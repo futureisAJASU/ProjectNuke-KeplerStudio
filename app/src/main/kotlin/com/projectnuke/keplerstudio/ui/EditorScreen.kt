@@ -100,7 +100,7 @@ fun EditorScreen(viewModel: EditorViewModel) {
                     val bitmap = state.previewBitmap
                     if (bitmap == null) {
                         Text(
-                            text = "사진을 선택하면 여기서 미리 볼 수 있어",
+                            text = "사진을 선택해 주세요",
                             color = TextPrimary,
                             style = MaterialTheme.typography.bodyLarge
                         )
