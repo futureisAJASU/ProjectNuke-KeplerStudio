@@ -6,6 +6,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +46,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
@@ -54,9 +56,11 @@ private val AppBackground = Color(0xFF101014)
 private val TopBarBackground = Color(0xFF17171D)
 private val PanelBackground = Color(0xFF1A1A22)
 private val PreviewBackground = Color(0xFF000000)
+private val RailBackground = Color(0xFF14141B)
 private val PrimaryPurple = Color(0xFF8E6CEF)
 private val TextPrimary = Color(0xFFF7F2FF)
 private val TextSecondary = Color(0xFFC9C0D8)
+private val TextMuted = Color(0xFF877D97)
 
 private val KeplerDarkColors = darkColorScheme(
     primary = PrimaryPurple,
@@ -67,12 +71,30 @@ private val KeplerDarkColors = darkColorScheme(
     onSurface = TextPrimary
 )
 
+private enum class EditorTool(val label: String, val description: String) {
+    Auto("자동", "원터치 보정과 흑백 전환"),
+    Profiles("프로필", "기본, 필름, 모던, 빈티지 톤"),
+    Presets("프리셋", "저장된 보정값과 추천 톤"),
+    Crop("자르기", "비율, 회전, 수평 보정"),
+    Masking("마스크", "피사체, 하늘, 배경 선택"),
+    Remove("제거", "지우개, 반사, 먼지 제거"),
+    Light("조명", "노출, 대비, 하이라이트, 섀도우"),
+    Color("색상", "화이트밸런스, 생동감, 채도, HSL"),
+    Effects("효과", "텍스처, 명료도, 디헤이즈, 비네팅, 그레인"),
+    Detail("디테일", "샤픈, 노이즈 감소, 컬러 노이즈"),
+    Optics("옵틱", "색수차 제거와 렌즈 보정"),
+    Geometry("기하", "왜곡, 수직/수평, 원근 보정"),
+    Blur("블러", "렌즈 블러와 초점 영역"),
+    Ai("AI", "리마스터, 초점, 플레어 복원")
+}
+
 @Composable
 fun EditorScreen(viewModel: EditorViewModel) {
     val state by viewModel.uiState.collectAsState()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) viewModel.openImage(uri)
     }
+    var selectedTool by remember { mutableStateOf(EditorTool.Light) }
 
     MaterialTheme(colorScheme = KeplerDarkColors) {
         Surface(
@@ -131,7 +153,9 @@ fun EditorScreen(viewModel: EditorViewModel) {
                 }
 
                 AdjustmentPanel(
+                    selectedTool = selectedTool,
                     params = state.params,
+                    onToolSelected = { selectedTool = it },
                     onChange = { transform -> viewModel.updateParams(transform) }
                 )
             }
@@ -219,7 +243,9 @@ private fun ZoomablePreview(
 
 @Composable
 private fun AdjustmentPanel(
+    selectedTool: EditorTool,
     params: EditParams,
+    onToolSelected: (EditorTool) -> Unit,
     onChange: ((EditParams) -> EditParams) -> Unit
 ) {
     Column(
@@ -227,15 +253,203 @@ private fun AdjustmentPanel(
             .fillMaxWidth()
             .background(PanelBackground)
             .navigationBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
-        AdjustmentSlider("노출", params.exposure, -1f, 1f) { v -> onChange { it.copy(exposure = v) } }
-        AdjustmentSlider("대비", params.contrast, -1f, 1f) { v -> onChange { it.copy(contrast = v) } }
-        AdjustmentSlider("섀도우", params.shadows, -1f, 1f) { v -> onChange { it.copy(shadows = v) } }
-        AdjustmentSlider("하이라이트", params.highlights, -1f, 1f) { v -> onChange { it.copy(highlights = v) } }
-        AdjustmentSlider("샤픈", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 150.dp, max = 260.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 12.dp)
+        ) {
+            Text(
+                text = selectedTool.label,
+                color = TextPrimary,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = selectedTool.description,
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+            )
+
+            when (selectedTool) {
+                EditorTool.Auto -> AutoPanel()
+                EditorTool.Profiles -> PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결됩니다")
+                EditorTool.Presets -> PlaceholderPanel("사용자 프리셋과 추천 프리셋 저장소를 준비 중입니다")
+                EditorTool.Crop -> PlaceholderPanel("비율, 회전, 수평계 기반 자르기 도구를 준비 중입니다")
+                EditorTool.Masking -> PlaceholderPanel("피사체, 하늘, 배경 마스크 모델을 연결할 예정입니다")
+                EditorTool.Remove -> PlaceholderPanel("지우개, 반사 제거, 센서 먼지 제거 엔진을 연결할 예정입니다")
+                EditorTool.Light -> LightPanel(params, onChange)
+                EditorTool.Color -> ColorPanel()
+                EditorTool.Effects -> EffectsPanel()
+                EditorTool.Detail -> DetailPanel(params, onChange)
+                EditorTool.Optics -> PlaceholderPanel("색수차 제거와 렌즈 프로필 보정은 네이티브 엔진에 추가할 예정입니다")
+                EditorTool.Geometry -> PlaceholderPanel("왜곡, 수직, 수평, 원근 보정 UI를 준비 중입니다")
+                EditorTool.Blur -> PlaceholderPanel("렌즈 블러와 초점 영역 편집은 AI 마스크 이후 연결됩니다")
+                EditorTool.Ai -> PlaceholderPanel("리마스터, 초점 리마스터, 플레어 억제 기능을 준비 중입니다")
+            }
+        }
+
+        ToolRail(
+            selectedTool = selectedTool,
+            onToolSelected = onToolSelected
+        )
     }
+}
+
+@Composable
+private fun ToolRail(
+    selectedTool: EditorTool,
+    onToolSelected: (EditorTool) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(RailBackground)
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        EditorTool.values().forEach { tool ->
+            TextButton(onClick = { onToolSelected(tool) }) {
+                Text(
+                    text = tool.label,
+                    color = if (tool == selectedTool) PrimaryPurple else TextSecondary,
+                    fontWeight = if (tool == selectedTool) FontWeight.Bold else FontWeight.Normal
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AutoPanel() {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Button(
+            onClick = { },
+            enabled = false,
+            colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)
+        ) {
+            Text("자동 보정")
+        }
+        Button(
+            onClick = { },
+            enabled = false,
+            colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)
+        ) {
+            Text("흑백")
+        }
+    }
+    Text(
+        text = "자동 보정 모델 연결 후 활성화됩니다",
+        color = TextMuted,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.padding(top = 8.dp)
+    )
+}
+
+@Composable
+private fun LightPanel(
+    params: EditParams,
+    onChange: ((EditParams) -> EditParams) -> Unit
+) {
+    AdjustmentSlider("노출", params.exposure, -1f, 1f) { v -> onChange { it.copy(exposure = v) } }
+    AdjustmentSlider("대비", params.contrast, -1f, 1f) { v -> onChange { it.copy(contrast = v) } }
+    AdjustmentSlider("하이라이트", params.highlights, -1f, 1f) { v -> onChange { it.copy(highlights = v) } }
+    AdjustmentSlider("섀도우", params.shadows, -1f, 1f) { v -> onChange { it.copy(shadows = v) } }
+    DisabledSlider("화이트", "톤 커브/화이트 포인트 엔진 연결 예정")
+    DisabledSlider("블랙", "톤 커브/블랙 포인트 엔진 연결 예정")
+    DisabledSlider("커브", "RGB 톤 커브 UI 연결 예정")
+}
+
+@Composable
+private fun ColorPanel() {
+    DisabledSlider("색온도", "화이트밸런스 엔진 연결 예정")
+    DisabledSlider("색조", "화이트밸런스 엔진 연결 예정")
+    DisabledSlider("생동감", "선택적 채도 엔진 연결 예정")
+    DisabledSlider("채도", "전역 채도 엔진 연결 예정")
+    DisabledSlider("색상 믹스", "HSL 색상별 보정 UI 연결 예정")
+    DisabledSlider("컬러 그레이딩", "섀도우/미드톤/하이라이트 휠 연결 예정")
+}
+
+@Composable
+private fun EffectsPanel() {
+    DisabledSlider("텍스처", "텍스처 보정 엔진 연결 예정")
+    DisabledSlider("명료도", "로컬 콘트라스트 엔진 연결 예정")
+    DisabledSlider("디헤이즈", "안개 제거 엔진 연결 예정")
+    DisabledSlider("비네팅", "비네팅 엔진 연결 예정")
+    DisabledSlider("그레인", "필름 그레인 엔진 연결 예정")
+}
+
+@Composable
+private fun DetailPanel(
+    params: EditParams,
+    onChange: ((EditParams) -> EditParams) -> Unit
+) {
+    AdjustmentSlider("샤픈", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
+    DisabledSlider("반경", "샤픈 반경 엔진 연결 예정")
+    DisabledSlider("디테일", "고주파 디테일 보정 연결 예정")
+    DisabledSlider("마스킹", "엣지 기반 샤픈 마스크 연결 예정")
+    DisabledSlider("노이즈 감소", "휘도 노이즈 감소 연결 예정")
+    DisabledSlider("컬러 노이즈", "색 노이즈 감소 연결 예정")
+}
+
+@Composable
+private fun PlaceholderPanel(message: String) {
+    Text(
+        text = message,
+        color = TextMuted,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier.padding(vertical = 10.dp)
+    )
+}
+
+@Composable
+private fun DisabledSlider(
+    label: String,
+    hint: String
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 50.dp)
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Column(modifier = Modifier.width(86.dp)) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = TextMuted
+            )
+        }
+        Slider(
+            value = 0f,
+            onValueChange = { },
+            valueRange = -1f..1f,
+            enabled = false,
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            text = "예정",
+            modifier = Modifier.width(44.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = TextMuted
+        )
+    }
+    Text(
+        text = hint,
+        color = TextMuted,
+        style = MaterialTheme.typography.bodySmall,
+        modifier = Modifier.padding(start = 94.dp, bottom = 4.dp)
+    )
 }
 
 @Composable
@@ -256,7 +470,7 @@ private fun AdjustmentSlider(
     ) {
         Text(
             text = label,
-            modifier = Modifier.width(76.dp),
+            modifier = Modifier.width(86.dp),
             style = MaterialTheme.typography.bodyMedium,
             color = TextPrimary
         )
