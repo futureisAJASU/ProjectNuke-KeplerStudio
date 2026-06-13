@@ -13,16 +13,22 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -43,7 +49,23 @@ import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ViewportState
-import kotlin.math.max
+
+private val AppBackground = Color(0xFF101014)
+private val TopBarBackground = Color(0xFF17171D)
+private val PanelBackground = Color(0xFF1A1A22)
+private val PreviewBackground = Color(0xFF000000)
+private val PrimaryPurple = Color(0xFF8E6CEF)
+private val TextPrimary = Color(0xFFF7F2FF)
+private val TextSecondary = Color(0xFFC9C0D8)
+
+private val KeplerDarkColors = darkColorScheme(
+    primary = PrimaryPurple,
+    onPrimary = Color.White,
+    background = AppBackground,
+    onBackground = TextPrimary,
+    surface = PanelBackground,
+    onSurface = TextPrimary
+)
 
 @Composable
 fun EditorScreen(viewModel: EditorViewModel) {
@@ -52,9 +74,16 @@ fun EditorScreen(viewModel: EditorViewModel) {
         if (uri != null) viewModel.openImage(uri)
     }
 
-    MaterialTheme {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Column(modifier = Modifier.fillMaxSize()) {
+    MaterialTheme(colorScheme = KeplerDarkColors) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = AppBackground
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(AppBackground)
+            ) {
                 TopBar(
                     nativeVersion = state.nativeVersion,
                     onOpen = { picker.launch("image/*") },
@@ -65,12 +94,16 @@ fun EditorScreen(viewModel: EditorViewModel) {
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .background(Color.Black),
+                        .background(PreviewBackground),
                     contentAlignment = Alignment.Center
                 ) {
                     val bitmap = state.previewBitmap
                     if (bitmap == null) {
-                        Text("사진을 열어줘", color = Color.White)
+                        Text(
+                            text = "사진을 선택하면 여기서 미리 볼 수 있어",
+                            color = TextPrimary,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
                     } else {
                         ZoomablePreview(
                             bitmap = bitmap,
@@ -79,14 +112,20 @@ fun EditorScreen(viewModel: EditorViewModel) {
                     }
 
                     if (state.isBusy) {
-                        CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(16.dp)
+                        )
                     }
 
                     state.message?.let {
                         Text(
                             text = it,
-                            color = Color.White,
-                            modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)
+                            color = TextPrimary,
+                            modifier = Modifier
+                                .align(Alignment.BottomStart)
+                                .padding(12.dp)
                         )
                     }
                 }
@@ -107,16 +146,38 @@ private fun TopBar(
     onReset: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(TopBarBackground)
+            .statusBarsPadding()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text("Kepler Studio v0.1", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.width(12.dp))
-        Text(nativeVersion, style = MaterialTheme.typography.bodySmall)
-        Spacer(Modifier.weight(1f))
-        Button(onClick = onReset) { Text("초기화") }
-        Spacer(Modifier.width(8.dp))
-        Button(onClick = onOpen) { Text("사진 열기") }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Kepler Studio v0.1",
+                style = MaterialTheme.typography.titleLarge,
+                color = TextPrimary,
+                maxLines = 1
+            )
+            Text(
+                text = nativeVersion,
+                style = MaterialTheme.typography.bodySmall,
+                color = TextSecondary,
+                maxLines = 1
+            )
+        }
+
+        TextButton(onClick = onReset) {
+            Text("초기화")
+        }
+        Button(
+            onClick = onOpen,
+            colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)
+        ) {
+            Text("사진 선택")
+        }
     }
 }
 
@@ -161,7 +222,14 @@ private fun AdjustmentPanel(
     params: EditParams,
     onChange: ((EditParams) -> EditParams) -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PanelBackground)
+            .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
         AdjustmentSlider("노출", params.exposure, -1f, 1f) { v -> onChange { it.copy(exposure = v) } }
         AdjustmentSlider("대비", params.contrast, -1f, 1f) { v -> onChange { it.copy(contrast = v) } }
         AdjustmentSlider("섀도우", params.shadows, -1f, 1f) { v -> onChange { it.copy(shadows = v) } }
@@ -179,17 +247,30 @@ private fun AdjustmentSlider(
     onValue: (Float) -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().height(38.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text(label, modifier = Modifier.width(72.dp), style = MaterialTheme.typography.bodySmall)
+        Text(
+            text = label,
+            modifier = Modifier.width(76.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextPrimary
+        )
         Slider(
             value = value,
             onValueChange = onValue,
             valueRange = min..max,
             modifier = Modifier.weight(1f)
         )
-        Text(String.format("%.2f", value), modifier = Modifier.width(48.dp), style = MaterialTheme.typography.bodySmall)
+        Text(
+            text = String.format("%.2f", value),
+            modifier = Modifier.width(52.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = TextSecondary
+        )
     }
 }
