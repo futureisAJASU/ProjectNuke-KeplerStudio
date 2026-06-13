@@ -31,7 +31,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openImage(uri: Uri) {
         renderJob?.cancel()
-        _uiState.update { it.copy(isBusy = true, message = "이미지 여는 중") }
+        _uiState.update { it.copy(isBusy = true, message = "이미지를 여는 중입니다") }
 
         viewModelScope.launch {
             try {
@@ -51,11 +51,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         previewBitmap = preview,
                         params = EditParams(),
                         revision = it.revision + 1,
-                        message = "원본 캐시 완료: ${preview.width}x${preview.height} preview"
+                        message = "원본 캐시가 완료되었습니다: ${preview.width}x${preview.height} preview"
                     )
                 }
             } catch (t: Throwable) {
-                _uiState.update { it.copy(isBusy = false, message = "이미지 열기 실패: ${t.message}") }
+                _uiState.update { it.copy(isBusy = false, message = "이미지를 열지 못했습니다: ${t.message}") }
             }
         }
     }
@@ -66,7 +66,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val nextParams = transform(current.params)
         val nextRevision = current.revision + 1
 
-        _uiState.update { it.copy(params = nextParams, revision = nextRevision, isBusy = true, message = "프리뷰 렌더링") }
+        _uiState.update { it.copy(params = nextParams, revision = nextRevision, isBusy = true, message = "미리보기를 렌더링하는 중입니다") }
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
             val rendered = withContext(Dispatchers.Default) {
@@ -83,7 +83,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 copy
             }
             if (_uiState.value.revision == nextRevision) {
-                _uiState.update { it.copy(previewBitmap = rendered, isBusy = false, message = "프리뷰 렌더 완료") }
+                _uiState.update { it.copy(previewBitmap = rendered, isBusy = false, message = "미리보기 렌더링이 완료되었습니다") }
             }
         }
     }
@@ -97,7 +97,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     previewBitmap = preview,
                     params = EditParams(),
                     revision = it.revision + 1,
-                    message = "초기화 완료"
+                    message = "초기화가 완료되었습니다"
                 )
             }
         }
@@ -133,7 +133,7 @@ private fun copyUriToCache(context: Context, uri: Uri): File {
 private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(path, bounds)
-    require(bounds.outWidth > 0 && bounds.outHeight > 0) { "지원하지 않는 이미지거나 decode 실패" }
+    require(bounds.outWidth > 0 && bounds.outHeight > 0) { "지원하지 않는 이미지이거나 디코딩에 실패했습니다" }
 
     var sample = 1
     val longest = max(bounds.outWidth, bounds.outHeight)
@@ -144,6 +144,6 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
         inPreferredConfig = Bitmap.Config.ARGB_8888
         inMutable = true
     }
-    return requireNotNull(BitmapFactory.decodeFile(path, options)) { "preview decode failed" }
+    return requireNotNull(BitmapFactory.decodeFile(path, options)) { "미리보기 디코딩에 실패했습니다" }
         .copy(Bitmap.Config.ARGB_8888, true)
 }
