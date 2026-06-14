@@ -48,6 +48,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         isBusy = false,
                         sourcePath = sourceFile.absolutePath,
+                        originalPreviewBitmap = preview,
                         previewBitmap = preview,
                         params = EditParams(),
                         revision = it.revision + 1,
@@ -62,7 +63,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun updateParams(transform: (EditParams) -> EditParams) {
         val current = _uiState.value
-        val originalPreview = current.previewBitmap ?: return
+        val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
         val nextRevision = current.revision + 1
 
@@ -70,7 +71,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
             val rendered = withContext(Dispatchers.Default) {
-                val copy = originalPreview.copy(Bitmap.Config.ARGB_8888, true)
+                val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
                 NativePhotoCore.nativeRenderPreviewInPlace(
                     copy,
                     nextParams.exposure,
@@ -94,6 +95,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmap(path, maxSide = 2048) }
             _uiState.update {
                 it.copy(
+                    originalPreviewBitmap = preview,
                     previewBitmap = preview,
                     params = EditParams(),
                     revision = it.revision + 1,
