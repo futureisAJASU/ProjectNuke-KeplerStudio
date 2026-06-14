@@ -241,12 +241,12 @@ private fun ZoomablePreview(
                 }
                 .pointerInput(bitmap, originalBitmap) {
                     detectTapGestures(
+                        onLongPress = {
+                            if (originalBitmap != null) showOriginal = true
+                        },
                         onPress = {
-                            if (originalBitmap != null) {
-                                showOriginal = true
-                                tryAwaitRelease()
-                                showOriginal = false
-                            }
+                            tryAwaitRelease()
+                            showOriginal = false
                         }
                     )
                 }
