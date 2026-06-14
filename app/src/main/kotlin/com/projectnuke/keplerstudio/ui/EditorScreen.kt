@@ -5,6 +5,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -57,6 +58,7 @@ private val TopBarBackground = Color(0xFF17171D)
 private val PanelBackground = Color(0xFF1A1A22)
 private val PreviewBackground = Color(0xFF000000)
 private val RailBackground = Color(0xFF14141B)
+private val CompareBadgeBackground = Color(0xCC000000)
 private val PrimaryPurple = Color(0xFF8E6CEF)
 private val TextPrimary = Color(0xFFF7F2FF)
 private val TextSecondary = Color(0xFFC9C0D8)
@@ -129,6 +131,7 @@ fun EditorScreen(viewModel: EditorViewModel) {
                     } else {
                         ZoomablePreview(
                             bitmap = bitmap,
+                            originalBitmap = state.originalPreviewBitmap,
                             onViewportChanged = viewModel::updateViewport
                         )
                     }
@@ -208,37 +211,66 @@ private fun TopBar(
 @Composable
 private fun ZoomablePreview(
     bitmap: Bitmap,
+    originalBitmap: Bitmap?,
     onViewportChanged: (ViewportState) -> Unit
 ) {
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
     var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
     var size by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+    var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }
+    val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
 
-    Image(
-        bitmap = bitmap.asImageBitmap(),
-        contentDescription = "preview",
-        contentScale = ContentScale.Fit,
-        modifier = Modifier
-            .fillMaxSize()
-            .onSizeChanged {
-                size = it
-                onViewportChanged(ViewportState(scale, offset, it.width, it.height))
-            }
-            .pointerInput(bitmap) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, 8f)
-                    offset += pan
-                    if (scale <= 1.01f) offset = Offset.Zero
-                    onViewportChanged(ViewportState(scale, offset, size.width, size.height))
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Image(
+            bitmap = displayedBitmap.asImageBitmap(),
+            contentDescription = "preview",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged {
+                    size = it
+                    onViewportChanged(ViewportState(scale, offset, it.width, it.height))
                 }
-            }
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                translationX = offset.x
-                translationY = offset.y
-            }
-    )
+                .pointerInput(bitmap) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        scale = (scale * zoom).coerceIn(1f, 8f)
+                        offset += pan
+                        if (scale <= 1.01f) offset = Offset.Zero
+                        onViewportChanged(ViewportState(scale, offset, size.width, size.height))
+                    }
+                }
+                .pointerInput(bitmap, originalBitmap) {
+                    detectTapGestures(
+                        onPress = {
+                            if (originalBitmap != null) {
+                                showOriginal = true
+                                tryAwaitRelease()
+                                showOriginal = false
+                            }
+                        }
+                    )
+                }
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                }
+        )
+
+        if (showOriginal && originalBitmap != null) {
+            Text(
+                text = "원본",
+                color = TextPrimary,
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 14.dp)
+                    .background(CompareBadgeBackground)
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+    }
 }
 
 @Composable
