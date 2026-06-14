@@ -44,6 +44,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.awaitPointerEventScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -218,6 +219,8 @@ private fun ZoomablePreview(
     var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
     var size by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
     var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }
+    var isMultiTouch by remember(bitmap) { mutableStateOf(false) }
+    var isTransforming by remember(bitmap) { mutableStateOf(false) }
     val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -232,7 +235,24 @@ private fun ZoomablePreview(
                     onViewportChanged(ViewportState(scale, offset, it.width, it.height))
                 }
                 .pointerInput(bitmap) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val pressedCount = event.changes.count { it.pressed }
+                            isMultiTouch = pressedCount > 1
+                            if (pressedCount != 1) {
+                                showOriginal = false
+                            }
+                            if (pressedCount == 0) {
+                                isTransforming = false
+                            }
+                        }
+                    }
+                }
+                .pointerInput(bitmap) {
                     detectTransformGestures { _, pan, zoom, _ ->
+                        isTransforming = true
+                        showOriginal = false
                         scale = (scale * zoom).coerceIn(1f, 8f)
                         offset += pan
                         if (scale <= 1.01f) offset = Offset.Zero
@@ -242,11 +262,14 @@ private fun ZoomablePreview(
                 .pointerInput(bitmap, originalBitmap) {
                     detectTapGestures(
                         onLongPress = {
-                            if (originalBitmap != null) showOriginal = true
+                            if (originalBitmap != null && !isMultiTouch && !isTransforming) {
+                                showOriginal = true
+                            }
                         },
                         onPress = {
                             tryAwaitRelease()
                             showOriginal = false
+                            isTransforming = false
                         }
                     )
                 }
