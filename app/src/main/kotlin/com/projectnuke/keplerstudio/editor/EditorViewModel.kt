@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.heifwriter.HeifWriter
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
@@ -376,15 +377,11 @@ private fun saveBitmapToGallery(
         ?: error("저장 위치를 만들 수 없습니다")
 
     try {
-        resolver.openOutputStream(uri)?.use { output ->
-            val compressFormat = when (format) {
-                ExportFormat.Jpeg -> Bitmap.CompressFormat.JPEG
-                ExportFormat.Png -> Bitmap.CompressFormat.PNG
-                ExportFormat.Webp -> Bitmap.CompressFormat.WEBP
-            }
-            val quality = if (format == ExportFormat.Png) 100 else 95
-            check(bitmap.compress(compressFormat, quality, output)) { "이미지 압축에 실패했습니다" }
-        } ?: error("저장 스트림을 열 수 없습니다")
+        if (format == ExportFormat.Heif) {
+            writeHeifToUri(context, uri, bitmap)
+        } else {
+            writeCompressedBitmapToUri(context, uri, bitmap, format)
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             values.clear()
@@ -395,6 +392,53 @@ private fun saveBitmapToGallery(
     } catch (t: Throwable) {
         resolver.delete(uri, null, null)
         throw t
+    }
+}
+
+private fun writeCompressedBitmapToUri(
+    context: Context,
+    uri: Uri,
+    bitmap: Bitmap,
+    format: ExportFormat
+) {
+    val compressFormat = when (format) {
+        ExportFormat.Jpeg -> Bitmap.CompressFormat.JPEG
+        ExportFormat.Png -> Bitmap.CompressFormat.PNG
+        ExportFormat.Webp -> Bitmap.CompressFormat.WEBP
+        ExportFormat.Heif -> error("HEIF는 별도 인코더를 사용합니다")
+    }
+    val quality = if (format == ExportFormat.Png) 100 else 95
+    context.contentResolver.openOutputStream(uri)?.use { output ->
+        check(bitmap.compress(compressFormat, quality, output)) { "이미지 압축에 실패했습니다" }
+    } ?: error("저장 스트림을 열 수 없습니다")
+}
+
+private fun writeHeifToUri(context: Context, uri: Uri, bitmap: Bitmap) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+        error("HEIF 저장은 Android 9 이상에서 지원됩니다")
+    }
+
+    val descriptor = context.contentResolver.openFileDescriptor(uri, "w")
+        ?: error("HEIF 저장 스트림을 열 수 없습니다")
+
+    descriptor.use { pfd ->
+        val writer = HeifWriter.Builder(
+            pfd.fileDescriptor,
+            bitmap.width,
+            bitmap.height,
+            HeifWriter.INPUT_MODE_BITMAP
+        )
+            .setMaxImages(1)
+            .setQuality(95)
+            .build()
+
+        try {
+            writer.start()
+            writer.addBitmap(bitmap)
+            writer.stop(0)
+        } finally {
+            writer.close()
+        }
     }
 }
 
