@@ -7,7 +7,8 @@ enum class ExportFormat(
 ) {
     Jpeg("JPEG", "jpg", "image/jpeg"),
     Png("PNG", "png", "image/png"),
-    Webp("WebP", "webp", "image/webp")
+    Webp("WebP", "webp", "image/webp"),
+    Heif("HEIF", "heic", "image/heic")
 }
 
 enum class ExportResolution(
