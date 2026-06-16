@@ -58,21 +58,22 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-private val AppBackground = Color(0xFF101014)
-private val TopBarBackground = Color(0xFF17171D)
-private val PanelBackground = Color(0xFF1A1A22)
+private val AppBackground = Color(0xFF101010)
+private val TopBarBackground = Color(0xFF171717)
+private val PanelBackground = Color(0xFF1B1B1B)
 private val PreviewBackground = Color(0xFF000000)
-private val RailBackground = Color(0xFF14141B)
-private val CardBackground = Color(0xFF20202A)
+private val RailBackground = Color(0xFF141414)
+private val CardBackground = Color(0xFF242424)
 private val CompareBadgeBackground = Color(0xCC000000)
-private val PrimaryPurple = Color(0xFF8E6CEF)
-private val TextPrimary = Color(0xFFF7F2FF)
-private val TextSecondary = Color(0xFFC9C0D8)
-private val TextMuted = Color(0xFF877D97)
+private val NeutralAccent = Color(0xFFE6E6E6)
+private val TextPrimary = Color(0xFFF2F2F2)
+private val TextSecondary = Color(0xFFC8C8C8)
+private val TextMuted = Color(0xFF8E8E8E)
+private val ButtonTextDark = Color(0xFF111111)
 
 private val KeplerDarkColors = darkColorScheme(
-    primary = PrimaryPurple,
-    onPrimary = Color.White,
+    primary = NeutralAccent,
+    onPrimary = ButtonTextDark,
     background = AppBackground,
     onBackground = TextPrimary,
     surface = PanelBackground,
@@ -199,7 +200,10 @@ private fun TopBar(
 
             TextButton(onClick = onReset) { Text("초기화") }
             TextButton(onClick = onExport, enabled = canExport) { Text("저장") }
-            Button(onClick = onOpen, colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)) {
+            Button(
+                onClick = onOpen,
+                colors = ButtonDefaults.buttonColors(containerColor = NeutralAccent, contentColor = ButtonTextDark)
+            ) {
                 Text("사진 선택")
             }
         }
@@ -209,7 +213,7 @@ private fun TopBar(
                 TextButton(onClick = { onTabSelected(tab) }) {
                     Text(
                         text = tab.label,
-                        color = if (tab == selectedTab) PrimaryPurple else TextSecondary,
+                        color = if (tab == selectedTab) NeutralAccent else TextSecondary,
                         fontWeight = if (tab == selectedTab) FontWeight.Bold else FontWeight.Normal
                     )
                 }
@@ -412,7 +416,7 @@ private fun ExportOptionsPanel(
         )
 
         OptionRow(title = "파일", values = ExportFormat.values().toList(), selected = exportFormat, label = { it.label }, onSelected = onFormatSelected)
-        OptionRow(title = "해상도", values = ExportResolution.values().toList(), selected = exportResolution, label = { it.label }, onSelected = onResolutionSelected)
+        OptionRow(title = "크기", values = ExportResolution.values().toList(), selected = exportResolution, label = { it.label }, onSelected = onResolutionSelected)
     }
 }
 
@@ -434,7 +438,7 @@ private fun <T> OptionRow(
             TextButton(onClick = { onSelected(value) }) {
                 Text(
                     text = label(value),
-                    color = if (value == selected) PrimaryPurple else TextSecondary,
+                    color = if (value == selected) NeutralAccent else TextSecondary,
                     fontWeight = if (value == selected) FontWeight.Bold else FontWeight.Normal
                 )
             }
@@ -457,7 +461,7 @@ private fun ToolRail(selectedTool: EditorTool, onToolSelected: (EditorTool) -> U
             TextButton(onClick = { onToolSelected(tool) }) {
                 Text(
                     text = tool.label,
-                    color = if (tool == selectedTool) PrimaryPurple else TextSecondary,
+                    color = if (tool == selectedTool) NeutralAccent else TextSecondary,
                     fontWeight = if (tool == selectedTool) FontWeight.Bold else FontWeight.Normal
                 )
             }
@@ -468,10 +472,18 @@ private fun ToolRail(selectedTool: EditorTool, onToolSelected: (EditorTool) -> U
 @Composable
 private fun AutoPanel() {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = { }, enabled = false, colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)) {
+        Button(
+            onClick = { },
+            enabled = false,
+            colors = ButtonDefaults.buttonColors(containerColor = NeutralAccent, contentColor = ButtonTextDark)
+        ) {
             Text("자동 보정")
         }
-        Button(onClick = { }, enabled = false, colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)) {
+        Button(
+            onClick = { },
+            enabled = false,
+            colors = ButtonDefaults.buttonColors(containerColor = NeutralAccent, contentColor = ButtonTextDark)
+        ) {
             Text("흑백")
         }
     }
