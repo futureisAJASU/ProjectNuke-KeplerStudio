@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExportFormat
+import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ViewportState
@@ -82,7 +83,8 @@ private val KeplerDarkColors = darkColorScheme(
 
 private enum class MainTab(val label: String) {
     Editor("편집"),
-    Saved("저장본")
+    Saved("저장본"),
+    Settings("설정")
 }
 
 private enum class EditorTool(val label: String, val description: String) {
@@ -124,54 +126,66 @@ fun EditorScreen(viewModel: EditorViewModel) {
                     onExport = { viewModel.exportPreview() }
                 )
 
-                if (selectedTab == MainTab.Saved) {
-                    SavedExportsScreen(
+                when (selectedTab) {
+                    MainTab.Saved -> SavedExportsScreen(
                         savedExports = state.savedExports,
+                        onRemoveSavedExport = viewModel::removeSavedExport,
                         onClearSavedExports = viewModel::clearSavedExports,
                         modifier = Modifier.weight(1f).fillMaxWidth()
                     )
-                } else {
-                    Box(
-                        modifier = Modifier.weight(1f).fillMaxWidth().background(PreviewBackground),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        val bitmap = state.previewBitmap
-                        if (bitmap == null) {
-                            Text("사진을 선택해 주세요", color = TextPrimary, style = MaterialTheme.typography.bodyLarge)
-                        } else {
-                            ZoomablePreview(
-                                bitmap = bitmap,
-                                originalBitmap = state.originalPreviewBitmap,
-                                onViewportChanged = viewModel::updateViewport
-                            )
-                        }
 
-                        if (state.isBusy) {
-                            CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
-                        }
-
-                        state.message?.let {
-                            Text(
-                                text = it,
-                                color = TextPrimary,
-                                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)
-                            )
-                        }
-                    }
-
-                    AdjustmentPanel(
-                        selectedTool = selectedTool,
-                        params = state.params,
-                        exportFormat = state.exportFormat,
-                        exportResolution = state.exportResolution,
+                    MainTab.Settings -> SettingsScreen(
+                        exportHistoryRetention = state.exportHistoryRetention,
+                        savedExportCount = state.savedExports.size,
                         draftSavedAtMillis = state.draftSavedAtMillis,
-                        onToolSelected = { selectedTool = it },
-                        onFormatSelected = viewModel::setExportFormat,
-                        onResolutionSelected = viewModel::setExportResolution,
+                        onRetentionSelected = viewModel::setExportHistoryRetention,
                         onClearDraft = viewModel::clearDraft,
+                        onCleanupOldTemporarySources = viewModel::cleanupOldTemporarySources,
                         onClearSavedExports = viewModel::clearSavedExports,
-                        onChange = { transform -> viewModel.updateParams(transform) }
+                        modifier = Modifier.weight(1f).fillMaxWidth()
                     )
+
+                    MainTab.Editor -> {
+                        Box(
+                            modifier = Modifier.weight(1f).fillMaxWidth().background(PreviewBackground),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            val bitmap = state.previewBitmap
+                            if (bitmap == null) {
+                                Text("사진을 선택해 주세요", color = TextPrimary, style = MaterialTheme.typography.bodyLarge)
+                            } else {
+                                ZoomablePreview(
+                                    bitmap = bitmap,
+                                    originalBitmap = state.originalPreviewBitmap,
+                                    onViewportChanged = viewModel::updateViewport
+                                )
+                            }
+
+                            if (state.isBusy) {
+                                CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
+                            }
+
+                            state.message?.let {
+                                Text(
+                                    text = it,
+                                    color = TextPrimary,
+                                    modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)
+                                )
+                            }
+                        }
+
+                        AdjustmentPanel(
+                            selectedTool = selectedTool,
+                            params = state.params,
+                            exportFormat = state.exportFormat,
+                            exportResolution = state.exportResolution,
+                            draftSavedAtMillis = state.draftSavedAtMillis,
+                            onToolSelected = { selectedTool = it },
+                            onFormatSelected = viewModel::setExportFormat,
+                            onResolutionSelected = viewModel::setExportResolution,
+                            onChange = { transform -> viewModel.updateParams(transform) }
+                        )
+                    }
                 }
             }
         }
@@ -228,6 +242,7 @@ private fun TopBar(
 @Composable
 private fun SavedExportsScreen(
     savedExports: List<SavedExport>,
+    onRemoveSavedExport: (String) -> Unit,
     onClearSavedExports: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -239,22 +254,22 @@ private fun SavedExportsScreen(
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("저장된 편집본", color = TextPrimary, style = MaterialTheme.typography.titleLarge)
+                Text("내보낸 사진", color = TextPrimary, style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Kepler Studio에서 내보낸 결과물이 여기에 표시됩니다",
+                    "Kepler Studio에서 내보낸 기록만 표시됩니다. 갤러리 파일은 직접 삭제하지 않습니다",
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 2.dp)
                 )
             }
             TextButton(onClick = onClearSavedExports, enabled = savedExports.isNotEmpty()) {
-                Text("목록 비우기")
+                Text("기록 전체 비우기")
             }
         }
 
         if (savedExports.isEmpty()) {
             Text(
-                "아직 저장된 편집본이 없습니다",
+                "아직 내보낸 사진 기록이 없습니다",
                 color = TextMuted,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(top = 12.dp)
@@ -268,12 +283,100 @@ private fun SavedExportsScreen(
                         .background(CardBackground)
                         .padding(14.dp)
                 ) {
-                    Text(item.displayName, color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text("${item.formatLabel} · ${item.resolutionLabel}", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
-                    Text(formatSavedTime(item.timestampMillis), color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(item.displayName, color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text("${item.formatLabel} · ${item.resolutionLabel}", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                            Text(formatSavedTime(item.timestampMillis), color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                        }
+                        TextButton(onClick = { onRemoveSavedExport(item.uriString) }) {
+                            Text("기록 삭제")
+                        }
+                    }
                     Text(item.uriString, color = TextMuted, style = MaterialTheme.typography.bodySmall, maxLines = 1)
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun SettingsScreen(
+    exportHistoryRetention: ExportHistoryRetention,
+    savedExportCount: Int,
+    draftSavedAtMillis: Long?,
+    onRetentionSelected: (ExportHistoryRetention) -> Unit,
+    onClearDraft: () -> Unit,
+    onCleanupOldTemporarySources: () -> Unit,
+    onClearSavedExports: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .background(AppBackground)
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        Text("정리 설정", color = TextPrimary, style = MaterialTheme.typography.titleLarge)
+        Text(
+            "자동 정리는 Kepler Studio가 관리하는 기록만 대상으로 합니다. 갤러리에 저장된 실제 사진은 자동으로 삭제하지 않습니다",
+            color = TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 2.dp, bottom = 14.dp)
+        )
+
+        SettingsCard(title = "내보낸 사진 기록") {
+            Text("현재 기록: ${savedExportCount}개", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+            OptionRow(
+                title = "자동",
+                values = ExportHistoryRetention.values().toList(),
+                selected = exportHistoryRetention,
+                label = { it.label },
+                onSelected = onRetentionSelected
+            )
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onClearSavedExports, enabled = savedExportCount > 0) {
+                    Text("기록 전체 비우기")
+                }
+            }
+        }
+
+        SettingsCard(title = "임시저장") {
+            Text(
+                draftSavedAtMillis?.let { "마지막 임시저장: ${formatSavedTime(it)}" } ?: "현재 자동복구용 임시저장 기록이 없습니다",
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall
+            )
+            Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onClearDraft, enabled = draftSavedAtMillis != null) {
+                    Text("임시저장 기록 삭제")
+                }
+                TextButton(onClick = onCleanupOldTemporarySources) {
+                    Text("오래된 임시 원본 정리")
+                }
+            }
+            Text(
+                "오래된 임시 원본 정리는 7일이 지난 앱 캐시 파일만 삭제하며, 현재 편집 중인 원본은 제외합니다",
+                color = TextMuted,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 6.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsCard(title: String, content: @Composable () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp)
+            .background(CardBackground)
+            .padding(14.dp)
+    ) {
+        Text(title, color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Column(modifier = Modifier.padding(top = 8.dp)) {
+            content()
         }
     }
 }
@@ -369,8 +472,6 @@ private fun AdjustmentPanel(
     onToolSelected: (EditorTool) -> Unit,
     onFormatSelected: (ExportFormat) -> Unit,
     onResolutionSelected: (ExportResolution) -> Unit,
-    onClearDraft: () -> Unit,
-    onClearSavedExports: () -> Unit,
     onChange: ((EditParams) -> EditParams) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().background(PanelBackground).navigationBarsPadding()) {
@@ -386,9 +487,7 @@ private fun AdjustmentPanel(
                 exportResolution = exportResolution,
                 draftSavedAtMillis = draftSavedAtMillis,
                 onFormatSelected = onFormatSelected,
-                onResolutionSelected = onResolutionSelected,
-                onClearDraft = onClearDraft,
-                onClearSavedExports = onClearSavedExports
+                onResolutionSelected = onResolutionSelected
             )
 
             Text(selectedTool.label, color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -427,9 +526,7 @@ private fun ExportOptionsPanel(
     exportResolution: ExportResolution,
     draftSavedAtMillis: Long?,
     onFormatSelected: (ExportFormat) -> Unit,
-    onResolutionSelected: (ExportResolution) -> Unit,
-    onClearDraft: () -> Unit,
-    onClearSavedExports: () -> Unit
+    onResolutionSelected: (ExportResolution) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
         Text("내보내기 설정", color = TextPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
@@ -442,11 +539,6 @@ private fun ExportOptionsPanel(
 
         OptionRow(title = "파일", values = ExportFormat.values().toList(), selected = exportFormat, label = { it.label }, onSelected = onFormatSelected)
         OptionRow(title = "크기", values = ExportResolution.values().toList(), selected = exportResolution, label = { it.label }, onSelected = onResolutionSelected)
-
-        Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = onClearDraft) { Text("임시저장 삭제") }
-            TextButton(onClick = onClearSavedExports) { Text("저장목록 비우기") }
-        }
     }
 }
 
