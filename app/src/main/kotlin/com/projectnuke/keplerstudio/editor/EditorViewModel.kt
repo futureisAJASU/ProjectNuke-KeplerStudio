@@ -39,9 +39,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     init {
         viewModelScope.launch {
             val context = getApplication<Application>()
-            withContext(Dispatchers.IO) { cleanupTemporarySourceFiles(context, deleteAll = false) }
-            val saved = withContext(Dispatchers.IO) { loadSavedExportsFromPrefs(context) }
-            _uiState.update { it.copy(savedExports = saved) }
+            val retention = loadExportHistoryRetention(context)
+            val saved = withContext(Dispatchers.IO) {
+                pruneSavedExportsIfNeeded(context, loadSavedExportsFromPrefs(context), retention)
+            }
+            _uiState.update { it.copy(savedExports = saved, exportHistoryRetention = retention) }
             restoreDraftIfAvailable(context)
         }
     }
@@ -140,6 +142,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun setExportHistoryRetention(retention: ExportHistoryRetention) {
+        val context = getApplication<Application>()
+        saveExportHistoryRetention(context, retention)
+        viewModelScope.launch {
+            val saved = withContext(Dispatchers.IO) {
+                pruneSavedExportsIfNeeded(context, _uiState.value.savedExports, retention)
+            }
+            _uiState.update {
+                it.copy(
+                    exportHistoryRetention = retention,
+                    savedExports = saved,
+                    message = "내보낸 사진 기록 자동 정리가 ${retention.label}으로 설정되었습니다"
+                )
+            }
+        }
+    }
+
     fun exportPreview() {
         val state = _uiState.value
         val bitmap = state.previewBitmap
@@ -164,7 +183,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     resolutionLabel = state.exportResolution.label,
                     timestampMillis = System.currentTimeMillis()
                 )
-                val savedExports = withContext(Dispatchers.IO) { rememberSavedExport(context, savedItem) }
+                val savedExports = withContext(Dispatchers.IO) {
+                    rememberSavedExport(context, savedItem, state.exportHistoryRetention)
+                }
                 _uiState.update {
                     it.copy(
                         isBusy = false,
@@ -179,25 +200,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun clearDraft() {
-        renderJob?.cancel()
+        val context = getApplication<Application>()
+        clearDraftPrefs(context)
+        _uiState.update {
+            it.copy(
+                draftSavedAtMillis = null,
+                message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다"
+            )
+        }
+    }
+
+    fun cleanupOldTemporarySources() {
+        val context = getApplication<Application>()
+        val activeSourcePath = _uiState.value.sourcePath
         viewModelScope.launch {
-            val context = getApplication<Application>()
             val removedCount = withContext(Dispatchers.IO) {
-                clearDraftPrefs(context)
-                cleanupTemporarySourceFiles(context, deleteAll = true)
+                cleanupTemporarySourceFiles(context, activeSourcePath = activeSourcePath)
             }
-            releaseNativeSession()
             _uiState.update {
-                it.copy(
-                    isBusy = false,
-                    sourcePath = null,
-                    originalPreviewBitmap = null,
-                    previewBitmap = null,
-                    params = EditParams(),
-                    draftSavedAtMillis = null,
-                    revision = it.revision + 1,
-                    message = "임시저장을 삭제했습니다. 정리된 임시파일: ${removedCount}개"
-                )
+                it.copy(message = "7일이 지난 임시 원본 캐시를 정리했습니다. 삭제된 파일: ${removedCount}개")
             }
         }
     }
@@ -208,7 +229,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.update {
             it.copy(
                 savedExports = emptyList(),
-                message = "저장본 목록을 비웠습니다. 갤러리에 저장된 파일은 삭제되지 않습니다"
+                message = "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다"
+            )
+        }
+    }
+
+    fun removeSavedExport(uriString: String) {
+        val context = getApplication<Application>()
+        val next = _uiState.value.savedExports.filterNot { it.uriString == uriString }
+        saveSavedExportsToPrefs(context, next)
+        _uiState.update {
+            it.copy(
+                savedExports = next,
+                message = "선택한 내보낸 사진 기록을 삭제했습니다. 갤러리 파일은 삭제되지 않습니다"
             )
         }
     }
@@ -395,9 +428,10 @@ private fun clearDraftPrefs(context: Context) {
         .apply()
 }
 
-private fun cleanupTemporarySourceFiles(context: Context, deleteAll: Boolean): Int {
+private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: String?): Int {
     val now = System.currentTimeMillis()
     val maxAgeMs = 7L * 24L * 60L * 60L * 1000L
+    val activePath = activeSourcePath?.let { File(it).absolutePath }
     val files = context.cacheDir.listFiles { file ->
         file.isFile && file.name.startsWith("source_") && file.name.endsWith(".img")
     }.orEmpty()
@@ -405,17 +439,41 @@ private fun cleanupTemporarySourceFiles(context: Context, deleteAll: Boolean): I
     var removed = 0
     files.forEach { file ->
         val expired = now - file.lastModified() > maxAgeMs
-        if ((deleteAll || expired) && file.delete()) removed += 1
+        val isActive = activePath != null && file.absolutePath == activePath
+        if (expired && !isActive && file.delete()) removed += 1
     }
     return removed
 }
 
-private fun rememberSavedExport(context: Context, item: SavedExport): List<SavedExport> {
+private fun rememberSavedExport(
+    context: Context,
+    item: SavedExport,
+    retention: ExportHistoryRetention
+): List<SavedExport> {
     val next = (listOf(item) + loadSavedExportsFromPrefs(context).filter { it.uriString != item.uriString }).take(60)
+    return pruneSavedExportsIfNeeded(context, next, retention)
+}
+
+private fun pruneSavedExportsIfNeeded(
+    context: Context,
+    items: List<SavedExport>,
+    retention: ExportHistoryRetention
+): List<SavedExport> {
+    val days = retention.days
+    val pruned = if (days == null) {
+        items
+    } else {
+        val cutoff = System.currentTimeMillis() - days * 24L * 60L * 60L * 1000L
+        items.filter { it.timestampMillis >= cutoff }
+    }
+    saveSavedExportsToPrefs(context, pruned)
+    return pruned
+}
+
+private fun saveSavedExportsToPrefs(context: Context, items: List<SavedExport>) {
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
-        .putString(KEY_SAVED_EXPORTS, next.joinToString("\n") { encodeSavedExport(it) })
+        .putString(KEY_SAVED_EXPORTS, items.joinToString("\n") { encodeSavedExport(it) })
         .apply()
-    return next
 }
 
 private fun clearSavedExportsPrefs(context: Context) {
@@ -429,6 +487,18 @@ private fun loadSavedExportsFromPrefs(context: Context): List<SavedExport> {
         ?: return emptyList()
     return raw.lines().mapNotNull { decodeSavedExport(it) }
 }
+
+private fun saveExportHistoryRetention(context: Context, retention: ExportHistoryRetention) {
+    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+        .putString(KEY_EXPORT_HISTORY_RETENTION, retention.name)
+        .apply()
+}
+
+private fun loadExportHistoryRetention(context: Context): ExportHistoryRetention =
+    enumValueOrDefault(
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(KEY_EXPORT_HISTORY_RETENTION, null),
+        ExportHistoryRetention.Never
+    )
 
 private fun encodeSavedExport(item: SavedExport): String = listOf(
     item.displayName,
@@ -457,6 +527,7 @@ private fun exportTimestamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss", Loca
 
 private const val PREF_NAME = "kepler_studio_editor"
 private const val KEY_SAVED_EXPORTS = "saved_exports"
+private const val KEY_EXPORT_HISTORY_RETENTION = "export_history_retention"
 private const val KEY_DRAFT_SOURCE = "draft_source"
 private const val KEY_DRAFT_EXPOSURE = "draft_exposure"
 private const val KEY_DRAFT_CONTRAST = "draft_contrast"
