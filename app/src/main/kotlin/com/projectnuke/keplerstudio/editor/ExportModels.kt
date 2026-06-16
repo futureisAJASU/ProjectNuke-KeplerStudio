@@ -21,6 +21,16 @@ enum class ExportResolution(
     Percent25("25%", 25)
 }
 
+enum class ExportHistoryRetention(
+    val label: String,
+    val days: Int?
+) {
+    Never("자동 정리 안 함", null),
+    Days7("7일", 7),
+    Days30("30일", 30),
+    Days90("90일", 90)
+}
+
 data class SavedExport(
     val displayName: String,
     val uriString: String,
