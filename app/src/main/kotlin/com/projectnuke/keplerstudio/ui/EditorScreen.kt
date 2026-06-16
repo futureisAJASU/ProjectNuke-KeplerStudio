@@ -127,6 +127,7 @@ fun EditorScreen(viewModel: EditorViewModel) {
                 if (selectedTab == MainTab.Saved) {
                     SavedExportsScreen(
                         savedExports = state.savedExports,
+                        onClearSavedExports = viewModel::clearSavedExports,
                         modifier = Modifier.weight(1f).fillMaxWidth()
                     )
                 } else {
@@ -167,6 +168,8 @@ fun EditorScreen(viewModel: EditorViewModel) {
                         onToolSelected = { selectedTool = it },
                         onFormatSelected = viewModel::setExportFormat,
                         onResolutionSelected = viewModel::setExportResolution,
+                        onClearDraft = viewModel::clearDraft,
+                        onClearSavedExports = viewModel::clearSavedExports,
                         onChange = { transform -> viewModel.updateParams(transform) }
                     )
                 }
@@ -223,29 +226,45 @@ private fun TopBar(
 }
 
 @Composable
-private fun SavedExportsScreen(savedExports: List<SavedExport>, modifier: Modifier = Modifier) {
+private fun SavedExportsScreen(
+    savedExports: List<SavedExport>,
+    onClearSavedExports: () -> Unit,
+    modifier: Modifier = Modifier
+) {
     Column(
         modifier = modifier
             .background(AppBackground)
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        Text("저장된 편집본", color = TextPrimary, style = MaterialTheme.typography.titleLarge)
-        Text(
-            "Kepler Studio에서 내보낸 결과물이 여기에 표시됩니다",
-            color = TextSecondary,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
-        )
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("저장된 편집본", color = TextPrimary, style = MaterialTheme.typography.titleLarge)
+                Text(
+                    "Kepler Studio에서 내보낸 결과물이 여기에 표시됩니다",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+            TextButton(onClick = onClearSavedExports, enabled = savedExports.isNotEmpty()) {
+                Text("목록 비우기")
+            }
+        }
 
         if (savedExports.isEmpty()) {
-            Text("아직 저장된 편집본이 없습니다", color = TextMuted, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "아직 저장된 편집본이 없습니다",
+                color = TextMuted,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.padding(top = 12.dp)
+            )
         } else {
             savedExports.forEach { item ->
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 10.dp)
+                        .padding(top = 10.dp)
                         .background(CardBackground)
                         .padding(14.dp)
                 ) {
@@ -350,6 +369,8 @@ private fun AdjustmentPanel(
     onToolSelected: (EditorTool) -> Unit,
     onFormatSelected: (ExportFormat) -> Unit,
     onResolutionSelected: (ExportResolution) -> Unit,
+    onClearDraft: () -> Unit,
+    onClearSavedExports: () -> Unit,
     onChange: ((EditParams) -> EditParams) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().background(PanelBackground).navigationBarsPadding()) {
@@ -365,7 +386,9 @@ private fun AdjustmentPanel(
                 exportResolution = exportResolution,
                 draftSavedAtMillis = draftSavedAtMillis,
                 onFormatSelected = onFormatSelected,
-                onResolutionSelected = onResolutionSelected
+                onResolutionSelected = onResolutionSelected,
+                onClearDraft = onClearDraft,
+                onClearSavedExports = onClearSavedExports
             )
 
             Text(selectedTool.label, color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -404,7 +427,9 @@ private fun ExportOptionsPanel(
     exportResolution: ExportResolution,
     draftSavedAtMillis: Long?,
     onFormatSelected: (ExportFormat) -> Unit,
-    onResolutionSelected: (ExportResolution) -> Unit
+    onResolutionSelected: (ExportResolution) -> Unit,
+    onClearDraft: () -> Unit,
+    onClearSavedExports: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
         Text("내보내기 설정", color = TextPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
@@ -417,6 +442,11 @@ private fun ExportOptionsPanel(
 
         OptionRow(title = "파일", values = ExportFormat.values().toList(), selected = exportFormat, label = { it.label }, onSelected = onFormatSelected)
         OptionRow(title = "크기", values = ExportResolution.values().toList(), selected = exportResolution, label = { it.label }, onSelected = onResolutionSelected)
+
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = onClearDraft) { Text("임시저장 삭제") }
+            TextButton(onClick = onClearSavedExports) { Text("저장목록 비우기") }
+        }
     }
 }
 
