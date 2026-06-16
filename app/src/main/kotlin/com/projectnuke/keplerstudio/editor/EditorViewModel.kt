@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val _uiState = MutableStateFlow(
@@ -35,6 +36,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private var nativeSession: Long = 0L
     private var renderJob: Job? = null
+
+    init {
+        viewModelScope.launch {
+            val context = getApplication<Application>()
+            val saved = withContext(Dispatchers.IO) { loadSavedExportsFromPrefs(context) }
+            _uiState.update { it.copy(savedExports = saved) }
+            restoreDraftIfAvailable(context)
+        }
+    }
 
     fun openImage(uri: Uri) {
         renderJob?.cancel()
@@ -52,7 +62,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 nativeSession = NativePhotoCore.nativeCreateSession(sourceFile.absolutePath)
 
                 _uiState.update {
-                    it.copy(
+                    val next = it.copy(
                         isBusy = false,
                         sourcePath = sourceFile.absolutePath,
                         originalPreviewBitmap = preview,
@@ -61,6 +71,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         revision = it.revision + 1,
                         message = "원본 캐시가 완료되었습니다: ${preview.width}x${preview.height} preview"
                     )
+                    saveDraftSnapshot(context, next)
+                    next
                 }
             } catch (t: Throwable) {
                 _uiState.update { it.copy(isBusy = false, message = "이미지를 열지 못했습니다: ${t.message}") }
@@ -78,20 +90,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
             val rendered = withContext(Dispatchers.Default) {
-                val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
-                NativePhotoCore.nativeRenderPreviewInPlace(
-                    copy,
-                    nextParams.exposure,
-                    nextParams.contrast,
-                    nextParams.shadows,
-                    nextParams.highlights,
-                    nextParams.sharpness,
-                    nextRevision
-                )
-                copy
+                renderEditedPreview(basePreview, nextParams, nextRevision)
             }
             if (_uiState.value.revision == nextRevision) {
-                _uiState.update { it.copy(previewBitmap = rendered, isBusy = false, message = "미리보기 렌더링이 완료되었습니다") }
+                val context = getApplication<Application>()
+                _uiState.update {
+                    val next = it.copy(previewBitmap = rendered, isBusy = false, message = "미리보기 렌더링이 완료되었습니다")
+                    saveDraftSnapshot(context, next)
+                    next
+                }
             }
         }
     }
@@ -99,21 +106,43 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun resetAdjustments() {
         val path = _uiState.value.sourcePath ?: return
         viewModelScope.launch {
+            val context = getApplication<Application>()
             val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmap(path, maxSide = 2048) }
             _uiState.update {
-                it.copy(
+                val next = it.copy(
                     originalPreviewBitmap = preview,
                     previewBitmap = preview,
                     params = EditParams(),
                     revision = it.revision + 1,
                     message = "초기화가 완료되었습니다"
                 )
+                saveDraftSnapshot(context, next)
+                next
             }
         }
     }
 
+    fun setExportFormat(format: ExportFormat) {
+        val context = getApplication<Application>()
+        _uiState.update {
+            val next = it.copy(exportFormat = format, message = "파일 형식이 ${format.label}로 설정되었습니다")
+            saveDraftSnapshot(context, next)
+            next
+        }
+    }
+
+    fun setExportResolution(resolution: ExportResolution) {
+        val context = getApplication<Application>()
+        _uiState.update {
+            val next = it.copy(exportResolution = resolution, message = "해상도가 ${resolution.label}로 설정되었습니다")
+            saveDraftSnapshot(context, next)
+            next
+        }
+    }
+
     fun exportPreview() {
-        val bitmap = _uiState.value.previewBitmap
+        val state = _uiState.value
+        val bitmap = state.previewBitmap
         if (bitmap == null) {
             _uiState.update { it.copy(message = "내보낼 이미지가 없습니다") }
             return
@@ -123,13 +152,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val context = getApplication<Application>()
-                val fileName = "KeplerStudio_${exportTimestamp()}.jpg"
-                withContext(Dispatchers.IO) {
-                    saveBitmapToGallery(context, bitmap, fileName)
+                val fileName = "KeplerStudio_${exportTimestamp()}.${state.exportFormat.extension}"
+                val savedUri = withContext(Dispatchers.IO) {
+                    val exportBitmap = scaleBitmapForExport(bitmap, state.exportResolution)
+                    saveBitmapToGallery(context, exportBitmap, fileName, state.exportFormat)
                 }
+                val savedItem = SavedExport(
+                    displayName = fileName,
+                    uriString = savedUri.toString(),
+                    formatLabel = state.exportFormat.label,
+                    resolutionLabel = state.exportResolution.label,
+                    timestampMillis = System.currentTimeMillis()
+                )
+                val savedExports = withContext(Dispatchers.IO) { rememberSavedExport(context, savedItem) }
                 _uiState.update {
                     it.copy(
                         isBusy = false,
+                        savedExports = savedExports,
                         message = "갤러리에 저장되었습니다: $fileName"
                     )
                 }
@@ -142,6 +181,49 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun updateViewport(viewport: ViewportState) {
         _uiState.update { it.copy(viewport = viewport) }
         // TODO v0.2: viewport가 scale 임계값 이상이면 ROI 타일 렌더 Job 발행.
+    }
+
+    private suspend fun restoreDraftIfAvailable(context: Context) {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        val sourcePath = prefs.getString(KEY_DRAFT_SOURCE, null) ?: return
+        val sourceFile = File(sourcePath)
+        if (!sourceFile.exists()) return
+
+        val params = EditParams(
+            exposure = prefs.getFloat(KEY_DRAFT_EXPOSURE, 0f),
+            contrast = prefs.getFloat(KEY_DRAFT_CONTRAST, 0f),
+            shadows = prefs.getFloat(KEY_DRAFT_SHADOWS, 0f),
+            highlights = prefs.getFloat(KEY_DRAFT_HIGHLIGHTS, 0f),
+            sharpness = prefs.getFloat(KEY_DRAFT_SHARPNESS, 0f)
+        )
+        val exportFormat = enumValueOrDefault(prefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
+        val exportResolution = enumValueOrDefault(prefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Preview)
+        val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
+
+        _uiState.update { it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다") }
+        try {
+            val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmap(sourcePath, maxSide = 2048) }
+            val nextRevision = _uiState.value.revision + 1
+            val rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview, params, nextRevision) }
+            releaseNativeSession()
+            nativeSession = NativePhotoCore.nativeCreateSession(sourcePath)
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    sourcePath = sourcePath,
+                    originalPreviewBitmap = preview,
+                    previewBitmap = rendered,
+                    params = params,
+                    exportFormat = exportFormat,
+                    exportResolution = exportResolution,
+                    draftSavedAtMillis = draftSavedAt,
+                    revision = nextRevision,
+                    message = "임시저장된 편집을 불러왔습니다"
+                )
+            }
+        } catch (t: Throwable) {
+            _uiState.update { it.copy(isBusy = false, message = "임시저장을 불러오지 못했습니다: ${t.message}") }
+        }
     }
 
     private fun releaseNativeSession() {
@@ -184,11 +266,40 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
         .copy(Bitmap.Config.ARGB_8888, true)
 }
 
-private fun saveBitmapToGallery(context: Context, bitmap: Bitmap, fileName: String) {
+private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, revision: Int): Bitmap {
+    val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
+    NativePhotoCore.nativeRenderPreviewInPlace(
+        copy,
+        params.exposure,
+        params.contrast,
+        params.shadows,
+        params.highlights,
+        params.sharpness,
+        revision
+    )
+    return copy
+}
+
+private fun scaleBitmapForExport(bitmap: Bitmap, resolution: ExportResolution): Bitmap {
+    val maxLongEdge = resolution.maxLongEdge ?: return bitmap
+    val longest = max(bitmap.width, bitmap.height)
+    if (longest <= maxLongEdge) return bitmap
+    val scale = maxLongEdge.toFloat() / longest.toFloat()
+    val width = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
+    val height = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
+    return Bitmap.createScaledBitmap(bitmap, width, height, true)
+}
+
+private fun saveBitmapToGallery(
+    context: Context,
+    bitmap: Bitmap,
+    fileName: String,
+    format: ExportFormat
+): Uri {
     val resolver = context.contentResolver
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        put(MediaStore.Images.Media.MIME_TYPE, format.mimeType)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/KeplerStudio")
             put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -200,7 +311,13 @@ private fun saveBitmapToGallery(context: Context, bitmap: Bitmap, fileName: Stri
 
     try {
         resolver.openOutputStream(uri)?.use { output ->
-            check(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)) { "이미지 압축에 실패했습니다" }
+            val compressFormat = when (format) {
+                ExportFormat.Jpeg -> Bitmap.CompressFormat.JPEG
+                ExportFormat.Png -> Bitmap.CompressFormat.PNG
+                ExportFormat.Webp -> Bitmap.CompressFormat.WEBP
+            }
+            val quality = if (format == ExportFormat.Png) 100 else 95
+            check(bitmap.compress(compressFormat, quality, output)) { "이미지 압축에 실패했습니다" }
         } ?: error("저장 스트림을 열 수 없습니다")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -208,10 +325,76 @@ private fun saveBitmapToGallery(context: Context, bitmap: Bitmap, fileName: Stri
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
             resolver.update(uri, values, null, null)
         }
+        return uri
     } catch (t: Throwable) {
         resolver.delete(uri, null, null)
         throw t
     }
 }
 
+private fun saveDraftSnapshot(context: Context, state: EditorUiState) {
+    val sourcePath = state.sourcePath ?: return
+    val savedAt = System.currentTimeMillis()
+    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+        .putString(KEY_DRAFT_SOURCE, sourcePath)
+        .putFloat(KEY_DRAFT_EXPOSURE, state.params.exposure)
+        .putFloat(KEY_DRAFT_CONTRAST, state.params.contrast)
+        .putFloat(KEY_DRAFT_SHADOWS, state.params.shadows)
+        .putFloat(KEY_DRAFT_HIGHLIGHTS, state.params.highlights)
+        .putFloat(KEY_DRAFT_SHARPNESS, state.params.sharpness)
+        .putString(KEY_DRAFT_FORMAT, state.exportFormat.name)
+        .putString(KEY_DRAFT_RESOLUTION, state.exportResolution.name)
+        .putLong(KEY_DRAFT_SAVED_AT, savedAt)
+        .apply()
+}
+
+private fun rememberSavedExport(context: Context, item: SavedExport): List<SavedExport> {
+    val next = (listOf(item) + loadSavedExportsFromPrefs(context).filter { it.uriString != item.uriString }).take(60)
+    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+        .putString(KEY_SAVED_EXPORTS, next.joinToString("\n") { encodeSavedExport(it) })
+        .apply()
+    return next
+}
+
+private fun loadSavedExportsFromPrefs(context: Context): List<SavedExport> {
+    val raw = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).getString(KEY_SAVED_EXPORTS, null)
+        ?: return emptyList()
+    return raw.lines().mapNotNull { decodeSavedExport(it) }
+}
+
+private fun encodeSavedExport(item: SavedExport): String = listOf(
+    item.displayName,
+    item.uriString,
+    item.formatLabel,
+    item.resolutionLabel,
+    item.timestampMillis.toString()
+).joinToString("|") { it.replace("|", " ").replace("\n", " ") }
+
+private fun decodeSavedExport(raw: String): SavedExport? {
+    val parts = raw.split("|")
+    if (parts.size != 5) return null
+    return SavedExport(
+        displayName = parts[0],
+        uriString = parts[1],
+        formatLabel = parts[2],
+        resolutionLabel = parts[3],
+        timestampMillis = parts[4].toLongOrNull() ?: return null
+    )
+}
+
+private inline fun <reified T : Enum<T>> enumValueOrDefault(name: String?, default: T): T =
+    runCatching { enumValueOf<T>(name ?: return default) }.getOrDefault(default)
+
 private fun exportTimestamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+
+private const val PREF_NAME = "kepler_studio_editor"
+private const val KEY_SAVED_EXPORTS = "saved_exports"
+private const val KEY_DRAFT_SOURCE = "draft_source"
+private const val KEY_DRAFT_EXPOSURE = "draft_exposure"
+private const val KEY_DRAFT_CONTRAST = "draft_contrast"
+private const val KEY_DRAFT_SHADOWS = "draft_shadows"
+private const val KEY_DRAFT_HIGHLIGHTS = "draft_highlights"
+private const val KEY_DRAFT_SHARPNESS = "draft_sharpness"
+private const val KEY_DRAFT_FORMAT = "draft_format"
+private const val KEY_DRAFT_RESOLUTION = "draft_resolution"
+private const val KEY_DRAFT_SAVED_AT = "draft_saved_at"
