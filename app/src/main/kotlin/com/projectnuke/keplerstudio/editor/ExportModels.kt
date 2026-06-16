@@ -12,12 +12,13 @@ enum class ExportFormat(
 
 enum class ExportResolution(
     val label: String,
-    val maxLongEdge: Int?
+    val scalePercent: Int
 ) {
-    Preview("현재 미리보기", null),
-    LongEdge1080("긴 변 1080px", 1080),
-    LongEdge2048("긴 변 2048px", 2048),
-    LongEdge4096("긴 변 4096px", 4096)
+    Full("100%", 100),
+    Percent90("90%", 90),
+    Percent75("75%", 75),
+    Percent50("50%", 50),
+    Percent25("25%", 25)
 }
 
 data class SavedExport(
