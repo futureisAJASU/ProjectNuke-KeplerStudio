@@ -1,15 +1,22 @@
 package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
+import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import java.io.File
 import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -105,6 +112,33 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun exportPreview() {
+        val bitmap = _uiState.value.previewBitmap
+        if (bitmap == null) {
+            _uiState.update { it.copy(message = "내보낼 이미지가 없습니다") }
+            return
+        }
+
+        _uiState.update { it.copy(isBusy = true, message = "이미지를 내보내는 중입니다") }
+        viewModelScope.launch {
+            try {
+                val context = getApplication<Application>()
+                val fileName = "KeplerStudio_${exportTimestamp()}.jpg"
+                withContext(Dispatchers.IO) {
+                    saveBitmapToGallery(context, bitmap, fileName)
+                }
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        message = "갤러리에 저장되었습니다: $fileName"
+                    )
+                }
+            } catch (t: Throwable) {
+                _uiState.update { it.copy(isBusy = false, message = "내보내기에 실패했습니다: ${t.message}") }
+            }
+        }
+    }
+
     fun updateViewport(viewport: ViewportState) {
         _uiState.update { it.copy(viewport = viewport) }
         // TODO v0.2: viewport가 scale 임계값 이상이면 ROI 타일 렌더 Job 발행.
@@ -149,3 +183,35 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
     return requireNotNull(BitmapFactory.decodeFile(path, options)) { "미리보기 디코딩에 실패했습니다" }
         .copy(Bitmap.Config.ARGB_8888, true)
 }
+
+private fun saveBitmapToGallery(context: Context, bitmap: Bitmap, fileName: String) {
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/KeplerStudio")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+    }
+
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+        ?: error("저장 위치를 만들 수 없습니다")
+
+    try {
+        resolver.openOutputStream(uri)?.use { output ->
+            check(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)) { "이미지 압축에 실패했습니다" }
+        } ?: error("저장 스트림을 열 수 없습니다")
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        }
+    } catch (t: Throwable) {
+        resolver.delete(uri, null, null)
+        throw t
+    }
+}
+
+private fun exportTimestamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
