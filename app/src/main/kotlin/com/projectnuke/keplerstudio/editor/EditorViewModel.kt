@@ -25,7 +25,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.max
 import kotlin.math.roundToInt
 
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
@@ -40,6 +39,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     init {
         viewModelScope.launch {
             val context = getApplication<Application>()
+            withContext(Dispatchers.IO) { cleanupTemporarySourceFiles(context, deleteAll = false) }
             val saved = withContext(Dispatchers.IO) { loadSavedExportsFromPrefs(context) }
             _uiState.update { it.copy(savedExports = saved) }
             restoreDraftIfAvailable(context)
@@ -178,6 +178,41 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun clearDraft() {
+        renderJob?.cancel()
+        viewModelScope.launch {
+            val context = getApplication<Application>()
+            val removedCount = withContext(Dispatchers.IO) {
+                clearDraftPrefs(context)
+                cleanupTemporarySourceFiles(context, deleteAll = true)
+            }
+            releaseNativeSession()
+            _uiState.update {
+                it.copy(
+                    isBusy = false,
+                    sourcePath = null,
+                    originalPreviewBitmap = null,
+                    previewBitmap = null,
+                    params = EditParams(),
+                    draftSavedAtMillis = null,
+                    revision = it.revision + 1,
+                    message = "임시저장을 삭제했습니다. 정리된 임시파일: ${removedCount}개"
+                )
+            }
+        }
+    }
+
+    fun clearSavedExports() {
+        val context = getApplication<Application>()
+        clearSavedExportsPrefs(context)
+        _uiState.update {
+            it.copy(
+                savedExports = emptyList(),
+                message = "저장본 목록을 비웠습니다. 갤러리에 저장된 파일은 삭제되지 않습니다"
+            )
+        }
+    }
+
     fun updateViewport(viewport: ViewportState) {
         _uiState.update { it.copy(viewport = viewport) }
         // TODO v0.2: viewport가 scale 임계값 이상이면 ROI 타일 렌더 Job 발행.
@@ -254,7 +289,7 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
     require(bounds.outWidth > 0 && bounds.outHeight > 0) { "지원하지 않는 이미지이거나 디코딩에 실패했습니다" }
 
     var sample = 1
-    val longest = max(bounds.outWidth, bounds.outHeight)
+    val longest = kotlin.math.max(bounds.outWidth, bounds.outHeight)
     while (longest / sample > maxSide) sample *= 2
 
     val options = BitmapFactory.Options().apply {
@@ -346,12 +381,47 @@ private fun saveDraftSnapshot(context: Context, state: EditorUiState) {
         .apply()
 }
 
+private fun clearDraftPrefs(context: Context) {
+    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+        .remove(KEY_DRAFT_SOURCE)
+        .remove(KEY_DRAFT_EXPOSURE)
+        .remove(KEY_DRAFT_CONTRAST)
+        .remove(KEY_DRAFT_SHADOWS)
+        .remove(KEY_DRAFT_HIGHLIGHTS)
+        .remove(KEY_DRAFT_SHARPNESS)
+        .remove(KEY_DRAFT_FORMAT)
+        .remove(KEY_DRAFT_RESOLUTION)
+        .remove(KEY_DRAFT_SAVED_AT)
+        .apply()
+}
+
+private fun cleanupTemporarySourceFiles(context: Context, deleteAll: Boolean): Int {
+    val now = System.currentTimeMillis()
+    val maxAgeMs = 7L * 24L * 60L * 60L * 1000L
+    val files = context.cacheDir.listFiles { file ->
+        file.isFile && file.name.startsWith("source_") && file.name.endsWith(".img")
+    }.orEmpty()
+
+    var removed = 0
+    files.forEach { file ->
+        val expired = now - file.lastModified() > maxAgeMs
+        if ((deleteAll || expired) && file.delete()) removed += 1
+    }
+    return removed
+}
+
 private fun rememberSavedExport(context: Context, item: SavedExport): List<SavedExport> {
     val next = (listOf(item) + loadSavedExportsFromPrefs(context).filter { it.uriString != item.uriString }).take(60)
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
         .putString(KEY_SAVED_EXPORTS, next.joinToString("\n") { encodeSavedExport(it) })
         .apply()
     return next
+}
+
+private fun clearSavedExportsPrefs(context: Context) {
+    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+        .remove(KEY_SAVED_EXPORTS)
+        .apply()
 }
 
 private fun loadSavedExportsFromPrefs(context: Context): List<SavedExport> {
