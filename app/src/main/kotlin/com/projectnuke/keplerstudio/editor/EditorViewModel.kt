@@ -197,7 +197,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             sharpness = prefs.getFloat(KEY_DRAFT_SHARPNESS, 0f)
         )
         val exportFormat = enumValueOrDefault(prefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
-        val exportResolution = enumValueOrDefault(prefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Preview)
+        val exportResolution = enumValueOrDefault(prefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Full)
         val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
 
         _uiState.update { it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다") }
@@ -281,10 +281,8 @@ private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, revisio
 }
 
 private fun scaleBitmapForExport(bitmap: Bitmap, resolution: ExportResolution): Bitmap {
-    val maxLongEdge = resolution.maxLongEdge ?: return bitmap
-    val longest = max(bitmap.width, bitmap.height)
-    if (longest <= maxLongEdge) return bitmap
-    val scale = maxLongEdge.toFloat() / longest.toFloat()
+    if (resolution.scalePercent >= 100) return bitmap
+    val scale = resolution.scalePercent / 100f
     val width = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
     val height = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
     return Bitmap.createScaledBitmap(bitmap, width, height, true)
