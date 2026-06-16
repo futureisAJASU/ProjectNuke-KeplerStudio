@@ -50,13 +50,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.ExportFormat
+import com.projectnuke.keplerstudio.editor.ExportResolution
+import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ViewportState
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val AppBackground = Color(0xFF101014)
 private val TopBarBackground = Color(0xFF17171D)
 private val PanelBackground = Color(0xFF1A1A22)
 private val PreviewBackground = Color(0xFF000000)
 private val RailBackground = Color(0xFF14141B)
+private val CardBackground = Color(0xFF20202A)
 private val CompareBadgeBackground = Color(0xCC000000)
 private val PrimaryPurple = Color(0xFF8E6CEF)
 private val TextPrimary = Color(0xFFF7F2FF)
@@ -71,6 +78,11 @@ private val KeplerDarkColors = darkColorScheme(
     surface = PanelBackground,
     onSurface = TextPrimary
 )
+
+private enum class MainTab(val label: String) {
+    Editor("편집"),
+    Saved("저장본")
+}
 
 private enum class EditorTool(val label: String, val description: String) {
     Auto("자동", "원터치 보정과 흑백 전환"),
@@ -96,52 +108,67 @@ fun EditorScreen(viewModel: EditorViewModel) {
         if (uri != null) viewModel.openImage(uri)
     }
     var selectedTool by remember { mutableStateOf(EditorTool.Light) }
+    var selectedTab by remember { mutableStateOf(MainTab.Editor) }
 
     MaterialTheme(colorScheme = KeplerDarkColors) {
         Surface(modifier = Modifier.fillMaxSize(), color = AppBackground) {
             Column(modifier = Modifier.fillMaxSize().background(AppBackground)) {
                 TopBar(
                     nativeVersion = state.nativeVersion,
+                    selectedTab = selectedTab,
                     canExport = state.previewBitmap != null && !state.isBusy,
+                    onTabSelected = { selectedTab = it },
                     onOpen = { picker.launch("image/*") },
                     onReset = { viewModel.resetAdjustments() },
                     onExport = { viewModel.exportPreview() }
                 )
 
-                Box(
-                    modifier = Modifier.weight(1f).fillMaxWidth().background(PreviewBackground),
-                    contentAlignment = Alignment.Center
-                ) {
-                    val bitmap = state.previewBitmap
-                    if (bitmap == null) {
-                        Text("사진을 선택해 주세요", color = TextPrimary, style = MaterialTheme.typography.bodyLarge)
-                    } else {
-                        ZoomablePreview(
-                            bitmap = bitmap,
-                            originalBitmap = state.originalPreviewBitmap,
-                            onViewportChanged = viewModel::updateViewport
-                        )
+                if (selectedTab == MainTab.Saved) {
+                    SavedExportsScreen(
+                        savedExports = state.savedExports,
+                        modifier = Modifier.weight(1f).fillMaxWidth()
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier.weight(1f).fillMaxWidth().background(PreviewBackground),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        val bitmap = state.previewBitmap
+                        if (bitmap == null) {
+                            Text("사진을 선택해 주세요", color = TextPrimary, style = MaterialTheme.typography.bodyLarge)
+                        } else {
+                            ZoomablePreview(
+                                bitmap = bitmap,
+                                originalBitmap = state.originalPreviewBitmap,
+                                onViewportChanged = viewModel::updateViewport
+                            )
+                        }
+
+                        if (state.isBusy) {
+                            CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
+                        }
+
+                        state.message?.let {
+                            Text(
+                                text = it,
+                                color = TextPrimary,
+                                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)
+                            )
+                        }
                     }
 
-                    if (state.isBusy) {
-                        CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
-                    }
-
-                    state.message?.let {
-                        Text(
-                            text = it,
-                            color = TextPrimary,
-                            modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)
-                        )
-                    }
+                    AdjustmentPanel(
+                        selectedTool = selectedTool,
+                        params = state.params,
+                        exportFormat = state.exportFormat,
+                        exportResolution = state.exportResolution,
+                        draftSavedAtMillis = state.draftSavedAtMillis,
+                        onToolSelected = { selectedTool = it },
+                        onFormatSelected = viewModel::setExportFormat,
+                        onResolutionSelected = viewModel::setExportResolution,
+                        onChange = { transform -> viewModel.updateParams(transform) }
+                    )
                 }
-
-                AdjustmentPanel(
-                    selectedTool = selectedTool,
-                    params = state.params,
-                    onToolSelected = { selectedTool = it },
-                    onChange = { transform -> viewModel.updateParams(transform) }
-                )
             }
         }
     }
@@ -150,29 +177,80 @@ fun EditorScreen(viewModel: EditorViewModel) {
 @Composable
 private fun TopBar(
     nativeVersion: String,
+    selectedTab: MainTab,
     canExport: Boolean,
+    onTabSelected: (MainTab) -> Unit,
     onOpen: () -> Unit,
     onReset: () -> Unit,
     onExport: () -> Unit
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(TopBarBackground)
             .statusBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text("Kepler Studio v0.1", style = MaterialTheme.typography.titleLarge, color = TextPrimary, maxLines = 1)
-            Text(nativeVersion, style = MaterialTheme.typography.bodySmall, color = TextSecondary, maxLines = 1)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Kepler Studio v0.1", style = MaterialTheme.typography.titleLarge, color = TextPrimary, maxLines = 1)
+                Text(nativeVersion, style = MaterialTheme.typography.bodySmall, color = TextSecondary, maxLines = 1)
+            }
+
+            TextButton(onClick = onReset) { Text("초기화") }
+            TextButton(onClick = onExport, enabled = canExport) { Text("저장") }
+            Button(onClick = onOpen, colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)) {
+                Text("사진 선택")
+            }
         }
 
-        TextButton(onClick = onReset) { Text("초기화") }
-        TextButton(onClick = onExport, enabled = canExport) { Text("저장") }
-        Button(onClick = onOpen, colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)) {
-            Text("사진 선택")
+        Row(modifier = Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MainTab.values().forEach { tab ->
+                TextButton(onClick = { onTabSelected(tab) }) {
+                    Text(
+                        text = tab.label,
+                        color = if (tab == selectedTab) PrimaryPurple else TextSecondary,
+                        fontWeight = if (tab == selectedTab) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SavedExportsScreen(savedExports: List<SavedExport>, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .background(AppBackground)
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        Text("저장된 편집본", color = TextPrimary, style = MaterialTheme.typography.titleLarge)
+        Text(
+            "Kepler Studio에서 내보낸 결과물이 여기에 표시됩니다",
+            color = TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
+        )
+
+        if (savedExports.isEmpty()) {
+            Text("아직 저장된 편집본이 없습니다", color = TextMuted, style = MaterialTheme.typography.bodyMedium)
+        } else {
+            savedExports.forEach { item ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 10.dp)
+                        .background(CardBackground)
+                        .padding(14.dp)
+                ) {
+                    Text(item.displayName, color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text("${item.formatLabel} · ${item.resolutionLabel}", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                    Text(formatSavedTime(item.timestampMillis), color = TextMuted, style = MaterialTheme.typography.bodySmall)
+                    Text(item.uriString, color = TextMuted, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                }
+            }
         }
     }
 }
@@ -262,17 +340,30 @@ private fun ZoomablePreview(
 private fun AdjustmentPanel(
     selectedTool: EditorTool,
     params: EditParams,
+    exportFormat: ExportFormat,
+    exportResolution: ExportResolution,
+    draftSavedAtMillis: Long?,
     onToolSelected: (EditorTool) -> Unit,
+    onFormatSelected: (ExportFormat) -> Unit,
+    onResolutionSelected: (ExportResolution) -> Unit,
     onChange: ((EditParams) -> EditParams) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().background(PanelBackground).navigationBarsPadding()) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 150.dp, max = 260.dp)
+                .heightIn(min = 170.dp, max = 290.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
+            ExportOptionsPanel(
+                exportFormat = exportFormat,
+                exportResolution = exportResolution,
+                draftSavedAtMillis = draftSavedAtMillis,
+                onFormatSelected = onFormatSelected,
+                onResolutionSelected = onResolutionSelected
+            )
+
             Text(selectedTool.label, color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(
                 selectedTool.description,
@@ -300,6 +391,54 @@ private fun AdjustmentPanel(
         }
 
         ToolRail(selectedTool = selectedTool, onToolSelected = onToolSelected)
+    }
+}
+
+@Composable
+private fun ExportOptionsPanel(
+    exportFormat: ExportFormat,
+    exportResolution: ExportResolution,
+    draftSavedAtMillis: Long?,
+    onFormatSelected: (ExportFormat) -> Unit,
+    onResolutionSelected: (ExportResolution) -> Unit
+) {
+    Column(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+        Text("내보내기 설정", color = TextPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        Text(
+            text = draftSavedAtMillis?.let { "임시저장됨 · ${formatSavedTime(it)}" } ?: "편집값은 자동으로 임시저장됩니다",
+            color = TextMuted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 2.dp)
+        )
+
+        OptionRow(title = "파일", values = ExportFormat.values().toList(), selected = exportFormat, label = { it.label }, onSelected = onFormatSelected)
+        OptionRow(title = "해상도", values = ExportResolution.values().toList(), selected = exportResolution, label = { it.label }, onSelected = onResolutionSelected)
+    }
+}
+
+@Composable
+private fun <T> OptionRow(
+    title: String,
+    values: List<T>,
+    selected: T,
+    label: (T) -> String,
+    onSelected: (T) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(title, color = TextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.width(46.dp))
+        values.forEach { value ->
+            TextButton(onClick = { onSelected(value) }) {
+                Text(
+                    text = label(value),
+                    color = if (value == selected) PrimaryPurple else TextSecondary,
+                    fontWeight = if (value == selected) FontWeight.Bold else FontWeight.Normal
+                )
+            }
+        }
     }
 }
 
@@ -387,3 +526,6 @@ private fun AdjustmentSlider(
         Text(String.format("%.2f", value), modifier = Modifier.width(52.dp), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
     }
 }
+
+private fun formatSavedTime(timestampMillis: Long): String =
+    SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.KOREA).format(Date(timestampMillis))
