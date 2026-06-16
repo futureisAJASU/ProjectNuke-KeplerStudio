@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -99,35 +98,23 @@ fun EditorScreen(viewModel: EditorViewModel) {
     var selectedTool by remember { mutableStateOf(EditorTool.Light) }
 
     MaterialTheme(colorScheme = KeplerDarkColors) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = AppBackground
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(AppBackground)
-            ) {
+        Surface(modifier = Modifier.fillMaxSize(), color = AppBackground) {
+            Column(modifier = Modifier.fillMaxSize().background(AppBackground)) {
                 TopBar(
                     nativeVersion = state.nativeVersion,
+                    canExport = state.previewBitmap != null && !state.isBusy,
                     onOpen = { picker.launch("image/*") },
-                    onReset = { viewModel.resetAdjustments() }
+                    onReset = { viewModel.resetAdjustments() },
+                    onExport = { viewModel.exportPreview() }
                 )
 
                 Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .background(PreviewBackground),
+                    modifier = Modifier.weight(1f).fillMaxWidth().background(PreviewBackground),
                     contentAlignment = Alignment.Center
                 ) {
                     val bitmap = state.previewBitmap
                     if (bitmap == null) {
-                        Text(
-                            text = "사진을 선택해 주세요",
-                            color = TextPrimary,
-                            style = MaterialTheme.typography.bodyLarge
-                        )
+                        Text("사진을 선택해 주세요", color = TextPrimary, style = MaterialTheme.typography.bodyLarge)
                     } else {
                         ZoomablePreview(
                             bitmap = bitmap,
@@ -137,20 +124,14 @@ fun EditorScreen(viewModel: EditorViewModel) {
                     }
 
                     if (state.isBusy) {
-                        CircularProgressIndicator(
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(16.dp)
-                        )
+                        CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
                     }
 
                     state.message?.let {
                         Text(
                             text = it,
                             color = TextPrimary,
-                            modifier = Modifier
-                                .align(Alignment.BottomStart)
-                                .padding(12.dp)
+                            modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)
                         )
                     }
                 }
@@ -169,8 +150,10 @@ fun EditorScreen(viewModel: EditorViewModel) {
 @Composable
 private fun TopBar(
     nativeVersion: String,
+    canExport: Boolean,
     onOpen: () -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
+    onExport: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -182,27 +165,13 @@ private fun TopBar(
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "Kepler Studio v0.1",
-                style = MaterialTheme.typography.titleLarge,
-                color = TextPrimary,
-                maxLines = 1
-            )
-            Text(
-                text = nativeVersion,
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary,
-                maxLines = 1
-            )
+            Text("Kepler Studio v0.1", style = MaterialTheme.typography.titleLarge, color = TextPrimary, maxLines = 1)
+            Text(nativeVersion, style = MaterialTheme.typography.bodySmall, color = TextSecondary, maxLines = 1)
         }
 
-        TextButton(onClick = onReset) {
-            Text("초기화")
-        }
-        Button(
-            onClick = onOpen,
-            colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)
-        ) {
+        TextButton(onClick = onReset) { Text("초기화") }
+        TextButton(onClick = onExport, enabled = canExport) { Text("저장") }
+        Button(onClick = onOpen, colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)) {
             Text("사진 선택")
         }
     }
@@ -239,12 +208,8 @@ private fun ZoomablePreview(
                             val event = awaitPointerEvent()
                             val pressedCount = event.changes.count { it.pressed }
                             isMultiTouch = pressedCount > 1
-                            if (pressedCount != 1) {
-                                showOriginal = false
-                            }
-                            if (pressedCount == 0) {
-                                isTransforming = false
-                            }
+                            if (pressedCount != 1) showOriginal = false
+                            if (pressedCount == 0) isTransforming = false
                         }
                     }
                 }
@@ -261,9 +226,7 @@ private fun ZoomablePreview(
                 .pointerInput(bitmap, originalBitmap) {
                     detectTapGestures(
                         onLongPress = {
-                            if (originalBitmap != null && !isMultiTouch && !isTransforming) {
-                                showOriginal = true
-                            }
+                            if (originalBitmap != null && !isMultiTouch && !isTransforming) showOriginal = true
                         },
                         onPress = {
                             tryAwaitRelease()
@@ -302,12 +265,7 @@ private fun AdjustmentPanel(
     onToolSelected: (EditorTool) -> Unit,
     onChange: ((EditParams) -> EditParams) -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PanelBackground)
-            .navigationBarsPadding()
-    ) {
+    Column(modifier = Modifier.fillMaxWidth().background(PanelBackground).navigationBarsPadding()) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -315,14 +273,9 @@ private fun AdjustmentPanel(
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
+            Text(selectedTool.label, color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             Text(
-                text = selectedTool.label,
-                color = TextPrimary,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                text = selectedTool.description,
+                selectedTool.description,
                 color = TextSecondary,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
@@ -330,34 +283,28 @@ private fun AdjustmentPanel(
 
             when (selectedTool) {
                 EditorTool.Auto -> AutoPanel()
+                EditorTool.Light -> LightPanel(params, onChange)
+                EditorTool.Color -> PlaceholderPanel("화이트밸런스, 생동감, 채도, HSL 보정을 준비 중입니다")
+                EditorTool.Effects -> PlaceholderPanel("텍스처, 명료도, 디헤이즈, 비네팅, 그레인 보정을 준비 중입니다")
+                EditorTool.Detail -> DetailPanel(params, onChange)
                 EditorTool.Profiles -> PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결됩니다")
                 EditorTool.Presets -> PlaceholderPanel("사용자 프리셋과 추천 프리셋 저장소를 준비 중입니다")
                 EditorTool.Crop -> PlaceholderPanel("비율, 회전, 수평계 기반 자르기 도구를 준비 중입니다")
                 EditorTool.Masking -> PlaceholderPanel("피사체, 하늘, 배경 마스크 모델을 연결할 예정입니다")
                 EditorTool.Remove -> PlaceholderPanel("지우개, 반사 제거, 센서 먼지 제거 엔진을 연결할 예정입니다")
-                EditorTool.Light -> LightPanel(params, onChange)
-                EditorTool.Color -> ColorPanel()
-                EditorTool.Effects -> EffectsPanel()
-                EditorTool.Detail -> DetailPanel(params, onChange)
-                EditorTool.Optics -> PlaceholderPanel("색수차 제거와 렌즈 프로필 보정은 네이티브 엔진에 추가할 예정입니다")
-                EditorTool.Geometry -> PlaceholderPanel("왜곡, 수직, 수평, 원근 보정 UI를 준비 중입니다")
-                EditorTool.Blur -> PlaceholderPanel("렌즈 블러와 초점 영역 편집은 AI 마스크 이후 연결됩니다")
+                EditorTool.Optics -> PlaceholderPanel("색수차 제거와 렌즈 프로필 보정을 준비 중입니다")
+                EditorTool.Geometry -> PlaceholderPanel("왜곡, 수직, 수평, 원근 보정을 준비 중입니다")
+                EditorTool.Blur -> PlaceholderPanel("렌즈 블러와 초점 영역 편집을 준비 중입니다")
                 EditorTool.Ai -> PlaceholderPanel("리마스터, 초점 리마스터, 플레어 억제 기능을 준비 중입니다")
             }
         }
 
-        ToolRail(
-            selectedTool = selectedTool,
-            onToolSelected = onToolSelected
-        )
+        ToolRail(selectedTool = selectedTool, onToolSelected = onToolSelected)
     }
 }
 
 @Composable
-private fun ToolRail(
-    selectedTool: EditorTool,
-    onToolSelected: (EditorTool) -> Unit
-) {
+private fun ToolRail(selectedTool: EditorTool, onToolSelected: (EditorTool) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -381,22 +328,11 @@ private fun ToolRail(
 
 @Composable
 private fun AutoPanel() {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Button(
-            onClick = { },
-            enabled = false,
-            colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)
-        ) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(onClick = { }, enabled = false, colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)) {
             Text("자동 보정")
         }
-        Button(
-            onClick = { },
-            enabled = false,
-            colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)
-        ) {
+        Button(onClick = { }, enabled = false, colors = ButtonDefaults.buttonColors(containerColor = PrimaryPurple)) {
             Text("흑백")
         }
     }
@@ -409,49 +345,18 @@ private fun AutoPanel() {
 }
 
 @Composable
-private fun LightPanel(
-    params: EditParams,
-    onChange: ((EditParams) -> EditParams) -> Unit
-) {
+private fun LightPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     AdjustmentSlider("노출", params.exposure, -1f, 1f) { v -> onChange { it.copy(exposure = v) } }
     AdjustmentSlider("대비", params.contrast, -1f, 1f) { v -> onChange { it.copy(contrast = v) } }
     AdjustmentSlider("하이라이트", params.highlights, -1f, 1f) { v -> onChange { it.copy(highlights = v) } }
     AdjustmentSlider("섀도우", params.shadows, -1f, 1f) { v -> onChange { it.copy(shadows = v) } }
-    DisabledSlider("화이트", "톤 커브/화이트 포인트 엔진 연결 예정")
-    DisabledSlider("블랙", "톤 커브/블랙 포인트 엔진 연결 예정")
-    DisabledSlider("커브", "RGB 톤 커브 UI 연결 예정")
+    PlaceholderPanel("화이트, 블랙, 커브 조절은 다음 단계에서 연결됩니다")
 }
 
 @Composable
-private fun ColorPanel() {
-    DisabledSlider("색온도", "화이트밸런스 엔진 연결 예정")
-    DisabledSlider("색조", "화이트밸런스 엔진 연결 예정")
-    DisabledSlider("생동감", "선택적 채도 엔진 연결 예정")
-    DisabledSlider("채도", "전역 채도 엔진 연결 예정")
-    DisabledSlider("색상 믹스", "HSL 색상별 보정 UI 연결 예정")
-    DisabledSlider("컬러 그레이딩", "섀도우/미드톤/하이라이트 휠 연결 예정")
-}
-
-@Composable
-private fun EffectsPanel() {
-    DisabledSlider("텍스처", "텍스처 보정 엔진 연결 예정")
-    DisabledSlider("명료도", "로컬 콘트라스트 엔진 연결 예정")
-    DisabledSlider("디헤이즈", "안개 제거 엔진 연결 예정")
-    DisabledSlider("비네팅", "비네팅 엔진 연결 예정")
-    DisabledSlider("그레인", "필름 그레인 엔진 연결 예정")
-}
-
-@Composable
-private fun DetailPanel(
-    params: EditParams,
-    onChange: ((EditParams) -> EditParams) -> Unit
-) {
+private fun DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     AdjustmentSlider("샤픈", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
-    DisabledSlider("반경", "샤픈 반경 엔진 연결 예정")
-    DisabledSlider("디테일", "고주파 디테일 보정 연결 예정")
-    DisabledSlider("마스킹", "엣지 기반 샤픈 마스크 연결 예정")
-    DisabledSlider("노이즈 감소", "휘도 노이즈 감소 연결 예정")
-    DisabledSlider("컬러 노이즈", "색 노이즈 감소 연결 예정")
+    PlaceholderPanel("반경, 디테일, 마스킹, 노이즈 감소는 다음 단계에서 연결됩니다")
 }
 
 @Composable
@@ -465,48 +370,6 @@ private fun PlaceholderPanel(message: String) {
 }
 
 @Composable
-private fun DisabledSlider(
-    label: String,
-    hint: String
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 50.dp)
-            .padding(vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        Column(modifier = Modifier.width(86.dp)) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.bodyMedium,
-                color = TextMuted
-            )
-        }
-        Slider(
-            value = 0f,
-            onValueChange = { },
-            valueRange = -1f..1f,
-            enabled = false,
-            modifier = Modifier.weight(1f)
-        )
-        Text(
-            text = "예정",
-            modifier = Modifier.width(44.dp),
-            style = MaterialTheme.typography.bodySmall,
-            color = TextMuted
-        )
-    }
-    Text(
-        text = hint,
-        color = TextMuted,
-        style = MaterialTheme.typography.bodySmall,
-        modifier = Modifier.padding(start = 94.dp, bottom = 4.dp)
-    )
-}
-
-@Composable
 private fun AdjustmentSlider(
     label: String,
     value: Float,
@@ -515,30 +378,12 @@ private fun AdjustmentSlider(
     onValue: (Float) -> Unit
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 56.dp)
-            .padding(vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Text(
-            text = label,
-            modifier = Modifier.width(86.dp),
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextPrimary
-        )
-        Slider(
-            value = value,
-            onValueChange = onValue,
-            valueRange = min..max,
-            modifier = Modifier.weight(1f)
-        )
-        Text(
-            text = String.format("%.2f", value),
-            modifier = Modifier.width(52.dp),
-            style = MaterialTheme.typography.bodyMedium,
-            color = TextSecondary
-        )
+        Text(label, modifier = Modifier.width(86.dp), style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
+        Slider(value = value, onValueChange = onValue, valueRange = min..max, modifier = Modifier.weight(1f))
+        Text(String.format("%.2f", value), modifier = Modifier.width(52.dp), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
     }
 }
