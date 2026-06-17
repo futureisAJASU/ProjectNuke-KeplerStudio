@@ -28,6 +28,10 @@ static inline float clampf(float v, float lo, float hi) {
     return v;
 }
 
+static inline float lerp(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
 static inline uint8_t to_u8(float v) {
     v = clamp01(v);
     return static_cast<uint8_t>(std::round(v * 255.0f));
@@ -40,6 +44,18 @@ static inline float smoothstep(float edge0, float edge1, float x) {
 
 static inline float luma_of(float r, float g, float b) {
     return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+}
+
+static inline float channel_at(const std::vector<uint8_t>& row, int x, int channel) {
+    return row[static_cast<size_t>(x) * 4U + static_cast<size_t>(channel)] / 255.0f;
+}
+
+static inline float luma_at(const std::vector<uint8_t>& row, int x) {
+    return luma_of(channel_at(row, x, 0), channel_at(row, x, 1), channel_at(row, x, 2));
+}
+
+static void copy_row(uint8_t* dst, const uint8_t* src, int stride) {
+    std::copy(src, src + stride, dst);
 }
 
 static void apply_adjustment_rgba8888(
@@ -61,23 +77,22 @@ static void apply_adjustment_rgba8888(
     float dehaze,
     float noiseReduction
 ) {
-    const float exposureMul = std::pow(2.0f, exposure); // -1..+1 EV
-    const float contrastMul = 1.0f + contrast * 0.75f;
-    const float shadowStrength = shadows * 0.45f;
-    const float highlightStrength = highlights * 0.45f;
-    const float whiteStrength = whites * 0.35f;
-    const float blackStrength = blacks * 0.35f;
-    const float clarityStrength = clarity * 0.45f;
-    const float dehazeStrength = dehaze * 0.40f;
-    const float noiseColorDamping = clamp01(noiseReduction) * 0.35f;
+    const float exposureMul = std::pow(2.0f, exposure);
+    const float contrastMul = 1.0f + contrast * 0.72f;
+    const float shadowStrength = shadows * 0.42f;
+    const float highlightStrength = highlights * 0.42f;
+    const float whiteStrength = whites * 0.34f;
+    const float blackStrength = blacks * 0.34f;
+    const float clarityStrength = clarity * 0.42f;
+    const float dehazeStrength = dehaze * 0.36f;
+    const float chromaDamping = clamp01(noiseReduction) * 0.18f;
 
-    // Simple WB approximation. Positive temperature warms; positive tint moves toward magenta.
-    const float tempR = 1.0f + temperature * 0.10f;
+    const float tempR = 1.0f + temperature * 0.11f;
     const float tempG = 1.0f;
-    const float tempB = 1.0f - temperature * 0.10f;
-    const float tintR = 1.0f + tint * 0.05f;
-    const float tintG = 1.0f - tint * 0.08f;
-    const float tintB = 1.0f + tint * 0.05f;
+    const float tempB = 1.0f - temperature * 0.11f;
+    const float tintR = 1.0f + tint * 0.045f;
+    const float tintG = 1.0f - tint * 0.085f;
+    const float tintB = 1.0f + tint * 0.045f;
 
     for (int y = 0; y < height; ++y) {
         auto* row = base + y * stride;
@@ -89,38 +104,28 @@ static void apply_adjustment_rgba8888(
             float b = px[2] / 255.0f;
             const uint8_t a = px[3];
 
-            // Exposure
-            r *= exposureMul;
-            g *= exposureMul;
-            b *= exposureMul;
+            r *= exposureMul * tempR * tintR;
+            g *= exposureMul * tempG * tintG;
+            b *= exposureMul * tempB * tintB;
 
-            // White balance / tint
-            r *= tempR * tintR;
-            g *= tempG * tintG;
-            b *= tempB * tintB;
-
-            // Contrast around 0.5
             r = (r - 0.5f) * contrastMul + 0.5f;
             g = (g - 0.5f) * contrastMul + 0.5f;
             b = (b - 0.5f) * contrastMul + 0.5f;
 
             float luma = luma_of(r, g, b);
-            const float shadowMask = 1.0f - smoothstep(0.18f, 0.55f, luma);
+            const float shadowMask = 1.0f - smoothstep(0.18f, 0.56f, luma);
             const float highlightMask = smoothstep(0.50f, 0.92f, luma);
-            const float whiteMask = smoothstep(0.68f, 0.98f, luma);
-            const float blackMask = 1.0f - smoothstep(0.03f, 0.35f, luma);
+            const float whiteMask = smoothstep(0.70f, 0.985f, luma);
+            const float blackMask = 1.0f - smoothstep(0.025f, 0.34f, luma);
 
-            // Shadows: positive lifts dark regions, negative crushes dark regions.
             r += shadowStrength * shadowMask * (shadowStrength >= 0.0f ? (1.0f - r) : r);
             g += shadowStrength * shadowMask * (shadowStrength >= 0.0f ? (1.0f - g) : g);
             b += shadowStrength * shadowMask * (shadowStrength >= 0.0f ? (1.0f - b) : b);
 
-            // Highlights: positive recovers/compresses bright regions, negative pushes them brighter.
             r -= highlightStrength * highlightMask * (highlightStrength >= 0.0f ? r : (1.0f - r));
             g -= highlightStrength * highlightMask * (highlightStrength >= 0.0f ? g : (1.0f - g));
             b -= highlightStrength * highlightMask * (highlightStrength >= 0.0f ? b : (1.0f - b));
 
-            // Whites and blacks are endpoint controls.
             r += whiteStrength * whiteMask * (whiteStrength >= 0.0f ? (1.0f - r) : r);
             g += whiteStrength * whiteMask * (whiteStrength >= 0.0f ? (1.0f - g) : g);
             b += whiteStrength * whiteMask * (whiteStrength >= 0.0f ? (1.0f - b) : b);
@@ -134,18 +139,18 @@ static void apply_adjustment_rgba8888(
             b = clamp01(b);
             luma = luma_of(r, g, b);
 
-            // Clarity / dehaze first-pass approximation: midtone contrast and haze compression.
             const float midMask = 1.0f - clamp01(std::fabs(luma - 0.5f) * 2.0f);
-            const float localContrast = 1.0f + clarityStrength * midMask + dehazeStrength * 0.35f;
+            const float localContrast = 1.0f + clarityStrength * midMask + dehazeStrength * 0.30f;
             r = luma + (r - luma) * localContrast;
             g = luma + (g - luma) * localContrast;
             b = luma + (b - luma) * localContrast;
 
             if (std::fabs(dehazeStrength) > 0.0001f) {
                 const float hazeCurve = (luma - 0.5f) * dehazeStrength;
-                r += hazeCurve;
-                g += hazeCurve;
-                b += hazeCurve;
+                const float hazeSat = 1.0f + dehazeStrength * 0.18f;
+                r = (r + hazeCurve - luma) * hazeSat + luma;
+                g = (g + hazeCurve - luma) * hazeSat + luma;
+                b = (b + hazeCurve - luma) * hazeSat + luma;
             }
 
             r = clamp01(r);
@@ -153,23 +158,21 @@ static void apply_adjustment_rgba8888(
             b = clamp01(b);
             luma = luma_of(r, g, b);
 
-            // Saturation and vibrance. Vibrance protects already-saturated colors.
             const float maxC = std::max(r, std::max(g, b));
             const float minC = std::min(r, std::min(g, b));
             const float chroma = clamp01(maxC - minC);
-            const float satMul = 1.0f + saturation * 0.85f;
-            const float vibMul = 1.0f + vibrance * 0.85f * (1.0f - chroma);
-            const float colorMul = clampf(satMul * vibMul, 0.0f, 2.5f);
+            const float satMul = 1.0f + saturation * 0.82f;
+            const float vibMul = 1.0f + vibrance * 0.86f * (1.0f - chroma);
+            const float colorMul = clampf(satMul * vibMul, 0.0f, 2.45f);
             r = luma + (r - luma) * colorMul;
             g = luma + (g - luma) * colorMul;
             b = luma + (b - luma) * colorMul;
 
-            // Very lightweight chroma noise reduction placeholder.
-            if (noiseColorDamping > 0.0f) {
+            if (chromaDamping > 0.0f) {
                 const float nrLuma = luma_of(r, g, b);
-                r = nrLuma + (r - nrLuma) * (1.0f - noiseColorDamping);
-                g = nrLuma + (g - nrLuma) * (1.0f - noiseColorDamping);
-                b = nrLuma + (b - nrLuma) * (1.0f - noiseColorDamping);
+                r = nrLuma + (r - nrLuma) * (1.0f - chromaDamping);
+                g = nrLuma + (g - nrLuma) * (1.0f - chromaDamping);
+                b = nrLuma + (b - nrLuma) * (1.0f - chromaDamping);
             }
 
             px[0] = to_u8(r);
@@ -180,12 +183,86 @@ static void apply_adjustment_rgba8888(
     }
 }
 
-static void copy_row(uint8_t* dst, const uint8_t* src, int stride) {
-    std::copy(src, src + stride, dst);
-}
+static void apply_edge_aware_noise_reduction_rgba8888(
+    uint8_t* base,
+    int width,
+    int height,
+    int stride,
+    float noiseReduction
+) {
+    const float strength = clamp01(noiseReduction);
+    if (strength <= 0.001f || width < 3 || height < 3) return;
 
-static float channel_at(const std::vector<uint8_t>& row, int x, int channel) {
-    return row[static_cast<size_t>(x) * 4U + static_cast<size_t>(channel)] / 255.0f;
+    std::vector<uint8_t> prev(static_cast<size_t>(stride));
+    std::vector<uint8_t> curr(static_cast<size_t>(stride));
+    std::vector<uint8_t> next(static_cast<size_t>(stride));
+
+    copy_row(curr.data(), base, stride);
+    copy_row(next.data(), base + stride, stride);
+    copy_row(prev.data(), curr.data(), stride);
+
+    const float sigma = 0.035f + (1.0f - strength) * 0.145f;
+    const float sigma2 = std::max(0.0001f, sigma * sigma * 2.0f);
+
+    for (int y = 0; y < height; ++y) {
+        auto* outRow = base + y * stride;
+        if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
+
+        for (int x = 0; x < width; ++x) {
+            auto* outPx = outRow + x * 4;
+            const float centerR = channel_at(curr, x, 0);
+            const float centerG = channel_at(curr, x, 1);
+            const float centerB = channel_at(curr, x, 2);
+            const float centerL = luma_of(centerR, centerG, centerB);
+            const uint8_t alpha = curr[static_cast<size_t>(x) * 4U + 3U];
+
+            float sumR = 0.0f;
+            float sumG = 0.0f;
+            float sumB = 0.0f;
+            float sumW = 0.0f;
+
+            for (int dy = -1; dy <= 1; ++dy) {
+                const std::vector<uint8_t>& row = (dy < 0) ? prev : ((dy > 0) ? next : curr);
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int nx = std::min(width - 1, std::max(0, x + dx));
+                    const float spatial = (dx == 0 && dy == 0) ? 0.38f : ((dx == 0 || dy == 0) ? 0.13f : 0.07f);
+                    const float nr = channel_at(row, nx, 0);
+                    const float ng = channel_at(row, nx, 1);
+                    const float nb = channel_at(row, nx, 2);
+                    const float nl = luma_of(nr, ng, nb);
+                    const float diff = nl - centerL;
+                    const float range = std::exp(-(diff * diff) / sigma2);
+                    const float w = spatial * range;
+                    sumR += nr * w;
+                    sumG += ng * w;
+                    sumB += nb * w;
+                    sumW += w;
+                }
+            }
+
+            const float invW = sumW > 0.0001f ? (1.0f / sumW) : 1.0f;
+            const float avgR = sumR * invW;
+            const float avgG = sumG * invW;
+            const float avgB = sumB * invW;
+            const float shadowBoost = 0.75f + (1.0f - centerL) * 0.35f;
+            const float mix = clamp01(strength * 0.78f * shadowBoost);
+
+            outPx[0] = to_u8(lerp(centerR, avgR, mix));
+            outPx[1] = to_u8(lerp(centerG, avgG, mix));
+            outPx[2] = to_u8(lerp(centerB, avgB, mix));
+            outPx[3] = alpha;
+        }
+
+        if (y + 1 < height) {
+            prev.swap(curr);
+            curr.swap(next);
+            if (y + 2 < height) {
+                copy_row(next.data(), base + (y + 2) * stride, stride);
+            } else {
+                copy_row(next.data(), curr.data(), stride);
+            }
+        }
+    }
 }
 
 static void apply_sharpness_rgba8888(
@@ -193,10 +270,11 @@ static void apply_sharpness_rgba8888(
     int width,
     int height,
     int stride,
-    float sharpness
+    float sharpness,
+    float noiseReduction
 ) {
-    const float amount = clamp01(sharpness) * 0.90f;
-    if (amount <= 0.001f || width < 3 || height < 3) return;
+    const float baseAmount = clamp01(sharpness) * 1.15f;
+    if (baseAmount <= 0.001f || width < 3 || height < 3) return;
 
     std::vector<uint8_t> prev(static_cast<size_t>(stride));
     std::vector<uint8_t> curr(static_cast<size_t>(stride));
@@ -208,14 +286,27 @@ static void apply_sharpness_rgba8888(
 
     for (int y = 0; y < height; ++y) {
         auto* outRow = base + y * stride;
-        const bool hasNext = y + 1 < height;
-        if (!hasNext) copy_row(next.data(), curr.data(), stride);
+        if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
 
         for (int x = 0; x < width; ++x) {
             const int lx = std::max(0, x - 1);
             const int rx = std::min(width - 1, x + 1);
             auto* outPx = outRow + x * 4;
             const uint8_t alpha = curr[static_cast<size_t>(x) * 4U + 3U];
+
+            const float centerL = luma_at(curr, x);
+            const float blurL = (
+                centerL * 4.0f +
+                luma_at(curr, lx) +
+                luma_at(curr, rx) +
+                luma_at(prev, x) +
+                luma_at(next, x)
+            ) / 8.0f;
+            const float detail = std::fabs(centerL - blurL);
+            const float textureMask = smoothstep(0.010f + noiseReduction * 0.020f, 0.070f + noiseReduction * 0.025f, detail);
+            const float shadowMask = smoothstep(0.045f, 0.28f, centerL);
+            const float highlightGuard = 1.0f - 0.50f * smoothstep(0.90f, 1.0f, centerL);
+            const float amount = baseAmount * textureMask * shadowMask * highlightGuard;
 
             for (int c = 0; c < 3; ++c) {
                 const float center = channel_at(curr, x, c);
@@ -226,8 +317,8 @@ static void apply_sharpness_rgba8888(
                     channel_at(prev, x, c) +
                     channel_at(next, x, c)
                 ) / 8.0f;
-                const float sharpened = center + (center - blur) * amount;
-                outPx[c] = to_u8(sharpened);
+                const float delta = clampf((center - blur) * amount, -0.105f, 0.105f);
+                outPx[c] = to_u8(center + delta);
             }
             outPx[3] = alpha;
         }
@@ -248,7 +339,7 @@ static void apply_sharpness_rgba8888(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeVersion(JNIEnv* env, jobject /*thiz*/) {
-    return env->NewStringUTF("PhotoCore C++ v0.2");
+    return env->NewStringUTF("PhotoCore C++ v0.3");
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -335,12 +426,20 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         dehaze,
         noiseReduction
     );
+    apply_edge_aware_noise_reduction_rgba8888(
+        bytes,
+        static_cast<int>(info.width),
+        static_cast<int>(info.height),
+        static_cast<int>(info.stride),
+        noiseReduction
+    );
     apply_sharpness_rgba8888(
         bytes,
         static_cast<int>(info.width),
         static_cast<int>(info.height),
         static_cast<int>(info.stride),
-        sharpness
+        sharpness,
+        noiseReduction
     );
 
     AndroidBitmap_unlockPixels(env, bitmap);
