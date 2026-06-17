@@ -272,7 +272,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             contrast = prefs.getFloat(KEY_DRAFT_CONTRAST, 0f),
             shadows = prefs.getFloat(KEY_DRAFT_SHADOWS, 0f),
             highlights = prefs.getFloat(KEY_DRAFT_HIGHLIGHTS, 0f),
-            sharpness = prefs.getFloat(KEY_DRAFT_SHARPNESS, 0f)
+            whites = prefs.getFloat(KEY_DRAFT_WHITES, 0f),
+            blacks = prefs.getFloat(KEY_DRAFT_BLACKS, 0f),
+            temperature = prefs.getFloat(KEY_DRAFT_TEMPERATURE, 0f),
+            tint = prefs.getFloat(KEY_DRAFT_TINT, 0f),
+            saturation = prefs.getFloat(KEY_DRAFT_SATURATION, 0f),
+            vibrance = prefs.getFloat(KEY_DRAFT_VIBRANCE, 0f),
+            clarity = prefs.getFloat(KEY_DRAFT_CLARITY, 0f),
+            dehaze = prefs.getFloat(KEY_DRAFT_DEHAZE, 0f),
+            sharpness = prefs.getFloat(KEY_DRAFT_SHARPNESS, 0f),
+            noiseReduction = prefs.getFloat(KEY_DRAFT_NOISE_REDUCTION, 0f)
         )
         val exportFormat = enumValueOrDefault(prefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
         val exportResolution = enumValueOrDefault(prefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Full)
@@ -346,15 +355,7 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
 
 private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, revision: Int): Bitmap {
     val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
-    NativePhotoCore.nativeRenderPreviewInPlace(
-        copy,
-        params.exposure,
-        params.contrast,
-        params.shadows,
-        params.highlights,
-        params.sharpness,
-        revision
-    )
+    renderBitmapInNative(copy, params, revision)
     return copy
 }
 
@@ -366,20 +367,32 @@ private fun renderEditedExport(
 ): Bitmap {
     // TODO v0.2: replace whole-bitmap export with ROI/tile rendering to reduce peak memory use.
     val decoded = decodeSampledMutableBitmap(sourcePath, maxSide = EXPORT_MAX_SIDE)
-    NativePhotoCore.nativeRenderPreviewInPlace(
-        decoded,
-        params.exposure,
-        params.contrast,
-        params.shadows,
-        params.highlights,
-        params.sharpness,
-        revision
-    )
+    renderBitmapInNative(decoded, params, revision)
 
     val scaled = scaleBitmapForExport(decoded, resolution)
     if (scaled !== decoded) decoded.recycle()
     return scaled
 }
+
+private fun renderBitmapInNative(bitmap: Bitmap, params: EditParams, revision: Int): Int =
+    NativePhotoCore.nativeRenderPreviewInPlace(
+        bitmap,
+        params.exposure,
+        params.contrast,
+        params.shadows,
+        params.highlights,
+        params.whites,
+        params.blacks,
+        params.temperature,
+        params.tint,
+        params.saturation,
+        params.vibrance,
+        params.clarity,
+        params.dehaze,
+        params.sharpness,
+        params.noiseReduction,
+        revision
+    )
 
 private fun scaleBitmapForExport(bitmap: Bitmap, resolution: ExportResolution): Bitmap {
     if (resolution.scalePercent >= 100) return bitmap
@@ -483,7 +496,16 @@ private fun saveDraftSnapshot(context: Context, state: EditorUiState) {
         .putFloat(KEY_DRAFT_CONTRAST, state.params.contrast)
         .putFloat(KEY_DRAFT_SHADOWS, state.params.shadows)
         .putFloat(KEY_DRAFT_HIGHLIGHTS, state.params.highlights)
+        .putFloat(KEY_DRAFT_WHITES, state.params.whites)
+        .putFloat(KEY_DRAFT_BLACKS, state.params.blacks)
+        .putFloat(KEY_DRAFT_TEMPERATURE, state.params.temperature)
+        .putFloat(KEY_DRAFT_TINT, state.params.tint)
+        .putFloat(KEY_DRAFT_SATURATION, state.params.saturation)
+        .putFloat(KEY_DRAFT_VIBRANCE, state.params.vibrance)
+        .putFloat(KEY_DRAFT_CLARITY, state.params.clarity)
+        .putFloat(KEY_DRAFT_DEHAZE, state.params.dehaze)
         .putFloat(KEY_DRAFT_SHARPNESS, state.params.sharpness)
+        .putFloat(KEY_DRAFT_NOISE_REDUCTION, state.params.noiseReduction)
         .putString(KEY_DRAFT_FORMAT, state.exportFormat.name)
         .putString(KEY_DRAFT_RESOLUTION, state.exportResolution.name)
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
@@ -497,7 +519,16 @@ private fun clearDraftPrefs(context: Context) {
         .remove(KEY_DRAFT_CONTRAST)
         .remove(KEY_DRAFT_SHADOWS)
         .remove(KEY_DRAFT_HIGHLIGHTS)
+        .remove(KEY_DRAFT_WHITES)
+        .remove(KEY_DRAFT_BLACKS)
+        .remove(KEY_DRAFT_TEMPERATURE)
+        .remove(KEY_DRAFT_TINT)
+        .remove(KEY_DRAFT_SATURATION)
+        .remove(KEY_DRAFT_VIBRANCE)
+        .remove(KEY_DRAFT_CLARITY)
+        .remove(KEY_DRAFT_DEHAZE)
         .remove(KEY_DRAFT_SHARPNESS)
+        .remove(KEY_DRAFT_NOISE_REDUCTION)
         .remove(KEY_DRAFT_FORMAT)
         .remove(KEY_DRAFT_RESOLUTION)
         .remove(KEY_DRAFT_SAVED_AT)
@@ -610,7 +641,16 @@ private const val KEY_DRAFT_EXPOSURE = "draft_exposure"
 private const val KEY_DRAFT_CONTRAST = "draft_contrast"
 private const val KEY_DRAFT_SHADOWS = "draft_shadows"
 private const val KEY_DRAFT_HIGHLIGHTS = "draft_highlights"
+private const val KEY_DRAFT_WHITES = "draft_whites"
+private const val KEY_DRAFT_BLACKS = "draft_blacks"
+private const val KEY_DRAFT_TEMPERATURE = "draft_temperature"
+private const val KEY_DRAFT_TINT = "draft_tint"
+private const val KEY_DRAFT_SATURATION = "draft_saturation"
+private const val KEY_DRAFT_VIBRANCE = "draft_vibrance"
+private const val KEY_DRAFT_CLARITY = "draft_clarity"
+private const val KEY_DRAFT_DEHAZE = "draft_dehaze"
 private const val KEY_DRAFT_SHARPNESS = "draft_sharpness"
+private const val KEY_DRAFT_NOISE_REDUCTION = "draft_noise_reduction"
 private const val KEY_DRAFT_FORMAT = "draft_format"
 private const val KEY_DRAFT_RESOLUTION = "draft_resolution"
 private const val KEY_DRAFT_SAVED_AT = "draft_saved_at"
