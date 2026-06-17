@@ -94,6 +94,7 @@ private enum class MainTab(val label: String) {
 
 private enum class EditorTool(val label: String, val description: String) {
     Auto("자동", "원터치 보정과 흑백 전환"),
+    Remaster("리마스터", "빠른 자동 보정과 온디바이스 모델 기반 보정"),
     Profiles("프로필", "기본, 필름, 모던, 빈티지 톤"),
     Presets("프리셋", "저장된 보정값과 추천 톤"),
     Crop("자르기", "비율, 회전, 수평 보정"),
@@ -544,6 +545,7 @@ private fun AdjustmentPanel(
 
             when (selectedTool) {
                 EditorTool.Auto -> AutoPanel(onAutoEnhance)
+                EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance)
                 EditorTool.Profiles -> PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결됩니다")
                 EditorTool.Presets -> PresetToolPanel(
                     params = params,
