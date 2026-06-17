@@ -22,6 +22,7 @@ data class EditorUiState(
     val selectionLayers: List<SelectionLayer> = emptyList(),
     val activeSelectionLayerId: String? = null,
     val selectionPaintSettings: SelectionPaintSettings = SelectionPaintSettings(),
+    val showSelectionOverlay: Boolean = true,
     val revision: Int = 0,
     val nativeVersion: String = "",
     val message: String? = null
