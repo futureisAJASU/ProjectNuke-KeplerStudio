@@ -34,6 +34,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    androidResources {
+        noCompress += listOf("tflite", "task", "onnx", "ort", "bin", "gguf")
+    }
+
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -55,5 +59,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.heifwriter:heifwriter:1.0.0")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
+    implementation("org.tensorflow:tensorflow-lite:2.17.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
