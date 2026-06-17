@@ -1,8 +1,23 @@
 package com.projectnuke.keplerstudio.ui
 
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.SelectionLayer
+
+private val OverlayBadgeBackground = Color(0xAA000000)
 
 @Composable
 fun SelectionMaskOverlay(
@@ -10,6 +25,26 @@ fun SelectionMaskOverlay(
     visible: Boolean,
     modifier: Modifier = Modifier
 ) {
-    // Preview overlay rendering will be wired after EditorScreenV2 receives the active layer.
-    // Keep this composable lightweight so the project builds while the UI integration is staged.
+    if (!visible || layer == null) return
+
+    Box(modifier = modifier) {
+        Image(
+            bitmap = layer.bitmap.asImageBitmap(),
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(alpha = 0.42f)
+        )
+        Text(
+            text = layer.name,
+            color = Color.White,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(12.dp)
+                .background(OverlayBadgeBackground)
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+        )
+    }
 }
