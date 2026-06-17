@@ -7,6 +7,9 @@ import androidx.compose.runtime.setValue
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
+import java.nio.MappedByteBuffer
+import java.nio.channels.FileChannel
+import org.tensorflow.lite.Interpreter
 
 object RemasterModelSession {
     var activeModel by mutableStateOf<RemasterModelCandidate?>(null)
@@ -33,6 +36,7 @@ object RemasterModelSession {
         runCatching {
             closeableModel = when (candidate.id) {
                 "edge_masker" -> createImageSegmenter(context, candidate.assetPath)
+                "universal_balancer", "flare_guard" -> TfliteModelHandle(createTfliteInterpreter(context, candidate.assetPath))
                 else -> null
             }
         }.onSuccess {
@@ -70,7 +74,31 @@ object RemasterModelSession {
         return ImageSegmenter.createFromOptions(context, options)
     }
 
+    private fun createTfliteInterpreter(context: Context, assetPath: String): Interpreter {
+        val options = Interpreter.Options().apply {
+            setNumThreads(4)
+        }
+        return Interpreter(loadMappedAsset(context, assetPath), options)
+    }
+
+    private fun loadMappedAsset(context: Context, assetPath: String): MappedByteBuffer {
+        val descriptor = context.assets.openFd(assetPath)
+        descriptor.use { afd ->
+            afd.createInputStream().channel.use { channel ->
+                return channel.map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
+            }
+        }
+    }
+
     private fun hasAsset(context: Context, assetPath: String): Boolean = runCatching {
         context.assets.open(assetPath).use { true }
     }.getOrDefault(false)
+}
+
+private class TfliteModelHandle(
+    private val interpreter: Interpreter
+) : AutoCloseable {
+    override fun close() {
+        interpreter.close()
+    }
 }
