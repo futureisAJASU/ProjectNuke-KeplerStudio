@@ -265,6 +265,99 @@ static void apply_edge_aware_noise_reduction_rgba8888(
     }
 }
 
+static float guided_estimate_channel(
+    const std::vector<uint8_t>& prev,
+    const std::vector<uint8_t>& curr,
+    const std::vector<uint8_t>& next,
+    int width,
+    int x,
+    int channel,
+    float eps
+) {
+    float meanI = 0.0f;
+    float meanP = 0.0f;
+    float corrI = 0.0f;
+    float corrIP = 0.0f;
+    const std::vector<uint8_t>* rows[3] = { &prev, &curr, &next };
+
+    for (const auto* row : rows) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int nx = std::min(width - 1, std::max(0, x + dx));
+            const float i = luma_at(*row, nx);
+            const float p = channel_at(*row, nx, channel);
+            meanI += i;
+            meanP += p;
+            corrI += i * i;
+            corrIP += i * p;
+        }
+    }
+
+    meanI /= 9.0f;
+    meanP /= 9.0f;
+    corrI /= 9.0f;
+    corrIP /= 9.0f;
+
+    const float varI = std::max(0.0f, corrI - meanI * meanI);
+    const float covIP = corrIP - meanI * meanP;
+    const float a = covIP / (varI + eps);
+    const float b = meanP - a * meanI;
+    return clamp01(a * luma_at(curr, x) + b);
+}
+
+static void apply_guided_noise_reduction_rgba8888(
+    uint8_t* base,
+    int width,
+    int height,
+    int stride,
+    float noiseReduction
+) {
+    const float strength = clamp01(noiseReduction);
+    if (strength <= 0.001f || width < 3 || height < 3) return;
+
+    std::vector<uint8_t> prev(static_cast<size_t>(stride));
+    std::vector<uint8_t> curr(static_cast<size_t>(stride));
+    std::vector<uint8_t> next(static_cast<size_t>(stride));
+
+    copy_row(curr.data(), base, stride);
+    copy_row(next.data(), base + stride, stride);
+    copy_row(prev.data(), curr.data(), stride);
+
+    const float eps = 0.0008f + (1.0f - strength) * 0.006f;
+
+    for (int y = 0; y < height; ++y) {
+        auto* outRow = base + y * stride;
+        if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
+
+        for (int x = 0; x < width; ++x) {
+            auto* outPx = outRow + x * 4;
+            const float centerR = channel_at(curr, x, 0);
+            const float centerG = channel_at(curr, x, 1);
+            const float centerB = channel_at(curr, x, 2);
+            const float centerL = luma_of(centerR, centerG, centerB);
+            const float guidedR = guided_estimate_channel(prev, curr, next, width, x, 0, eps);
+            const float guidedG = guided_estimate_channel(prev, curr, next, width, x, 1, eps);
+            const float guidedB = guided_estimate_channel(prev, curr, next, width, x, 2, eps);
+            const float mix = clamp01(strength * (0.64f + (1.0f - centerL) * 0.24f));
+            const uint8_t alpha = curr[static_cast<size_t>(x) * 4U + 3U];
+
+            outPx[0] = to_u8(lerp(centerR, guidedR, mix));
+            outPx[1] = to_u8(lerp(centerG, guidedG, mix));
+            outPx[2] = to_u8(lerp(centerB, guidedB, mix));
+            outPx[3] = alpha;
+        }
+
+        if (y + 1 < height) {
+            prev.swap(curr);
+            curr.swap(next);
+            if (y + 2 < height) {
+                copy_row(next.data(), base + (y + 2) * stride, stride);
+            } else {
+                copy_row(next.data(), curr.data(), stride);
+            }
+        }
+    }
+}
+
 static void apply_sharpness_rgba8888(
     uint8_t* base,
     int width,
@@ -339,7 +432,7 @@ static void apply_sharpness_rgba8888(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeVersion(JNIEnv* env, jobject /*thiz*/) {
-    return env->NewStringUTF("PhotoCore C++ v0.3");
+    return env->NewStringUTF("PhotoCore C++ v0.4");
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -387,8 +480,16 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     jfloat dehaze,
     jfloat sharpness,
     jfloat noiseReduction,
+    jint noiseEngine,
+    jint detailEngine,
+    jint toneEngine,
+    jint hazeEngine,
     jint revision
 ) {
+    (void)detailEngine;
+    (void)toneEngine;
+    (void)hazeEngine;
+
     AndroidBitmapInfo info{};
     if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
         LOGE("AndroidBitmap_getInfo failed");
@@ -426,13 +527,40 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         dehaze,
         noiseReduction
     );
-    apply_edge_aware_noise_reduction_rgba8888(
-        bytes,
-        static_cast<int>(info.width),
-        static_cast<int>(info.height),
-        static_cast<int>(info.stride),
-        noiseReduction
-    );
+
+    if (noiseEngine == 1) {
+        apply_guided_noise_reduction_rgba8888(
+            bytes,
+            static_cast<int>(info.width),
+            static_cast<int>(info.height),
+            static_cast<int>(info.stride),
+            noiseReduction
+        );
+    } else if (noiseEngine == 2) {
+        apply_edge_aware_noise_reduction_rgba8888(
+            bytes,
+            static_cast<int>(info.width),
+            static_cast<int>(info.height),
+            static_cast<int>(info.stride),
+            noiseReduction * 0.70f
+        );
+        apply_guided_noise_reduction_rgba8888(
+            bytes,
+            static_cast<int>(info.width),
+            static_cast<int>(info.height),
+            static_cast<int>(info.stride),
+            noiseReduction * 0.85f
+        );
+    } else {
+        apply_edge_aware_noise_reduction_rgba8888(
+            bytes,
+            static_cast<int>(info.width),
+            static_cast<int>(info.height),
+            static_cast<int>(info.stride),
+            noiseReduction
+        );
+    }
+
     apply_sharpness_rgba8888(
         bytes,
         static_cast<int>(info.width),
