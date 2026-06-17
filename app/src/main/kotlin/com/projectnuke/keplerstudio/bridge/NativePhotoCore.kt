@@ -18,8 +18,8 @@ object NativePhotoCore {
     external fun nativeReleaseSession(handle: Long)
 
     /**
-     * MVP용 in-place preview renderer.
-     * 실제 v0.2부터는 source file + tile/ROI 기반으로 옮기는 게 목표.
+     * MVP용 in-place bitmap renderer.
+     * Preview와 export가 같은 네이티브 픽셀 파이프라인을 사용한다.
      */
     external fun nativeRenderPreviewInPlace(
         bitmap: Bitmap,
@@ -27,7 +27,16 @@ object NativePhotoCore {
         contrast: Float,
         shadows: Float,
         highlights: Float,
+        whites: Float,
+        blacks: Float,
+        temperature: Float,
+        tint: Float,
+        saturation: Float,
+        vibrance: Float,
+        clarity: Float,
+        dehaze: Float,
         sharpness: Float,
+        noiseReduction: Float,
         revision: Int
     ): Int
 }
