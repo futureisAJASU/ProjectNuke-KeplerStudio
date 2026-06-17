@@ -126,12 +126,18 @@ fun RemasterToolPanel(
         ) {
             Text("개발 도구", color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
             Text(
-                "모델 학습과 규칙 기반 분석을 검증하기 위한 임시 도구입니다",
+                "규칙 기반 분석과 학습 데이터 저장을 검증하기 위한 임시 도구입니다",
                 color = RemasterTextSecondary,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }) {
+                    Text("장면 분석")
+                }
+                TextButton(onClick = { editorViewModel.applyFlareGuardV0Preview() }) {
+                    Text("번짐 완화")
+                }
                 TextButton(onClick = { editorViewModel.exportUniversalBalancerTrainingRow() }) {
                     Text("학습 row 저장")
                 }
