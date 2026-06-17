@@ -96,12 +96,12 @@ private enum class EditorTool(val label: String, val description: String) {
     Remove("제거", "지우개, 반사, 먼지 제거"),
     Light("조명", "노출, 대비, 하이라이트, 섀도우"),
     Color("색상", "화이트밸런스, 생동감, 채도, HSL"),
-    Effects("효과", "텍스처, 명료도, 디헤이즈, 비네팅, 그레인"),
+    Effects("효과", "명료도, 디헤이즈, 비네팅, 그레인"),
     Detail("디테일", "샤픈, 노이즈 감소, 컬러 노이즈"),
     Optics("옵틱", "색수차 제거와 렌즈 보정"),
     Geometry("기하", "왜곡, 수직/수평, 원근 보정"),
     Blur("블러", "렌즈 블러와 초점 영역"),
-    Ai("AI", "리마스터, 초점, 플레어 복원")
+    Ai("AI", "자동 마스크, 디테일 복원, 노이즈 억제")
 }
 
 @Composable
@@ -501,8 +501,8 @@ private fun AdjustmentPanel(
             when (selectedTool) {
                 EditorTool.Auto -> AutoPanel()
                 EditorTool.Light -> LightPanel(params, onChange)
-                EditorTool.Color -> PlaceholderPanel("화이트밸런스, 생동감, 채도, HSL 보정을 준비 중입니다")
-                EditorTool.Effects -> PlaceholderPanel("텍스처, 명료도, 디헤이즈, 비네팅, 그레인 보정을 준비 중입니다")
+                EditorTool.Color -> ColorPanel(params, onChange)
+                EditorTool.Effects -> EffectsPanel(params, onChange)
                 EditorTool.Detail -> DetailPanel(params, onChange)
                 EditorTool.Profiles -> PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결됩니다")
                 EditorTool.Presets -> PlaceholderPanel("사용자 프리셋과 추천 프리셋 저장소를 준비 중입니다")
@@ -512,7 +512,7 @@ private fun AdjustmentPanel(
                 EditorTool.Optics -> PlaceholderPanel("색수차 제거와 렌즈 프로필 보정을 준비 중입니다")
                 EditorTool.Geometry -> PlaceholderPanel("왜곡, 수직, 수평, 원근 보정을 준비 중입니다")
                 EditorTool.Blur -> PlaceholderPanel("렌즈 블러와 초점 영역 편집을 준비 중입니다")
-                EditorTool.Ai -> PlaceholderPanel("리마스터, 초점 리마스터, 플레어 억제 기능을 준비 중입니다")
+                EditorTool.Ai -> PlaceholderPanel("생성형 보정이 아니라 자동 마스크, 노이즈 억제, 디테일 복원 보조를 준비 중입니다")
             }
         }
 
@@ -623,13 +623,31 @@ private fun LightPanel(params: EditParams, onChange: ((EditParams) -> EditParams
     AdjustmentSlider("대비", params.contrast, -1f, 1f) { v -> onChange { it.copy(contrast = v) } }
     AdjustmentSlider("하이라이트", params.highlights, -1f, 1f) { v -> onChange { it.copy(highlights = v) } }
     AdjustmentSlider("섀도우", params.shadows, -1f, 1f) { v -> onChange { it.copy(shadows = v) } }
-    PlaceholderPanel("화이트, 블랙, 커브 조절은 다음 단계에서 연결됩니다")
+    AdjustmentSlider("화이트", params.whites, -1f, 1f) { v -> onChange { it.copy(whites = v) } }
+    AdjustmentSlider("블랙", params.blacks, -1f, 1f) { v -> onChange { it.copy(blacks = v) } }
+}
+
+@Composable
+private fun ColorPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
+    AdjustmentSlider("색온도", params.temperature, -1f, 1f) { v -> onChange { it.copy(temperature = v) } }
+    AdjustmentSlider("색조", params.tint, -1f, 1f) { v -> onChange { it.copy(tint = v) } }
+    AdjustmentSlider("생동감", params.vibrance, -1f, 1f) { v -> onChange { it.copy(vibrance = v) } }
+    AdjustmentSlider("채도", params.saturation, -1f, 1f) { v -> onChange { it.copy(saturation = v) } }
+    PlaceholderPanel("HSL과 색상 혼합은 다음 단계에서 연결됩니다")
+}
+
+@Composable
+private fun EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
+    AdjustmentSlider("명료도", params.clarity, -1f, 1f) { v -> onChange { it.copy(clarity = v) } }
+    AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f) { v -> onChange { it.copy(dehaze = v) } }
+    PlaceholderPanel("텍스처, 비네팅, 그레인은 다음 단계에서 연결됩니다")
 }
 
 @Composable
 private fun DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     AdjustmentSlider("샤픈", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
-    PlaceholderPanel("반경, 디테일, 마스킹, 노이즈 감소는 다음 단계에서 연결됩니다")
+    AdjustmentSlider("노이즈 감소", params.noiseReduction, 0f, 1f) { v -> onChange { it.copy(noiseReduction = v) } }
+    PlaceholderPanel("반경, 디테일, 마스킹, 컬러 노이즈 감소는 다음 단계에서 연결됩니다")
 }
 
 @Composable
