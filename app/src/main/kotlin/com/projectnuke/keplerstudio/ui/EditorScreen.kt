@@ -56,6 +56,7 @@ import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
 import com.projectnuke.keplerstudio.editor.NoiseEngine
+import com.projectnuke.keplerstudio.editor.PresetLookHandoff
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import com.projectnuke.keplerstudio.editor.ViewportState
@@ -112,7 +113,10 @@ private enum class EditorTool(val label: String, val description: String) {
 fun EditorScreen(viewModel: EditorViewModel) {
     val state by viewModel.uiState.collectAsState()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) viewModel.openImage(uri)
+        if (uri != null) {
+            PresetLookHandoff.clear()
+            viewModel.openImage(uri)
+        }
     }
     var selectedTool by remember { mutableStateOf(EditorTool.Light) }
     var selectedTab by remember { mutableStateOf(MainTab.Editor) }
@@ -126,7 +130,10 @@ fun EditorScreen(viewModel: EditorViewModel) {
                     canExport = state.previewBitmap != null && !state.isBusy,
                     onTabSelected = { selectedTab = it },
                     onOpen = { picker.launch("image/*") },
-                    onReset = { viewModel.resetAdjustments() },
+                    onReset = {
+                        PresetLookHandoff.clear()
+                        viewModel.resetAdjustments()
+                    },
                     onExport = { viewModel.exportPreview() }
                 )
 
@@ -195,7 +202,10 @@ fun EditorScreen(viewModel: EditorViewModel) {
                             onToolSelected = { selectedTool = it },
                             onFormatSelected = viewModel::setExportFormat,
                             onResolutionSelected = viewModel::setExportResolution,
-                            onAutoEnhance = viewModel::applyAutoEnhance,
+                            onAutoEnhance = {
+                                PresetLookHandoff.clear()
+                                viewModel.applyAutoEnhance()
+                            },
                             onChange = { transform -> viewModel.updateParams(transform) }
                         )
                     }
