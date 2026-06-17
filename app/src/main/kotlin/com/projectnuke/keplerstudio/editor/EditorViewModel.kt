@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -596,6 +597,7 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
 private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, engines: EngineSelection, revision: Int): Bitmap {
     val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
     renderBitmapInNative(copy, params, engines, revision)
+    applySelectedToneEngine(copy, engines.toneEngine)
     return copy
 }
 
@@ -609,6 +611,7 @@ private fun renderEditedExport(
     // TODO v0.2: replace whole-bitmap export with ROI/tile rendering to reduce peak memory use.
     val decoded = decodeSampledMutableBitmap(sourcePath, maxSide = EXPORT_MAX_SIDE)
     renderBitmapInNative(decoded, params, engines, revision)
+    applySelectedToneEngine(decoded, engines.toneEngine)
 
     val scaled = scaleBitmapForExport(decoded, resolution)
     if (scaled !== decoded) decoded.recycle()
@@ -638,6 +641,143 @@ private fun renderBitmapInNative(bitmap: Bitmap, params: EditParams, engines: En
         engines.hazeEngine.nativeId,
         revision
     )
+
+private fun applySelectedToneEngine(bitmap: Bitmap, toneEngine: ToneEngine) {
+    if (toneEngine == ToneEngine.Clahe) {
+        applyClaheToneInPlace(bitmap, strength = 0.34f)
+    }
+}
+
+private fun applyClaheToneInPlace(bitmap: Bitmap, strength: Float) {
+    val width = bitmap.width
+    val height = bitmap.height
+    val safeStrength = strength.coerceIn(0f, 1f)
+    if (safeStrength <= 0.001f || width < 16 || height < 16) return
+
+    val tilesX = kotlin.math.min(12, max(2, (width + 255) / 256))
+    val tilesY = kotlin.math.min(12, max(2, (height + 255) / 256))
+    val tileW = (width + tilesX - 1) / tilesX
+    val tileH = (height + tilesY - 1) / tilesY
+    val luts = Array(tilesX * tilesY) { IntArray(256) }
+
+    for (ty in 0 until tilesY) {
+        val y0 = ty * tileH
+        val y1 = kotlin.math.min(height, y0 + tileH)
+        for (tx in 0 until tilesX) {
+            val x0 = tx * tileW
+            val x1 = kotlin.math.min(width, x0 + tileW)
+            val tileWidth = x1 - x0
+            val pixelCount = max(1, tileWidth * (y1 - y0))
+            val histogram = IntArray(256)
+            val row = IntArray(tileWidth)
+
+            for (y in y0 until y1) {
+                bitmap.getPixels(row, 0, tileWidth, x0, y, tileWidth, 1)
+                for (pixel in row) histogram[lumaBin(pixel)] += 1
+            }
+
+            val limit = max(2, ((pixelCount / 256f) * 2.25f).roundToInt())
+            var overflow = 0
+            for (i in histogram.indices) {
+                if (histogram[i] > limit) {
+                    overflow += histogram[i] - limit
+                    histogram[i] = limit
+                }
+            }
+            val bonus = overflow / 256
+            val remainder = overflow % 256
+            for (i in histogram.indices) histogram[i] += bonus + if (i < remainder) 1 else 0
+
+            var cdf = 0
+            var cdfMin = 0
+            var found = false
+            for (i in histogram.indices) {
+                cdf += histogram[i]
+                if (!found && cdf > 0) {
+                    cdfMin = cdf
+                    found = true
+                }
+            }
+
+            cdf = 0
+            val denom = max(1, pixelCount - cdfMin).toFloat()
+            val lut = luts[ty * tilesX + tx]
+            for (i in histogram.indices) {
+                cdf += histogram[i]
+                val equalized = ((cdf - cdfMin) / denom).coerceIn(0f, 1f)
+                lut[i] = (equalized * 255f).roundToInt().coerceIn(0, 255)
+            }
+        }
+    }
+
+    val rowPixels = IntArray(width)
+    for (y in 0 until height) {
+        bitmap.getPixels(rowPixels, 0, width, 0, y, width, 1)
+        val gy = y.toFloat() / max(1, tileH) - 0.5f
+        val gyFloor = floor(gy)
+        val ty0 = gyFloor.toInt()
+        val ty1 = ty0 + 1
+        val fy = (gy - gyFloor).coerceIn(0f, 1f)
+
+        for (x in 0 until width) {
+            val pixel = rowPixels[x]
+            val luma = lumaFloat(pixel)
+            val bin = (luma * 255f).roundToInt().coerceIn(0, 255)
+            val gx = x.toFloat() / max(1, tileW) - 0.5f
+            val gxFloor = floor(gx)
+            val tx0 = gxFloor.toInt()
+            val tx1 = tx0 + 1
+            val fx = (gx - gxFloor).coerceIn(0f, 1f)
+
+            val m00 = lutValue(luts, tilesX, tilesY, tx0, ty0, bin)
+            val m10 = lutValue(luts, tilesX, tilesY, tx1, ty0, bin)
+            val m01 = lutValue(luts, tilesX, tilesY, tx0, ty1, bin)
+            val m11 = lutValue(luts, tilesX, tilesY, tx1, ty1, bin)
+            val mappedTop = lerpFloat(m00, m10, fx)
+            val mappedBottom = lerpFloat(m01, m11, fx)
+            val mapped = lerpFloat(mappedTop, mappedBottom, fy)
+
+            val highlightGuard = 1f - 0.65f * smoothstepFloat(0.86f, 1f, luma)
+            val shadowGuard = 0.45f + 0.55f * smoothstepFloat(0.025f, 0.18f, luma)
+            val localStrength = safeStrength * highlightGuard * shadowGuard
+            val newLuma = lerpFloat(luma, mapped, localStrength)
+            val scale = newLuma / max(0.015f, luma)
+            rowPixels[x] = scalePixelLuma(pixel, scale)
+        }
+        bitmap.setPixels(rowPixels, 0, width, 0, y, width, 1)
+    }
+}
+
+private fun lumaBin(pixel: Int): Int = (lumaFloat(pixel) * 255f).roundToInt().coerceIn(0, 255)
+
+private fun lumaFloat(pixel: Int): Float {
+    val r = ((pixel shr 16) and 0xff) / 255f
+    val g = ((pixel shr 8) and 0xff) / 255f
+    val b = (pixel and 0xff) / 255f
+    return (0.2126f * r + 0.7152f * g + 0.0722f * b).coerceIn(0f, 1f)
+}
+
+private fun lutValue(luts: Array<IntArray>, tilesX: Int, tilesY: Int, tx: Int, ty: Int, bin: Int): Float {
+    val safeTx = tx.coerceIn(0, tilesX - 1)
+    val safeTy = ty.coerceIn(0, tilesY - 1)
+    val safeBin = bin.coerceIn(0, 255)
+    return luts[safeTy * tilesX + safeTx][safeBin] / 255f
+}
+
+private fun scalePixelLuma(pixel: Int, scale: Float): Int {
+    val alpha = pixel and -0x1000000
+    val r = ((((pixel shr 16) and 0xff) / 255f) * scale * 255f).roundToInt().coerceIn(0, 255)
+    val g = ((((pixel shr 8) and 0xff) / 255f) * scale * 255f).roundToInt().coerceIn(0, 255)
+    val b = (((pixel and 0xff) / 255f) * scale * 255f).roundToInt().coerceIn(0, 255)
+    return alpha or (r shl 16) or (g shl 8) or b
+}
+
+private fun smoothstepFloat(edge0: Float, edge1: Float, value: Float): Float {
+    val t = ((value - edge0) / (edge1 - edge0)).coerceIn(0f, 1f)
+    return t * t * (3f - 2f * t)
+}
+
+private fun lerpFloat(a: Float, b: Float, t: Float): Float = a + (b - a) * t
 
 private fun scaleBitmapForExport(bitmap: Bitmap, resolution: ExportResolution): Bitmap {
     if (resolution.scalePercent >= 100) return bitmap
