@@ -97,7 +97,7 @@ private enum class EditorTool(val label: String, val description: String) {
     Presets("프리셋", "저장된 보정값과 추천 톤"),
     Crop("자르기", "비율, 회전, 수평 보정"),
     Masking("마스크", "피사체, 하늘, 배경 선택"),
-    Remove("제거", "지우개, 반사, 먼지 제거"),
+    Remove("제거", "지우개, 반사 제거, 먼지 제거"),
     Light("조명", "노출, 대비, 하이라이트, 섀도우"),
     Color("색상", "화이트밸런스, 생동감, 채도, HSL"),
     Effects("효과", "명료도, 디헤이즈, 비네팅, 그레인"),
@@ -534,12 +534,15 @@ private fun AdjustmentPanel(
 
             when (selectedTool) {
                 EditorTool.Auto -> AutoPanel(onAutoEnhance)
+                EditorTool.Profiles -> PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결됩니다")
+                EditorTool.Presets -> PresetToolPanel(
+                    params = params,
+                    onApplyPreset = { presetParams -> onChange { presetParams } }
+                )
                 EditorTool.Light -> LightPanel(params, onChange)
                 EditorTool.Color -> ColorPanel(params, onChange)
                 EditorTool.Effects -> EffectsPanel(params, onChange)
                 EditorTool.Detail -> DetailPanel(params, onChange)
-                EditorTool.Profiles -> PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결됩니다")
-                EditorTool.Presets -> PlaceholderPanel("사용자 프리셋과 추천 프리셋 저장소를 준비 중입니다")
                 EditorTool.Crop -> PlaceholderPanel("비율, 회전, 수평계 기반 자르기 도구를 준비 중입니다")
                 EditorTool.Masking -> PlaceholderPanel("피사체, 하늘, 배경 마스크 모델을 연결할 예정입니다")
                 EditorTool.Remove -> PlaceholderPanel("지우개, 반사 제거, 센서 먼지 제거 엔진을 연결할 예정입니다")
@@ -708,7 +711,7 @@ private fun AdjustmentSlider(
     ) {
         Text(label, modifier = Modifier.width(86.dp), style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
         Slider(value = value, onValueChange = onValue, valueRange = min..max, modifier = Modifier.weight(1f))
-        Text(String.format("%.2f", value), modifier = Modifier.width(52.dp), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+        Text(String.format(Locale.US, "%.2f", value), modifier = Modifier.width(52.dp), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
     }
 }
 
