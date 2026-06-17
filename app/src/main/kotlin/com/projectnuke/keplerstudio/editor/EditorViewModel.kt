@@ -162,20 +162,29 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun exportPreview() {
         val state = _uiState.value
-        val bitmap = state.previewBitmap
-        if (bitmap == null) {
-            _uiState.update { it.copy(message = "내보낼 이미지가 없습니다") }
+        val sourcePath = state.sourcePath
+        if (sourcePath == null) {
+            _uiState.update { it.copy(message = "내보낼 원본 이미지가 없습니다") }
             return
         }
 
-        _uiState.update { it.copy(isBusy = true, message = "이미지를 내보내는 중입니다") }
+        _uiState.update { it.copy(isBusy = true, message = "원본 기준으로 내보내는 중입니다") }
         viewModelScope.launch {
             try {
                 val context = getApplication<Application>()
                 val fileName = "KeplerStudio_${exportTimestamp()}.${state.exportFormat.extension}"
                 val savedUri = withContext(Dispatchers.IO) {
-                    val exportBitmap = scaleBitmapForExport(bitmap, state.exportResolution)
-                    saveBitmapToGallery(context, exportBitmap, fileName, state.exportFormat)
+                    val exportBitmap = renderEditedExport(
+                        sourcePath = sourcePath,
+                        params = state.params,
+                        resolution = state.exportResolution,
+                        revision = state.revision + 1
+                    )
+                    try {
+                        saveBitmapToGallery(context, exportBitmap, fileName, state.exportFormat)
+                    } finally {
+                        exportBitmap.recycle()
+                    }
                 }
                 val savedItem = SavedExport(
                     displayName = fileName,
@@ -347,6 +356,29 @@ private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, revisio
         revision
     )
     return copy
+}
+
+private fun renderEditedExport(
+    sourcePath: String,
+    params: EditParams,
+    resolution: ExportResolution,
+    revision: Int
+): Bitmap {
+    // TODO v0.2: replace whole-bitmap export with ROI/tile rendering to reduce peak memory use.
+    val decoded = decodeSampledMutableBitmap(sourcePath, maxSide = EXPORT_MAX_SIDE)
+    NativePhotoCore.nativeRenderPreviewInPlace(
+        decoded,
+        params.exposure,
+        params.contrast,
+        params.shadows,
+        params.highlights,
+        params.sharpness,
+        revision
+    )
+
+    val scaled = scaleBitmapForExport(decoded, resolution)
+    if (scaled !== decoded) decoded.recycle()
+    return scaled
 }
 
 private fun scaleBitmapForExport(bitmap: Bitmap, resolution: ExportResolution): Bitmap {
@@ -569,6 +601,7 @@ private inline fun <reified T : Enum<T>> enumValueOrDefault(name: String?, defau
 
 private fun exportTimestamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
+private const val EXPORT_MAX_SIDE = 8192
 private const val PREF_NAME = "kepler_studio_editor"
 private const val KEY_SAVED_EXPORTS = "saved_exports"
 private const val KEY_EXPORT_HISTORY_RETENTION = "export_history_retention"
