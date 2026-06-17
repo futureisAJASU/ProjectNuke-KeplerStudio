@@ -5,6 +5,7 @@ add_library(
     kepler_photocore
     SHARED
     native_bridge.cpp
+    native_bridge_alias.cpp
 )
 
 find_library(log-lib log)
