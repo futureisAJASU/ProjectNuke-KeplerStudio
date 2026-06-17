@@ -183,6 +183,7 @@ fun EditorScreen(viewModel: EditorViewModel) {
                             onToolSelected = { selectedTool = it },
                             onFormatSelected = viewModel::setExportFormat,
                             onResolutionSelected = viewModel::setExportResolution,
+                            onAutoEnhance = viewModel::applyAutoEnhance,
                             onChange = { transform -> viewModel.updateParams(transform) }
                         )
                     }
@@ -472,6 +473,7 @@ private fun AdjustmentPanel(
     onToolSelected: (EditorTool) -> Unit,
     onFormatSelected: (ExportFormat) -> Unit,
     onResolutionSelected: (ExportResolution) -> Unit,
+    onAutoEnhance: () -> Unit,
     onChange: ((EditParams) -> EditParams) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().background(PanelBackground).navigationBarsPadding()) {
@@ -499,7 +501,7 @@ private fun AdjustmentPanel(
             )
 
             when (selectedTool) {
-                EditorTool.Auto -> AutoPanel()
+                EditorTool.Auto -> AutoPanel(onAutoEnhance)
                 EditorTool.Light -> LightPanel(params, onChange)
                 EditorTool.Color -> ColorPanel(params, onChange)
                 EditorTool.Effects -> EffectsPanel(params, onChange)
@@ -592,11 +594,10 @@ private fun ToolRail(selectedTool: EditorTool, onToolSelected: (EditorTool) -> U
 }
 
 @Composable
-private fun AutoPanel() {
+private fun AutoPanel(onAutoEnhance: () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(
-            onClick = { },
-            enabled = false,
+            onClick = onAutoEnhance,
             colors = ButtonDefaults.buttonColors(containerColor = NeutralAccent, contentColor = ButtonTextDark)
         ) {
             Text("자동 보정")
@@ -610,7 +611,7 @@ private fun AutoPanel() {
         }
     }
     Text(
-        text = "자동 보정 모델 연결 후 활성화됩니다",
+        text = "히스토그램을 분석해 노출, 대비, 하이라이트, 섀도우, 색감, 디테일 값을 자동으로 적용합니다",
         color = TextMuted,
         style = MaterialTheme.typography.bodySmall,
         modifier = Modifier.padding(top = 8.dp)
