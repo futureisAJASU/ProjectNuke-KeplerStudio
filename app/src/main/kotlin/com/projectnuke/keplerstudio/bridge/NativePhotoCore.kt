@@ -18,7 +18,6 @@ object NativePhotoCore {
     external fun nativeReleaseSession(handle: Long)
 
     /**
-     * MVP용 in-place bitmap renderer.
      * Preview와 export가 같은 네이티브 픽셀 파이프라인을 사용한다.
      */
     external fun nativeRenderPreviewInPlace(
@@ -37,6 +36,10 @@ object NativePhotoCore {
         dehaze: Float,
         sharpness: Float,
         noiseReduction: Float,
+        noiseEngine: Int,
+        detailEngine: Int,
+        toneEngine: Int,
+        hazeEngine: Int,
         revision: Int
     ): Int
 }
