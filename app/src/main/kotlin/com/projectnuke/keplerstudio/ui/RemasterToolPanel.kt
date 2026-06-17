@@ -18,6 +18,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.projectnuke.keplerstudio.editor.EditorViewModel
 
 private val RemasterCardBackground = Color(0xFF242424)
 private val RemasterAccent = Color(0xFFE6E6E6)
@@ -28,10 +30,10 @@ private val RemasterButtonTextDark = Color(0xFF111111)
 
 @Composable
 fun RemasterToolPanel(
-    onQuickAutoEnhance: () -> Unit,
-    onMaskAwareRemaster: () -> Unit
+    onQuickAutoEnhance: () -> Unit
 ) {
     val context = LocalContext.current
+    val editorViewModel: EditorViewModel = viewModel()
     val activeModel = RemasterModelSession.activeModel
     val statusText = RemasterModelSession.statusText
     val loaded = RemasterModelSession.isModelLoaded
@@ -96,7 +98,7 @@ fun RemasterToolPanel(
                 )
             }
             Button(
-                onClick = onMaskAwareRemaster,
+                onClick = { editorViewModel.applyMaskAwareRemaster() },
                 enabled = canRunMaskRemaster,
                 colors = ButtonDefaults.buttonColors(containerColor = RemasterAccent, contentColor = RemasterButtonTextDark),
                 modifier = Modifier.padding(top = 8.dp)
