@@ -77,6 +77,17 @@ fun MaskingToolPanel() {
                 TextButton(onClick = { editorViewModel.createBrushSelection() }) {
                     Text("브러시 마스크")
                 }
+                TextButton(onClick = { editorViewModel.toggleSelectionOverlay() }) {
+                    Text(if (state.showSelectionOverlay) "표시 끄기" else "표시 켜기")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 2.dp)) {
+                TextButton(onClick = { editorViewModel.createBackgroundSelectionFromActive() }, enabled = activeLayer != null) {
+                    Text("배경 만들기")
+                }
+                TextButton(onClick = { editorViewModel.duplicateActiveSelectionLayer() }, enabled = activeLayer != null) {
+                    Text("복제")
+                }
                 TextButton(onClick = { editorViewModel.invertActiveSelectionLayer() }, enabled = activeLayer != null) {
                     Text("반전")
                 }
