@@ -130,6 +130,14 @@ fun RemasterToolPanel(
                 onSelect = { RemasterModelSession.load(context, model) }
             )
         }
+
+        Text(
+            text = "마스크 편집",
+            color = RemasterTextPrimary,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(top = 14.dp, bottom = 4.dp)
+        )
+        MaskingToolPanel()
     }
 }
 
