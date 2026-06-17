@@ -19,6 +19,9 @@ data class EditorUiState(
     val savedExports: List<SavedExport> = emptyList(),
     val draftSavedAtMillis: Long? = null,
     val viewport: ViewportState = ViewportState(),
+    val selectionLayers: List<SelectionLayer> = emptyList(),
+    val activeSelectionLayerId: String? = null,
+    val selectionPaintSettings: SelectionPaintSettings = SelectionPaintSettings(),
     val revision: Int = 0,
     val nativeVersion: String = "",
     val message: String? = null
