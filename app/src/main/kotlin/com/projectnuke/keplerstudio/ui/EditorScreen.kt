@@ -48,12 +48,16 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.projectnuke.keplerstudio.editor.DehazeEngine
+import com.projectnuke.keplerstudio.editor.DetailEngine
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
+import com.projectnuke.keplerstudio.editor.NoiseEngine
 import com.projectnuke.keplerstudio.editor.SavedExport
+import com.projectnuke.keplerstudio.editor.ToneEngine
 import com.projectnuke.keplerstudio.editor.ViewportState
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -101,7 +105,7 @@ private enum class EditorTool(val label: String, val description: String) {
     Optics("옵틱", "색수차 제거와 렌즈 보정"),
     Geometry("기하", "왜곡, 수직/수평, 원근 보정"),
     Blur("블러", "렌즈 블러와 초점 영역"),
-    Ai("AI", "자동 마스크, 디테일 복원, 노이즈 억제")
+    Model("모델", "자동 마스크, 디테일 복원, 노이즈 억제")
 }
 
 @Composable
@@ -138,7 +142,15 @@ fun EditorScreen(viewModel: EditorViewModel) {
                         exportHistoryRetention = state.exportHistoryRetention,
                         savedExportCount = state.savedExports.size,
                         draftSavedAtMillis = state.draftSavedAtMillis,
+                        noiseEngine = state.noiseEngine,
+                        detailEngine = state.detailEngine,
+                        toneEngine = state.toneEngine,
+                        hazeEngine = state.hazeEngine,
                         onRetentionSelected = viewModel::setExportHistoryRetention,
+                        onNoiseEngineSelected = viewModel::setNoiseEngine,
+                        onDetailEngineSelected = viewModel::setDetailEngine,
+                        onToneEngineSelected = viewModel::setToneEngine,
+                        onHazeEngineSelected = viewModel::setHazeEngine,
                         onClearDraft = viewModel::clearDraft,
                         onCleanupOldTemporarySources = viewModel::cleanupOldTemporarySources,
                         onClearSavedExports = viewModel::clearSavedExports,
@@ -306,7 +318,15 @@ private fun SettingsScreen(
     exportHistoryRetention: ExportHistoryRetention,
     savedExportCount: Int,
     draftSavedAtMillis: Long?,
+    noiseEngine: NoiseEngine,
+    detailEngine: DetailEngine,
+    toneEngine: ToneEngine,
+    hazeEngine: DehazeEngine,
     onRetentionSelected: (ExportHistoryRetention) -> Unit,
+    onNoiseEngineSelected: (NoiseEngine) -> Unit,
+    onDetailEngineSelected: (DetailEngine) -> Unit,
+    onToneEngineSelected: (ToneEngine) -> Unit,
+    onHazeEngineSelected: (DehazeEngine) -> Unit,
     onClearDraft: () -> Unit,
     onCleanupOldTemporarySources: () -> Unit,
     onClearSavedExports: () -> Unit,
@@ -325,6 +345,18 @@ private fun SettingsScreen(
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 2.dp, bottom = 14.dp)
         )
+
+        SettingsCard(title = "보정 엔진") {
+            Text(
+                "사진 특성에 맞게 알고리즘을 바꿔 테스트할 수 있습니다. 지원 준비 중인 엔진은 선택값을 저장해 두고, 구현되는 순서대로 활성화됩니다",
+                color = TextSecondary,
+                style = MaterialTheme.typography.bodySmall
+            )
+            OptionRow(title = "노이즈", values = NoiseEngine.values().toList(), selected = noiseEngine, label = { it.label }, onSelected = onNoiseEngineSelected)
+            OptionRow(title = "디테일", values = DetailEngine.values().toList(), selected = detailEngine, label = { it.label }, onSelected = onDetailEngineSelected)
+            OptionRow(title = "톤", values = ToneEngine.values().toList(), selected = toneEngine, label = { it.label }, onSelected = onToneEngineSelected)
+            OptionRow(title = "안개", values = DehazeEngine.values().toList(), selected = hazeEngine, label = { it.label }, onSelected = onHazeEngineSelected)
+        }
 
         SettingsCard(title = "내보낸 사진 기록") {
             Text("현재 기록: ${savedExportCount}개", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
@@ -514,7 +546,7 @@ private fun AdjustmentPanel(
                 EditorTool.Optics -> PlaceholderPanel("색수차 제거와 렌즈 프로필 보정을 준비 중입니다")
                 EditorTool.Geometry -> PlaceholderPanel("왜곡, 수직, 수평, 원근 보정을 준비 중입니다")
                 EditorTool.Blur -> PlaceholderPanel("렌즈 블러와 초점 영역 편집을 준비 중입니다")
-                EditorTool.Ai -> PlaceholderPanel("생성형 보정이 아니라 자동 마스크, 노이즈 억제, 디테일 복원 보조를 준비 중입니다")
+                EditorTool.Model -> PlaceholderPanel("자동 마스크, 노이즈 억제, 디테일 복원 보조를 준비 중입니다")
             }
         }
 
