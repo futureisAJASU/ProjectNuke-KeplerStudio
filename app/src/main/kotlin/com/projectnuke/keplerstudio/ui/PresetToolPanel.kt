@@ -30,6 +30,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.EditParams
+import com.projectnuke.keplerstudio.editor.PresetColorLook
+import com.projectnuke.keplerstudio.editor.PresetLookHandoff
+import com.projectnuke.keplerstudio.editor.createPresetColorLookFromParams
+import com.projectnuke.keplerstudio.editor.presetColorLookFromJson
+import com.projectnuke.keplerstudio.editor.presetColorLookSummary
+import com.projectnuke.keplerstudio.editor.presetColorLookToJson
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
@@ -53,7 +59,8 @@ private data class StoredPreset(
     val id: String,
     val name: String,
     val params: EditParams,
-    val timestampMillis: Long
+    val timestampMillis: Long,
+    val look: PresetColorLook? = null
 )
 
 @Composable
@@ -67,6 +74,12 @@ fun PresetToolPanel(
     var presets by remember { mutableStateOf(emptyList<StoredPreset>()) }
     var statusMessage by remember { mutableStateOf("현재 편집값 저장, JSON 백업/복원, 이미지 분석 추출을 사용할 수 있습니다") }
     var pendingBeforeUri by remember { mutableStateOf<Uri?>(null) }
+
+    fun applyStoredPreset(preset: StoredPreset, message: String) {
+        PresetLookHandoff.offer(preset.look)
+        onApplyPreset(preset.params)
+        statusMessage = message
+    }
 
     LaunchedEffect(Unit) {
         presets = loadPresets(context)
@@ -116,12 +129,12 @@ fun PresetToolPanel(
                     id = System.currentTimeMillis().toString(),
                     name = "Pair_${timeTag()}",
                     params = extracted,
-                    timestampMillis = System.currentTimeMillis()
+                    timestampMillis = System.currentTimeMillis(),
+                    look = createPresetColorLookFromParams(extracted, strength = 0.82f)
                 )
                 presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
-                onApplyPreset(item.params)
-                statusMessage = "전/후 비교 기반 프리셋을 추출하고 현재 사진에 적용했습니다"
+                applyStoredPreset(item, "전/후 비교 기반 프리셋과 LUT를 추출하고 현재 사진에 적용했습니다")
             }.onFailure {
                 statusMessage = "전/후 비교 프리셋 추출에 실패했습니다: ${it.message}"
             }
@@ -149,12 +162,12 @@ fun PresetToolPanel(
                     id = System.currentTimeMillis().toString(),
                     name = "Reference_${timeTag()}",
                     params = extracted,
-                    timestampMillis = System.currentTimeMillis()
+                    timestampMillis = System.currentTimeMillis(),
+                    look = createPresetColorLookFromParams(extracted, strength = 0.74f)
                 )
                 presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
-                onApplyPreset(item.params)
-                statusMessage = "레퍼런스 기반 프리셋을 추출하고 현재 사진에 적용했습니다"
+                applyStoredPreset(item, "레퍼런스 기반 프리셋과 LUT를 추출하고 현재 사진에 적용했습니다")
             }.onFailure {
                 statusMessage = "레퍼런스 프리셋 추출에 실패했습니다: ${it.message}"
             }
@@ -188,12 +201,13 @@ fun PresetToolPanel(
                         id = System.currentTimeMillis().toString(),
                         name = presetName.ifBlank { defaultPresetName() },
                         params = params,
-                        timestampMillis = System.currentTimeMillis()
+                        timestampMillis = System.currentTimeMillis(),
+                        look = createPresetColorLookFromParams(params, strength = 0.60f)
                     )
                     presets = mergePresets(presets, listOf(item)).take(40)
                     savePresets(context, presets)
                     presetName = defaultPresetName()
-                    statusMessage = "현재 편집값을 프리셋으로 저장했습니다"
+                    statusMessage = "현재 편집값과 LUT를 프리셋으로 저장했습니다"
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = PresetAccent, contentColor = PresetButtonTextDark)
             ) {
@@ -242,7 +256,7 @@ fun PresetToolPanel(
         )
 
         Text(
-            text = "추출 기능은 1차 통계 기반 근사입니다. 전/후 비교는 원본과 보정본 차이를 추정하고, 레퍼런스 추출은 한 장의 색감과 대비를 현재 사진에 맞는 보정값으로 변환합니다",
+            text = "추출 기능은 1차 통계 기반 근사입니다. 추출된 프리셋은 슬라이더값과 LUT를 함께 저장해 색 변환을 더 강하게 재사용합니다",
             color = PresetTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 8.dp)
@@ -267,13 +281,10 @@ fun PresetToolPanel(
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(preset.name, color = PresetTextPrimary, fontWeight = FontWeight.SemiBold)
-                            Text(formatPresetSummary(preset.params), color = PresetTextSecondary, style = MaterialTheme.typography.bodySmall)
+                            Text(formatPresetSummary(preset), color = PresetTextSecondary, style = MaterialTheme.typography.bodySmall)
                             Text(formatPresetTime(preset.timestampMillis), color = PresetTextMuted, style = MaterialTheme.typography.bodySmall)
                         }
-                        TextButton(onClick = {
-                            onApplyPreset(preset.params)
-                            statusMessage = "선택한 프리셋을 현재 사진에 적용했습니다"
-                        }) {
+                        TextButton(onClick = { applyStoredPreset(preset, "선택한 프리셋을 현재 사진에 적용했습니다") }) {
                             Text("적용")
                         }
                         TextButton(
@@ -299,8 +310,8 @@ private fun timeTag(): String = SimpleDateFormat("MMdd_HHmm", Locale.US).format(
 private fun formatPresetTime(timestampMillis: Long): String =
     SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.KOREA).format(Date(timestampMillis))
 
-private fun formatPresetSummary(params: EditParams): String =
-    "노출 ${params.exposure.toFixed2()} · 대비 ${params.contrast.toFixed2()} · 색온도 ${params.temperature.toFixed2()} · 샤픈 ${params.sharpness.toFixed2()}"
+private fun formatPresetSummary(preset: StoredPreset): String =
+    "노출 ${preset.params.exposure.toFixed2()} · 대비 ${preset.params.contrast.toFixed2()} · 색온도 ${preset.params.temperature.toFixed2()} · ${presetColorLookSummary(preset.look)}"
 
 private fun Float.toFixed2(): String = String.format(Locale.US, "%.2f", this)
 
@@ -347,33 +358,35 @@ private fun encodePreset(item: StoredPreset): String = listOf(
 private fun decodePreset(raw: String): StoredPreset? {
     val p = raw.split("|")
     if (p.size != 17) return null
+    val params = EditParams(
+        exposure = p[3].toFloatOrNull() ?: 0f,
+        contrast = p[4].toFloatOrNull() ?: 0f,
+        shadows = p[5].toFloatOrNull() ?: 0f,
+        highlights = p[6].toFloatOrNull() ?: 0f,
+        whites = p[7].toFloatOrNull() ?: 0f,
+        blacks = p[8].toFloatOrNull() ?: 0f,
+        temperature = p[9].toFloatOrNull() ?: 0f,
+        tint = p[10].toFloatOrNull() ?: 0f,
+        saturation = p[11].toFloatOrNull() ?: 0f,
+        vibrance = p[12].toFloatOrNull() ?: 0f,
+        clarity = p[13].toFloatOrNull() ?: 0f,
+        dehaze = p[14].toFloatOrNull() ?: 0f,
+        sharpness = p[15].toFloatOrNull() ?: 0f,
+        noiseReduction = p[16].toFloatOrNull() ?: 0f
+    )
     return StoredPreset(
         id = p[0],
         name = p[1],
         timestampMillis = p[2].toLongOrNull() ?: return null,
-        params = EditParams(
-            exposure = p[3].toFloatOrNull() ?: 0f,
-            contrast = p[4].toFloatOrNull() ?: 0f,
-            shadows = p[5].toFloatOrNull() ?: 0f,
-            highlights = p[6].toFloatOrNull() ?: 0f,
-            whites = p[7].toFloatOrNull() ?: 0f,
-            blacks = p[8].toFloatOrNull() ?: 0f,
-            temperature = p[9].toFloatOrNull() ?: 0f,
-            tint = p[10].toFloatOrNull() ?: 0f,
-            saturation = p[11].toFloatOrNull() ?: 0f,
-            vibrance = p[12].toFloatOrNull() ?: 0f,
-            clarity = p[13].toFloatOrNull() ?: 0f,
-            dehaze = p[14].toFloatOrNull() ?: 0f,
-            sharpness = p[15].toFloatOrNull() ?: 0f,
-            noiseReduction = p[16].toFloatOrNull() ?: 0f
-        )
+        params = params,
+        look = createPresetColorLookFromParams(params, strength = 0.60f)
     )
 }
 
 private fun exportPresetsToJson(context: Context, uri: Uri, presets: List<StoredPreset>) {
     val root = JSONObject().apply {
         put("format", "keplerstudio-presets")
-        put("version", 1)
+        put("version", 2)
         put("exportedAt", System.currentTimeMillis())
         put("presets", JSONArray().apply {
             presets.forEach { preset ->
@@ -382,6 +395,7 @@ private fun exportPresetsToJson(context: Context, uri: Uri, presets: List<Stored
                     put("name", preset.name)
                     put("timestampMillis", preset.timestampMillis)
                     put("params", editParamsToJson(preset.params))
+                    presetColorLookToJson(preset.look)?.let { put("look", it) }
                 })
             }
         })
@@ -402,11 +416,13 @@ private fun importPresetsFromJson(context: Context, uri: Uri): List<StoredPreset
     val items = mutableListOf<StoredPreset>()
     for (i in 0 until array.length()) {
         val obj = array.optJSONObject(i) ?: continue
+        val params = editParamsFromJson(obj.optJSONObject("params") ?: JSONObject())
         items += StoredPreset(
             id = obj.optString("id", System.currentTimeMillis().toString()),
             name = obj.optString("name", "Imported_${i + 1}"),
             timestampMillis = obj.optLong("timestampMillis", System.currentTimeMillis()),
-            params = editParamsFromJson(obj.optJSONObject("params") ?: JSONObject())
+            params = params,
+            look = presetColorLookFromJson(obj.optJSONObject("look")) ?: createPresetColorLookFromParams(params, strength = 0.60f)
         )
     }
     return items
