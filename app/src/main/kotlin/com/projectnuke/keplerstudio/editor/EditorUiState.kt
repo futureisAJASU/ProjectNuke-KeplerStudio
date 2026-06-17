@@ -8,6 +8,7 @@ data class EditorUiState(
     val originalPreviewBitmap: Bitmap? = null,
     val previewBitmap: Bitmap? = null,
     val params: EditParams = EditParams(),
+    val presetLook: PresetColorLook? = null,
     val exportFormat: ExportFormat = ExportFormat.Jpeg,
     val exportResolution: ExportResolution = ExportResolution.Full,
     val exportHistoryRetention: ExportHistoryRetention = ExportHistoryRetention.Never,
