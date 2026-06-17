@@ -5,6 +5,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -32,13 +35,17 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -56,13 +63,14 @@ import com.projectnuke.keplerstudio.editor.ToneEngine
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.roundToInt
 
 private val V2AppBackground = Color(0xFF101010)
 private val V2TopBarBackground = Color(0xFF171717)
 private val V2PanelBackground = Color(0xFF1B1B1B)
 private val V2PreviewBackground = Color(0xFF000000)
+private val V2RailBackground = Color(0xFF141414)
 private val V2CardBackground = Color(0xFF242424)
+private val V2CompareBadgeBackground = Color(0xCC000000)
 private val V2NeutralAccent = Color(0xFFE6E6E6)
 private val V2TextPrimary = Color(0xFFF2F2F2)
 private val V2TextSecondary = Color(0xFFC8C8C8)
@@ -85,13 +93,21 @@ private enum class V2MainTab(val label: String) {
 }
 
 private enum class V2EditorTool(val label: String, val description: String) {
-    Auto("자동", "원터치 보정"),
+    Auto("자동", "자동 보정"),
     Remaster("리마스터", "모델 기반 보정과 마스크 편집"),
+    Profiles("프로필", "프로필 브라우저와 강도 조절"),
+    Presets("프리셋", "저장된 보정값과 추천값"),
+    Crop("자르기", "비율, 회전, 수평 보정"),
     Masking("마스크", "마스크 레이어와 브러시"),
+    Remove("제거", "지우개, 반사 제거, 먼지 제거"),
     Light("조명", "노출, 대비, 하이라이트, 섀도우"),
     Color("색상", "색온도, 색조, 생동감, 채도"),
     Effects("효과", "명료도와 디헤이즈"),
-    Detail("디테일", "샤픈과 노이즈 감소")
+    Detail("디테일", "샤프닝과 노이즈 감소"),
+    Optics("옵틱", "색수차 제거와 렌즈 보정"),
+    Geometry("기하", "수직, 수평, 원근 보정"),
+    Blur("블러", "렌즈 블러와 초점 영역"),
+    Model("모델", "자동 마스크, 노이즈 억제, 디테일 복원")
 }
 
 @Composable
@@ -164,7 +180,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                                 PresetLookHandoff.clear()
                                 viewModel.applyAutoEnhance()
                             },
-                            onChange = { transform -> viewModel.updateParams(transform) }
+                            onChange = viewModel::updateParams
                         )
                     }
                 }
@@ -244,20 +260,7 @@ private fun V2PreviewArea(
         if (bitmap == null) {
             Text("사진을 선택해 주세요", color = V2TextPrimary, style = MaterialTheme.typography.bodyLarge)
         } else {
-            var showOriginal by remember { mutableStateOf(false) }
-            Image(
-                bitmap = (if (showOriginal) originalBitmap ?: bitmap else bitmap).asImageBitmap(),
-                contentDescription = null,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(8.dp)
-            )
-            Row(modifier = Modifier.align(Alignment.TopStart).padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { showOriginal = !showOriginal }) {
-                    Text(if (showOriginal) "편집본" else "원본 보기")
-                }
-            }
+            V2ZoomablePreview(bitmap = bitmap, originalBitmap = originalBitmap)
         }
         if (isBusy) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
@@ -269,6 +272,69 @@ private fun V2PreviewArea(
                 modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)
             )
         }
+    }
+}
+
+@Composable
+private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?) {
+    var scale by remember(bitmap) { mutableFloatStateOf(1f) }
+    var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
+    var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }
+    val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
+
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Image(
+            bitmap = displayedBitmap.asImageBitmap(),
+            contentDescription = "preview",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp)
+                .pointerInput(bitmap) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        val nextScale = (scale * zoom).coerceIn(1f, 8f)
+                        scale = nextScale
+                        offset = if (nextScale <= 1.01f) Offset.Zero else offset + pan
+                        showOriginal = false
+                    }
+                }
+                .pointerInput(bitmap, originalBitmap) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            if (scale > 1.01f) {
+                                scale = 1f
+                                offset = Offset.Zero
+                            } else {
+                                scale = 2.5f
+                            }
+                        },
+                        onLongPress = {
+                            if (originalBitmap != null) showOriginal = true
+                        },
+                        onPress = {
+                            tryAwaitRelease()
+                            showOriginal = false
+                        }
+                    )
+                }
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                }
+        )
+
+        Text(
+            text = if (showOriginal && originalBitmap != null) "원본" else "편집본",
+            color = V2TextPrimary,
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(12.dp)
+                .background(V2CompareBadgeBackground)
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        )
     }
 }
 
@@ -293,29 +359,43 @@ private fun V2AdjustmentPanel(
             when (selectedTool) {
                 V2EditorTool.Auto -> V2AutoPanel(onAutoEnhance)
                 V2EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance)
+                V2EditorTool.Profiles -> V2PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결합니다")
+                V2EditorTool.Presets -> PresetToolPanel(params = params, onApplyPreset = { presetParams -> onChange { presetParams } })
+                V2EditorTool.Crop -> V2PlaceholderPanel("비율, 회전, 수평 기반 자르기 도구를 준비 중입니다")
                 V2EditorTool.Masking -> MaskingToolPanel()
+                V2EditorTool.Remove -> V2PlaceholderPanel("지우개, 반사 제거, 센서 먼지 제거 엔진을 연결할 예정입니다")
                 V2EditorTool.Light -> V2LightPanel(params, onChange)
                 V2EditorTool.Color -> V2ColorPanel(params, onChange)
                 V2EditorTool.Effects -> V2EffectsPanel(params, onChange)
                 V2EditorTool.Detail -> V2DetailPanel(params, onChange)
+                V2EditorTool.Optics -> V2PlaceholderPanel("색수차 제거와 렌즈 프로필 보정을 준비 중입니다")
+                V2EditorTool.Geometry -> V2PlaceholderPanel("수직, 수평, 원근 보정을 준비 중입니다")
+                V2EditorTool.Blur -> V2PlaceholderPanel("렌즈 블러와 초점 영역 편집을 준비 중입니다")
+                V2EditorTool.Model -> V2PlaceholderPanel("자동 마스크, 노이즈 억제, 디테일 복원 보조를 준비 중입니다")
             }
         }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .background(Color(0xFF141414))
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            V2EditorTool.values().forEach { tool ->
-                TextButton(onClick = { onToolSelected(tool) }) {
-                    Text(
-                        text = tool.label,
-                        color = if (tool == selectedTool) V2NeutralAccent else V2TextSecondary,
-                        fontWeight = if (tool == selectedTool) FontWeight.Bold else FontWeight.Normal
-                    )
-                }
+        V2ToolRail(selectedTool = selectedTool, onToolSelected = onToolSelected)
+    }
+}
+
+@Composable
+private fun V2ToolRail(selectedTool: V2EditorTool, onToolSelected: (V2EditorTool) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .background(V2RailBackground)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        V2EditorTool.values().forEach { tool ->
+            TextButton(onClick = { onToolSelected(tool) }) {
+                Text(
+                    text = tool.label,
+                    color = if (tool == selectedTool) V2NeutralAccent else V2TextSecondary,
+                    fontWeight = if (tool == selectedTool) FontWeight.Bold else FontWeight.Normal
+                )
             }
         }
     }
@@ -366,7 +446,6 @@ private fun V2AutoPanel(onAutoEnhance: () -> Unit) {
 
 @Composable
 private fun V2LightPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    ParamSlider2("노출", params.exposure, -1f, 1f) { onChange { it.copy(exposure = it.exposure + (it.exposure - it.exposure) + 0f) } }
     ParamSlider2("노출", params.exposure, -1f, 1f) { value -> onChange { it.copy(exposure = value) } }
     ParamSlider2("대비", params.contrast, -1f, 1f) { value -> onChange { it.copy(contrast = value) } }
     ParamSlider2("하이라이트", params.highlights, -1f, 1f) { value -> onChange { it.copy(highlights = value) } }
@@ -391,18 +470,33 @@ private fun V2EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditPa
 
 @Composable
 private fun V2DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    ParamSlider2("샤픈", params.sharpness, 0f, 1f) { value -> onChange { it.copy(sharpness = value) } }
+    ParamSlider2("샤프닝", params.sharpness, 0f, 1f) { value -> onChange { it.copy(sharpness = value) } }
     ParamSlider2("노이즈 감소", params.noiseReduction, 0f, 1f) { value -> onChange { it.copy(noiseReduction = value) } }
 }
 
 @Composable
+private fun V2PlaceholderPanel(message: String) {
+    Text(
+        text = message,
+        color = V2TextMuted,
+        style = MaterialTheme.typography.bodyMedium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(V2CardBackground)
+            .padding(12.dp)
+    )
+}
+
+@Composable
 private fun ParamSlider2(label: String, value: Float, min: Float, max: Float, onValue: (Float) -> Unit) {
-    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(label, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
-            Text(String.format(Locale.US, "%.2f", value), color = V2TextMuted, style = MaterialTheme.typography.bodySmall)
-        }
-        Slider(value = value.coerceIn(min, max), onValueChange = onValue, valueRange = min..max)
+    Row(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(label, modifier = Modifier.width(86.dp), color = V2TextPrimary, style = MaterialTheme.typography.bodyMedium)
+        Slider(value = value.coerceIn(min, max), onValueChange = onValue, valueRange = min..max, modifier = Modifier.weight(1f))
+        Text(String.format(Locale.US, "%.2f", value), modifier = Modifier.width(52.dp), color = V2TextSecondary, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -435,7 +529,7 @@ private fun V2SavedScreen(
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("내보낸 사진", color = V2TextPrimary, style = MaterialTheme.typography.titleLarge)
-                Text("Kepler Studio에서 내보낸 기록만 표시됩니다", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text("Kepler Studio에서 내보낸 기록만 표시합니다", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
             }
             TextButton(onClick = onClearSavedExports, enabled = savedExports.isNotEmpty()) { Text("기록 전체 비우기") }
         }
@@ -489,10 +583,10 @@ private fun V2SettingsScreen(
             OptionRow2(ExportHistoryRetention.values().toList(), exportHistoryRetention, { it.label }, onRetentionSelected)
             TextButton(onClick = onClearSavedExports, enabled = savedExportCount > 0) { Text("기록 전체 비우기") }
         }
-        V2SettingsCard("임시저장") {
-            Text(draftSavedAtMillis?.let { "마지막 임시저장: ${formatSavedTime2(it)}" } ?: "현재 임시저장 기록이 없습니다", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+        V2SettingsCard("임시 저장") {
+            Text(draftSavedAtMillis?.let { "마지막 임시 저장: ${formatSavedTime2(it)}" } ?: "현재 임시 저장 기록이 없습니다", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onClearDraft, enabled = draftSavedAtMillis != null) { Text("임시저장 삭제") }
+                TextButton(onClick = onClearDraft, enabled = draftSavedAtMillis != null) { Text("임시 저장 삭제") }
                 TextButton(onClick = onCleanupOldTemporarySources) { Text("임시 원본 정리") }
             }
         }
