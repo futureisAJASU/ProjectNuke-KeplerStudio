@@ -117,6 +117,27 @@ fun RemasterToolPanel(
             )
         }
 
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 10.dp)
+                .background(RemasterCardBackground)
+                .padding(12.dp)
+        ) {
+            Text("개발 도구", color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
+            Text(
+                "모델 학습과 규칙 기반 분석을 검증하기 위한 임시 도구입니다",
+                color = RemasterTextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = { editorViewModel.exportUniversalBalancerTrainingRow() }) {
+                    Text("학습 row 저장")
+                }
+            }
+        }
+
         Text(
             text = "온디바이스 후보",
             color = RemasterTextPrimary,
