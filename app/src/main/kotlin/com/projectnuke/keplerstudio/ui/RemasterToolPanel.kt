@@ -28,12 +28,14 @@ private val RemasterButtonTextDark = Color(0xFF111111)
 
 @Composable
 fun RemasterToolPanel(
-    onQuickAutoEnhance: () -> Unit
+    onQuickAutoEnhance: () -> Unit,
+    onMaskAwareRemaster: () -> Unit
 ) {
     val context = LocalContext.current
     val activeModel = RemasterModelSession.activeModel
     val statusText = RemasterModelSession.statusText
     val loaded = RemasterModelSession.isModelLoaded
+    val canRunMaskRemaster = loaded && activeModel?.id == "edge_masker"
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -93,6 +95,24 @@ fun RemasterToolPanel(
                     style = MaterialTheme.typography.bodySmall
                 )
             }
+            Button(
+                onClick = onMaskAwareRemaster,
+                enabled = canRunMaskRemaster,
+                colors = ButtonDefaults.buttonColors(containerColor = RemasterAccent, contentColor = RemasterButtonTextDark),
+                modifier = Modifier.padding(top = 8.dp)
+            ) {
+                Text("모델 마스크 리마스터 적용")
+            }
+            Text(
+                text = if (canRunMaskRemaster) {
+                    "Edge Masker로 피사체 마스크를 생성한 뒤, 피사체 보호 보정본과 배경 강화 보정본을 합성합니다"
+                } else {
+                    "Edge Masker 모델을 로드하면 마스크 리마스터를 적용할 수 있습니다"
+                },
+                color = RemasterTextMuted,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 6.dp)
+            )
         }
 
         Text(
