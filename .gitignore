@@ -17,5 +17,15 @@ local.properties
 .idea/caches/
 .idea/libraries/
 
+# Local on-device model binaries
+# Keep model files on the local machine or distribute them through release assets / Git LFS.
+app/src/main/assets/models/*.tflite
+app/src/main/assets/models/*.task
+app/src/main/assets/models/*.onnx
+app/src/main/assets/models/*.ort
+app/src/main/assets/models/*.bin
+app/src/main/assets/models/*.gguf
+!app/src/main/assets/models/README.md
+
 .DS_Store
 Thumbs.db
