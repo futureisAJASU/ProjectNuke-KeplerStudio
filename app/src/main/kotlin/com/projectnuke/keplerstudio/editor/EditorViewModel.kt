@@ -43,10 +43,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val context = getApplication<Application>()
             val retention = loadExportHistoryRetention(context)
+            val engines = loadEngineSelection(context)
             val saved = withContext(Dispatchers.IO) {
                 pruneSavedExportsIfNeeded(context, loadSavedExportsFromPrefs(context), retention)
             }
-            _uiState.update { it.copy(savedExports = saved, exportHistoryRetention = retention) }
+            _uiState.update {
+                it.copy(
+                    savedExports = saved,
+                    exportHistoryRetention = retention,
+                    noiseEngine = engines.noiseEngine,
+                    detailEngine = engines.detailEngine,
+                    toneEngine = engines.toneEngine,
+                    hazeEngine = engines.hazeEngine
+                )
+            }
             restoreDraftIfAvailable(context)
         }
     }
@@ -95,7 +105,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
             val rendered = withContext(Dispatchers.Default) {
-                renderEditedPreview(basePreview, nextParams, nextRevision)
+                renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision)
             }
             if (_uiState.value.revision == nextRevision) {
                 val context = getApplication<Application>()
@@ -125,7 +135,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob = viewModelScope.launch {
             try {
                 val nextParams = withContext(Dispatchers.Default) { computeAutoEnhanceParams(basePreview) }
-                val rendered = withContext(Dispatchers.Default) { renderEditedPreview(basePreview, nextParams, nextRevision) }
+                val rendered = withContext(Dispatchers.Default) {
+                    renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision)
+                }
                 if (_uiState.value.revision == nextRevision) {
                     val context = getApplication<Application>()
                     _uiState.update {
@@ -143,6 +155,78 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (t: Throwable) {
                 _uiState.update { it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}") }
+            }
+        }
+    }
+
+    fun setNoiseEngine(engine: NoiseEngine) {
+        applyEngineChange(noiseEngine = engine, message = "노이즈 감소 엔진이 ${engine.label}으로 설정되었습니다")
+    }
+
+    fun setDetailEngine(engine: DetailEngine) {
+        applyEngineChange(detailEngine = engine, message = "디테일 엔진이 ${engine.label}으로 설정되었습니다")
+    }
+
+    fun setToneEngine(engine: ToneEngine) {
+        applyEngineChange(toneEngine = engine, message = "톤 엔진이 ${engine.label}으로 설정되었습니다")
+    }
+
+    fun setHazeEngine(engine: DehazeEngine) {
+        applyEngineChange(hazeEngine = engine, message = "디헤이즈 엔진이 ${engine.label}으로 설정되었습니다")
+    }
+
+    private fun applyEngineChange(
+        noiseEngine: NoiseEngine? = null,
+        detailEngine: DetailEngine? = null,
+        toneEngine: ToneEngine? = null,
+        hazeEngine: DehazeEngine? = null,
+        message: String
+    ) {
+        val current = _uiState.value
+        val nextEngines = EngineSelection(
+            noiseEngine = noiseEngine ?: current.noiseEngine,
+            detailEngine = detailEngine ?: current.detailEngine,
+            toneEngine = toneEngine ?: current.toneEngine,
+            hazeEngine = hazeEngine ?: current.hazeEngine
+        )
+        val context = getApplication<Application>()
+        saveEngineSelection(context, nextEngines)
+
+        val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
+        if (basePreview == null) {
+            _uiState.update {
+                it.copy(
+                    noiseEngine = nextEngines.noiseEngine,
+                    detailEngine = nextEngines.detailEngine,
+                    toneEngine = nextEngines.toneEngine,
+                    hazeEngine = nextEngines.hazeEngine,
+                    message = message
+                )
+            }
+            return
+        }
+
+        val nextRevision = current.revision + 1
+        _uiState.update {
+            it.copy(
+                noiseEngine = nextEngines.noiseEngine,
+                detailEngine = nextEngines.detailEngine,
+                toneEngine = nextEngines.toneEngine,
+                hazeEngine = nextEngines.hazeEngine,
+                revision = nextRevision,
+                isBusy = true,
+                message = "$message. 미리보기를 다시 렌더링하는 중입니다"
+            )
+        }
+        renderJob?.cancel()
+        renderJob = viewModelScope.launch {
+            val rendered = withContext(Dispatchers.Default) {
+                renderEditedPreview(basePreview, current.params, nextEngines, nextRevision)
+            }
+            if (_uiState.value.revision == nextRevision) {
+                _uiState.update { it.copy(previewBitmap = rendered, isBusy = false, message = message) }
+            } else {
+                rendered.recycle()
             }
         }
     }
@@ -219,6 +303,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         sourcePath = sourcePath,
                         params = state.params,
                         resolution = state.exportResolution,
+                        engines = state.engineSelection(),
                         revision = state.revision + 1
                     )
                     try {
@@ -327,12 +412,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val exportFormat = enumValueOrDefault(prefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
         val exportResolution = enumValueOrDefault(prefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Full)
         val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
+        val engines = _uiState.value.engineSelection()
 
         _uiState.update { it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다") }
         try {
             val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmap(sourcePath, maxSide = 2048) }
             val nextRevision = _uiState.value.revision + 1
-            val rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview, params, nextRevision) }
+            val rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview, params, engines, nextRevision) }
             releaseNativeSession()
             nativeSession = NativePhotoCore.nativeCreateSession(sourcePath)
             _uiState.update {
@@ -366,6 +452,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
     }
 }
+
+private data class EngineSelection(
+    val noiseEngine: NoiseEngine,
+    val detailEngine: DetailEngine,
+    val toneEngine: ToneEngine,
+    val hazeEngine: DehazeEngine
+)
+
+private fun EditorUiState.engineSelection(): EngineSelection = EngineSelection(
+    noiseEngine = noiseEngine,
+    detailEngine = detailEngine,
+    toneEngine = toneEngine,
+    hazeEngine = hazeEngine
+)
 
 private data class LumaStats(
     val p01: Float,
@@ -493,9 +593,9 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
         .copy(Bitmap.Config.ARGB_8888, true)
 }
 
-private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, revision: Int): Bitmap {
+private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, engines: EngineSelection, revision: Int): Bitmap {
     val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
-    renderBitmapInNative(copy, params, revision)
+    renderBitmapInNative(copy, params, engines, revision)
     return copy
 }
 
@@ -503,18 +603,19 @@ private fun renderEditedExport(
     sourcePath: String,
     params: EditParams,
     resolution: ExportResolution,
+    engines: EngineSelection,
     revision: Int
 ): Bitmap {
     // TODO v0.2: replace whole-bitmap export with ROI/tile rendering to reduce peak memory use.
     val decoded = decodeSampledMutableBitmap(sourcePath, maxSide = EXPORT_MAX_SIDE)
-    renderBitmapInNative(decoded, params, revision)
+    renderBitmapInNative(decoded, params, engines, revision)
 
     val scaled = scaleBitmapForExport(decoded, resolution)
     if (scaled !== decoded) decoded.recycle()
     return scaled
 }
 
-private fun renderBitmapInNative(bitmap: Bitmap, params: EditParams, revision: Int): Int =
+private fun renderBitmapInNative(bitmap: Bitmap, params: EditParams, engines: EngineSelection, revision: Int): Int =
     NativePhotoCore.nativeRenderPreviewInPlace(
         bitmap,
         params.exposure,
@@ -531,6 +632,10 @@ private fun renderBitmapInNative(bitmap: Bitmap, params: EditParams, revision: I
         params.dehaze,
         params.sharpness,
         params.noiseReduction,
+        engines.noiseEngine.nativeId,
+        engines.detailEngine.nativeId,
+        engines.toneEngine.nativeId,
+        engines.hazeEngine.nativeId,
         revision
     )
 
@@ -747,6 +852,25 @@ private fun loadExportHistoryRetention(context: Context): ExportHistoryRetention
         ExportHistoryRetention.Never
     )
 
+private fun saveEngineSelection(context: Context, engines: EngineSelection) {
+    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+        .putString(KEY_NOISE_ENGINE, engines.noiseEngine.name)
+        .putString(KEY_DETAIL_ENGINE, engines.detailEngine.name)
+        .putString(KEY_TONE_ENGINE, engines.toneEngine.name)
+        .putString(KEY_HAZE_ENGINE, engines.hazeEngine.name)
+        .apply()
+}
+
+private fun loadEngineSelection(context: Context): EngineSelection {
+    val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+    return EngineSelection(
+        noiseEngine = enumValueOrDefault(prefs.getString(KEY_NOISE_ENGINE, null), NoiseEngine.FastEdgeAware),
+        detailEngine = enumValueOrDefault(prefs.getString(KEY_DETAIL_ENGINE, null), DetailEngine.MaskedUnsharp),
+        toneEngine = enumValueOrDefault(prefs.getString(KEY_TONE_ENGINE, null), ToneEngine.HistogramAuto),
+        hazeEngine = enumValueOrDefault(prefs.getString(KEY_HAZE_ENGINE, null), DehazeEngine.FastContrast)
+    )
+}
+
 private fun encodeSavedExport(item: SavedExport): String = listOf(
     item.displayName,
     item.uriString,
@@ -776,6 +900,10 @@ private const val EXPORT_MAX_SIDE = 8192
 private const val PREF_NAME = "kepler_studio_editor"
 private const val KEY_SAVED_EXPORTS = "saved_exports"
 private const val KEY_EXPORT_HISTORY_RETENTION = "export_history_retention"
+private const val KEY_NOISE_ENGINE = "noise_engine"
+private const val KEY_DETAIL_ENGINE = "detail_engine"
+private const val KEY_TONE_ENGINE = "tone_engine"
+private const val KEY_HAZE_ENGINE = "haze_engine"
 private const val KEY_DRAFT_SOURCE = "draft_source"
 private const val KEY_DRAFT_EXPOSURE = "draft_exposure"
 private const val KEY_DRAFT_CONTRAST = "draft_contrast"
