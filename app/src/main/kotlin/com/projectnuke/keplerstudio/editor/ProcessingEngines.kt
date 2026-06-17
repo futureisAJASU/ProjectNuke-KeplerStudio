@@ -25,7 +25,7 @@ enum class ToneEngine(
     val nativeId: Int
 ) {
     HistogramAuto("히스토그램", 0),
-    Clahe("CLAHE 준비 중", 1),
+    Clahe("CLAHE", 1),
     Filmic("필믹 준비 중", 2),
     Sigmoid("시그모이드 준비 중", 3),
     AgxLike("AgX 유사 준비 중", 4),
