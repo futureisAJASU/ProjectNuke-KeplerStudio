@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.ui
 
 data class RemasterModelCandidate(
     val id: String,
+    val category: String,
     val title: String,
     val role: String,
     val personality: String,
@@ -15,7 +16,34 @@ data class RemasterModelCandidate(
 
 val OnDeviceRemasterModels = listOf(
     RemasterModelCandidate(
+        id = "universal_auto_router",
+        category = "전천후",
+        title = "Universal Auto Router",
+        role = "장면 분석·모델 선택",
+        personality = "가볍게 먼저 판단하고 필요한 모델만 추천",
+        strengths = "흔들림, 노출 실패, 과채도, 저대비, 저조도, 반사 문제를 분류합니다",
+        cost = "낮음",
+        status = "1순위",
+        runtime = "LiteRT",
+        assetPath = "models/universal_auto_router.tflite",
+        memoryTier = "S"
+    ),
+    RemasterModelCandidate(
+        id = "universal_balancer",
+        category = "전천후",
+        title = "Universal Balancer",
+        role = "전체 자동 리마스터",
+        personality = "대부분의 사진에 무난한 균형 보정",
+        strengths = "노출, 대비, 화이트밸런스, 채도, LUT 강도를 한 번에 추정합니다",
+        cost = "낮음~중간",
+        status = "1순위",
+        runtime = "LiteRT",
+        assetPath = "models/universal_balancer.tflite",
+        memoryTier = "M"
+    ),
+    RemasterModelCandidate(
         id = "edge_masker",
+        category = "마스크",
         title = "Edge Masker",
         role = "피사체·하늘·배경 분리",
         personality = "빠르고 안정적인 마스크 생성",
@@ -28,6 +56,7 @@ val OnDeviceRemasterModels = listOf(
     ),
     RemasterModelCandidate(
         id = "interactive_masker",
+        category = "마스크",
         title = "Interactive Masker",
         role = "터치 기반 영역 선택",
         personality = "사용자가 찍은 지점을 중심으로 정교하게 선택",
@@ -40,6 +69,7 @@ val OnDeviceRemasterModels = listOf(
     ),
     RemasterModelCandidate(
         id = "portrait_guard",
+        category = "인물",
         title = "Portrait Guard",
         role = "인물·피부 보호 리마스터",
         personality = "피부톤을 과하게 망가뜨리지 않는 보수적 보정",
@@ -52,6 +82,7 @@ val OnDeviceRemasterModels = listOf(
     ),
     RemasterModelCandidate(
         id = "sky_balancer",
+        category = "장면",
         title = "Sky Balancer",
         role = "하늘·구름·노을 보정",
         personality = "하늘은 살리고 피사체는 과장하지 않는 보정",
@@ -64,6 +95,7 @@ val OnDeviceRemasterModels = listOf(
     ),
     RemasterModelCandidate(
         id = "low_light_cleaner",
+        category = "저조도",
         title = "Low Light Cleaner",
         role = "저조도 노이즈·톤 복원",
         personality = "어두운 사진을 자연스럽게 살리는 야간 보정",
@@ -76,6 +108,7 @@ val OnDeviceRemasterModels = listOf(
     ),
     RemasterModelCandidate(
         id = "dehaze_reasoner",
+        category = "장면",
         title = "Dehaze Reasoner",
         role = "안개·흐림·역광 보정",
         personality = "뿌연 사진의 깊이감을 되살리는 보정",
@@ -87,7 +120,73 @@ val OnDeviceRemasterModels = listOf(
         memoryTier = "M"
     ),
     RemasterModelCandidate(
+        id = "flare_guard",
+        category = "제거·반사",
+        title = "Flare Guard",
+        role = "렌즈 플레어·강한 광원 번짐 제거",
+        personality = "야간 조명 번짐은 줄이고 광원 자체는 보존",
+        strengths = "Flare7K 계열 데이터셋/모델을 기준으로 야간 플레어를 다룹니다",
+        cost = "중간~높음",
+        status = "중요 후보",
+        runtime = "LiteRT / Native Tile",
+        assetPath = "models/flare_guard.tflite",
+        memoryTier = "L"
+    ),
+    RemasterModelCandidate(
+        id = "glass_reflection_remover",
+        category = "제거·반사",
+        title = "Glass Reflection Remover",
+        role = "유리창 반사 제거",
+        personality = "실내 조명·유리 반사를 약하게 분리",
+        strengths = "반사층과 실제 장면층을 분리하는 reflection removal 계열 모델 슬롯입니다",
+        cost = "높음",
+        status = "실험 후보",
+        runtime = "LiteRT / Native Tile",
+        assetPath = "models/glass_reflection_remover.tflite",
+        memoryTier = "L"
+    ),
+    RemasterModelCandidate(
+        id = "specular_highlight_tamer",
+        category = "제거·반사",
+        title = "Specular Highlight Tamer",
+        role = "빛반사·번들거림 완화",
+        personality = "금속, 유리, 피부의 과한 반짝임을 줄임",
+        strengths = "마스크와 인페인팅을 섞어 하이라이트 클리핑 주변을 자연스럽게 보정합니다",
+        cost = "중간",
+        status = "후보",
+        runtime = "LiteRT",
+        assetPath = "models/specular_highlight_tamer.tflite",
+        memoryTier = "M"
+    ),
+    RemasterModelCandidate(
+        id = "object_dust_eraser",
+        category = "제거·반사",
+        title = "Object & Dust Eraser",
+        role = "먼지·작은 물체 제거",
+        personality = "작은 잡티부터 간단한 방해물까지 제거",
+        strengths = "마스크 기반 인페인팅 모델을 연결하는 슬롯입니다",
+        cost = "중간~높음",
+        status = "후보",
+        runtime = "LiteRT / Native Tile",
+        assetPath = "models/object_dust_eraser.tflite",
+        memoryTier = "L"
+    ),
+    RemasterModelCandidate(
+        id = "shadow_lifter",
+        category = "장면",
+        title = "Shadow Lifter",
+        role = "강한 그림자 완화",
+        personality = "어두운 영역을 살리되 HDR처럼 과장하지 않음",
+        strengths = "피사체/배경 마스크와 로컬 톤맵을 결합합니다",
+        cost = "중간",
+        status = "후보",
+        runtime = "LiteRT",
+        assetPath = "models/shadow_lifter.tflite",
+        memoryTier = "M"
+    ),
+    RemasterModelCandidate(
         id = "detail_restorer_light",
+        category = "복원",
         title = "Detail Restorer Lite",
         role = "가벼운 디테일 복원",
         personality = "미리보기에서도 쓸 수 있는 경량 복원",
@@ -100,6 +199,7 @@ val OnDeviceRemasterModels = listOf(
     ),
     RemasterModelCandidate(
         id = "detail_restorer_hq",
+        category = "복원",
         title = "Detail Restorer HQ",
         role = "고품질 디테일 복원·업스케일",
         personality = "느리지만 고품질 내보내기용",
@@ -112,6 +212,7 @@ val OnDeviceRemasterModels = listOf(
     ),
     RemasterModelCandidate(
         id = "jpeg_artifact_cleaner",
+        category = "복원",
         title = "JPEG Artifact Cleaner",
         role = "압축 노이즈 제거",
         personality = "뭉개진 JPEG를 덜 지저분하게 정리",
@@ -124,6 +225,7 @@ val OnDeviceRemasterModels = listOf(
     ),
     RemasterModelCandidate(
         id = "look_reasoner",
+        category = "룩 추론",
         title = "Look Reasoner",
         role = "색감·프리셋 추천",
         personality = "사진 분위기를 읽고 자연스러운 룩을 제안",
@@ -133,17 +235,5 @@ val OnDeviceRemasterModels = listOf(
         runtime = "LiteRT",
         assetPath = "models/look_reasoner.tflite",
         memoryTier = "M"
-    ),
-    RemasterModelCandidate(
-        id = "scene_quality_ranker",
-        title = "Scene Quality Ranker",
-        role = "사진 품질·문제 감지",
-        personality = "흔들림, 노출 실패, 과채도, 저대비를 먼저 판단",
-        strengths = "어떤 보정 엔진을 쓸지 선택하는 라우터 역할입니다",
-        cost = "낮음",
-        status = "후보",
-        runtime = "LiteRT",
-        assetPath = "models/scene_quality_ranker.tflite",
-        memoryTier = "S"
     )
 )
