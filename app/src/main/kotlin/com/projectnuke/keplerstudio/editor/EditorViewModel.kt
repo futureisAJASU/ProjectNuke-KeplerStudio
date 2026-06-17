@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.ln
+import kotlin.math.max
 import kotlin.math.roundToInt
 
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
@@ -102,6 +104,45 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     saveDraftSnapshot(context, next)
                     next
                 }
+            } else {
+                rendered.recycle()
+            }
+        }
+    }
+
+    fun applyAutoEnhance() {
+        val current = _uiState.value
+        val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
+        if (basePreview == null) {
+            _uiState.update { it.copy(message = "자동 보정을 적용할 이미지가 없습니다") }
+            return
+        }
+
+        val nextRevision = current.revision + 1
+        renderJob?.cancel()
+        _uiState.update { it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다") }
+
+        renderJob = viewModelScope.launch {
+            try {
+                val nextParams = withContext(Dispatchers.Default) { computeAutoEnhanceParams(basePreview) }
+                val rendered = withContext(Dispatchers.Default) { renderEditedPreview(basePreview, nextParams, nextRevision) }
+                if (_uiState.value.revision == nextRevision) {
+                    val context = getApplication<Application>()
+                    _uiState.update {
+                        val next = it.copy(
+                            params = nextParams,
+                            previewBitmap = rendered,
+                            isBusy = false,
+                            message = "자동 보정이 적용되었습니다"
+                        )
+                        saveDraftSnapshot(context, next)
+                        next
+                    }
+                } else {
+                    rendered.recycle()
+                }
+            } catch (t: Throwable) {
+                _uiState.update { it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}") }
             }
         }
     }
@@ -326,6 +367,105 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 }
 
+private data class LumaStats(
+    val p01: Float,
+    val p05: Float,
+    val p50: Float,
+    val p95: Float,
+    val p99: Float,
+    val mean: Float,
+    val chromaMean: Float
+)
+
+private fun computeAutoEnhanceParams(bitmap: Bitmap): EditParams {
+    val stats = analyzeBitmap(bitmap)
+    val safeMedian = stats.p50.coerceAtLeast(0.015f)
+    val exposure = (ln(0.46f / safeMedian) / ln(2f)).toFloat().coerceIn(-0.70f, 0.70f)
+
+    val range = (stats.p95 - stats.p05).coerceAtLeast(0.01f)
+    val contrast = ((0.58f - range) * 0.70f).coerceIn(-0.22f, 0.38f)
+    val shadows = ((0.24f - stats.p05) * 0.85f).coerceIn(-0.18f, 0.42f)
+    val highlights = ((stats.p95 - 0.78f) * 0.95f).coerceIn(-0.18f, 0.42f)
+    val whites = ((0.97f - stats.p99) * 0.65f).coerceIn(-0.20f, 0.30f)
+    val blacks = ((0.025f - stats.p01) * 1.05f).coerceIn(-0.32f, 0.22f)
+    val vibrance = ((0.30f - stats.chromaMean) * 0.72f).coerceIn(0.00f, 0.28f)
+    val saturation = if (stats.chromaMean < 0.10f) 0.04f else 0.00f
+    val clarity = if (range < 0.48f) 0.12f else 0.07f
+    val dehaze = if (stats.p05 > 0.10f && stats.p95 < 0.86f) 0.10f else 0.02f
+    val noiseReduction = if (stats.mean < 0.34f) 0.20f else 0.08f
+
+    return EditParams(
+        exposure = exposure,
+        contrast = contrast,
+        shadows = shadows,
+        highlights = highlights,
+        whites = whites,
+        blacks = blacks,
+        temperature = 0f,
+        tint = 0f,
+        saturation = saturation,
+        vibrance = vibrance,
+        clarity = clarity,
+        dehaze = dehaze,
+        sharpness = 0.16f,
+        noiseReduction = noiseReduction
+    )
+}
+
+private fun analyzeBitmap(bitmap: Bitmap): LumaStats {
+    val histogram = IntArray(256)
+    var count = 0
+    var lumaSum = 0f
+    var chromaSum = 0f
+    val step = max(1, max(bitmap.width, bitmap.height) / 512)
+    val row = IntArray(bitmap.width)
+
+    var y = 0
+    while (y < bitmap.height) {
+        bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+        var x = 0
+        while (x < bitmap.width) {
+            val pixel = row[x]
+            val r = ((pixel shr 16) and 0xff) / 255f
+            val g = ((pixel shr 8) and 0xff) / 255f
+            val b = (pixel and 0xff) / 255f
+            val luma = (0.2126f * r + 0.7152f * g + 0.0722f * b).coerceIn(0f, 1f)
+            val maxC = max(r, max(g, b))
+            val minC = kotlin.math.min(r, kotlin.math.min(g, b))
+            histogram[(luma * 255f).roundToInt().coerceIn(0, 255)] += 1
+            lumaSum += luma
+            chromaSum += (maxC - minC).coerceIn(0f, 1f)
+            count += 1
+            x += step
+        }
+        y += step
+    }
+
+    if (count <= 0) {
+        return LumaStats(0f, 0f, 0.5f, 1f, 1f, 0.5f, 0.1f)
+    }
+
+    return LumaStats(
+        p01 = percentileFromHistogram(histogram, count, 0.01f),
+        p05 = percentileFromHistogram(histogram, count, 0.05f),
+        p50 = percentileFromHistogram(histogram, count, 0.50f),
+        p95 = percentileFromHistogram(histogram, count, 0.95f),
+        p99 = percentileFromHistogram(histogram, count, 0.99f),
+        mean = lumaSum / count,
+        chromaMean = chromaSum / count
+    )
+}
+
+private fun percentileFromHistogram(histogram: IntArray, count: Int, percentile: Float): Float {
+    val target = (count * percentile).roundToInt().coerceIn(1, count)
+    var accum = 0
+    for (i in histogram.indices) {
+        accum += histogram[i]
+        if (accum >= target) return i / 255f
+    }
+    return 1f
+}
+
 private fun copyUriToCache(context: Context, uri: Uri): File {
     val outFile = File(context.cacheDir, "source_${System.currentTimeMillis()}.img")
     context.contentResolver.openInputStream(uri).use { input ->
@@ -341,7 +481,7 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
     require(bounds.outWidth > 0 && bounds.outHeight > 0) { "지원하지 않는 이미지이거나 디코딩에 실패했습니다" }
 
     var sample = 1
-    val longest = kotlin.math.max(bounds.outWidth, bounds.outHeight)
+    val longest = max(bounds.outWidth, bounds.outHeight)
     while (longest / sample > maxSide) sample *= 2
 
     val options = BitmapFactory.Options().apply {
