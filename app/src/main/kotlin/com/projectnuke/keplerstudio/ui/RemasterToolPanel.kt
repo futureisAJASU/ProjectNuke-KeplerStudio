@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
@@ -29,6 +30,11 @@ private val RemasterButtonTextDark = Color(0xFF111111)
 fun RemasterToolPanel(
     onQuickAutoEnhance: () -> Unit
 ) {
+    val context = LocalContext.current
+    val activeModel = RemasterModelSession.activeModel
+    val statusText = RemasterModelSession.statusText
+    val loaded = RemasterModelSession.isModelLoaded
+
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             text = "사진을 분석해 자동으로 보정합니다. 빠른 자동 보정은 즉시 사용할 수 있으며, 모델 기반 리마스터는 온디바이스 추론 엔진 연결 후 활성화됩니다",
@@ -67,28 +73,26 @@ fun RemasterToolPanel(
         ) {
             Text("모델 기반 리마스터", color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
             Text(
-                "마스크를 따고 영역별로 색감, 노이즈, 디테일을 다르게 보정하는 온디바이스 리마스터 모드입니다",
+                "여러 모델을 등록해도 런타임에는 하나만 유지합니다. 새 모델을 선택하면 기존 모델을 먼저 해제한 뒤 선택한 모델 슬롯을 엽니다",
                 color = RemasterTextSecondary,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { }, enabled = false) {
-                    Text("균형 리마스터")
-                }
-                TextButton(onClick = { }, enabled = false) {
-                    Text("인물 보호")
-                }
-                TextButton(onClick = { }, enabled = false) {
-                    Text("야간 복원")
-                }
-            }
             Text(
-                text = "모델 파일과 LiteRT/TFLite 런타임이 연결되면 활성화됩니다",
-                color = RemasterTextMuted,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 6.dp)
+                text = statusText,
+                color = if (loaded) RemasterTextPrimary else RemasterTextMuted,
+                style = MaterialTheme.typography.bodySmall
             )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                TextButton(onClick = { RemasterModelSession.unload() }, enabled = activeModel != null) {
+                    Text("현재 모델 해제")
+                }
+                Text(
+                    text = activeModel?.let { "선택됨: ${it.title}" } ?: "선택된 모델 없음",
+                    color = RemasterTextMuted,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
 
         Text(
@@ -98,13 +102,21 @@ fun RemasterToolPanel(
             modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
         )
         OnDeviceRemasterModels.forEach { model ->
-            RemasterModelCard(model)
+            RemasterModelCard(
+                model = model,
+                isActive = activeModel?.id == model.id,
+                onSelect = { RemasterModelSession.load(context, model) }
+            )
         }
     }
 }
 
 @Composable
-private fun RemasterModelCard(model: RemasterModelCandidate) {
+private fun RemasterModelCard(
+    model: RemasterModelCandidate,
+    isActive: Boolean,
+    onSelect: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -117,10 +129,14 @@ private fun RemasterModelCard(model: RemasterModelCandidate) {
                 Text(model.title, color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
                 Text(model.role, color = RemasterTextSecondary, style = MaterialTheme.typography.bodySmall)
             }
-            Text(model.status, color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall)
+            Text(if (isActive) "선택됨" else model.status, color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall)
         }
         Text("성격: ${model.personality}", color = RemasterTextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
         Text("특징: ${model.strengths}", color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
-        Text("비용: ${model.cost}", color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
+        Text("런타임: ${model.runtime} · 메모리: ${model.memoryTier} · 비용: ${model.cost}", color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
+        Text("파일: ${model.assetPath}", color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
+        TextButton(onClick = onSelect, modifier = Modifier.padding(top = 4.dp)) {
+            Text(if (isActive) "다시 로드" else "이 모델 선택")
+        }
     }
 }
