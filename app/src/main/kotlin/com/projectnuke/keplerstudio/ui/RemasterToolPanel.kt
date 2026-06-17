@@ -127,7 +127,7 @@ private fun RemasterModelCard(
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(model.title, color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
-                Text(model.role, color = RemasterTextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text("${model.category} · ${model.role}", color = RemasterTextSecondary, style = MaterialTheme.typography.bodySmall)
             }
             Text(if (isActive) "선택됨" else model.status, color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall)
         }
