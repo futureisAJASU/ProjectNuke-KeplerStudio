@@ -71,6 +71,13 @@ object NativePhotoCore {
         return result
     }
 
+    fun nativeApplySpecialEffectInPlace(
+        bitmap: Bitmap,
+        effect: Int,
+        strength: Float,
+        revision: Int
+    ): Int = nativeApplySpecialEffectInPlaceNative(bitmap, effect, strength, revision)
+
     private external fun nativeRenderPreviewInPlaceNative(
         bitmap: Bitmap,
         exposure: Float,
@@ -91,6 +98,13 @@ object NativePhotoCore {
         detailEngine: Int,
         toneEngine: Int,
         hazeEngine: Int,
+        revision: Int
+    ): Int
+
+    private external fun nativeApplySpecialEffectInPlaceNative(
+        bitmap: Bitmap,
+        effect: Int,
+        strength: Float,
         revision: Int
     ): Int
 }
