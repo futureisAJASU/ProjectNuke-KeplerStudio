@@ -20,6 +20,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.FlareGuardMode
 
 private val RemasterCardBackground = Color(0xFF242424)
 private val RemasterAccent = Color(0xFFE6E6E6)
@@ -135,10 +136,10 @@ fun RemasterToolPanel(
                 TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }) {
                     Text("장면 분석")
                 }
-                TextButton(onClick = { editorViewModel.applyFlareGuardV0Preview() }) {
+                TextButton(onClick = { editorViewModel.applyFlareGuardAiPreview(context, FlareGuardMode.NightLight) }) {
                     Text("번짐 완화")
                 }
-                TextButton(onClick = { editorViewModel.applyDaySunFlareGuardV0Preview() }) {
+                TextButton(onClick = { editorViewModel.applyFlareGuardAiPreview(context, FlareGuardMode.DaySun) }) {
                     Text("태양 번짐 완화")
                 }
                 TextButton(onClick = { editorViewModel.exportUniversalBalancerTrainingRow() }) {
