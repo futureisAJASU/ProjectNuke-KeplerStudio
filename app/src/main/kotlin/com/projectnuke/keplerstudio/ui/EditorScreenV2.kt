@@ -361,7 +361,7 @@ private fun V2AdjustmentPanel(
                 V2EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance)
                 V2EditorTool.Profiles -> V2PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결합니다")
                 V2EditorTool.Presets -> PresetToolPanel(params = params, onApplyPreset = { presetParams -> onChange { presetParams } })
-                V2EditorTool.Crop -> V2PlaceholderPanel("비율, 회전, 수평 기반 자르기 도구를 준비 중입니다")
+                V2EditorTool.Crop -> CropToolPanel()
                 V2EditorTool.Masking -> MaskingToolPanel()
                 V2EditorTool.Remove -> V2PlaceholderPanel("지우개, 반사 제거, 센서 먼지 제거 엔진을 연결할 예정입니다")
                 V2EditorTool.Light -> V2LightPanel(params, onChange)
