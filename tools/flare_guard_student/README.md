@@ -4,6 +4,34 @@ This tool creates the first real `flare_guard.tflite` model for Kepler Studio.
 
 The goal is not final-quality flare removal yet. The first goal is to make the Android app run a real on-device TFLite model that predicts a soft flare mask, then lets the existing Kotlin Flare Guard correction do the conservative edit.
 
+## V0 scope
+
+V0 is only for obvious light-source flare artifacts.
+
+In scope:
+
+```text
+street-lamp halo
+car-headlight halo
+signboard glow
+sun flare near the light source
+lens ghost blob
+light streak
+```
+
+Out of scope for V0:
+
+```text
+window haze
+bus/car-window diffusion
+large glass reflection haze
+lens fingerprint fog
+scene-wide dehaze
+ordinary low-contrast photos
+```
+
+Do not add broad window-haze samples to the first training set. They need a separate veiling/window-haze channel later, because the correction method is different from point-source flare correction.
+
 ## What this trains
 
 ```text
@@ -14,13 +42,13 @@ File  : flare_guard.tflite
 
 This is a bootstrap student model. It learns from:
 
-1. pseudo masks generated from bright light / haze heuristics similar to `FlareGuardV0`
+1. pseudo masks generated from bright point-light / halo heuristics similar to `FlareGuardV0`
 2. optional synthetic flare blobs and streaks added during training
 3. later, real teacher masks from Flare7K++ or manually corrected rows
 
 ## Fast path
 
-Create local image folders. The images can be ordinary phone photos. More flare/backlight samples are better.
+Create local image folders. The images can be ordinary phone photos. More obvious flare/backlight samples are better.
 
 ```text
 datasets/kepler_flare/raw/night
@@ -90,14 +118,23 @@ signboards
 phone lens ghost blobs
 sun near frame edge
 sun inside frame
-backlit landscape
-sky washed by sunlight
+backlit light source with local halo
+```
+
+Avoid these for V0:
+
+```text
+photos made hazy mainly by a window
+large glass reflections without a clear bright source
+foggy/low-contrast scenes without flare
+lens-smudge haze
 ```
 
 ## Next upgrade path
 
-1. Run Flare7K++ teacher on night flare images.
+1. Run Flare7K++ teacher on obvious night/day flare images.
 2. Save `mask = blur(threshold(abs(input - teacher_output)))` with bright-core protection.
 3. Add those masks as real targets.
 4. Train this same model architecture against the teacher masks.
 5. Replace only the `.tflite`; Android code can stay the same.
+6. Add a separate veiling/window-haze channel after the point-source flare path is stable.
