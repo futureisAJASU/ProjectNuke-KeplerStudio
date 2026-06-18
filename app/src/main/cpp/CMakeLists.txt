@@ -6,6 +6,7 @@ add_library(
     SHARED
     native_bridge.cpp
     native_bridge_alias.cpp
+    native_special_effects.cpp
 )
 
 find_library(log-lib log)
