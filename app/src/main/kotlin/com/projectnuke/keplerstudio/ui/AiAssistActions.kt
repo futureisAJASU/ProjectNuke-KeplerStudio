@@ -1,5 +1,6 @@
 package com.projectnuke.keplerstudio.ui
 
+import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.analyzeAutoRouterV0
