@@ -9,6 +9,7 @@ data class EditorUiState(
     val previewBitmap: Bitmap? = null,
     val params: EditParams = EditParams(),
     val presetLook: PresetColorLook? = null,
+    val cropState: CropState = CropState(),
     val exportFormat: ExportFormat = ExportFormat.Jpeg,
     val exportResolution: ExportResolution = ExportResolution.Full,
     val exportHistoryRetention: ExportHistoryRetention = ExportHistoryRetention.Never,
