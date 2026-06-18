@@ -160,7 +160,7 @@ class FlareGuardModelRunner private constructor(
 
     private fun readOutputValue(buffer: ByteBuffer): Float {
         return when (outputType) {
-            DataType.FLOAT32 -> buffer.float
+            DataType.FLOAT32 -> buffer.getFloat()
             DataType.UINT8 -> (buffer.get().toInt() and 0xff) / 255f
             DataType.INT8 -> ((buffer.get().toInt() + 128).coerceIn(0, 255)) / 255f
             else -> error("Unsupported FlareGuard output tensor type: $outputType")
