@@ -1,9 +1,9 @@
 package com.projectnuke.keplerstudio.ui
 
-import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.analyzeAutoRouterV0
+import com.projectnuke.keplerstudio.editor.applyDaySunFlareGuardV0
 import com.projectnuke.keplerstudio.editor.applyFlareGuardV0
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -58,6 +58,45 @@ fun EditorViewModel.applyFlareGuardV0Preview() {
         } catch (t: Throwable) {
             editorFlowAi().update {
                 it.copy(isBusy = false, message = "플레어 완화에 실패했습니다: ${t.message}")
+            }
+        }
+    }
+}
+
+fun EditorViewModel.applyDaySunFlareGuardV0Preview() {
+    val state = uiState.value
+    val base = state.previewBitmap ?: state.originalPreviewBitmap
+    if (base == null) {
+        editorFlowAi().update { it.copy(message = "태양 플레어 완화를 적용할 이미지가 없습니다") }
+        return
+    }
+    val nextRevision = state.revision + 1
+    editorFlowAi().update {
+        it.copy(
+            isBusy = true,
+            revision = nextRevision,
+            message = "태양 플레어 완화를 적용하는 중입니다"
+        )
+    }
+    viewModelScope.launch {
+        try {
+            val rendered = withContext(Dispatchers.Default) {
+                applyDaySunFlareGuardV0(base, strength = 0.32f)
+            }
+            if (uiState.value.revision == nextRevision) {
+                editorFlowAi().update {
+                    it.copy(
+                        previewBitmap = rendered,
+                        isBusy = false,
+                        message = "태양 플레어 완화를 적용했습니다"
+                    )
+                }
+            } else {
+                rendered.recycle()
+            }
+        } catch (t: Throwable) {
+            editorFlowAi().update {
+                it.copy(isBusy = false, message = "태양 플레어 완화에 실패했습니다: ${t.message}")
             }
         }
     }
