@@ -1,5 +1,6 @@
 package com.projectnuke.keplerstudio.ui
 
+import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.CropAspectRatio
 import com.projectnuke.keplerstudio.editor.CropState
 import com.projectnuke.keplerstudio.editor.EditorUiState
