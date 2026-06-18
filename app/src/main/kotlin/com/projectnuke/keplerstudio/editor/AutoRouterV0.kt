@@ -16,6 +16,9 @@ data class AutoRouterScores(
     val food: Float,
     val document: Float,
     val flare: Float,
+    val sunFlare: Float,
+    val veilingGlare: Float,
+    val ghostBlob: Float,
     val reflection: Float,
     val jpegArtifact: Float,
     val blur: Float,
@@ -33,6 +36,9 @@ data class AutoRouterScores(
         if (food >= threshold) add("food")
         if (document >= threshold) add("document")
         if (flare >= threshold) add("flare")
+        if (sunFlare >= threshold) add("sun_flare")
+        if (veilingGlare >= threshold) add("veiling_glare")
+        if (ghostBlob >= threshold) add("ghost_blob")
         if (reflection >= threshold) add("reflection")
         if (jpegArtifact >= threshold) add("jpeg_artifact")
         if (blur >= threshold) add("blur")
@@ -49,12 +55,16 @@ fun analyzeAutoRouterV0(bitmap: Bitmap): AutoRouterScores {
     val overexposed = smoothScore(0.08f, 0.28f, stats.clipHighRatio)
     val highDynamicRange = smoothScore(0.52f, 0.82f, stats.p95 - stats.p05)
     val flare = (smoothScore(0.01f, 0.08f, stats.clipHighRatio) * smoothScore(0.72f, 0.92f, stats.p99)).coerceIn(0f, 1f)
+    val sunFlare = (smoothScore(0.008f, 0.055f, stats.clipHighRatio) * smoothScore(0.48f, 0.76f, stats.mean) * smoothScore(0.05f, 0.16f, stats.warmDominance + stats.blueDominance)).coerceIn(0f, 1f)
+    val veilingGlare = (smoothScore(0.50f, 0.74f, stats.mean) * smoothScore(0.18f, 0.46f, stats.p05) * smoothScore(0.38f, 0.72f, stats.p95 - stats.p05)).coerceIn(0f, 1f)
+    val ghostBlob = (smoothScore(0.012f, 0.065f, stats.clipHighRatio) * smoothScore(0.08f, 0.22f, stats.chromaMean)).coerceIn(0f, 1f)
     val noise = if (stats.mean < 0.34f) 0.58f else 0.18f
     val document = if (stats.chromaMean < 0.05f && stats.p95 - stats.p05 > 0.55f) 0.55f else 0.08f
     val landscape = if (stats.chromaMean > 0.12f && stats.mean in 0.35f..0.72f) 0.38f else 0.12f
     val sky = if (stats.blueDominance > 0.06f && stats.mean > 0.42f) 0.45f else 0.10f
     val food = if (stats.warmDominance > 0.08f && stats.chromaMean > 0.12f) 0.32f else 0.08f
-    val normal = (1f - max(max(lowLight, overexposed), max(underexposed, flare))).coerceIn(0f, 1f)
+    val biggestIssue = max(max(lowLight, overexposed), max(max(underexposed, flare), max(sunFlare, veilingGlare)))
+    val normal = (1f - biggestIssue).coerceIn(0f, 1f)
 
     return AutoRouterScores(
         normal = normal,
@@ -68,6 +78,9 @@ fun analyzeAutoRouterV0(bitmap: Bitmap): AutoRouterScores {
         food = food,
         document = document,
         flare = flare,
+        sunFlare = sunFlare,
+        veilingGlare = veilingGlare,
+        ghostBlob = ghostBlob,
         reflection = 0.0f,
         jpegArtifact = 0.0f,
         blur = 0.0f,
