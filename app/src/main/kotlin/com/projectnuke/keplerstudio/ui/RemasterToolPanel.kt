@@ -138,6 +138,9 @@ fun RemasterToolPanel(
                 TextButton(onClick = { editorViewModel.applyFlareGuardV0Preview() }) {
                     Text("번짐 완화")
                 }
+                TextButton(onClick = { editorViewModel.applyDaySunFlareGuardV0Preview() }) {
+                    Text("태양 번짐 완화")
+                }
                 TextButton(onClick = { editorViewModel.exportUniversalBalancerTrainingRow() }) {
                     Text("학습 row 저장")
                 }
