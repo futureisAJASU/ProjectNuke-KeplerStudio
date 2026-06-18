@@ -4,6 +4,11 @@ import android.graphics.Bitmap
 import kotlin.math.max
 import kotlin.math.roundToInt
 
+enum class FlareGuardMode {
+    NightLight,
+    DaySun
+}
+
 fun createFlareMaskV0(bitmap: Bitmap, threshold: Float = 0.90f): Bitmap {
     val width = bitmap.width
     val height = bitmap.height
@@ -50,6 +55,34 @@ fun applyFlareGuardV0(source: Bitmap, strength: Float = 0.35f): Bitmap {
     return output
 }
 
+fun applyDaySunFlareGuardV0(source: Bitmap, strength: Float = 0.32f): Bitmap {
+    val output = source.copy(Bitmap.Config.ARGB_8888, true)
+    val sunMask = createFlareMaskV0(source, threshold = 0.86f)
+    val hazeMask = blurMaskBox(sunMask.copy(Bitmap.Config.ARGB_8888, true), radius = max(10, max(source.width, source.height) / 42), passes = 2)
+    val safeStrength = strength.coerceIn(0f, 1f)
+    val width = output.width
+    val row = IntArray(width)
+    val hazeRow = IntArray(width)
+
+    for (y in 0 until output.height) {
+        output.getPixels(row, 0, width, 0, y, width, 1)
+        hazeMask.getPixels(hazeRow, 0, width, 0, y, width, 1)
+        for (x in 0 until width) {
+            val pixel = row[x]
+            val luma = flareLuma(pixel)
+            val rawMask = ((hazeRow[x] ushr 16) and 0xff) / 255f
+            val sunCoreProtect = smoothstep(0.90f, 1.0f, luma)
+            val amount = rawMask * safeStrength * (1f - 0.82f * sunCoreProtect)
+            if (amount <= 0.001f) continue
+            row[x] = recoverSunVeilPixel(pixel, amount)
+        }
+        output.setPixels(row, 0, width, 0, y, width, 1)
+    }
+
+    hazeMask.recycle()
+    return output
+}
+
 private fun reduceFlarePixel(pixel: Int, amount: Float): Int {
     val a = pixel and -0x1000000
     val r = (pixel ushr 16) and 0xff
@@ -67,6 +100,27 @@ private fun reduceFlarePixel(pixel: Int, amount: Float): Int {
     }
 
     return a or (channel(r) shl 16) or (channel(g) shl 8) or channel(b)
+}
+
+private fun recoverSunVeilPixel(pixel: Int, amount: Float): Int {
+    val alpha = pixel and -0x1000000
+    val r = (pixel ushr 16) and 0xff
+    val g = (pixel ushr 8) and 0xff
+    val b = pixel and 0xff
+    val luma = flareLuma(pixel)
+    val contrastGain = 1f + amount * 0.22f
+    val saturationGain = 1f + amount * 0.12f
+    val darken = amount * 0.08f
+
+    fun channel(c: Int): Int {
+        val normalized = c / 255f
+        val contrast = ((normalized - 0.5f) * contrastGain + 0.5f).coerceIn(0f, 1f)
+        val saturated = luma + (contrast - luma) * saturationGain
+        val corrected = saturated * (1f - darken)
+        return (corrected * 255f).roundToInt().coerceIn(0, 255)
+    }
+
+    return alpha or (channel(r) shl 16) or (channel(g) shl 8) or channel(b)
 }
 
 private fun blurMaskBox(mask: Bitmap, radius: Int, passes: Int): Bitmap {
