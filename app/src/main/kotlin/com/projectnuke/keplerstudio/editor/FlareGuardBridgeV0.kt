@@ -2,8 +2,11 @@ package com.projectnuke.keplerstudio.editor
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.util.Log
 import kotlin.math.max
 import kotlin.math.roundToInt
+
+private const val FLARE_GUARD_BRIDGE_TAG = "KeplerFlareAI"
 
 fun applyFlareGuardModelOrRuleV0(
     context: Context,
@@ -17,17 +20,30 @@ fun applyFlareGuardModelOrRuleV0(
     val runner = FlareGuardModelRunner.createOrNull(context)
     if (runner != null) {
         try {
+            Log.i(
+                FLARE_GUARD_BRIDGE_TAG,
+                "FlareGuard model loaded: mode=$mode input=${runner.inputWidth}x${runner.inputHeight} source=${source.width}x${source.height}"
+            )
             val result = runner.predictMaskOrNull(source)
             if (result != null) {
+                Log.i(
+                    FLARE_GUARD_BRIDGE_TAG,
+                    "FlareGuard model inference success: mode=$mode mean=${result.meanAlpha} max=${result.maxAlpha}"
+                )
                 try {
                     return applyFlareGuardMaskBlendV0(source, result.mask, mode, strength)
                 } finally {
                     result.mask.recycle()
                 }
             }
+            Log.w(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model inference returned null; falling back to rule path")
+        } catch (t: Throwable) {
+            Log.e(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model path failed; falling back to rule path", t)
         } finally {
             runner.close()
         }
+    } else {
+        Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model asset unavailable; using rule fallback")
     }
 
     return when (mode) {
