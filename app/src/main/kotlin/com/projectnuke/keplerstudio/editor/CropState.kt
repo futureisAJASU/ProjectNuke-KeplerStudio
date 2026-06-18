@@ -1,0 +1,75 @@
+package com.projectnuke.keplerstudio.editor
+
+import kotlin.math.max
+import kotlin.math.min
+
+enum class CropAspectRatio(val label: String, val ratio: Float?) {
+    Free("자유", null),
+    Original("원본", -1f),
+    Square("1:1", 1f),
+    FourThree("4:3", 4f / 3f),
+    ThreeFour("3:4", 3f / 4f),
+    SixteenNine("16:9", 16f / 9f),
+    NineSixteen("9:16", 9f / 16f)
+}
+
+data class CropState(
+    val aspectRatio: CropAspectRatio = CropAspectRatio.Original,
+    val cropLeft: Float = 0f,
+    val cropTop: Float = 0f,
+    val cropRight: Float = 1f,
+    val cropBottom: Float = 1f,
+    val rotationDegrees: Int = 0,
+    val straightenDegrees: Float = 0f,
+    val flipHorizontal: Boolean = false
+) {
+    val cropWidth: Float get() = (cropRight - cropLeft).coerceIn(0f, 1f)
+    val cropHeight: Float get() = (cropBottom - cropTop).coerceIn(0f, 1f)
+}
+
+fun CropState.normalized(minSize: Float = 0.08f): CropState {
+    val left = min(cropLeft, cropRight).coerceIn(0f, 1f)
+    val right = max(cropLeft, cropRight).coerceIn(0f, 1f)
+    val top = min(cropTop, cropBottom).coerceIn(0f, 1f)
+    val bottom = max(cropTop, cropBottom).coerceIn(0f, 1f)
+    val fixedRight = if (right - left < minSize) (left + minSize).coerceAtMost(1f) else right
+    val fixedBottom = if (bottom - top < minSize) (top + minSize).coerceAtMost(1f) else bottom
+    return copy(
+        cropLeft = fixedRight.minus(fixedRight - left).coerceIn(0f, 1f),
+        cropTop = fixedBottom.minus(fixedBottom - top).coerceIn(0f, 1f),
+        cropRight = fixedRight,
+        cropBottom = fixedBottom,
+        rotationDegrees = ((rotationDegrees % 360) + 360) % 360,
+        straightenDegrees = straightenDegrees.coerceIn(-45f, 45f)
+    )
+}
+
+fun centeredCropForAspect(imageWidth: Int, imageHeight: Int, aspect: CropAspectRatio): CropState {
+    val imageRatio = if (imageHeight > 0) imageWidth.toFloat() / imageHeight.toFloat() else 1f
+    val targetRatio = when (aspect) {
+        CropAspectRatio.Free -> null
+        CropAspectRatio.Original -> imageRatio
+        else -> aspect.ratio
+    }
+    if (targetRatio == null || targetRatio <= 0f) {
+        return CropState(aspectRatio = aspect)
+    }
+    val normalizedWidth: Float
+    val normalizedHeight: Float
+    if (imageRatio > targetRatio) {
+        normalizedHeight = 1f
+        normalizedWidth = (targetRatio / imageRatio).coerceIn(0.08f, 1f)
+    } else {
+        normalizedWidth = 1f
+        normalizedHeight = (imageRatio / targetRatio).coerceIn(0.08f, 1f)
+    }
+    val left = (1f - normalizedWidth) / 2f
+    val top = (1f - normalizedHeight) / 2f
+    return CropState(
+        aspectRatio = aspect,
+        cropLeft = left,
+        cropTop = top,
+        cropRight = left + normalizedWidth,
+        cropBottom = top + normalizedHeight
+    )
+}
