@@ -18,7 +18,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
 
@@ -31,10 +30,10 @@ private val RemasterButtonTextDark = Color(0xFF111111)
 
 @Composable
 fun RemasterToolPanel(
+    editorViewModel: EditorViewModel,
     onQuickAutoEnhance: () -> Unit
 ) {
     val context = LocalContext.current
-    val editorViewModel: EditorViewModel = viewModel()
     val activeModel = RemasterModelSession.activeModel
     val statusText = RemasterModelSession.statusText
     val loaded = RemasterModelSession.isModelLoaded
