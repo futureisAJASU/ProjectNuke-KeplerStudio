@@ -47,6 +47,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.DehazeEngine
@@ -112,11 +113,12 @@ private enum class V2EditorTool(val label: String, val description: String) {
 
 @Composable
 fun EditorScreenV2(viewModel: EditorViewModel) {
+    val context = LocalContext.current
     val state by viewModel.uiState.collectAsState()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             PresetLookHandoff.clear()
-            viewModel.openImage(uri)
+            viewModel.openImageWithExifOrientation(context, uri)
         }
     }
     var selectedTab by remember { mutableStateOf(V2MainTab.Editor) }
