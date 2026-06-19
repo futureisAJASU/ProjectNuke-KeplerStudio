@@ -18,8 +18,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.FlareGuardMode
+import androidx.lifecycle.viewmodel.compose.viewModel
 
 private val RemasterCardBackground = Color(0xFF242424)
 private val RemasterAccent = Color(0xFFE6E6E6)
@@ -30,10 +31,10 @@ private val RemasterButtonTextDark = Color(0xFF111111)
 
 @Composable
 fun RemasterToolPanel(
+    editorViewModel: EditorViewModel = viewModel()  ,
     onQuickAutoEnhance: () -> Unit
 ) {
     val context = LocalContext.current
-    val editorViewModel: EditorViewModel = viewModel()
     val activeModel = RemasterModelSession.activeModel
     val statusText = RemasterModelSession.statusText
     val loaded = RemasterModelSession.isModelLoaded
@@ -135,10 +136,10 @@ fun RemasterToolPanel(
                 TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }) {
                     Text("장면 분석")
                 }
-                TextButton(onClick = { editorViewModel.applyFlareGuardV0Preview() }) {
+                TextButton(onClick = { editorViewModel.applyFlareGuardAiPreview(context, FlareGuardMode.NightLight) }) {
                     Text("번짐 완화")
                 }
-                TextButton(onClick = { editorViewModel.applyDaySunFlareGuardV0Preview() }) {
+                TextButton(onClick = { editorViewModel.applyFlareGuardAiPreview(context, FlareGuardMode.DaySun) }) {
                     Text("태양 번짐 완화")
                 }
                 TextButton(onClick = { editorViewModel.exportUniversalBalancerTrainingRow() }) {

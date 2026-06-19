@@ -1,0 +1,3 @@
+# Kaggle currently ships TensorFlow 2.19.x in many notebook images.
+# Do not force a downgrade there; the trainer works with Keras 3 / TF 2.19.
+tensorflow>=2.16,<2.20
