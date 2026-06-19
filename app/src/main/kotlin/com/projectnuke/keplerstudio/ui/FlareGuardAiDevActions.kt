@@ -2,7 +2,10 @@ package com.projectnuke.keplerstudio.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Matrix
+import android.media.ExifInterface
+import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.EditParams
@@ -10,6 +13,8 @@ import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import com.projectnuke.keplerstudio.editor.applyFlareGuardModelOrRuleV0
+import java.io.File
+import java.io.FileOutputStream
 import java.util.ArrayDeque
 import java.util.WeakHashMap
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.max
 
 private const val FLARE_GUARD_AI_TAG = "KeplerFlareAI"
 private const val EDITOR_HISTORY_MAX = 8
@@ -34,6 +40,48 @@ private data class EditorHistoryStacks(
 )
 
 private val editorHistory = WeakHashMap<EditorViewModel, EditorHistoryStacks>()
+
+fun EditorViewModel.openImageWithExifOrientation(
+    context: Context,
+    uri: Uri
+) {
+    val stateFlow = mutableEditorStateFlowOrNull()
+    if (stateFlow == null) {
+        Log.e(FLARE_GUARD_AI_TAG, "Editor state reflection failed; cannot open image with EXIF orientation")
+        return
+    }
+
+    val appContext = context.applicationContext
+    editorHistory.remove(this)
+    stateFlow.update { it.copy(isBusy = true, message = "이미지를 여는 중입니다") }
+
+    viewModelScope.launch {
+        try {
+            val sourceFile = withContext(Dispatchers.IO) { copyUriToCacheForEditor(appContext, uri) }
+            val preview = withContext(Dispatchers.IO) {
+                decodeSampledMutableBitmapWithExif(sourceFile.absolutePath, maxSide = 2048)
+            }
+            Log.i(
+                FLARE_GUARD_AI_TAG,
+                "Opened image with EXIF orientation: ${sourceFile.name} preview=${preview.width}x${preview.height}"
+            )
+            stateFlow.update { state ->
+                state.copy(
+                    isBusy = false,
+                    sourcePath = sourceFile.absolutePath,
+                    originalPreviewBitmap = preview,
+                    previewBitmap = preview,
+                    params = EditParams(),
+                    revision = state.revision + 1,
+                    message = "원본 캐시가 완료되었습니다: ${preview.width}x${preview.height} preview"
+                )
+            }
+        } catch (t: Throwable) {
+            Log.e(FLARE_GUARD_AI_TAG, "Open image with EXIF orientation failed", t)
+            stateFlow.update { it.copy(isBusy = false, message = "이미지를 열지 못했습니다: ${t.message}") }
+        }
+    }
+}
 
 fun EditorViewModel.applyParamChangeWithUndo(transform: (EditParams) -> EditParams) {
     pushUndoSnapshot(clearRedo = true)
@@ -225,6 +273,67 @@ private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot = EditorHis
     originalPreviewBitmap = originalPreviewBitmap?.copy(Bitmap.Config.ARGB_8888, false),
     revision = revision
 )
+
+private fun copyUriToCacheForEditor(context: Context, uri: Uri): File {
+    val outFile = File(context.cacheDir, "source_${System.currentTimeMillis()}.img")
+    context.contentResolver.openInputStream(uri).use { input ->
+        requireNotNull(input) { "input stream is null" }
+        FileOutputStream(outFile).use { output -> input.copyTo(output) }
+    }
+    return outFile
+}
+
+private fun decodeSampledMutableBitmapWithExif(path: String, maxSide: Int): Bitmap {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, bounds)
+    require(bounds.outWidth > 0 && bounds.outHeight > 0) { "지원하지 않는 이미지이거나 디코딩에 실패했습니다" }
+
+    var sample = 1
+    val longest = max(bounds.outWidth, bounds.outHeight)
+    while (longest / sample > maxSide) sample *= 2
+
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+        inMutable = true
+    }
+    val decoded = requireNotNull(BitmapFactory.decodeFile(path, options)) { "미리보기 디코딩에 실패했습니다" }
+        .copy(Bitmap.Config.ARGB_8888, true)
+
+    return applyExifOrientation(path, decoded)
+}
+
+private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
+    val orientation = runCatching {
+        ExifInterface(path).getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL
+        )
+    }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+
+    val matrix = Matrix()
+    when (orientation) {
+        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+        ExifInterface.ORIENTATION_TRANSPOSE -> {
+            matrix.postRotate(90f)
+            matrix.postScale(-1f, 1f)
+        }
+        ExifInterface.ORIENTATION_TRANSVERSE -> {
+            matrix.postRotate(270f)
+            matrix.postScale(-1f, 1f)
+        }
+        else -> return bitmap
+    }
+
+    val transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    if (transformed !== bitmap) bitmap.recycle()
+    Log.i(FLARE_GUARD_AI_TAG, "Applied EXIF orientation=$orientation -> ${transformed.width}x${transformed.height}")
+    return transformed.copy(Bitmap.Config.ARGB_8888, true)
+}
 
 private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
     val matrix = Matrix().apply { postRotate(90f) }
