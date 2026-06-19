@@ -122,22 +122,30 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     var selectedTab by remember { mutableStateOf(V2MainTab.Editor) }
     var selectedTool by remember { mutableStateOf(V2EditorTool.Light) }
     var showExportDialog by remember { mutableStateOf(false) }
+    var panelCollapsed by remember { mutableStateOf(false) }
+    var fullScreenPreview by remember { mutableStateOf(false) }
 
     MaterialTheme(colorScheme = V2DarkColors) {
         Surface(modifier = Modifier.fillMaxSize(), color = V2AppBackground) {
             Column(modifier = Modifier.fillMaxSize().background(V2AppBackground)) {
-                V2TopBar(
-                    nativeVersion = state.nativeVersion,
-                    selectedTab = selectedTab,
-                    canExport = state.previewBitmap != null && !state.isBusy,
-                    onTabSelected = { selectedTab = it },
-                    onOpen = { picker.launch("image/*") },
-                    onReset = {
-                        PresetLookHandoff.clear()
-                        viewModel.resetAdjustments()
-                    },
-                    onSaveClicked = { showExportDialog = true }
-                )
+                if (!fullScreenPreview) {
+                    V2TopBar(
+                        nativeVersion = state.nativeVersion,
+                        selectedTab = selectedTab,
+                        canExport = state.previewBitmap != null && !state.isBusy,
+                        hasImage = state.previewBitmap != null,
+                        onTabSelected = { selectedTab = it },
+                        onOpen = { picker.launch("image/*") },
+                        onUndo = viewModel::undoDevEdit,
+                        onRedo = viewModel::redoDevEdit,
+                        onRotate = viewModel::rotatePreview90ForDev,
+                        onReset = {
+                            PresetLookHandoff.clear()
+                            viewModel.resetAdjustments()
+                        },
+                        onSaveClicked = { showExportDialog = true }
+                    )
+                }
 
                 when (selectedTab) {
                     V2MainTab.Saved -> V2SavedScreen(
@@ -170,18 +178,27 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                             originalBitmap = state.originalPreviewBitmap,
                             isBusy = state.isBusy,
                             message = state.message,
+                            isFullScreen = fullScreenPreview,
+                            onToggleFullScreen = { fullScreenPreview = !fullScreenPreview },
+                            onTogglePanel = { panelCollapsed = !panelCollapsed },
                             modifier = Modifier.weight(1f).fillMaxWidth()
                         )
-                        V2AdjustmentPanel(
-                            selectedTool = selectedTool,
-                            params = state.params,
-                            onToolSelected = { selectedTool = it },
-                            onAutoEnhance = {
-                                PresetLookHandoff.clear()
-                                viewModel.applyAutoEnhance()
-                            },
-                            onChange = viewModel::updateParams
-                        )
+                        if (!fullScreenPreview) {
+                            V2AdjustmentPanel(
+                                editorViewModel = viewModel,
+                                selectedTool = selectedTool,
+                                params = state.params,
+                                panelCollapsed = panelCollapsed,
+                                onTogglePanel = { panelCollapsed = !panelCollapsed },
+                                onFullScreen = { fullScreenPreview = true },
+                                onToolSelected = { selectedTool = it },
+                                onAutoEnhance = {
+                                    PresetLookHandoff.clear()
+                                    viewModel.applyAutoEnhance()
+                                },
+                                onChange = viewModel::applyParamChangeWithUndo
+                            )
+                        }
                     }
                 }
             }
@@ -208,8 +225,12 @@ private fun V2TopBar(
     nativeVersion: String,
     selectedTab: V2MainTab,
     canExport: Boolean,
+    hasImage: Boolean,
     onTabSelected: (V2MainTab) -> Unit,
     onOpen: () -> Unit,
+    onUndo: () -> Unit,
+    onRedo: () -> Unit,
+    onRotate: () -> Unit,
     onReset: () -> Unit,
     onSaveClicked: () -> Unit
 ) {
@@ -218,23 +239,23 @@ private fun V2TopBar(
             .fillMaxWidth()
             .background(V2TopBarBackground)
             .statusBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("Kepler Studio v0.1", style = MaterialTheme.typography.titleLarge, color = V2TextPrimary, maxLines = 1)
+                Text("Kepler Studio v0.1", style = MaterialTheme.typography.titleMedium, color = V2TextPrimary, maxLines = 1)
                 Text(nativeVersion, style = MaterialTheme.typography.bodySmall, color = V2TextSecondary, maxLines = 1)
             }
-            TextButton(onClick = onReset) { Text("초기화") }
+            TextButton(onClick = onUndo, enabled = hasImage) { Text("Undo") }
+            TextButton(onClick = onRedo, enabled = hasImage) { Text("Redo") }
+            TextButton(onClick = onRotate, enabled = hasImage) { Text("회전") }
+            TextButton(onClick = onReset, enabled = hasImage) { Text("초기화") }
             TextButton(onClick = onSaveClicked, enabled = canExport) { Text("저장") }
-            Button(
-                onClick = onOpen,
-                colors = ButtonDefaults.buttonColors(containerColor = V2NeutralAccent, contentColor = V2ButtonTextDark)
-            ) {
-                Text("사진 선택")
+            Button(onClick = onOpen, colors = ButtonDefaults.buttonColors(containerColor = V2NeutralAccent, contentColor = V2ButtonTextDark)) {
+                Text("사진")
             }
         }
-        Row(modifier = Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(modifier = Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             V2MainTab.values().forEach { tab ->
                 TextButton(onClick = { onTabSelected(tab) }) {
                     Text(
@@ -254,6 +275,9 @@ private fun V2PreviewArea(
     originalBitmap: Bitmap?,
     isBusy: Boolean,
     message: String?,
+    isFullScreen: Boolean,
+    onToggleFullScreen: () -> Unit,
+    onTogglePanel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(modifier = modifier.background(V2PreviewBackground), contentAlignment = Alignment.Center) {
@@ -265,11 +289,18 @@ private fun V2PreviewArea(
         if (isBusy) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
         }
+        Row(
+            modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            TextButton(onClick = onTogglePanel) { Text("편집창") }
+            TextButton(onClick = onToggleFullScreen) { Text(if (isFullScreen) "나가기" else "전체화면") }
+        }
         message?.let {
             Text(
                 text = it,
                 color = V2TextPrimary,
-                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)
+                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp).background(V2CompareBadgeBackground).padding(horizontal = 10.dp, vertical = 6.dp)
             )
         }
     }
@@ -308,9 +339,7 @@ private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?) {
                                 scale = 2.5f
                             }
                         },
-                        onLongPress = {
-                            if (originalBitmap != null) showOriginal = true
-                        },
+                        onLongPress = { if (originalBitmap != null) showOriginal = true },
                         onPress = {
                             tryAwaitRelease()
                             showOriginal = false
@@ -329,49 +358,59 @@ private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?) {
             text = if (showOriginal && originalBitmap != null) "원본" else "편집본",
             color = V2TextPrimary,
             style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(12.dp)
-                .background(V2CompareBadgeBackground)
-                .padding(horizontal = 12.dp, vertical = 6.dp)
+            modifier = Modifier.align(Alignment.TopStart).padding(12.dp).background(V2CompareBadgeBackground).padding(horizontal = 12.dp, vertical = 6.dp)
         )
     }
 }
 
 @Composable
 private fun V2AdjustmentPanel(
+    editorViewModel: EditorViewModel,
     selectedTool: V2EditorTool,
     params: EditParams,
+    panelCollapsed: Boolean,
+    onTogglePanel: () -> Unit,
+    onFullScreen: () -> Unit,
     onToolSelected: (V2EditorTool) -> Unit,
     onAutoEnhance: () -> Unit,
     onChange: ((EditParams) -> EditParams) -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth().background(V2PanelBackground).navigationBarsPadding()) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 170.dp, max = 290.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp)
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(selectedTool.label, color = V2TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            Text(selectedTool.description, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp, bottom = 8.dp))
-            when (selectedTool) {
-                V2EditorTool.Auto -> V2AutoPanel(onAutoEnhance)
-                V2EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance)
-                V2EditorTool.Profiles -> V2PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결합니다")
-                V2EditorTool.Presets -> PresetToolPanel(params = params, onApplyPreset = { presetParams -> onChange { presetParams } })
-                V2EditorTool.Crop -> V2PlaceholderPanel("비율, 회전, 수평 기반 자르기 도구를 준비 중입니다")
-                V2EditorTool.Masking -> MaskingToolPanel()
-                V2EditorTool.Remove -> V2PlaceholderPanel("지우개, 반사 제거, 센서 먼지 제거 엔진을 연결할 예정입니다")
-                V2EditorTool.Light -> V2LightPanel(params, onChange)
-                V2EditorTool.Color -> V2ColorPanel(params, onChange)
-                V2EditorTool.Effects -> V2EffectsPanel(params, onChange)
-                V2EditorTool.Detail -> V2DetailPanel(params, onChange)
-                V2EditorTool.Optics -> V2PlaceholderPanel("색수차 제거와 렌즈 프로필 보정을 준비 중입니다")
-                V2EditorTool.Geometry -> V2PlaceholderPanel("수직, 수평, 원근 보정을 준비 중입니다")
-                V2EditorTool.Blur -> V2PlaceholderPanel("렌즈 블러와 초점 영역 편집을 준비 중입니다")
-                V2EditorTool.Model -> V2PlaceholderPanel("자동 마스크, 노이즈 억제, 디테일 복원 보조를 준비 중입니다")
+            Text(selectedTool.label, color = V2TextPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            TextButton(onClick = onTogglePanel) { Text(if (panelCollapsed) "펼치기" else "접기") }
+            TextButton(onClick = onFullScreen) { Text("전체화면") }
+        }
+        if (!panelCollapsed) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 120.dp, max = 220.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Text(selectedTool.description, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 8.dp))
+                when (selectedTool) {
+                    V2EditorTool.Auto -> V2AutoPanel(onAutoEnhance)
+                    V2EditorTool.Remaster -> RemasterToolPanel(editorViewModel = editorViewModel, onQuickAutoEnhance = onAutoEnhance)
+                    V2EditorTool.Profiles -> V2PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결합니다")
+                    V2EditorTool.Presets -> PresetToolPanel(params = params, onApplyPreset = { presetParams -> onChange { presetParams } })
+                    V2EditorTool.Crop -> V2PlaceholderPanel("비율, 회전, 수평 기반 자르기 도구를 준비 중입니다")
+                    V2EditorTool.Masking -> MaskingToolPanel()
+                    V2EditorTool.Remove -> V2PlaceholderPanel("지우개, 반사 제거, 센서 먼지 제거 엔진을 연결할 예정입니다")
+                    V2EditorTool.Light -> V2LightPanel(params, onChange)
+                    V2EditorTool.Color -> V2ColorPanel(params, onChange)
+                    V2EditorTool.Effects -> V2EffectsPanel(params, onChange)
+                    V2EditorTool.Detail -> V2DetailPanel(params, onChange)
+                    V2EditorTool.Optics -> V2PlaceholderPanel("색수차 제거와 렌즈 프로필 보정을 준비 중입니다")
+                    V2EditorTool.Geometry -> V2PlaceholderPanel("수직, 수평, 원근 보정을 준비 중입니다")
+                    V2EditorTool.Blur -> V2PlaceholderPanel("렌즈 블러와 초점 영역 편집을 준비 중입니다")
+                    V2EditorTool.Model -> V2PlaceholderPanel("자동 마스크, 노이즈 억제, 디테일 복원 보조를 준비 중입니다")
+                }
             }
         }
         V2ToolRail(selectedTool = selectedTool, onToolSelected = onToolSelected)
@@ -381,11 +420,7 @@ private fun V2AdjustmentPanel(
 @Composable
 private fun V2ToolRail(selectedTool: V2EditorTool, onToolSelected: (V2EditorTool) -> Unit) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .background(V2RailBackground)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(V2RailBackground).padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -423,13 +458,9 @@ private fun ExportSettingsDialog(
             }
         },
         confirmButton = {
-            Button(onClick = onSave, colors = ButtonDefaults.buttonColors(containerColor = V2NeutralAccent, contentColor = V2ButtonTextDark)) {
-                Text("저장")
-            }
+            Button(onClick = onSave, colors = ButtonDefaults.buttonColors(containerColor = V2NeutralAccent, contentColor = V2ButtonTextDark)) { Text("저장") }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("취소") }
-        }
+        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } }
     )
 }
 
@@ -438,9 +469,7 @@ private fun V2AutoPanel(onAutoEnhance: () -> Unit) {
     Column(modifier = Modifier.fillMaxWidth().background(V2CardBackground).padding(12.dp)) {
         Text("자동 분석", color = V2TextPrimary, fontWeight = FontWeight.SemiBold)
         Text("현재 사진의 밝기와 색상 통계를 분석해 기본 보정값을 적용합니다", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
-        Button(onClick = onAutoEnhance, colors = ButtonDefaults.buttonColors(containerColor = V2NeutralAccent, contentColor = V2ButtonTextDark)) {
-            Text("빠른 자동 보정 적용")
-        }
+        Button(onClick = onAutoEnhance, colors = ButtonDefaults.buttonColors(containerColor = V2NeutralAccent, contentColor = V2ButtonTextDark)) { Text("빠른 자동 보정 적용") }
     }
 }
 
@@ -480,10 +509,7 @@ private fun V2PlaceholderPanel(message: String) {
         text = message,
         color = V2TextMuted,
         style = MaterialTheme.typography.bodyMedium,
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(V2CardBackground)
-            .padding(12.dp)
+        modifier = Modifier.fillMaxWidth().background(V2CardBackground).padding(12.dp)
     )
 }
 
@@ -502,17 +528,10 @@ private fun ParamSlider2(label: String, value: Float, min: Float, max: Float, on
 
 @Composable
 private fun <T> OptionRow2(values: List<T>, selected: T, label: (T) -> String, onSelected: (T) -> Unit) {
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
+    Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         values.forEach { value ->
             TextButton(onClick = { onSelected(value) }) {
-                Text(
-                    text = label(value),
-                    color = if (value == selected) V2NeutralAccent else V2TextSecondary,
-                    fontWeight = if (value == selected) FontWeight.Bold else FontWeight.Normal
-                )
+                Text(text = label(value), color = if (value == selected) V2NeutralAccent else V2TextSecondary, fontWeight = if (value == selected) FontWeight.Bold else FontWeight.Normal)
             }
         }
     }
