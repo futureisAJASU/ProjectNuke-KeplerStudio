@@ -24,6 +24,9 @@ data class EditorUiState(
     val activeSelectionLayerId: String? = null,
     val selectionPaintSettings: SelectionPaintSettings = SelectionPaintSettings(),
     val showSelectionOverlay: Boolean = true,
+    val canUndo: Boolean = false,
+    val canRedo: Boolean = false,
+    val flareGuardRuntimeStatus: String? = null,
     val revision: Int = 0,
     val nativeVersion: String = "",
     val message: String? = null

@@ -5,14 +5,18 @@ import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import androidx.heifwriter.HeifWriter
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
+import java.util.ArrayDeque
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -39,6 +43,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private var nativeSession: Long = 0L
     private var renderJob: Job? = null
+    private val undoHistory = ArrayDeque<EditorHistorySnapshot>()
+    private val redoHistory = ArrayDeque<EditorHistorySnapshot>()
 
     init {
         viewModelScope.launch {
@@ -64,6 +70,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openImage(uri: Uri) {
         renderJob?.cancel()
+        clearEditHistory()
         _uiState.update { it.copy(isBusy = true, message = "이미지를 여는 중입니다") }
 
         viewModelScope.launch {
@@ -71,8 +78,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val context = getApplication<Application>()
                 val sourceFile = withContext(Dispatchers.IO) { copyUriToCache(context, uri) }
                 val preview = withContext(Dispatchers.IO) {
-                    decodeSampledMutableBitmap(sourceFile.absolutePath, maxSide = 2048)
+                    decodeSampledMutableBitmapWithExif(sourceFile.absolutePath, maxSide = 2048)
                 }
+                Log.i(FLARE_GUARD_AI_TAG, "Opened image with EXIF orientation: ${sourceFile.name} preview=${preview.width}x${preview.height}")
 
                 releaseNativeSession()
                 nativeSession = NativePhotoCore.nativeCreateSession(sourceFile.absolutePath)
@@ -84,6 +92,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         originalPreviewBitmap = preview,
                         previewBitmap = preview,
                         params = EditParams(),
+                        canUndo = false,
+                        canRedo = false,
+                        flareGuardRuntimeStatus = null,
                         revision = it.revision + 1,
                         message = "원본 캐시가 완료되었습니다: ${preview.width}x${preview.height} preview"
                     )
@@ -100,8 +111,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
+        if (nextParams == current.params) return
         val nextRevision = current.revision + 1
 
+        pushUndoSnapshot(clearRedo = true)
         _uiState.update { it.copy(params = nextParams, revision = nextRevision, isBusy = true, message = "미리보기를 렌더링하는 중입니다") }
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
@@ -131,6 +144,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         val nextRevision = current.revision + 1
         renderJob?.cancel()
+        pushUndoSnapshot(clearRedo = true)
         _uiState.update { it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다") }
 
         renderJob = viewModelScope.launch {
@@ -234,9 +248,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun resetAdjustments() {
         val path = _uiState.value.sourcePath ?: return
+        pushUndoSnapshot(clearRedo = true)
         viewModelScope.launch {
             val context = getApplication<Application>()
-            val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmap(path, maxSide = 2048) }
+            val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(path, maxSide = 2048) }
             _uiState.update {
                 val next = it.copy(
                     originalPreviewBitmap = preview,
@@ -388,6 +403,112 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // TODO v0.2: viewport가 scale 임계값 이상이면 ROI 타일 렌더 Job 발행.
     }
 
+    fun undoEdit() {
+        if (undoHistory.isEmpty()) {
+            _uiState.update { it.copy(message = "되돌릴 편집 기록이 없습니다.") }
+            return
+        }
+        renderJob?.cancel()
+        redoHistory.addLast(_uiState.value.toHistorySnapshot())
+        val snapshot = undoHistory.removeLast()
+        applyHistorySnapshot(snapshot, "이전 편집 상태로 되돌렸습니다.")
+        updateHistoryFlags()
+        Log.i(FLARE_GUARD_AI_TAG, "Undo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
+    }
+
+    fun redoEdit() {
+        if (redoHistory.isEmpty()) {
+            _uiState.update { it.copy(message = "다시 실행할 편집 기록이 없습니다.") }
+            return
+        }
+        renderJob?.cancel()
+        undoHistory.addLast(_uiState.value.toHistorySnapshot())
+        trimHistory(undoHistory)
+        val snapshot = redoHistory.removeLast()
+        applyHistorySnapshot(snapshot, "다음 편집 상태를 다시 적용했습니다.")
+        updateHistoryFlags()
+        Log.i(FLARE_GUARD_AI_TAG, "Redo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
+    }
+
+    fun rotatePreview90() {
+        val current = _uiState.value
+        val preview = current.previewBitmap
+        if (preview == null) {
+            _uiState.update { it.copy(message = "회전할 이미지가 없습니다.") }
+            return
+        }
+        pushUndoSnapshot(clearRedo = true)
+        val original = current.originalPreviewBitmap
+        val rotatedPreview = rotateBitmap90(preview)
+        val rotatedOriginal = if (original != null && original !== preview) rotateBitmap90(original) else rotatedPreview
+        _uiState.update {
+            it.copy(
+                previewBitmap = rotatedPreview,
+                originalPreviewBitmap = rotatedOriginal,
+                revision = it.revision + 1,
+                message = "미리보기를 90도 회전했습니다."
+            )
+        }
+        Log.i(FLARE_GUARD_AI_TAG, "Rotated preview manually: ${preview.width}x${preview.height} -> ${rotatedPreview.width}x${rotatedPreview.height}")
+    }
+
+    fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
+        val current = _uiState.value
+        val source = current.previewBitmap ?: current.originalPreviewBitmap
+        if (source == null) {
+            _uiState.update { it.copy(message = "번짐 완화를 적용할 이미지가 없습니다.") }
+            return
+        }
+
+        pushUndoSnapshot(clearRedo = true)
+        val label = when (mode) {
+            FlareGuardMode.NightLight -> "번짐 완화"
+            FlareGuardMode.DaySun -> "태양 번짐 완화"
+        }
+        val nextRevision = current.revision + 1
+        val appContext = context.applicationContext
+        _uiState.update {
+            it.copy(
+                isBusy = true,
+                revision = nextRevision,
+                message = "$label 처리를 적용하는 중입니다.",
+                flareGuardRuntimeStatus = "AI 모델 상태를 확인하는 중입니다."
+            )
+        }
+        Log.i(FLARE_GUARD_AI_TAG, "Starting FlareGuard preview: mode=$mode source=${source.width}x${source.height} revision=$nextRevision")
+
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.Default) {
+                    applyFlareGuardModelOrRuleResultV0(appContext, source, mode)
+                }
+                if (_uiState.value.revision == nextRevision) {
+                    _uiState.update {
+                        it.copy(
+                            previewBitmap = result.bitmap,
+                            isBusy = false,
+                            message = result.status.uiText,
+                            flareGuardRuntimeStatus = result.status.uiText
+                        )
+                    }
+                    Log.i(FLARE_GUARD_AI_TAG, "Finished FlareGuard preview: mode=$mode status=${result.status} output=${result.bitmap.width}x${result.bitmap.height}")
+                } else {
+                    result.bitmap.recycle()
+                    Log.w(FLARE_GUARD_AI_TAG, "Discarded stale FlareGuard preview: expected=$nextRevision actual=${_uiState.value.revision}")
+                }
+            } catch (t: Throwable) {
+                Log.e(FLARE_GUARD_AI_TAG, "FlareGuard preview failed", t)
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        message = "번짐 완화 적용에 실패했습니다.",
+                        flareGuardRuntimeStatus = "번짐 완화 적용에 실패했습니다."
+                    )
+                }
+            }
+        }
+    }
+
     private suspend fun restoreDraftIfAvailable(context: Context) {
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
         val sourcePath = prefs.getString(KEY_DRAFT_SOURCE, null) ?: return
@@ -417,7 +538,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         _uiState.update { it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다") }
         try {
-            val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmap(sourcePath, maxSide = 2048) }
+            val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048) }
             val nextRevision = _uiState.value.revision + 1
             val rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview, params, engines, nextRevision) }
             releaseNativeSession()
@@ -441,6 +562,44 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun pushUndoSnapshot(clearRedo: Boolean) {
+        val state = _uiState.value
+        if (state.previewBitmap == null && state.originalPreviewBitmap == null) return
+        undoHistory.addLast(state.toHistorySnapshot())
+        trimHistory(undoHistory)
+        if (clearRedo) {
+            recycleHistory(redoHistory)
+            redoHistory.clear()
+        }
+        updateHistoryFlags()
+        Log.i(FLARE_GUARD_AI_TAG, "Pushed undo snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
+    }
+
+    private fun applyHistorySnapshot(snapshot: EditorHistorySnapshot, message: String) {
+        _uiState.update {
+            it.copy(
+                params = snapshot.params,
+                previewBitmap = snapshot.previewBitmap,
+                originalPreviewBitmap = snapshot.originalPreviewBitmap,
+                isBusy = false,
+                revision = it.revision + 1,
+                message = message
+            )
+        }
+    }
+
+    private fun updateHistoryFlags() {
+        _uiState.update { it.copy(canUndo = undoHistory.isNotEmpty(), canRedo = redoHistory.isNotEmpty()) }
+    }
+
+    private fun clearEditHistory() {
+        recycleHistory(undoHistory)
+        recycleHistory(redoHistory)
+        undoHistory.clear()
+        redoHistory.clear()
+        updateHistoryFlags()
+    }
+
     private fun releaseNativeSession() {
         if (nativeSession != 0L) {
             runCatching { NativePhotoCore.nativeReleaseSession(nativeSession) }
@@ -452,6 +611,43 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         releaseNativeSession()
         super.onCleared()
     }
+}
+
+private data class EditorHistorySnapshot(
+    val params: EditParams,
+    val previewBitmap: Bitmap?,
+    val originalPreviewBitmap: Bitmap?
+)
+
+private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
+    val previewCopy = previewBitmap?.copy(Bitmap.Config.ARGB_8888, true)
+    val originalCopy = if (originalPreviewBitmap == null) {
+        null
+    } else if (originalPreviewBitmap === previewBitmap) {
+        previewCopy
+    } else {
+        originalPreviewBitmap.copy(Bitmap.Config.ARGB_8888, true)
+    }
+    return EditorHistorySnapshot(
+        params = params,
+        previewBitmap = previewCopy,
+        originalPreviewBitmap = originalCopy
+    )
+}
+
+private fun trimHistory(stack: ArrayDeque<EditorHistorySnapshot>) {
+    while (stack.size > EDITOR_HISTORY_MAX) {
+        stack.removeFirst().recycleBitmaps()
+    }
+}
+
+private fun recycleHistory(stack: ArrayDeque<EditorHistorySnapshot>) {
+    stack.forEach { it.recycleBitmaps() }
+}
+
+private fun EditorHistorySnapshot.recycleBitmaps() {
+    previewBitmap?.recycle()
+    if (originalPreviewBitmap !== previewBitmap) originalPreviewBitmap?.recycle()
 }
 
 private data class EngineSelection(
@@ -594,6 +790,50 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
         .copy(Bitmap.Config.ARGB_8888, true)
 }
 
+private fun decodeSampledMutableBitmapWithExif(path: String, maxSide: Int): Bitmap {
+    return applyExifOrientation(path, decodeSampledMutableBitmap(path, maxSide))
+}
+
+private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
+    val orientation = runCatching {
+        ExifInterface(path).getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL
+        )
+    }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+
+    val matrix = Matrix()
+    when (orientation) {
+        ExifInterface.ORIENTATION_NORMAL -> return bitmap
+        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+        ExifInterface.ORIENTATION_TRANSPOSE -> {
+            matrix.postRotate(90f)
+            matrix.postScale(-1f, 1f)
+        }
+        ExifInterface.ORIENTATION_TRANSVERSE -> {
+            matrix.postRotate(270f)
+            matrix.postScale(-1f, 1f)
+        }
+        else -> return bitmap
+    }
+
+    val transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    if (transformed !== bitmap) bitmap.recycle()
+    val mutable = transformed.copy(Bitmap.Config.ARGB_8888, true)
+    if (mutable !== transformed) transformed.recycle()
+    Log.i(FLARE_GUARD_AI_TAG, "Applied EXIF orientation=$orientation -> ${mutable.width}x${mutable.height}")
+    return mutable
+}
+
+private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
+    val matrix = Matrix().apply { postRotate(90f) }
+    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+}
+
 private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, engines: EngineSelection, revision: Int): Bitmap {
     val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
     renderBitmapInNative(copy, params, engines, revision)
@@ -609,7 +849,7 @@ private fun renderEditedExport(
     revision: Int
 ): Bitmap {
     // TODO v0.2: replace whole-bitmap export with ROI/tile rendering to reduce peak memory use.
-    val decoded = decodeSampledMutableBitmap(sourcePath, maxSide = EXPORT_MAX_SIDE)
+    val decoded = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE)
     renderBitmapInNative(decoded, params, engines, revision)
     applySelectedToneEngine(decoded, engines.toneEngine)
 
@@ -1036,6 +1276,8 @@ private inline fun <reified T : Enum<T>> enumValueOrDefault(name: String?, defau
 
 private fun exportTimestamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
+private const val FLARE_GUARD_AI_TAG = "KeplerFlareAI"
+private const val EDITOR_HISTORY_MAX = 10
 private const val EXPORT_MAX_SIDE = 8192
 private const val PREF_NAME = "kepler_studio_editor"
 private const val KEY_SAVED_EXPORTS = "saved_exports"

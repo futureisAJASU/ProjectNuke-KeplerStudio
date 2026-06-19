@@ -12,6 +12,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -35,6 +37,7 @@ fun RemasterToolPanel(
     onQuickAutoEnhance: () -> Unit
 ) {
     val context = LocalContext.current
+    val editorState by editorViewModel.uiState.collectAsState()
     val activeModel = RemasterModelSession.activeModel
     val statusText = RemasterModelSession.statusText
     val loaded = RemasterModelSession.isModelLoaded
@@ -132,14 +135,20 @@ fun RemasterToolPanel(
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
             )
+            Text(
+                text = editorState.flareGuardRuntimeStatus ?: "번짐 완화 런타임 상태가 아직 없습니다.",
+                color = RemasterTextMuted,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }) {
                     Text("장면 분석")
                 }
-                TextButton(onClick = { editorViewModel.applyFlareGuardAiPreview(context, FlareGuardMode.NightLight) }) {
+                TextButton(onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.NightLight) }) {
                     Text("번짐 완화")
                 }
-                TextButton(onClick = { editorViewModel.applyFlareGuardAiPreview(context, FlareGuardMode.DaySun) }) {
+                TextButton(onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.DaySun) }) {
                     Text("태양 번짐 완화")
                 }
                 TextButton(onClick = { editorViewModel.exportUniversalBalancerTrainingRow() }) {

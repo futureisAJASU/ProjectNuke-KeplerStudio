@@ -8,6 +8,18 @@ import kotlin.math.roundToInt
 
 private const val FLARE_GUARD_BRIDGE_TAG = "KeplerFlareAI"
 
+data class FlareGuardApplyResult(
+    val bitmap: Bitmap,
+    val status: FlareGuardRuntimeStatus
+)
+
+enum class FlareGuardRuntimeStatus(val uiText: String) {
+    ModelLoaded("AI 모델을 불러왔습니다."),
+    ModelInferenceSuccess("AI 모델로 번짐 완화를 적용했습니다."),
+    ModelUnavailableRuleFallback("AI 모델을 사용할 수 없어 기본 보정으로 적용했습니다."),
+    ModelFailedRuleFallback("AI 모델 처리에 실패하여 기본 보정으로 적용했습니다.")
+}
+
 fun applyFlareGuardModelOrRuleV0(
     context: Context,
     source: Bitmap,
@@ -16,7 +28,17 @@ fun applyFlareGuardModelOrRuleV0(
         FlareGuardMode.NightLight -> 0.35f
         FlareGuardMode.DaySun -> 0.32f
     }
-): Bitmap {
+): Bitmap = applyFlareGuardModelOrRuleResultV0(context, source, mode, strength).bitmap
+
+fun applyFlareGuardModelOrRuleResultV0(
+    context: Context,
+    source: Bitmap,
+    mode: FlareGuardMode,
+    strength: Float = when (mode) {
+        FlareGuardMode.NightLight -> 0.35f
+        FlareGuardMode.DaySun -> 0.32f
+    }
+): FlareGuardApplyResult {
     val runner = FlareGuardModelRunner.createOrNull(context)
     if (runner != null) {
         try {
@@ -31,7 +53,10 @@ fun applyFlareGuardModelOrRuleV0(
                     "FlareGuard model inference success: mode=$mode mean=${result.meanAlpha} max=${result.maxAlpha}"
                 )
                 try {
-                    return applyFlareGuardMaskBlendV0(source, result.mask, mode, strength)
+                    return FlareGuardApplyResult(
+                        bitmap = applyFlareGuardMaskBlendV0(source, result.mask, mode, strength),
+                        status = FlareGuardRuntimeStatus.ModelInferenceSuccess
+                    )
                 } finally {
                     result.mask.recycle()
                 }
@@ -39,6 +64,12 @@ fun applyFlareGuardModelOrRuleV0(
             Log.w(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model inference returned null; falling back to rule path")
         } catch (t: Throwable) {
             Log.e(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model path failed; falling back to rule path", t)
+            val fallback = when (mode) {
+                FlareGuardMode.NightLight -> applyFlareGuardV0(source, strength)
+                FlareGuardMode.DaySun -> applyDaySunFlareGuardV0(source, strength)
+            }
+            Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_failed")
+            return FlareGuardApplyResult(fallback, FlareGuardRuntimeStatus.ModelFailedRuleFallback)
         } finally {
             runner.close()
         }
@@ -46,10 +77,12 @@ fun applyFlareGuardModelOrRuleV0(
         Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model asset unavailable; using rule fallback")
     }
 
-    return when (mode) {
+    val fallback = when (mode) {
         FlareGuardMode.NightLight -> applyFlareGuardV0(source, strength)
         FlareGuardMode.DaySun -> applyDaySunFlareGuardV0(source, strength)
     }
+    Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_unavailable")
+    return FlareGuardApplyResult(fallback, FlareGuardRuntimeStatus.ModelUnavailableRuleFallback)
 }
 
 fun applyFlareGuardMaskBlendV0(

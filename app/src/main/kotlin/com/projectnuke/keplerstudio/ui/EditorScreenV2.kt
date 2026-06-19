@@ -118,7 +118,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             PresetLookHandoff.clear()
-            viewModel.openImageWithExifOrientation(context, uri)
+            viewModel.openImage(uri)
         }
     }
     var selectedTab by remember { mutableStateOf(V2MainTab.Editor) }
@@ -138,9 +138,11 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         hasImage = state.previewBitmap != null,
                         onTabSelected = { selectedTab = it },
                         onOpen = { picker.launch("image/*") },
-                        onUndo = viewModel::undoDevEdit,
-                        onRedo = viewModel::redoDevEdit,
-                        onRotate = viewModel::rotatePreview90ForDev,
+                        canUndo = state.canUndo,
+                        canRedo = state.canRedo,
+                        onUndo = viewModel::undoEdit,
+                        onRedo = viewModel::redoEdit,
+                        onRotate = viewModel::rotatePreview90,
                         onReset = {
                             PresetLookHandoff.clear()
                             viewModel.resetAdjustments()
@@ -198,7 +200,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                                     PresetLookHandoff.clear()
                                     viewModel.applyAutoEnhance()
                                 },
-                                onChange = viewModel::applyParamChangeWithUndo
+                                onChange = viewModel::updateParams
                             )
                         }
                     }
@@ -228,6 +230,8 @@ private fun V2TopBar(
     selectedTab: V2MainTab,
     canExport: Boolean,
     hasImage: Boolean,
+    canUndo: Boolean,
+    canRedo: Boolean,
     onTabSelected: (V2MainTab) -> Unit,
     onOpen: () -> Unit,
     onUndo: () -> Unit,
@@ -248,8 +252,8 @@ private fun V2TopBar(
                 Text("Kepler Studio v0.1", style = MaterialTheme.typography.titleMedium, color = V2TextPrimary, maxLines = 1)
                 Text(nativeVersion, style = MaterialTheme.typography.bodySmall, color = V2TextSecondary, maxLines = 1)
             }
-            TextButton(onClick = onUndo, enabled = hasImage) { Text("Undo") }
-            TextButton(onClick = onRedo, enabled = hasImage) { Text("Redo") }
+            TextButton(onClick = onUndo, enabled = canUndo) { Text("Undo") }
+            TextButton(onClick = onRedo, enabled = canRedo) { Text("Redo") }
             TextButton(onClick = onRotate, enabled = hasImage) { Text("회전") }
             TextButton(onClick = onReset, enabled = hasImage) { Text("초기화") }
             TextButton(onClick = onSaveClicked, enabled = canExport) { Text("저장") }
