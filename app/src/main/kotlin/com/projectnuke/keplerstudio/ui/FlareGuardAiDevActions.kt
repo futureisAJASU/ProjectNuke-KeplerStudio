@@ -2,12 +2,16 @@ package com.projectnuke.keplerstudio.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Matrix
 import android.util.Log
 import androidx.lifecycle.viewModelScope
+import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import com.projectnuke.keplerstudio.editor.applyFlareGuardModelOrRuleV0
+import java.util.ArrayDeque
+import java.util.WeakHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
@@ -15,6 +19,99 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val FLARE_GUARD_AI_TAG = "KeplerFlareAI"
+private const val EDITOR_HISTORY_MAX = 8
+
+private data class EditorHistorySnapshot(
+    val params: EditParams,
+    val previewBitmap: Bitmap?,
+    val originalPreviewBitmap: Bitmap?,
+    val revision: Int
+)
+
+private data class EditorHistoryStacks(
+    val undo: ArrayDeque<EditorHistorySnapshot> = ArrayDeque(),
+    val redo: ArrayDeque<EditorHistorySnapshot> = ArrayDeque()
+)
+
+private val editorHistory = WeakHashMap<EditorViewModel, EditorHistoryStacks>()
+
+fun EditorViewModel.applyParamChangeWithUndo(transform: (EditParams) -> EditParams) {
+    pushUndoSnapshot(clearRedo = true)
+    updateParams(transform)
+}
+
+fun EditorViewModel.undoDevEdit() {
+    val stateFlow = mutableEditorStateFlowOrNull() ?: return
+    val stacks = historyStacks()
+    if (stacks.undo.isEmpty()) {
+        stateFlow.update { it.copy(message = "되돌릴 편집 기록이 없습니다") }
+        return
+    }
+
+    val current = stateFlow.value
+    stacks.redo.addLast(current.toHistorySnapshot())
+    val snapshot = stacks.undo.removeLast()
+    Log.i(FLARE_GUARD_AI_TAG, "Undo editor snapshot: undo=${stacks.undo.size} redo=${stacks.redo.size}")
+    stateFlow.update { state ->
+        state.copy(
+            params = snapshot.params,
+            previewBitmap = snapshot.previewBitmap,
+            originalPreviewBitmap = snapshot.originalPreviewBitmap,
+            revision = state.revision + 1,
+            isBusy = false,
+            message = "실행 취소했습니다"
+        )
+    }
+}
+
+fun EditorViewModel.redoDevEdit() {
+    val stateFlow = mutableEditorStateFlowOrNull() ?: return
+    val stacks = historyStacks()
+    if (stacks.redo.isEmpty()) {
+        stateFlow.update { it.copy(message = "다시 실행할 편집 기록이 없습니다") }
+        return
+    }
+
+    val current = stateFlow.value
+    stacks.undo.addLast(current.toHistorySnapshot())
+    trimUndoStack(stacks.undo)
+    val snapshot = stacks.redo.removeLast()
+    Log.i(FLARE_GUARD_AI_TAG, "Redo editor snapshot: undo=${stacks.undo.size} redo=${stacks.redo.size}")
+    stateFlow.update { state ->
+        state.copy(
+            params = snapshot.params,
+            previewBitmap = snapshot.previewBitmap,
+            originalPreviewBitmap = snapshot.originalPreviewBitmap,
+            revision = state.revision + 1,
+            isBusy = false,
+            message = "다시 실행했습니다"
+        )
+    }
+}
+
+fun EditorViewModel.rotatePreview90ForDev() {
+    val stateFlow = mutableEditorStateFlowOrNull() ?: return
+    val current = stateFlow.value
+    val preview = current.previewBitmap
+    if (preview == null) {
+        stateFlow.update { it.copy(message = "회전할 이미지가 없습니다") }
+        return
+    }
+
+    pushUndoSnapshot(clearRedo = true)
+    val original = current.originalPreviewBitmap
+    val rotatedPreview = rotateBitmap90(preview)
+    val rotatedOriginal = original?.let { rotateBitmap90(it) }
+    Log.i(FLARE_GUARD_AI_TAG, "Rotated preview manually: ${preview.width}x${preview.height} -> ${rotatedPreview.width}x${rotatedPreview.height}")
+    stateFlow.update { state ->
+        state.copy(
+            previewBitmap = rotatedPreview,
+            originalPreviewBitmap = rotatedOriginal ?: rotatedPreview,
+            revision = state.revision + 1,
+            message = "미리보기를 90도 회전했습니다"
+        )
+    }
+}
 
 /**
  * Temporary dev action for validating the optional Flare Guard TFLite path.
@@ -39,6 +136,7 @@ fun EditorViewModel.applyFlareGuardAiPreview(
         return
     }
 
+    pushUndoSnapshot(clearRedo = true)
     val label = when (mode) {
         FlareGuardMode.NightLight -> "번짐 완화"
         FlareGuardMode.DaySun -> "태양 번짐 완화"
@@ -98,6 +196,39 @@ fun EditorViewModel.applyFlareGuardAiPreview(
             }
         }
     }
+}
+
+private fun EditorViewModel.pushUndoSnapshot(clearRedo: Boolean) {
+    val state = uiState.value
+    if (state.previewBitmap == null && state.originalPreviewBitmap == null) return
+    val stacks = historyStacks()
+    stacks.undo.addLast(state.toHistorySnapshot())
+    trimUndoStack(stacks.undo)
+    if (clearRedo) stacks.redo.clear()
+    Log.i(FLARE_GUARD_AI_TAG, "Pushed undo snapshot: undo=${stacks.undo.size} redo=${stacks.redo.size}")
+}
+
+private fun EditorViewModel.historyStacks(): EditorHistoryStacks =
+    editorHistory.getOrPut(this) { EditorHistoryStacks() }
+
+private fun trimUndoStack(stack: ArrayDeque<EditorHistorySnapshot>) {
+    while (stack.size > EDITOR_HISTORY_MAX) {
+        val removed = stack.removeFirst()
+        removed.previewBitmap?.recycle()
+        if (removed.originalPreviewBitmap !== removed.previewBitmap) removed.originalPreviewBitmap?.recycle()
+    }
+}
+
+private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot = EditorHistorySnapshot(
+    params = params,
+    previewBitmap = previewBitmap?.copy(Bitmap.Config.ARGB_8888, false),
+    originalPreviewBitmap = originalPreviewBitmap?.copy(Bitmap.Config.ARGB_8888, false),
+    revision = revision
+)
+
+private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
+    val matrix = Matrix().apply { postRotate(90f) }
+    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
 }
 
 @Suppress("UNCHECKED_CAST")
