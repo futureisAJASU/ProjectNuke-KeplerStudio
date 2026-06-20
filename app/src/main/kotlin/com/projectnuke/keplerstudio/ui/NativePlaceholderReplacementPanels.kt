@@ -85,8 +85,8 @@ fun NativeModelToolPanel() {
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = { vm.runAutoRouterV0Analysis() }) { Text("화면 분석") }
-            TextButton(onClick = { vm.applyFlareGuardV0Preview() }) { Text("번짐 완화") }
-            TextButton(onClick = { vm.applyDaySunFlareGuardV0Preview() }) { Text("태양 번짐 완화") }
+            TextButton(onClick = { vm.applyFlareOriginalMvp() }) { Text("번짐 완화") }
+            TextButton(onClick = { vm.applySunFlareOriginalMvp() }) { Text("태양 번짐 완화") }
         }
     }
 }
