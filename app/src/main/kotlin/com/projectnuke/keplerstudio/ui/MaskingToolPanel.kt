@@ -243,7 +243,7 @@ private fun LocalMaskEditCard(activeLayer: SelectionLayer?, editorViewModel: Edi
             editorViewModel.updateActiveSelectionParams { it.copy(dehaze = value) }
         }
         Button(
-            onClick = { editorViewModel.applyActiveSelectionLocalEdit() },
+            onClick = { editorViewModel.applyActiveSelectionLocalEditNativeBaked() },
             enabled = activeLayer != null,
             colors = ButtonDefaults.buttonColors(containerColor = MaskAccent, contentColor = MaskButtonTextDark),
             modifier = Modifier.padding(top = 8.dp)
