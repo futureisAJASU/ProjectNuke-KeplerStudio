@@ -228,19 +228,19 @@ private fun LocalMaskEditCard(activeLayer: SelectionLayer?, editorViewModel: Edi
             modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
         )
         LocalParamSlider("노출", params.exposure, -0.8f, 0.8f, activeLayer != null) { value ->
-            editorViewModel.updateActiveSelectionParams { it.copy(exposure = value) }
+            editorViewModel.updateActiveSelectionParamsLive { it.copy(exposure = value) }
         }
         LocalParamSlider("대비", params.contrast, -0.6f, 0.6f, activeLayer != null) { value ->
-            editorViewModel.updateActiveSelectionParams { it.copy(contrast = value) }
+            editorViewModel.updateActiveSelectionParamsLive { it.copy(contrast = value) }
         }
         LocalParamSlider("채도", params.saturation, -0.6f, 0.6f, activeLayer != null) { value ->
-            editorViewModel.updateActiveSelectionParams { it.copy(saturation = value) }
+            editorViewModel.updateActiveSelectionParamsLive { it.copy(saturation = value) }
         }
         LocalParamSlider("명료도", params.clarity, -0.6f, 0.6f, activeLayer != null) { value ->
-            editorViewModel.updateActiveSelectionParams { it.copy(clarity = value) }
+            editorViewModel.updateActiveSelectionParamsLive { it.copy(clarity = value) }
         }
         LocalParamSlider("디헤이즈", params.dehaze, -0.6f, 0.6f, activeLayer != null) { value ->
-            editorViewModel.updateActiveSelectionParams { it.copy(dehaze = value) }
+            editorViewModel.updateActiveSelectionParamsLive { it.copy(dehaze = value) }
         }
         Button(
             onClick = { editorViewModel.applyActiveSelectionLocalEditNativeBaked() },
