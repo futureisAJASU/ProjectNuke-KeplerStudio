@@ -1,30 +1,41 @@
 package com.projectnuke.keplerstudio.editor
 
 import android.graphics.Bitmap
-import android.graphics.Matrix
+import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.roundToInt
+import kotlin.math.sin
 
 fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap {
     val state = cropState.normalized()
-    val transformed = transformBeforeCrop(source, state)
-    val left = (state.cropLeft * transformed.width).roundToInt().coerceIn(0, transformed.width - 1)
-    val top = (state.cropTop * transformed.height).roundToInt().coerceIn(0, transformed.height - 1)
-    val right = (state.cropRight * transformed.width).roundToInt().coerceIn(left + 1, transformed.width)
-    val bottom = (state.cropBottom * transformed.height).roundToInt().coerceIn(top + 1, transformed.height)
-    val cropped = Bitmap.createBitmap(transformed, left, top, right - left, bottom - top)
-    if (transformed !== source) transformed.recycle()
-    return cropped.copy(Bitmap.Config.ARGB_8888, true)
+    val rotation = state.rotationDegrees + state.straightenDegrees
+    val size = rotatedCanvasSize(source.width, source.height, rotation)
+    val outWidth = ((state.cropRight - state.cropLeft).coerceIn(0.01f, 1f) * size.first).roundToInt().coerceAtLeast(1)
+    val outHeight = ((state.cropBottom - state.cropTop).coerceIn(0.01f, 1f) * size.second).roundToInt().coerceAtLeast(1)
+    val output = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
+    NativePhotoCore.nativeRenderCropTransform(
+        source,
+        output,
+        state.cropLeft,
+        state.cropTop,
+        state.cropRight,
+        state.cropBottom,
+        rotation,
+        state.flipHorizontal,
+        0
+    )
+    return output
 }
 
-private fun transformBeforeCrop(source: Bitmap, state: CropState): Bitmap {
-    val matrix = Matrix()
-    if (state.flipHorizontal) {
-        matrix.postScale(-1f, 1f, source.width / 2f, source.height / 2f)
-    }
-    val totalRotation = state.rotationDegrees + state.straightenDegrees
-    if (abs(totalRotation) > 0.001f) {
-        matrix.postRotate(totalRotation, source.width / 2f, source.height / 2f)
-    }
-    return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
+private fun rotatedCanvasSize(width: Int, height: Int, degrees: Float): Pair<Int, Int> {
+    val normalized = ((degrees % 360f) + 360f) % 360f
+    if (abs(normalized) < 0.001f) return width to height
+    val radians = Math.toRadians(normalized.toDouble()).toFloat()
+    val c = abs(cos(radians))
+    val s = abs(sin(radians))
+    val outWidth = ceil(width * c + height * s).roundToInt().coerceAtLeast(1)
+    val outHeight = ceil(width * s + height * c).roundToInt().coerceAtLeast(1)
+    return outWidth to outHeight
 }
