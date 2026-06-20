@@ -93,6 +93,14 @@ object NativePhotoCore {
         passes: Int
     ): Int = nativeCreateFlareMaskNative(source, mask, threshold, radius, passes)
 
+    fun nativeBlendSelectionLayerInPlace(
+        target: Bitmap,
+        local: Bitmap,
+        mask: Bitmap,
+        inverted: Boolean,
+        opacity: Float
+    ): Int = nativeBlendSelectionLayerInPlaceNative(target, local, mask, inverted, opacity)
+
     fun nativeRenderCropTransform(
         source: Bitmap,
         destination: Bitmap,
@@ -158,6 +166,14 @@ object NativePhotoCore {
         threshold: Float,
         radius: Int,
         passes: Int
+    ): Int
+
+    private external fun nativeBlendSelectionLayerInPlaceNative(
+        target: Bitmap,
+        local: Bitmap,
+        mask: Bitmap,
+        inverted: Boolean,
+        opacity: Float
     ): Int
 
     private external fun nativeRenderCropTransformNative(
