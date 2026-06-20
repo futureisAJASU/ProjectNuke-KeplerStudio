@@ -477,6 +477,78 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         Log.i(FLARE_GUARD_AI_TAG, "Rotated preview manually: ${preview.width}x${preview.height} -> ${rotatedPreview.width}x${rotatedPreview.height}")
     }
 
+    fun applySpotCleanupMvp() {
+        applyNativeSpecialEffectsMvp(
+            title = "기본 제거",
+            operations = listOf(NativeSpecialEffectOp(effect = 0, strength = 0.58f))
+        )
+    }
+
+    fun applyOpticsCorrectionMvp() {
+        applyNativeSpecialEffectsMvp(
+            title = "광학 보정",
+            operations = listOf(
+                NativeSpecialEffectOp(effect = 1, strength = 0.62f),
+                NativeSpecialEffectOp(effect = 2, strength = 0.45f)
+            )
+        )
+    }
+
+    fun applySoftBlurMvp(strength: Float = 0.28f) {
+        applyNativeSpecialEffectsMvp(
+            title = "부드러운 흐림",
+            operations = listOf(NativeSpecialEffectOp(effect = 3, strength = strength.coerceIn(0f, 1f)))
+        )
+    }
+
+    private fun applyNativeSpecialEffectsMvp(title: String, operations: List<NativeSpecialEffectOp>) {
+        val current = _uiState.value
+        val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
+        if (baseOriginal == null) {
+            _uiState.update { it.copy(message = "적용할 이미지가 없습니다.") }
+            return
+        }
+
+        pushUndoSnapshot(clearRedo = true)
+        val nextRevision = current.revision + 1
+        renderJob?.cancel()
+        _uiState.update {
+            it.copy(
+                isBusy = true,
+                revision = nextRevision,
+                message = "$title 적용 중입니다."
+            )
+        }
+
+        renderJob = viewModelScope.launch {
+            try {
+                val renderedOriginal = withContext(Dispatchers.Default) {
+                    applyNativeSpecialEffectsToCopy(baseOriginal, operations, nextRevision)
+                }
+                val renderedPreview = withContext(Dispatchers.Default) {
+                    renderEditedPreview(renderedOriginal, current.params, current.engineSelection(), nextRevision)
+                }
+                if (_uiState.value.revision == nextRevision) {
+                    _uiState.update {
+                        val next = it.copy(
+                            originalPreviewBitmap = renderedOriginal,
+                            previewBitmap = renderedPreview,
+                            isBusy = false,
+                            message = "$title 적용했습니다. 되돌릴 수 있습니다."
+                        )
+                        saveDraftSnapshot(getApplication(), next)
+                        next
+                    }
+                } else {
+                    renderedOriginal.recycle()
+                    renderedPreview.recycle()
+                }
+            } catch (t: Throwable) {
+                _uiState.update { it.copy(isBusy = false, message = "$title 적용에 실패했습니다: ${t.message}") }
+            }
+        }
+    }
+
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
         val current = _uiState.value
         val source = current.previewBitmap ?: current.originalPreviewBitmap
@@ -886,6 +958,28 @@ private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, engines
     val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
     renderBitmapInNative(copy, params, engines, revision)
     applySelectedToneEngine(copy, engines.toneEngine)
+    return copy
+}
+
+private data class NativeSpecialEffectOp(
+    val effect: Int,
+    val strength: Float
+)
+
+private fun applyNativeSpecialEffectsToCopy(
+    source: Bitmap,
+    operations: List<NativeSpecialEffectOp>,
+    revision: Int
+): Bitmap {
+    val copy = source.copy(Bitmap.Config.ARGB_8888, true)
+    operations.forEach { operation ->
+        NativePhotoCore.nativeApplySpecialEffectInPlace(
+            bitmap = copy,
+            effect = operation.effect,
+            strength = operation.strength.coerceIn(0f, 1f),
+            revision = revision
+        )
+    }
     return copy
 }
 

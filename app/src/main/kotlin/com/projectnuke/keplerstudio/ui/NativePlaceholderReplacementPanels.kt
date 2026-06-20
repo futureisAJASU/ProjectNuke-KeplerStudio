@@ -30,10 +30,10 @@ private val NativePanelTextMuted = Color(0xFF8E8E8E)
 fun NativeRemoveToolPanel() {
     val vm: EditorViewModel = viewModel()
     NativeToolCard(
-        title = "네이티브 제거",
-        description = "작은 점, 먼지, 고립된 결함을 C++ 픽셀 커널로 완화합니다. 큰 물체 제거는 이후 마스크 기반으로 연결합니다."
+        title = "기본 제거",
+        description = "작은 얼룩을 완화합니다. 이 기능은 AI 기반 객체 제거가 아닙니다."
     ) {
-        NativePrimaryButton("작은 결함 완화") { vm.applyNativeSpecialEffect(NativeSpecialEffect.SmallSpotCleanup, 0.58f) }
+        NativePrimaryButton("작은 얼룩 완화") { vm.applySpotCleanupMvp() }
     }
 }
 
@@ -41,13 +41,10 @@ fun NativeRemoveToolPanel() {
 fun NativeOpticsToolPanel() {
     val vm: EditorViewModel = viewModel()
     NativeToolCard(
-        title = "네이티브 옵틱 보정",
-        description = "렌즈 주변부와 강한 엣지에서 생기는 색수차·비네팅을 C++ 커널로 보정합니다."
+        title = "광학 보정",
+        description = "색수차와 주변부 어두움을 완화합니다. 렌즈 프로필 보정은 아직 지원되지 않습니다."
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { vm.applyNativeSpecialEffect(NativeSpecialEffect.ChromaFringeReduce, 0.62f) }) { Text("색수차 완화") }
-            TextButton(onClick = { vm.applyNativeSpecialEffect(NativeSpecialEffect.VignetteCorrection, 0.45f) }) { Text("비네팅 보정") }
-        }
+        NativePrimaryButton("색수차 및 주변부 완화") { vm.applyOpticsCorrectionMvp() }
     }
 }
 
@@ -56,11 +53,11 @@ fun NativeGeometryToolPanel() {
     val vm: EditorViewModel = viewModel()
     NativeToolCard(
         title = "기하 보정",
-        description = "수평 보정은 자르기 도구의 수동/자동 수평 엔진과 연결되어 있습니다. 원근 보정은 다음 단계에서 네이티브 워프 커널로 확장합니다."
+        description = "자르기와 기울기 보정만 지원합니다. 원근 보정은 아직 지원되지 않습니다."
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { vm.autoStraightenCrop() }) { Text("자동 수평 계산") }
-            TextButton(onClick = { vm.setStraightenDegrees(0f) }) { Text("수평 초기화") }
+            TextButton(onClick = { vm.autoStraightenCrop() }) { Text("기울기 보정") }
+            TextButton(onClick = { vm.setStraightenDegrees(0f) }) { Text("기울기 초기화") }
         }
     }
 }
@@ -69,12 +66,12 @@ fun NativeGeometryToolPanel() {
 fun NativeBlurToolPanel() {
     val vm: EditorViewModel = viewModel()
     NativeToolCard(
-        title = "네이티브 블러",
-        description = "현재 사진에 C++ 3x3 소프트 블러를 적용합니다. 이후 마스크/피사체 기반 렌즈 블러로 확장합니다."
+        title = "부드러운 흐림",
+        description = "이미지를 부드럽게 흐립니다."
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { vm.applyNativeSpecialEffect(NativeSpecialEffect.SoftBlur, 0.28f) }) { Text("약하게") }
-            TextButton(onClick = { vm.applyNativeSpecialEffect(NativeSpecialEffect.SoftBlur, 0.55f) }) { Text("강하게") }
+            TextButton(onClick = { vm.applySoftBlurMvp(0.28f) }) { Text("약하게") }
+            TextButton(onClick = { vm.applySoftBlurMvp(0.55f) }) { Text("강하게") }
         }
     }
 }
@@ -83,11 +80,11 @@ fun NativeBlurToolPanel() {
 fun NativeModelToolPanel() {
     val vm: EditorViewModel = viewModel()
     NativeToolCard(
-        title = "모델 및 네이티브 보조",
-        description = "AI 모델이 없을 때도 네이티브 C++ 보조 기능과 규칙 기반 분석으로 동작합니다."
+        title = "모델 및 기본 보조",
+        description = "연결된 모델이 없을 때는 기본 보정과 규칙 기반 분석으로 동작합니다."
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { vm.runAutoRouterV0Analysis() }) { Text("장면 분석") }
+            TextButton(onClick = { vm.runAutoRouterV0Analysis() }) { Text("화면 분석") }
             TextButton(onClick = { vm.applyFlareGuardV0Preview() }) { Text("번짐 완화") }
             TextButton(onClick = { vm.applyDaySunFlareGuardV0Preview() }) { Text("태양 번짐 완화") }
         }
@@ -98,9 +95,9 @@ fun NativeModelToolPanel() {
 fun NativeProfilesToolPanel() {
     NativeToolCard(
         title = "프로필",
-        description = "현재는 프리셋/룩 엔진과 같은 네이티브 렌더 파라미터를 사용합니다. 프로필별 카메라 매트릭스와 LUT는 다음 단계에서 별도 asset으로 연결합니다."
+        description = "전용 LUT 또는 카메라 매트릭스 프로필은 아직 연결되지 않았습니다."
     ) {
-        Text("프로필은 프리셋 탭의 보정값 적용 경로와 공유됩니다.", color = NativePanelTextMuted, style = MaterialTheme.typography.bodySmall)
+        Text("현재는 프리셋과 동일한 보정값 경로만 사용할 수 있습니다.", color = NativePanelTextMuted, style = MaterialTheme.typography.bodySmall)
     }
 }
 
