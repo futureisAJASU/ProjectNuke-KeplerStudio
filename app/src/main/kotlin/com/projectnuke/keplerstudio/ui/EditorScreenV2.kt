@@ -385,7 +385,7 @@ private fun V2AdjustmentPanel(
                 when (selectedTool) {
                     V2EditorTool.Auto -> V2AutoPanel(onAutoEnhance)
                     V2EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance, editorViewModel = editorViewModel)
-                    V2EditorTool.Profiles -> V2PlaceholderPanel("프로필 전용 LUT 자산이 아직 없어서 현재는 프리셋 기반 보정만 지원합니다")
+                    V2EditorTool.Profiles -> NativeProfilesToolPanel()
                     V2EditorTool.Presets -> PresetToolPanel(params = params, onApplyPreset = { presetParams -> onChange { presetParams } })
                     V2EditorTool.Crop -> CropToolPanel()
                     V2EditorTool.Masking -> MaskingToolPanel()
@@ -395,7 +395,7 @@ private fun V2AdjustmentPanel(
                     V2EditorTool.Effects -> V2EffectsPanel(params, onChange)
                     V2EditorTool.Detail -> V2DetailPanel(params, onChange)
                     V2EditorTool.Optics -> NativeOpticsToolPanel()
-                    V2EditorTool.Geometry -> V2PlaceholderPanel("원근 보정은 아직 연결하지 않았습니다. 수평 보정은 자르기 도구에서 사용할 수 있습니다")
+                    V2EditorTool.Geometry -> NativeGeometryToolPanel()
                     V2EditorTool.Blur -> NativeBlurToolPanel()
                     V2EditorTool.Model -> NativeModelToolPanel()
                 }
