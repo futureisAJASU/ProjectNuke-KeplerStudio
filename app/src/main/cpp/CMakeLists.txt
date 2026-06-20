@@ -9,6 +9,7 @@ add_library(
     native_special_effects.cpp
     native_crop_transform.cpp
     native_flare_guard.cpp
+    native_flare_mask.cpp
 )
 
 find_library(log-lib log)
