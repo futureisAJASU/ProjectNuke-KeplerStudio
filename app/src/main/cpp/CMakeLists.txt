@@ -8,6 +8,7 @@ add_library(
     native_bridge_alias.cpp
     native_special_effects.cpp
     native_crop_transform.cpp
+    native_flare_guard.cpp
 )
 
 find_library(log-lib log)
