@@ -78,6 +78,28 @@ object NativePhotoCore {
         revision: Int
     ): Int = nativeApplySpecialEffectInPlaceNative(bitmap, effect, strength, revision)
 
+    fun nativeRenderCropTransform(
+        source: Bitmap,
+        destination: Bitmap,
+        cropLeft: Float,
+        cropTop: Float,
+        cropRight: Float,
+        cropBottom: Float,
+        rotationDegrees: Float,
+        flipHorizontal: Boolean,
+        revision: Int
+    ): Int = nativeRenderCropTransformNative(
+        source,
+        destination,
+        cropLeft,
+        cropTop,
+        cropRight,
+        cropBottom,
+        rotationDegrees,
+        flipHorizontal,
+        revision
+    )
+
     private external fun nativeRenderPreviewInPlaceNative(
         bitmap: Bitmap,
         exposure: Float,
@@ -105,6 +127,18 @@ object NativePhotoCore {
         bitmap: Bitmap,
         effect: Int,
         strength: Float,
+        revision: Int
+    ): Int
+
+    private external fun nativeRenderCropTransformNative(
+        source: Bitmap,
+        destination: Bitmap,
+        cropLeft: Float,
+        cropTop: Float,
+        cropRight: Float,
+        cropBottom: Float,
+        rotationDegrees: Float,
+        flipHorizontal: Boolean,
         revision: Int
     ): Int
 }
