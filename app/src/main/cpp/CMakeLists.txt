@@ -10,6 +10,7 @@ add_library(
     native_crop_transform.cpp
     native_flare_guard.cpp
     native_flare_mask.cpp
+    native_selection_blend.cpp
 )
 
 find_library(log-lib log)
