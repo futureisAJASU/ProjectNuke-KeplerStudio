@@ -85,6 +85,14 @@ object NativePhotoCore {
         revision: Int
     ): Int = nativeApplyFlareGuardInPlaceNative(bitmap, mode, strength, revision)
 
+    fun nativeCreateFlareMask(
+        source: Bitmap,
+        mask: Bitmap,
+        threshold: Float,
+        radius: Int,
+        passes: Int
+    ): Int = nativeCreateFlareMaskNative(source, mask, threshold, radius, passes)
+
     fun nativeRenderCropTransform(
         source: Bitmap,
         destination: Bitmap,
@@ -142,6 +150,14 @@ object NativePhotoCore {
         mode: Int,
         strength: Float,
         revision: Int
+    ): Int
+
+    private external fun nativeCreateFlareMaskNative(
+        source: Bitmap,
+        mask: Bitmap,
+        threshold: Float,
+        radius: Int,
+        passes: Int
     ): Int
 
     private external fun nativeRenderCropTransformNative(
