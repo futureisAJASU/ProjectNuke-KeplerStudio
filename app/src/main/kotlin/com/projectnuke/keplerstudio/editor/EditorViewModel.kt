@@ -331,7 +331,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val context = getApplication<Application>()
                 val fileName = "KeplerStudio_${exportTimestamp()}.${state.exportFormat.extension}"
                 val savedUri = withContext(Dispatchers.IO) {
-                    val exportBitmap = renderEditedExport(
+                    val exportBitmap = state.originalPreviewBitmap?.let { baseBitmap ->
+                        renderEditedExportFromBitmap(
+                            baseBitmap = baseBitmap,
+                            params = state.params,
+                            resolution = state.exportResolution,
+                            engines = state.engineSelection(),
+                            revision = state.revision + 1
+                        )
+                    } ?: renderEditedExport(
                         sourcePath = sourcePath,
                         params = state.params,
                         resolution = state.exportResolution,
@@ -890,6 +898,22 @@ private fun renderEditedExport(
 ): Bitmap {
     // TODO v0.2: replace whole-bitmap export with ROI/tile rendering to reduce peak memory use.
     val decoded = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE)
+    renderBitmapInNative(decoded, params, engines, revision)
+    applySelectedToneEngine(decoded, engines.toneEngine)
+
+    val scaled = scaleBitmapForExport(decoded, resolution)
+    if (scaled !== decoded) decoded.recycle()
+    return scaled
+}
+
+private fun renderEditedExportFromBitmap(
+    baseBitmap: Bitmap,
+    params: EditParams,
+    resolution: ExportResolution,
+    engines: EngineSelection,
+    revision: Int
+): Bitmap {
+    val decoded = baseBitmap.copy(Bitmap.Config.ARGB_8888, true)
     renderBitmapInNative(decoded, params, engines, revision)
     applySelectedToneEngine(decoded, engines.toneEngine)
 
