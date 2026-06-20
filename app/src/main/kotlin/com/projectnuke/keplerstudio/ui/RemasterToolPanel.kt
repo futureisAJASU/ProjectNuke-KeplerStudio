@@ -33,8 +33,8 @@ private val RemasterButtonTextDark = Color(0xFF111111)
 
 @Composable
 fun RemasterToolPanel(
-    editorViewModel: EditorViewModel = viewModel()      ,
-    onQuickAutoEnhance: () -> Unit
+    onQuickAutoEnhance: () -> Unit,
+    editorViewModel: EditorViewModel = viewModel()
 ) {
     val context = LocalContext.current
     val editorState by editorViewModel.uiState.collectAsState()

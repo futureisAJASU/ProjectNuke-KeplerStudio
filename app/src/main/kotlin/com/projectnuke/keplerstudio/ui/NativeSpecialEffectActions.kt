@@ -2,34 +2,32 @@ package com.projectnuke.keplerstudio.ui
 
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
-import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 enum class NativeSpecialEffect(val id: Int, val label: String) {
-    SmallSpotCleanup(0, "작은 결함 완화"),
-    ChromaFringeReduce(1, "색수차 완화"),
-    VignetteCorrection(2, "비네팅 보정"),
-    SoftBlur(3, "소프트 블러")
+    SmallSpotCleanup(0, "?묒? 寃고븿 ?꾪솕"),
+    ChromaFringeReduce(1, "?됱닔李??꾪솕"),
+    VignetteCorrection(2, "鍮꾨꽕??蹂댁젙"),
+    SoftBlur(3, "?뚰봽??釉붾윭")
 }
 
 fun EditorViewModel.applyNativeSpecialEffect(effect: NativeSpecialEffect, strength: Float = 0.45f) {
     val state = uiState.value
     val base = state.previewBitmap ?: state.originalPreviewBitmap
     if (base == null) {
-        editorFlowNativeFx().update { it.copy(message = "적용할 이미지가 없습니다") }
+        updateUiState { it.copy(message = "?곸슜???대?吏媛 ?놁뒿?덈떎") }
         return
     }
+    recordUserEditForUndo(clearRedo = true)
     val nextRevision = state.revision + 1
-    editorFlowNativeFx().update {
+    updateUiState {
         it.copy(
             isBusy = true,
             revision = nextRevision,
-            message = "${effect.label}을 적용하는 중입니다"
+            message = "${effect.label}???곸슜?섎뒗 以묒엯?덈떎"
         )
     }
     viewModelScope.launch {
@@ -45,27 +43,21 @@ fun EditorViewModel.applyNativeSpecialEffect(effect: NativeSpecialEffect, streng
                 copy
             }
             if (uiState.value.revision == nextRevision) {
-                editorFlowNativeFx().update {
+                updateUiState {
                     it.copy(
                         previewBitmap = rendered,
                         isBusy = false,
-                        message = "${effect.label}을 적용했습니다"
+                        message = "${effect.label}???곸슜?덉뒿?덈떎"
                     )
                 }
+                persistDraftSnapshot()
             } else {
                 rendered.recycle()
             }
         } catch (t: Throwable) {
-            editorFlowNativeFx().update {
-                it.copy(isBusy = false, message = "${effect.label} 적용에 실패했습니다: ${t.message}")
+            updateUiState {
+                it.copy(isBusy = false, message = "${effect.label} ?곸슜???ㅽ뙣?덉뒿?덈떎: ${t.message}")
             }
         }
     }
-}
-
-@Suppress("UNCHECKED_CAST")
-private fun EditorViewModel.editorFlowNativeFx(): MutableStateFlow<EditorUiState> {
-    val field = EditorViewModel::class.java.getDeclaredField("_uiState")
-    field.isAccessible = true
-    return field.get(this) as MutableStateFlow<EditorUiState>
 }

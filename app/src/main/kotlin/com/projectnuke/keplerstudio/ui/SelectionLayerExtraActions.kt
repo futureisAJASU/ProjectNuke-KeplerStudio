@@ -1,27 +1,27 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
-import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
 import java.util.UUID
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 
 fun EditorViewModel.toggleSelectionOverlay() {
-    editorFlowExtra().update {
+    updateUiState {
         it.copy(
             showSelectionOverlay = !it.showSelectionOverlay,
-            message = if (it.showSelectionOverlay) "마스크 표시를 해제했습니다" else "마스크를 표시합니다"
+            message = if (it.showSelectionOverlay) "마스크 오버레이를 숨겼습니다" else "마스크 오버레이를 표시합니다"
         )
     }
 }
 
 fun EditorViewModel.duplicateActiveSelectionLayer() {
-    editorFlowExtra().update { current ->
-        val active = current.selectionLayers.firstOrNull { it.id == current.activeSelectionLayerId }
-            ?: return@update current.copy(message = "복제할 마스크를 선택해 주세요")
+    val active = uiState.value.selectionLayers.firstOrNull { it.id == uiState.value.activeSelectionLayerId } ?: run {
+        updateUiState { it.copy(message = "복제할 마스크를 선택해 주세요") }
+        return
+    }
+    recordUserEditForUndo(clearRedo = true)
+    updateUiState { current ->
         val copy = active.copy(
             id = newExtraSelectionId(),
             name = "${active.name} 복사본",
@@ -33,12 +33,16 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
             message = "마스크를 복제했습니다"
         )
     }
+    persistDraftSnapshot()
 }
 
 fun EditorViewModel.createBackgroundSelectionFromActive() {
-    editorFlowExtra().update { current ->
-        val active = current.selectionLayers.firstOrNull { it.id == current.activeSelectionLayerId }
-            ?: return@update current.copy(message = "배경으로 변환할 마스크를 선택해 주세요")
+    val active = uiState.value.selectionLayers.firstOrNull { it.id == uiState.value.activeSelectionLayerId } ?: run {
+        updateUiState { it.copy(message = "배경으로 변환할 마스크를 선택해 주세요") }
+        return
+    }
+    recordUserEditForUndo(clearRedo = true)
+    updateUiState { current ->
         val layer = SelectionLayer(
             id = newExtraSelectionId(),
             name = "배경 마스크",
@@ -55,13 +59,7 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
             message = "선택한 마스크를 기준으로 배경 마스크를 만들었습니다"
         )
     }
+    persistDraftSnapshot()
 }
 
 private fun newExtraSelectionId(): String = "sel_" + UUID.randomUUID().toString().take(8)
-
-@Suppress("UNCHECKED_CAST")
-private fun EditorViewModel.editorFlowExtra(): MutableStateFlow<EditorUiState> {
-    val field = EditorViewModel::class.java.getDeclaredField("_uiState")
-    field.isAccessible = true
-    return field.get(this) as MutableStateFlow<EditorUiState>
-}

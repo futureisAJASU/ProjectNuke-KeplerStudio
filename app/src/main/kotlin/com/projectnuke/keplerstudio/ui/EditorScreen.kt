@@ -110,6 +110,7 @@ private enum class EditorTool(val label: String, val description: String) {
     Model("모델", "자동 마스크, 디테일 복원, 노이즈 억제")
 }
 
+// Legacy reference screen kept buildable while EditorScreenV2 remains the active entry.
 @Composable
 fun EditorScreen(viewModel: EditorViewModel) {
     val state by viewModel.uiState.collectAsState()

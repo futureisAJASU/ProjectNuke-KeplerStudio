@@ -1,6 +1,7 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
+import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
@@ -11,8 +12,6 @@ import com.projectnuke.keplerstudio.editor.SelectionPaintMode
 import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
@@ -23,36 +22,39 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val state = uiState.value
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     if (base == null) {
-        editorFlow().update { it.copy(message = "마스크를 만들 이미지가 없습니다") }
+        updateUiState { it.copy(message = "留덉뒪?щ? 留뚮뱾 ?대?吏媛 ?놁뒿?덈떎") }
         return
     }
     if (RemasterModelSession.activeModel?.id != "edge_masker" || !RemasterModelSession.isModelLoaded) {
-        editorFlow().update { it.copy(message = "Edge Masker 모델을 먼저 로드해 주세요") }
+        updateUiState { it.copy(message = "Edge Masker 紐⑤뜽??癒쇱? 濡쒕뱶??二쇱꽭??") }
         return
     }
-    editorFlow().update { it.copy(isBusy = true, message = "피사체 마스크를 생성하는 중입니다") }
+
+    recordUserEditForUndo(clearRedo = true)
+    updateUiState { it.copy(isBusy = true, message = "?쇱궗泥?留덉뒪?щ? ?앹꽦?섎뒗 以묒엯?덈떎") }
     viewModelScope.launch {
         try {
             val layer = withContext(Dispatchers.Default) {
                 val mask = RemasterModelSession.createForegroundMask(base)
-                    ?: error("마스크를 생성하지 못했습니다")
+                    ?: error("留덉뒪?щ? ?앹꽦?섏? 紐삵뻽?듬땲??")
                 SelectionLayer(
                     id = newSelectionId(),
-                    name = "피사체 마스크",
+                    name = "?쇱궗泥?留덉뒪??",
                     kind = SelectionLayerKind.Subject,
                     bitmap = mask.copy(Bitmap.Config.ARGB_8888, true)
                 )
             }
-            editorFlow().update { current ->
+            updateUiState { current ->
                 current.copy(
                     isBusy = false,
                     selectionLayers = current.selectionLayers + layer,
                     activeSelectionLayerId = layer.id,
-                    message = "피사체 마스크를 추가했습니다"
+                    message = "?쇱궗泥?留덉뒪?щ? 異붽??덉뒿?덈떎"
                 )
             }
+            persistDraftSnapshot()
         } catch (t: Throwable) {
-            editorFlow().update { it.copy(isBusy = false, message = "피사체 마스크 생성에 실패했습니다: ${t.message}") }
+            updateUiState { it.copy(isBusy = false, message = "?쇱궗泥?留덉뒪???앹꽦???ㅽ뙣?덉뒿?덈떎: ${t.message}") }
         }
     }
 }
@@ -61,74 +63,93 @@ fun EditorViewModel.createBrushSelection() {
     val state = uiState.value
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     if (base == null) {
-        editorFlow().update { it.copy(message = "브러시 마스크를 만들 이미지가 없습니다") }
+        updateUiState { it.copy(message = "釉뚮윭??留덉뒪?щ? 留뚮뱾 ?대?吏媛 ?놁뒿?덈떎") }
         return
     }
+    recordUserEditForUndo(clearRedo = true)
     val layer = SelectionLayer(
         id = newSelectionId(),
-        name = "브러시 마스크 ${state.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
+        name = "釉뚮윭??留덉뒪??${state.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
         kind = SelectionLayerKind.Brush,
         bitmap = Bitmap.createBitmap(base.width, base.height, Bitmap.Config.ARGB_8888)
     )
-    editorFlow().update {
+    updateUiState {
         it.copy(
             selectionLayers = it.selectionLayers + layer,
             activeSelectionLayerId = layer.id,
-            message = "브러시 마스크를 만들었습니다"
+            message = "釉뚮윭??留덉뒪?щ? 留뚮뱾?덉뒿?덈떎"
         )
     }
+    persistDraftSnapshot()
 }
 
 fun EditorViewModel.selectSelectionLayer(id: String) {
-    editorFlow().update { it.copy(activeSelectionLayerId = id, message = "마스크를 선택했습니다") }
+    updateUiState { it.copy(activeSelectionLayerId = id, message = "留덉뒪?щ? ?좏깮?덉뒿?덈떎") }
 }
 
 fun EditorViewModel.deleteActiveSelectionLayer() {
     val activeId = uiState.value.activeSelectionLayerId ?: return
-    editorFlow().update { current ->
+    recordUserEditForUndo(clearRedo = true)
+    updateUiState { current ->
         val nextLayers = current.selectionLayers.filterNot { it.id == activeId }
         current.copy(
             selectionLayers = nextLayers,
             activeSelectionLayerId = nextLayers.lastOrNull()?.id,
-            message = "선택한 마스크를 삭제했습니다"
+            message = "?좏깮??留덉뒪?щ? ??젣?덉뒿?덈떎"
         )
     }
+    persistDraftSnapshot()
 }
 
 fun EditorViewModel.invertActiveSelectionLayer() {
-    editorFlow().update { current ->
-        val activeId = current.activeSelectionLayerId ?: return@update current.copy(message = "선택된 마스크가 없습니다")
+    val activeId = uiState.value.activeSelectionLayerId ?: run {
+        updateUiState { it.copy(message = "선택한 마스크가 없습니다") }
+        return
+    }
+    recordUserEditForUndo(clearRedo = true)
+    updateUiState { current ->
         current.copy(
             selectionLayers = current.selectionLayers.map { layer ->
                 if (layer.id == activeId) layer.copy(inverted = !layer.inverted) else layer
             },
-            message = "마스크 반전을 전환했습니다"
+            message = "留덉뒪??諛섏쟾???꾪솚?덉뒿?덈떎"
         )
     }
+    persistDraftSnapshot()
 }
 
 fun EditorViewModel.clearActiveSelectionLayer() {
-    editorFlow().update { current ->
-        val activeId = current.activeSelectionLayerId ?: return@update current.copy(message = "선택된 마스크가 없습니다")
+    val activeId = uiState.value.activeSelectionLayerId ?: run {
+        updateUiState { it.copy(message = "선택한 마스크가 없습니다") }
+        return
+    }
+    recordUserEditForUndo(clearRedo = true)
+    updateUiState { current ->
         current.copy(
             selectionLayers = current.selectionLayers.map { layer ->
                 if (layer.id == activeId) {
                     layer.bitmap.eraseColor(0xFF000000.toInt())
                     layer
-                } else layer
+                } else {
+                    layer
+                }
             },
-            message = "마스크를 비웠습니다"
+            message = "留덉뒪?щ? 鍮꾩썱?듬땲??"
         )
     }
+    persistDraftSnapshot()
 }
 
 fun EditorViewModel.updateSelectionPaintSettings(transform: (SelectionPaintSettings) -> SelectionPaintSettings) {
-    editorFlow().update { it.copy(selectionPaintSettings = transform(it.selectionPaintSettings)) }
+    updateUiState { it.copy(selectionPaintSettings = transform(it.selectionPaintSettings)) }
 }
 
 fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
-    editorFlow().update { current ->
-        val activeId = current.activeSelectionLayerId ?: return@update current.copy(message = "먼저 마스크를 선택해 주세요")
+    val activeId = uiState.value.activeSelectionLayerId ?: run {
+        updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요") }
+        return
+    }
+    updateUiState { current ->
         var changed = false
         val nextLayers = current.selectionLayers.map { layer ->
             if (layer.id == activeId) {
@@ -140,19 +161,22 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
         current.copy(
             selectionLayers = nextLayers,
             revision = current.revision + if (changed) 1 else 0,
-            message = if (changed) "마스크를 수정했습니다" else current.message
+            message = if (changed) "留덉뒪?щ? ?섏젙?덉뒿?덈떎" else current.message
         )
     }
 }
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {
-    editorFlow().update { current ->
-        val activeId = current.activeSelectionLayerId ?: return@update current.copy(message = "선택된 마스크가 없습니다")
+    val activeId = uiState.value.activeSelectionLayerId ?: run {
+        updateUiState { it.copy(message = "선택한 마스크가 없습니다") }
+        return
+    }
+    updateUiState { current ->
         current.copy(
             selectionLayers = current.selectionLayers.map { layer ->
                 if (layer.id == activeId) layer.copy(localParams = transform(layer.localParams)) else layer
             },
-            message = "마스크 보정값을 변경했습니다"
+            message = "留덉뒪??蹂댁젙媛믪쓣 蹂寃쏀뻽?듬땲??"
         )
     }
 }
@@ -162,25 +186,27 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val layer = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId }
     if (base == null || layer == null) {
-        editorFlow().update { it.copy(message = "적용할 마스크 또는 이미지가 없습니다") }
+        updateUiState { it.copy(message = "?곸슜??留덉뒪???먮뒗 ?대?吏媛 ?놁뒿?덈떎") }
         return
     }
+    recordUserEditForUndo(clearRedo = true)
     val nextRevision = state.revision + 1
-    editorFlow().update { it.copy(isBusy = true, revision = nextRevision, message = "마스크 보정을 적용하는 중입니다") }
+    updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "留덉뒪??蹂댁젙???곸슜?섎뒗 以묒엯?덈떎") }
     viewModelScope.launch {
         try {
             val rendered = withContext(Dispatchers.Default) {
                 renderSelectionLocalEdit(base, state, layer, nextRevision)
             }
             if (uiState.value.revision == nextRevision) {
-                editorFlow().update {
-                    it.copy(previewBitmap = rendered, isBusy = false, message = "선택한 마스크 보정을 적용했습니다")
+                updateUiState {
+                    it.copy(previewBitmap = rendered, isBusy = false, message = "?좏깮??留덉뒪??蹂댁젙???곸슜?덉뒿?덈떎")
                 }
+                persistDraftSnapshot()
             } else {
                 rendered.recycle()
             }
         } catch (t: Throwable) {
-            editorFlow().update { it.copy(isBusy = false, message = "마스크 보정에 실패했습니다: ${t.message}") }
+            updateUiState { it.copy(isBusy = false, message = "留덉뒪??蹂댁젙???ㅽ뙣?덉뒿?덈떎: ${t.message}") }
         }
     }
 }
@@ -306,10 +332,3 @@ private fun blendArgb(foreground: Int, background: Int, alpha: Float): Int {
 }
 
 private fun newSelectionId(): String = "sel_" + UUID.randomUUID().toString().take(8)
-
-@Suppress("UNCHECKED_CAST")
-private fun EditorViewModel.editorFlow(): MutableStateFlow<EditorUiState> {
-    val field = EditorViewModel::class.java.getDeclaredField("_uiState")
-    field.isAccessible = true
-    return field.get(this) as MutableStateFlow<EditorUiState>
-}

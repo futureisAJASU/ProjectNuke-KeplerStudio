@@ -46,6 +46,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val undoHistory = ArrayDeque<EditorHistorySnapshot>()
     private val redoHistory = ArrayDeque<EditorHistorySnapshot>()
 
+    fun updateUiState(transform: (EditorUiState) -> EditorUiState) {
+        _uiState.update(transform)
+    }
+
+    fun recordUserEditForUndo(clearRedo: Boolean = true) {
+        pushUndoSnapshot(clearRedo = clearRedo)
+    }
+
+    fun persistDraftSnapshot() {
+        saveDraftSnapshot(getApplication(), _uiState.value)
+    }
+
+    fun appContext(): Context = getApplication<Application>().applicationContext
+
+    fun appApplication(): Application = getApplication()
+
     init {
         viewModelScope.launch {
             val context = getApplication<Application>()
@@ -439,6 +455,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         pushUndoSnapshot(clearRedo = true)
         val original = current.originalPreviewBitmap
+        // TODO: model manual rotation as editor state instead of mutating preview bitmaps directly.
         val rotatedPreview = rotateBitmap90(preview)
         val rotatedOriginal = if (original != null && original !== preview) rotateBitmap90(original) else rotatedPreview
         _uiState.update {
@@ -581,6 +598,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 params = snapshot.params,
                 previewBitmap = snapshot.previewBitmap,
                 originalPreviewBitmap = snapshot.originalPreviewBitmap,
+                cropState = snapshot.cropState,
+                selectionLayers = snapshot.selectionLayers,
+                activeSelectionLayerId = snapshot.activeSelectionLayerId,
+                selectionPaintSettings = snapshot.selectionPaintSettings,
+                showSelectionOverlay = snapshot.showSelectionOverlay,
+                flareGuardRuntimeStatus = snapshot.flareGuardRuntimeStatus,
                 isBusy = false,
                 revision = it.revision + 1,
                 message = message
@@ -616,7 +639,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 private data class EditorHistorySnapshot(
     val params: EditParams,
     val previewBitmap: Bitmap?,
-    val originalPreviewBitmap: Bitmap?
+    val originalPreviewBitmap: Bitmap?,
+    val cropState: CropState,
+    val selectionLayers: List<SelectionLayer>,
+    val activeSelectionLayerId: String?,
+    val selectionPaintSettings: SelectionPaintSettings,
+    val showSelectionOverlay: Boolean,
+    val flareGuardRuntimeStatus: String?
 )
 
 private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
@@ -631,8 +660,18 @@ private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
     return EditorHistorySnapshot(
         params = params,
         previewBitmap = previewCopy,
-        originalPreviewBitmap = originalCopy
+        originalPreviewBitmap = originalCopy,
+        cropState = cropState,
+        selectionLayers = selectionLayers.deepCopy(),
+        activeSelectionLayerId = activeSelectionLayerId,
+        selectionPaintSettings = selectionPaintSettings,
+        showSelectionOverlay = showSelectionOverlay,
+        flareGuardRuntimeStatus = flareGuardRuntimeStatus
     )
+}
+
+private fun List<SelectionLayer>.deepCopy(): List<SelectionLayer> = map { layer ->
+    layer.copy(bitmap = layer.bitmap.copy(Bitmap.Config.ARGB_8888, true))
 }
 
 private fun trimHistory(stack: ArrayDeque<EditorHistorySnapshot>) {
@@ -648,6 +687,7 @@ private fun recycleHistory(stack: ArrayDeque<EditorHistorySnapshot>) {
 private fun EditorHistorySnapshot.recycleBitmaps() {
     previewBitmap?.recycle()
     if (originalPreviewBitmap !== previewBitmap) originalPreviewBitmap?.recycle()
+    selectionLayers.forEach { it.bitmap.recycle() }
 }
 
 private data class EngineSelection(

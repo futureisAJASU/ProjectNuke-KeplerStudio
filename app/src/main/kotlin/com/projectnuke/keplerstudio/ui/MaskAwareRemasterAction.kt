@@ -7,8 +7,6 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
@@ -18,16 +16,17 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     val state = uiState.value
     val basePreview = state.originalPreviewBitmap ?: state.previewBitmap
     if (basePreview == null) {
-        updateEditorStateMessage("마스크 기반 리마스터를 적용할 이미지가 없습니다")
+        updateUiState { it.copy(message = "마스크 기반 리마스터를 적용할 이미지가 없습니다") }
         return
     }
     if (RemasterModelSession.activeModel?.id != "edge_masker" || !RemasterModelSession.isModelLoaded) {
-        updateEditorStateMessage("Edge Masker 모델을 먼저 선택하고 로드해 주세요")
+        updateUiState { it.copy(message = "Edge Masker 모델을 먼저 선택하고 로드해 주세요") }
         return
     }
 
+    recordUserEditForUndo(clearRedo = true)
     val nextRevision = state.revision + 1
-    mutableEditorState().update {
+    updateUiState {
         it.copy(
             isBusy = true,
             revision = nextRevision,
@@ -49,37 +48,27 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             }
             if (uiState.value.revision == nextRevision) {
                 val params = computeMaskAwareBaseParams(basePreview)
-                mutableEditorState().update {
+                updateUiState {
                     it.copy(
                         params = params,
                         previewBitmap = rendered,
                         isBusy = false,
-                        message = "AI 마스크 기반 리마스터가 적용되었습니다"
+                        message = "AI 마스크 기반 리마스터를 적용했습니다"
                     )
                 }
+                persistDraftSnapshot()
             } else {
                 rendered.recycle()
             }
         } catch (t: Throwable) {
-            mutableEditorState().update {
+            updateUiState {
                 it.copy(
                     isBusy = false,
-                    message = "AI 마스크 기반 리마스터에 실패했습니다: ${t.message}"
+                    message = "AI 마스크 기반 리마스터 적용에 실패했습니다: ${t.message}"
                 )
             }
         }
     }
-}
-
-private fun EditorViewModel.updateEditorStateMessage(message: String) {
-    mutableEditorState().update { it.copy(message = message) }
-}
-
-@Suppress("UNCHECKED_CAST")
-private fun EditorViewModel.mutableEditorState(): MutableStateFlow<EditorUiState> {
-    val field = EditorViewModel::class.java.getDeclaredField("_uiState")
-    field.isAccessible = true
-    return field.get(this) as MutableStateFlow<EditorUiState>
 }
 
 private fun renderMaskAwareRemaster(
