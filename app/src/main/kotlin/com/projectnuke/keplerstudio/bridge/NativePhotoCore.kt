@@ -78,6 +78,13 @@ object NativePhotoCore {
         revision: Int
     ): Int = nativeApplySpecialEffectInPlaceNative(bitmap, effect, strength, revision)
 
+    fun nativeApplyFlareGuardInPlace(
+        bitmap: Bitmap,
+        mode: Int,
+        strength: Float,
+        revision: Int
+    ): Int = nativeApplyFlareGuardInPlaceNative(bitmap, mode, strength, revision)
+
     fun nativeRenderCropTransform(
         source: Bitmap,
         destination: Bitmap,
@@ -126,6 +133,13 @@ object NativePhotoCore {
     private external fun nativeApplySpecialEffectInPlaceNative(
         bitmap: Bitmap,
         effect: Int,
+        strength: Float,
+        revision: Int
+    ): Int
+
+    private external fun nativeApplyFlareGuardInPlaceNative(
+        bitmap: Bitmap,
+        mode: Int,
         strength: Float,
         revision: Int
     ): Int
