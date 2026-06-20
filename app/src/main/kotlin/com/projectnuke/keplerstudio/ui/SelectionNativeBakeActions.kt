@@ -1,0 +1,72 @@
+package com.projectnuke.keplerstudio.ui
+
+import androidx.lifecycle.viewModelScope
+import com.projectnuke.keplerstudio.editor.EditParams
+import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
+    val current = uiState.value
+    val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
+    if (baseOriginal == null) {
+        updateUiState { it.copy(message = "적용할 이미지가 없습니다.") }
+        return
+    }
+    val enabledLayers = current.selectionLayers.filter { it.enabled }
+    if (enabledLayers.isEmpty()) {
+        updateUiState { it.copy(message = "적용할 선택 마스크가 없습니다.") }
+        return
+    }
+
+    recordUserEditForUndo(clearRedo = true)
+    val nextRevision = current.revision + 1
+    updateUiState {
+        it.copy(
+            isBusy = true,
+            revision = nextRevision,
+            message = "선택 마스크 보정을 적용하는 중입니다."
+        )
+    }
+
+    viewModelScope.launch {
+        try {
+            val bakedOriginal = withContext(Dispatchers.Default) {
+                val localOnlyState = current.copy(params = EditParams())
+                renderBitmapWithSelectionLayers(baseOriginal, localOnlyState, nextRevision)
+            }
+            val renderedPreview = withContext(Dispatchers.Default) {
+                val globalOnlyState = current.copy(
+                    selectionLayers = emptyList(),
+                    activeSelectionLayerId = null
+                )
+                renderBitmapWithSelectionLayers(bakedOriginal, globalOnlyState, nextRevision)
+            }
+            if (uiState.value.revision == nextRevision) {
+                updateUiState {
+                    it.copy(
+                        originalPreviewBitmap = bakedOriginal,
+                        previewBitmap = renderedPreview,
+                        selectionLayers = emptyList(),
+                        activeSelectionLayerId = null,
+                        isBusy = false,
+                        message = "선택 마스크 보정을 원본에 적용했습니다. 저장 결과에도 반영됩니다."
+                    )
+                }
+                persistDraftSnapshot()
+            } else {
+                bakedOriginal.recycle()
+                renderedPreview.recycle()
+            }
+        } catch (_: Throwable) {
+            updateUiState {
+                it.copy(
+                    isBusy = false,
+                    message = "선택 마스크 보정 적용에 실패했습니다."
+                )
+            }
+        }
+    }
+}
