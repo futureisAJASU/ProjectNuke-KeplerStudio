@@ -7,6 +7,7 @@ add_library(
     native_bridge.cpp
     native_bridge_alias.cpp
     native_special_effects.cpp
+    native_crop_transform.cpp
 )
 
 find_library(log-lib log)
