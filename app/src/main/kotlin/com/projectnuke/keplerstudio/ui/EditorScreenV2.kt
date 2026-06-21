@@ -3,6 +3,12 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -56,6 +62,7 @@ import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
 import com.projectnuke.keplerstudio.editor.NoiseEngine
+import com.projectnuke.keplerstudio.editor.PresetLookHandoff
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import java.text.SimpleDateFormat
@@ -93,8 +100,8 @@ private enum class V2MainTab(val label: String) {
 private enum class V2EditorTool(val label: String, val description: String) {
     Auto("자동", "빠른 자동 보정을 적용합니다"),
     Remaster("리마스터", "모델 상태와 마스크 기반 보조 보정을 확인합니다"),
-    Profiles("프로필", "내장 색감 룩을 적용합니다. 전용 카메라 프로필은 아직 지원되지 않습니다"),
-    Presets("프리셋", "저장한 보정값과 색감 룩을 적용하거나 JSON으로 백업합니다"),
+    Profiles("프로필", "전용 LUT 자산이 없어서 현재는 참고용 상태만 안내합니다"),
+    Presets("프리셋", "저장한 보정값을 적용하거나 JSON으로 백업합니다"),
     Crop("자르기", "비율, 회전, 수평 기반 자르기를 적용합니다"),
     Masking("마스킹", "피사체 선택과 브러시 마스크를 편집합니다"),
     Remove("제거", "작은 결함 완화 같은 기본 정리 도구를 제공합니다"),
@@ -103,7 +110,7 @@ private enum class V2EditorTool(val label: String, val description: String) {
     Effects("효과", "효과 계열 파라미터를 조정합니다"),
     Detail("디테일", "선명도와 노이즈 감소를 조정합니다"),
     Optics("광학", "색수차 완화와 비네팅 보정을 적용합니다"),
-    Geometry("기하", "자르기와 기울기 보정을 제공합니다. 원근 보정은 아직 지원되지 않습니다"),
+    Geometry("기하", "원근 보정은 아직 제외하고 수평 관련 MVP 상태만 안내합니다"),
     Blur("블러", "기본 소프트 블러를 적용합니다"),
     Model("모델", "현재 연결된 모델 상태와 규칙 기반 보조 기능을 보여줍니다")
 }
@@ -113,6 +120,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     val state by viewModel.uiState.collectAsState()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
+            PresetLookHandoff.clear()
             viewModel.openImage(uri)
         }
     }
@@ -120,12 +128,17 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     var selectedTool by remember { mutableStateOf(V2EditorTool.Light) }
     var showExportDialog by remember { mutableStateOf(false) }
     var panelCollapsed by remember { mutableStateOf(false) }
-    var fullScreenPreview by remember { mutableStateOf(false) }
+    var chromeHidden by remember { mutableStateOf(false) }
+    val hideChromeForPreview = selectedTab == V2MainTab.Editor && chromeHidden
 
     MaterialTheme(colorScheme = V2DarkColors) {
         Surface(modifier = Modifier.fillMaxSize(), color = V2AppBackground) {
             Column(modifier = Modifier.fillMaxSize().background(V2AppBackground)) {
-                if (!fullScreenPreview) {
+                AnimatedVisibility(
+                    visible = !hideChromeForPreview,
+                    enter = slideInVertically(animationSpec = tween(220), initialOffsetY = { -it }) + fadeIn(animationSpec = tween(160)),
+                    exit = slideOutVertically(animationSpec = tween(220), targetOffsetY = { -it }) + fadeOut(animationSpec = tween(160))
+                ) {
                     V2TopBar(
                         nativeVersion = state.nativeVersion,
                         selectedTab = selectedTab,
@@ -133,12 +146,18 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         canExport = state.previewBitmap != null && !state.isBusy,
                         canUndo = state.canUndo,
                         canRedo = state.canRedo,
-                        onTabSelected = { selectedTab = it },
+                        onTabSelected = {
+                            chromeHidden = false
+                            selectedTab = it
+                        },
                         onOpen = { picker.launch("image/*") },
                         onUndo = viewModel::undoEdit,
                         onRedo = viewModel::redoEdit,
                         onRotate = viewModel::rotatePreview90,
-                        onReset = viewModel::resetAdjustments,
+                        onReset = {
+                            PresetLookHandoff.clear()
+                            viewModel.resetAdjustments()
+                        },
                         onSave = { showExportDialog = true }
                     )
                 }
@@ -150,22 +169,29 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                             originalBitmap = state.originalPreviewBitmap,
                             isBusy = state.isBusy,
                             message = state.message,
-                            isFullScreen = fullScreenPreview,
-                            onTogglePanel = { panelCollapsed = !panelCollapsed },
-                            onToggleFullScreen = { fullScreenPreview = !fullScreenPreview },
+                            chromeHidden = chromeHidden,
+                            onToggleChrome = {
+                                if (state.previewBitmap != null) chromeHidden = !chromeHidden
+                            },
                             modifier = Modifier.weight(1f).fillMaxWidth()
                         )
-                        if (!fullScreenPreview) {
+                        AnimatedVisibility(
+                            visible = !chromeHidden,
+                            enter = slideInVertically(animationSpec = tween(220), initialOffsetY = { it }) + fadeIn(animationSpec = tween(160)),
+                            exit = slideOutVertically(animationSpec = tween(220), targetOffsetY = { it }) + fadeOut(animationSpec = tween(160))
+                        ) {
                             V2AdjustmentPanel(
                                 editorViewModel = viewModel,
                                 selectedTool = selectedTool,
                                 params = state.params,
-                                activeLook = state.presetLook,
                                 panelCollapsed = panelCollapsed,
                                 onTogglePanel = { panelCollapsed = !panelCollapsed },
-                                onFullScreen = { fullScreenPreview = true },
+                                onFullScreen = { chromeHidden = true },
                                 onToolSelected = { selectedTool = it },
-                                onAutoEnhance = viewModel::applyAutoEnhance,
+                                onAutoEnhance = {
+                                    PresetLookHandoff.clear()
+                                    viewModel.applyAutoEnhance()
+                                },
                                 onChange = viewModel::updateParams
                             )
                         }
@@ -263,36 +289,33 @@ private fun V2PreviewArea(
     originalBitmap: Bitmap?,
     isBusy: Boolean,
     message: String?,
-    isFullScreen: Boolean,
-    onTogglePanel: () -> Unit,
-    onToggleFullScreen: () -> Unit,
+    chromeHidden: Boolean,
+    onToggleChrome: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Box(modifier = modifier.background(V2PreviewBackground), contentAlignment = Alignment.Center) {
         if (bitmap == null) {
             Text("사진을 선택해 주세요", color = V2TextPrimary)
         } else {
-            V2ZoomablePreview(bitmap = bitmap, originalBitmap = originalBitmap)
+            V2ZoomablePreview(bitmap = bitmap, originalBitmap = originalBitmap, onToggleChrome = onToggleChrome)
         }
         if (isBusy) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
         }
-        Row(modifier = Modifier.align(Alignment.TopEnd).padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = onTogglePanel) { Text("편집창") }
-            TextButton(onClick = onToggleFullScreen) { Text(if (isFullScreen) "전체화면 종료" else "전체화면") }
-        }
-        message?.let {
-            Text(
-                text = it,
-                color = V2TextPrimary,
-                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp).background(V2BadgeBackground).padding(horizontal = 10.dp, vertical = 6.dp)
-            )
+        if (!chromeHidden) {
+            message?.let {
+                Text(
+                    text = it,
+                    color = V2TextPrimary,
+                    modifier = Modifier.align(Alignment.BottomStart).padding(12.dp).background(V2BadgeBackground).padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?) {
+private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?, onToggleChrome: () -> Unit) {
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
     var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
     var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }
@@ -316,6 +339,7 @@ private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?) {
                 }
                 .pointerInput(bitmap, originalBitmap) {
                     detectTapGestures(
+                        onTap = { onToggleChrome() },
                         onDoubleTap = {
                             if (scale > 1.01f) {
                                 scale = 1f
@@ -353,7 +377,6 @@ private fun V2AdjustmentPanel(
     editorViewModel: EditorViewModel,
     selectedTool: V2EditorTool,
     params: EditParams,
-    activeLook: com.projectnuke.keplerstudio.editor.PresetColorLook?,
     panelCollapsed: Boolean,
     onTogglePanel: () -> Unit,
     onFullScreen: () -> Unit,
@@ -369,7 +392,7 @@ private fun V2AdjustmentPanel(
         ) {
             Text(selectedTool.label, color = V2TextPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             TextButton(onClick = onTogglePanel) { Text(if (panelCollapsed) "펼치기" else "접기") }
-            TextButton(onClick = onFullScreen) { Text("전체화면") }
+            TextButton(onClick = onFullScreen) { Text("미리보기") }
         }
         if (!panelCollapsed) {
             Column(
@@ -379,23 +402,19 @@ private fun V2AdjustmentPanel(
                 when (selectedTool) {
                     V2EditorTool.Auto -> V2AutoPanel(onAutoEnhance)
                     V2EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance, editorViewModel = editorViewModel)
-                    V2EditorTool.Profiles -> NativeProfilesToolPanel(editorViewModel = editorViewModel)
-                    V2EditorTool.Presets -> PresetToolPanel(
-                        editorViewModel = editorViewModel,
-                        params = params,
-                        activeLook = activeLook
-                    )
+                    V2EditorTool.Profiles -> NativeProfilesToolPanel()
+                    V2EditorTool.Presets -> PresetToolPanel(params = params, onApplyPreset = { presetParams -> onChange { presetParams } })
                     V2EditorTool.Crop -> CropToolPanel()
                     V2EditorTool.Masking -> MaskingToolPanel()
-                    V2EditorTool.Remove -> NativeRemoveToolPanel(editorViewModel = editorViewModel)
+                    V2EditorTool.Remove -> NativeRemoveToolPanel()
                     V2EditorTool.Light -> V2LightPanel(params, onChange)
                     V2EditorTool.Color -> V2ColorPanel(params, onChange)
                     V2EditorTool.Effects -> V2EffectsPanel(params, onChange)
                     V2EditorTool.Detail -> V2DetailPanel(params, onChange)
-                    V2EditorTool.Optics -> NativeOpticsToolPanel(editorViewModel = editorViewModel)
-                    V2EditorTool.Geometry -> NativeGeometryToolPanel(editorViewModel = editorViewModel)
-                    V2EditorTool.Blur -> NativeBlurToolPanel(editorViewModel = editorViewModel)
-                    V2EditorTool.Model -> NativeModelToolPanel(editorViewModel = editorViewModel)
+                    V2EditorTool.Optics -> NativeOpticsToolPanel()
+                    V2EditorTool.Geometry -> NativeGeometryToolPanel()
+                    V2EditorTool.Blur -> NativeBlurToolPanel()
+                    V2EditorTool.Model -> NativeModelToolPanel()
                 }
             }
         }
@@ -420,7 +439,7 @@ private fun V2AutoPanel(onAutoEnhance: () -> Unit) {
 }
 
 @Composable
-private fun V2UnavailablePanel(message: String) {
+private fun V2PlaceholderPanel(message: String) {
     Text(message, color = V2TextMuted, style = MaterialTheme.typography.bodySmall)
 }
 
@@ -440,21 +459,21 @@ private fun V2ColorPanel(params: EditParams, onChange: ((EditParams) -> EditPara
     V2AdjustmentSlider("색조", params.tint, -1f, 1f) { v -> onChange { it.copy(tint = v) } }
     V2AdjustmentSlider("생동감", params.vibrance, -1f, 1f) { v -> onChange { it.copy(vibrance = v) } }
     V2AdjustmentSlider("채도", params.saturation, -1f, 1f) { v -> onChange { it.copy(saturation = v) } }
-    V2UnavailablePanel("HSL과 색상 혼합은 아직 지원되지 않습니다")
+    V2PlaceholderPanel("HSL과 색상 혼합은 아직 연결하지 않았습니다")
 }
 
 @Composable
 private fun V2EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     V2AdjustmentSlider("선명 대비", params.clarity, -1f, 1f) { v -> onChange { it.copy(clarity = v) } }
     V2AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f) { v -> onChange { it.copy(dehaze = v) } }
-    V2UnavailablePanel("텍스처, 그레인, 고급 효과는 아직 지원되지 않습니다")
+    V2PlaceholderPanel("텍스처, 그레인, 고급 효과는 아직 연결하지 않았습니다")
 }
 
 @Composable
 private fun V2DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     V2AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
     V2AdjustmentSlider("노이즈 감소", params.noiseReduction, 0f, 1f) { v -> onChange { it.copy(noiseReduction = v) } }
-    V2UnavailablePanel("반경, 디테일 마스킹, 컬러 노이즈 감소는 아직 지원되지 않습니다")
+    V2PlaceholderPanel("반경, 디테일 마스킹, 컬러 노이즈 감소는 아직 연결하지 않았습니다")
 }
 
 @Composable
