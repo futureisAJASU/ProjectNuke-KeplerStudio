@@ -93,8 +93,8 @@ private enum class V2MainTab(val label: String) {
 private enum class V2EditorTool(val label: String, val description: String) {
     Auto("자동", "빠른 자동 보정을 적용합니다"),
     Remaster("리마스터", "모델 상태와 마스크 기반 보조 보정을 확인합니다"),
-    Profiles("프로필", "전용 LUT 자산이 없어서 현재는 참고용 상태만 안내합니다"),
-    Presets("프리셋", "저장한 보정값을 적용하거나 JSON으로 백업합니다"),
+    Profiles("프로필", "내장 색감 룩을 적용합니다. 전용 카메라 프로필은 아직 지원되지 않습니다"),
+    Presets("프리셋", "저장한 보정값과 색감 룩을 적용하거나 JSON으로 백업합니다"),
     Crop("자르기", "비율, 회전, 수평 기반 자르기를 적용합니다"),
     Masking("마스킹", "피사체 선택과 브러시 마스크를 편집합니다"),
     Remove("제거", "작은 결함 완화 같은 기본 정리 도구를 제공합니다"),
@@ -103,7 +103,7 @@ private enum class V2EditorTool(val label: String, val description: String) {
     Effects("효과", "효과 계열 파라미터를 조정합니다"),
     Detail("디테일", "선명도와 노이즈 감소를 조정합니다"),
     Optics("광학", "색수차 완화와 비네팅 보정을 적용합니다"),
-    Geometry("기하", "원근 보정은 아직 제외하고 수평 관련 MVP 상태만 안내합니다"),
+    Geometry("기하", "자르기와 기울기 보정을 제공합니다. 원근 보정은 아직 지원되지 않습니다"),
     Blur("블러", "기본 소프트 블러를 적용합니다"),
     Model("모델", "현재 연결된 모델 상태와 규칙 기반 보조 기능을 보여줍니다")
 }
@@ -420,7 +420,7 @@ private fun V2AutoPanel(onAutoEnhance: () -> Unit) {
 }
 
 @Composable
-private fun V2PlaceholderPanel(message: String) {
+private fun V2UnavailablePanel(message: String) {
     Text(message, color = V2TextMuted, style = MaterialTheme.typography.bodySmall)
 }
 
@@ -440,21 +440,21 @@ private fun V2ColorPanel(params: EditParams, onChange: ((EditParams) -> EditPara
     V2AdjustmentSlider("색조", params.tint, -1f, 1f) { v -> onChange { it.copy(tint = v) } }
     V2AdjustmentSlider("생동감", params.vibrance, -1f, 1f) { v -> onChange { it.copy(vibrance = v) } }
     V2AdjustmentSlider("채도", params.saturation, -1f, 1f) { v -> onChange { it.copy(saturation = v) } }
-    V2PlaceholderPanel("HSL과 색상 혼합은 아직 연결하지 않았습니다")
+    V2UnavailablePanel("HSL과 색상 혼합은 아직 지원되지 않습니다")
 }
 
 @Composable
 private fun V2EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     V2AdjustmentSlider("선명 대비", params.clarity, -1f, 1f) { v -> onChange { it.copy(clarity = v) } }
     V2AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f) { v -> onChange { it.copy(dehaze = v) } }
-    V2PlaceholderPanel("텍스처, 그레인, 고급 효과는 아직 연결하지 않았습니다")
+    V2UnavailablePanel("텍스처, 그레인, 고급 효과는 아직 지원되지 않습니다")
 }
 
 @Composable
 private fun V2DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     V2AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
     V2AdjustmentSlider("노이즈 감소", params.noiseReduction, 0f, 1f) { v -> onChange { it.copy(noiseReduction = v) } }
-    V2PlaceholderPanel("반경, 디테일 마스킹, 컬러 노이즈 감소는 아직 연결하지 않았습니다")
+    V2UnavailablePanel("반경, 디테일 마스킹, 컬러 노이즈 감소는 아직 지원되지 않습니다")
 }
 
 @Composable

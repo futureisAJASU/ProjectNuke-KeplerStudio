@@ -56,7 +56,6 @@ import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
 import com.projectnuke.keplerstudio.editor.NoiseEngine
-import com.projectnuke.keplerstudio.editor.PresetLookHandoff
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import com.projectnuke.keplerstudio.editor.ViewportState
@@ -116,7 +115,6 @@ fun EditorScreen(viewModel: EditorViewModel) {
     val state by viewModel.uiState.collectAsState()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
-            PresetLookHandoff.clear()
             viewModel.openImage(uri)
         }
     }
@@ -132,10 +130,7 @@ fun EditorScreen(viewModel: EditorViewModel) {
                     canExport = state.previewBitmap != null && !state.isBusy,
                     onTabSelected = { selectedTab = it },
                     onOpen = { picker.launch("image/*") },
-                    onReset = {
-                        PresetLookHandoff.clear()
-                        viewModel.resetAdjustments()
-                    },
+                    onReset = viewModel::resetAdjustments,
                     onExport = { viewModel.exportPreview() }
                 )
 
@@ -206,10 +201,7 @@ fun EditorScreen(viewModel: EditorViewModel) {
                             onToolSelected = { selectedTool = it },
                             onFormatSelected = viewModel::setExportFormat,
                             onResolutionSelected = viewModel::setExportResolution,
-                            onAutoEnhance = {
-                                PresetLookHandoff.clear()
-                                viewModel.applyAutoEnhance()
-                            },
+                            onAutoEnhance = viewModel::applyAutoEnhance,
                             onChange = { transform -> viewModel.updateParams(transform) }
                         )
                     }
@@ -551,7 +543,7 @@ private fun AdjustmentPanel(
             when (selectedTool) {
                 EditorTool.Auto -> AutoPanel(onAutoEnhance)
                 EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance)
-                EditorTool.Profiles -> PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결됩니다")
+                EditorTool.Profiles -> UnavailablePanel("내장 색감 룩은 EditorScreenV2에서 지원됩니다. 전용 카메라 프로필은 아직 지원되지 않습니다")
                 EditorTool.Presets -> PresetToolPanel(
                     editorViewModel = viewModel,
                     params = params,
@@ -561,13 +553,13 @@ private fun AdjustmentPanel(
                 EditorTool.Color -> ColorPanel(params, onChange)
                 EditorTool.Effects -> EffectsPanel(params, onChange)
                 EditorTool.Detail -> DetailPanel(params, onChange)
-                EditorTool.Crop -> PlaceholderPanel("비율, 회전, 수평계 기반 자르기 도구를 준비 중입니다")
-                EditorTool.Masking -> PlaceholderPanel("피사체, 하늘, 배경 마스크 모델을 연결할 예정입니다")
-                EditorTool.Remove -> PlaceholderPanel("지우개, 반사 제거, 센서 먼지 제거 엔진을 연결할 예정입니다")
-                EditorTool.Optics -> PlaceholderPanel("색수차 제거와 렌즈 프로필 보정을 준비 중입니다")
-                EditorTool.Geometry -> PlaceholderPanel("왜곡, 수직, 수평, 원근 보정을 준비 중입니다")
-                EditorTool.Blur -> PlaceholderPanel("렌즈 블러와 초점 영역 편집을 준비 중입니다")
-                EditorTool.Model -> PlaceholderPanel("자동 마스크, 노이즈 억제, 디테일 복원 보조를 준비 중입니다")
+                EditorTool.Crop -> UnavailablePanel("자르기 도구는 EditorScreenV2에서 지원됩니다")
+                EditorTool.Masking -> UnavailablePanel("마스킹 모델은 아직 지원되지 않습니다")
+                EditorTool.Remove -> UnavailablePanel("기본 정리 도구는 EditorScreenV2에서 지원됩니다")
+                EditorTool.Optics -> UnavailablePanel("기본 광학 보정은 EditorScreenV2에서 지원됩니다. 렌즈 프로필 보정은 아직 지원되지 않습니다")
+                EditorTool.Geometry -> UnavailablePanel("자르기와 기울기 보정은 EditorScreenV2에서 지원됩니다. 원근 보정은 아직 지원되지 않습니다")
+                EditorTool.Blur -> UnavailablePanel("부드러운 흐림은 EditorScreenV2에서 지원됩니다")
+                EditorTool.Model -> UnavailablePanel("AI 스타일 전환과 자동 마스크는 아직 지원되지 않습니다")
             }
         }
 
@@ -687,25 +679,25 @@ private fun ColorPanel(params: EditParams, onChange: ((EditParams) -> EditParams
     AdjustmentSlider("색조", params.tint, -1f, 1f) { v -> onChange { it.copy(tint = v) } }
     AdjustmentSlider("생동감", params.vibrance, -1f, 1f) { v -> onChange { it.copy(vibrance = v) } }
     AdjustmentSlider("채도", params.saturation, -1f, 1f) { v -> onChange { it.copy(saturation = v) } }
-    PlaceholderPanel("HSL과 색상 혼합은 다음 단계에서 연결됩니다")
+    UnavailablePanel("HSL과 색상 혼합은 아직 지원되지 않습니다")
 }
 
 @Composable
 private fun EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     AdjustmentSlider("명료도", params.clarity, -1f, 1f) { v -> onChange { it.copy(clarity = v) } }
     AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f) { v -> onChange { it.copy(dehaze = v) } }
-    PlaceholderPanel("텍스처, 비네팅, 그레인은 다음 단계에서 연결됩니다")
+    UnavailablePanel("텍스처, 비네팅, 그레인은 아직 지원되지 않습니다")
 }
 
 @Composable
 private fun DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     AdjustmentSlider("샤픈", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
     AdjustmentSlider("노이즈 감소", params.noiseReduction, 0f, 1f) { v -> onChange { it.copy(noiseReduction = v) } }
-    PlaceholderPanel("반경, 디테일, 마스킹, 컬러 노이즈 감소는 다음 단계에서 연결됩니다")
+    UnavailablePanel("반경, 디테일 마스킹, 컬러 노이즈 감소는 아직 지원되지 않습니다")
 }
 
 @Composable
-private fun PlaceholderPanel(message: String) {
+private fun UnavailablePanel(message: String) {
     Text(
         text = message,
         color = TextMuted,
