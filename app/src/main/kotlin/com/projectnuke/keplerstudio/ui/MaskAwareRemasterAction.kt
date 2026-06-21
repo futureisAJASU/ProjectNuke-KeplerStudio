@@ -6,21 +6,21 @@ import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import kotlin.math.max
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlin.math.max
-import kotlin.math.roundToInt
 
 fun EditorViewModel.applyMaskAwareRemaster() {
     val state = uiState.value
     val basePreview = state.originalPreviewBitmap ?: state.previewBitmap
     if (basePreview == null) {
-        updateUiState { it.copy(message = "마스크 기반 리마스터를 적용할 이미지가 없습니다") }
+        updateUiState { it.copy(message = "모델 마스크 보조를 적용할 이미지가 없습니다.") }
         return
     }
     if (RemasterModelSession.activeModel?.id != "edge_masker" || !RemasterModelSession.isModelLoaded) {
-        updateUiState { it.copy(message = "Edge Masker 모델을 먼저 선택하고 로드해 주세요") }
+        updateUiState { it.copy(message = "Edge Masker 모델 파일과 런타임이 준비된 뒤 사용할 수 있습니다.") }
         return
     }
 
@@ -30,7 +30,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         it.copy(
             isBusy = true,
             revision = nextRevision,
-            message = "AI 마스크를 분석하는 중입니다"
+            message = "Edge Masker로 마스크를 분석하는 중입니다."
         )
     }
 
@@ -38,7 +38,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         try {
             val rendered = withContext(Dispatchers.Default) {
                 val mask = RemasterModelSession.createForegroundMask(basePreview)
-                    ?: error("AI 마스크를 생성하지 못했습니다")
+                    ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
                 renderMaskAwareRemaster(
                     basePreview = basePreview,
                     mask = mask,
@@ -53,7 +53,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                         params = params,
                         previewBitmap = rendered,
                         isBusy = false,
-                        message = "AI 마스크 기반 리마스터를 적용했습니다"
+                        message = "Edge Masker 기반 마스크 보정을 적용했습니다."
                     )
                 }
                 persistDraftSnapshot()
@@ -64,7 +64,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             updateUiState {
                 it.copy(
                     isBusy = false,
-                    message = "AI 마스크 기반 리마스터 적용에 실패했습니다: ${t.message}"
+                    message = "Edge Masker 기반 마스크 보정 적용에 실패했습니다: ${t.message}"
                 )
             }
         }

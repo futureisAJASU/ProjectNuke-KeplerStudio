@@ -619,16 +619,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
         val current = _uiState.value
-        val source = current.previewBitmap ?: current.originalPreviewBitmap
-        if (source == null) {
+        val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
+        if (baseOriginal == null) {
             _uiState.update { it.copy(message = "번짐 완화를 적용할 이미지가 없습니다.") }
             return
         }
 
         pushUndoSnapshot(clearRedo = true)
         val label = when (mode) {
-            FlareGuardMode.NightLight -> "번짐 완화"
-            FlareGuardMode.DaySun -> "태양 번짐 완화"
+            FlareGuardMode.NightLight -> "번짐 영역 감지"
+            FlareGuardMode.DaySun -> "태양 번짐 영역 감지"
         }
         val nextRevision = current.revision + 1
         val appContext = context.applicationContext
@@ -636,29 +636,36 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 isBusy = true,
                 revision = nextRevision,
-                message = "$label 처리를 적용하는 중입니다.",
-                flareGuardRuntimeStatus = "AI 모델 상태를 확인하는 중입니다."
+                message = "$label 처리 중입니다.",
+                flareGuardRuntimeStatus = "플레어 마스크 모델 상태를 확인하는 중입니다."
             )
         }
-        Log.i(FLARE_GUARD_AI_TAG, "Starting FlareGuard preview: mode=$mode source=${source.width}x${source.height} revision=$nextRevision")
+        Log.i(FLARE_GUARD_AI_TAG, "Starting FlareGuard preview: mode=$mode source=${baseOriginal.width}x${baseOriginal.height} revision=$nextRevision")
 
         viewModelScope.launch {
             try {
                 val result = withContext(Dispatchers.Default) {
-                    applyFlareGuardModelOrRuleResultV0(appContext, source, mode)
+                    applyFlareGuardModelOrRuleResultV0(appContext, baseOriginal, mode, allowRuleFallback = true)
+                }
+                val renderedPreview = withContext(Dispatchers.Default) {
+                    renderEditedPreview(result.bitmap, current.params, current.engineSelection(), nextRevision, current.presetLook)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     _uiState.update {
-                        it.copy(
-                            previewBitmap = result.bitmap,
+                        val next = it.copy(
+                            originalPreviewBitmap = result.bitmap,
+                            previewBitmap = renderedPreview,
                             isBusy = false,
                             message = result.status.uiText,
                             flareGuardRuntimeStatus = result.status.uiText
                         )
+                        saveDraftSnapshot(getApplication(), next)
+                        next
                     }
                     Log.i(FLARE_GUARD_AI_TAG, "Finished FlareGuard preview: mode=$mode status=${result.status} output=${result.bitmap.width}x${result.bitmap.height}")
                 } else {
                     result.bitmap.recycle()
+                    renderedPreview.recycle()
                     Log.w(FLARE_GUARD_AI_TAG, "Discarded stale FlareGuard preview: expected=$nextRevision actual=${_uiState.value.revision}")
                 }
             } catch (t: Throwable) {
@@ -666,13 +673,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 _uiState.update {
                     it.copy(
                         isBusy = false,
-                        message = "번짐 완화 적용에 실패했습니다.",
-                        flareGuardRuntimeStatus = "번짐 완화 적용에 실패했습니다."
+                        message = "번짐 영역 감지에 실패했습니다.",
+                        flareGuardRuntimeStatus = "번짐 영역 감지에 실패했습니다."
                     )
                 }
             }
         }
     }
+
 
     private suspend fun restoreDraftIfAvailable(context: Context) {
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)

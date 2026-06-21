@@ -12,17 +12,17 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.roundToInt
 
-private const val FLARE_GUARD_MODEL_ASSET = "models/flare_guard.tflite"
+private const val FLARE_MASKER_MODEL_ASSET = "models/flare_guard.tflite"
 
 /**
- * Small runtime slot for the first Flare Guard student model.
+ * Runtime slot for the current Flare Masker model.
  *
  * Expected v1 contract:
  * - input: RGB tile/full-preview, NHWC [1, H, W, 3], FLOAT32 preferred
  * - output: grayscale flare alpha mask, usually [1, H, W, 1]
  *
- * The model file is intentionally optional. If the asset is missing or invalid,
- * callers should fall back to the rule-based FlareGuardV0 path.
+ * This model only returns a grayscale flare alpha mask. It is not a restoration
+ * model; callers should use it for mask-assisted correction or selection.
  */
 class FlareGuardModelRunner private constructor(
     private val interpreter: Interpreter,
@@ -177,7 +177,7 @@ class FlareGuardModelRunner private constructor(
                 setNumThreads(2)
                 setUseXNNPACK(true)
             }
-            val interpreter = Interpreter(loadMappedAsset(context, FLARE_GUARD_MODEL_ASSET), options)
+            val interpreter = Interpreter(loadMappedAsset(context, FLARE_MASKER_MODEL_ASSET), options)
             val inputTensor = interpreter.getInputTensor(0)
             val outputTensor = interpreter.getOutputTensor(0)
             val inputShape = parseInputShape(inputTensor.shape())

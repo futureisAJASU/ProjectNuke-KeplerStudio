@@ -21,24 +21,32 @@ fun createFlareMaskV0(bitmap: Bitmap, threshold: Float = 0.90f): Bitmap {
     return mask
 }
 
-fun applyFlareGuardV0(source: Bitmap, strength: Float = 0.35f): Bitmap {
+fun applyFlareGuardV0(source: Bitmap, strength: Float = 0.28f): Bitmap {
     val output = source.copy(Bitmap.Config.ARGB_8888, true)
-    NativePhotoCore.nativeApplyFlareGuardInPlace(
+    val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
         bitmap = output,
         mode = FlareGuardMode.NightLight.ordinal,
         strength = strength.coerceIn(0f, 1f),
         revision = 0
     )
+    if (result < 0) {
+        output.recycle()
+        error("nativeApplyFlareGuardInPlace failed: $result")
+    }
     return output
 }
 
-fun applyDaySunFlareGuardV0(source: Bitmap, strength: Float = 0.32f): Bitmap {
+fun applyDaySunFlareGuardV0(source: Bitmap, strength: Float = 0.24f): Bitmap {
     val output = source.copy(Bitmap.Config.ARGB_8888, true)
-    NativePhotoCore.nativeApplyFlareGuardInPlace(
+    val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
         bitmap = output,
         mode = FlareGuardMode.DaySun.ordinal,
         strength = strength.coerceIn(0f, 1f),
         revision = 0
     )
+    if (result < 0) {
+        output.recycle()
+        error("nativeApplyFlareGuardInPlace failed: $result")
+    }
     return output
 }

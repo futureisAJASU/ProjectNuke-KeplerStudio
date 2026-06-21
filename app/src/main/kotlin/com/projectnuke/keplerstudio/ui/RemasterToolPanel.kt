@@ -14,15 +14,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
-import androidx.lifecycle.viewmodel.compose.viewModel
 
 private val RemasterCardBackground = Color(0xFF242424)
 private val RemasterAccent = Color(0xFFE6E6E6)
@@ -39,136 +38,158 @@ fun RemasterToolPanel(
     val context = LocalContext.current
     val editorState by editorViewModel.uiState.collectAsState()
     val activeModel = RemasterModelSession.activeModel
-    val statusText = RemasterModelSession.statusText
     val loaded = RemasterModelSession.isModelLoaded
-    val canRunMaskRemaster = loaded && activeModel?.id == "edge_masker"
+    val flareMasker = OnDeviceRemasterModels.first { it.id == "flare_masker" }
+    val flareRestorer = OnDeviceRemasterModels.first { it.id == "flare_restorer" }
+    val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
+    val autoRouter = OnDeviceRemasterModels.first { it.id == "universal_auto_router" }
+    val flareMaskerAvailable = RemasterModelSession.hasModelAsset(context, flareMasker.assetPath)
+    val flareRestorerAvailable = RemasterModelSession.hasModelAsset(context, flareRestorer.assetPath)
+    val edgeAssetAvailable = RemasterModelSession.hasModelAsset(context, edgeMasker.assetPath)
+    val edgeLoaded = loaded && activeModel?.id == "edge_masker"
+    val hasImage = editorState.previewBitmap != null || editorState.originalPreviewBitmap != null
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            text = "사진을 분석해 자동으로 보정합니다. 빠른 자동 보정은 즉시 사용할 수 있으며, 모델 기반 리마스터는 온디바이스 추론 엔진 연결 후 활성화됩니다",
+            text = "모델 파일과 런타임 상태에 따라 사용할 수 있는 기능만 실행합니다.",
             color = RemasterTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 8.dp)
         )
 
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(RemasterCardBackground)
-                .padding(12.dp)
+        ModelHubCard(
+            title = "기본 자동 보정",
+            status = "규칙 기반 보정",
+            explanation = "히스토그램과 색상 통계를 사용해 기본 보정을 적용합니다."
         ) {
-            Text("빠른 자동 보정", color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
-            Text(
-                "히스토그램과 색상 통계를 분석해 노출, 대비, 하이라이트, 섀도우, 색감, 디테일 값을 자동으로 조정합니다",
-                color = RemasterTextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
-            )
             Button(
                 onClick = onQuickAutoEnhance,
+                enabled = hasImage,
                 colors = ButtonDefaults.buttonColors(containerColor = RemasterAccent, contentColor = RemasterButtonTextDark)
             ) {
-                Text("빠른 자동 보정 적용")
-            }
-        }
-
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 10.dp)
-                .background(RemasterCardBackground)
-                .padding(12.dp)
-        ) {
-            Text("모델 기반 리마스터", color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
-            Text(
-                "여러 모델을 등록해도 런타임에는 하나만 유지합니다. 새 모델을 선택하면 기존 모델을 먼저 해제한 뒤 선택한 모델 슬롯을 엽니다",
-                color = RemasterTextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
-            )
-            Text(
-                text = statusText,
-                color = if (loaded) RemasterTextPrimary else RemasterTextMuted,
-                style = MaterialTheme.typography.bodySmall
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
-                TextButton(onClick = { RemasterModelSession.unload() }, enabled = activeModel != null) {
-                    Text("현재 모델 해제")
-                }
-                Text(
-                    text = activeModel?.let { "선택됨: ${it.title}" } ?: "선택된 모델 없음",
-                    color = RemasterTextMuted,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
-            Button(
-                onClick = { editorViewModel.applyMaskAwareRemaster() },
-                enabled = canRunMaskRemaster,
-                colors = ButtonDefaults.buttonColors(containerColor = RemasterAccent, contentColor = RemasterButtonTextDark),
-                modifier = Modifier.padding(top = 8.dp)
-            ) {
-                Text("모델 마스크 리마스터 적용")
-            }
-            Text(
-                text = if (canRunMaskRemaster) {
-                    "Edge Masker로 피사체 마스크를 생성한 뒤, 피사체 보호 보정본과 배경 강화 보정본을 합성합니다"
-                } else {
-                    "Edge Masker 모델을 로드하면 마스크 리마스터를 적용할 수 있습니다"
-                },
-                color = RemasterTextMuted,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 6.dp)
-            )
-        }
-
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 10.dp)
-                .background(RemasterCardBackground)
-                .padding(12.dp)
-        ) {
-            Text("개발 도구", color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
-            Text(
-                "규칙 기반 분석과 학습 데이터 저장을 검증하기 위한 임시 도구입니다",
-                color = RemasterTextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
-            )
-            Text(
-                text = editorState.flareGuardRuntimeStatus ?: "번짐 완화 런타임 상태가 아직 없습니다.",
-                color = RemasterTextMuted,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(bottom = 6.dp)
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }) {
-                    Text("장면 분석")
-                }
-                TextButton(onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.NightLight) }) {
-                    Text("번짐 완화")
-                }
-                TextButton(onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.DaySun) }) {
-                    Text("태양 번짐 완화")
-                }
-                TextButton(onClick = { editorViewModel.exportUniversalBalancerTrainingRow() }) {
-                    Text("학습 row 저장")
-                }
+                Text("기본 자동 보정 적용")
             }
         }
 
         Text(
-            text = "온디바이스 후보",
+            text = "모델 허브",
             color = RemasterTextPrimary,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(top = 12.dp, bottom = 4.dp)
+            modifier = Modifier.padding(top = 12.dp, bottom = 6.dp)
         )
-        OnDeviceRemasterModels.forEach { model ->
-            RemasterModelCard(
-                model = model,
-                isActive = activeModel?.id == model.id,
-                onSelect = { RemasterModelSession.load(context, model) }
+
+        ModelHubCard(
+            title = "플레어 자동 선택",
+            status = if (flareMaskerAvailable) "사용 가능" else "모델 파일 없음",
+            explanation = if (flareMaskerAvailable) {
+                "현재 모델은 번짐 영역 감지에 사용됩니다. 자동 복원 모델은 아닙니다."
+            } else {
+                "모델 파일이 없어 규칙 기반 보정으로 대체했습니다."
+            }
+        ) {
+            Text(
+                text = editorState.flareGuardRuntimeStatus ?: "마지막 실행 상태가 없습니다.",
+                color = RemasterTextMuted,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(bottom = 6.dp)
             )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                TextButton(
+                    onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.NightLight) },
+                    enabled = hasImage && flareMaskerAvailable
+                ) {
+                    Text("마스크 기반 기본 보정")
+                }
+                TextButton(
+                    onClick = { editorViewModel.applyFlareOriginalMvp() },
+                    enabled = hasImage
+                ) {
+                    Text("규칙 기반 번짐 완화")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                TextButton(
+                    onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.DaySun) },
+                    enabled = hasImage && flareMaskerAvailable
+                ) {
+                    Text("태양 번짐 마스크 보정")
+                }
+                TextButton(
+                    onClick = { editorViewModel.applySunFlareOriginalMvp() },
+                    enabled = hasImage
+                ) {
+                    Text("태양 번짐 규칙 보정")
+                }
+            }
+        }
+
+        ModelHubCard(
+            title = "AI 번짐 보정",
+            status = if (flareRestorerAvailable) "준비 중" else "모델 파일 없음",
+            explanation = if (flareRestorerAvailable) {
+                "플레어 복원 모델 파일이 감지되었습니다. 실행 경로 연결은 별도 단계에서 진행합니다."
+            } else {
+                "자동 복원 모델은 아직 연결되지 않았습니다."
+            }
+        ) {
+            Text(
+                text = "플레어 복원 모델은 향후 실제 복원 모델 자산이 있을 때만 활성화됩니다.",
+                color = RemasterTextMuted,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        ModelHubCard(
+            title = edgeMasker.title,
+            status = when {
+                edgeLoaded -> "사용 가능"
+                edgeAssetAvailable -> "준비 중"
+                else -> "모델 파일 없음"
+            },
+            explanation = if (edgeAssetAvailable) {
+                "모델 마스크 보조를 사용할 수 있도록 런타임을 로드합니다."
+            } else {
+                "이 기능은 모델 파일이 있을 때만 사용할 수 있습니다."
+            }
+        ) {
+            Text(
+                text = RemasterModelSession.statusText,
+                color = if (edgeLoaded) RemasterTextPrimary else RemasterTextMuted,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                TextButton(
+                    onClick = { RemasterModelSession.load(context, edgeMasker) },
+                    enabled = edgeAssetAvailable
+                ) {
+                    Text(if (edgeLoaded) "다시 로드" else "Edge Masker 로드")
+                }
+                TextButton(
+                    onClick = { RemasterModelSession.unload() },
+                    enabled = activeModel != null
+                ) {
+                    Text("모델 해제")
+                }
+            }
+            Button(
+                onClick = { editorViewModel.applyMaskAwareRemaster() },
+                enabled = hasImage && edgeLoaded,
+                colors = ButtonDefaults.buttonColors(containerColor = RemasterAccent, contentColor = RemasterButtonTextDark),
+                modifier = Modifier.padding(top = 6.dp)
+            ) {
+                Text("모델 마스크 보조 적용")
+            }
+        }
+
+        ModelHubCard(
+            title = autoRouter.title,
+            status = "분석 전용",
+            explanation = "자동 라우터는 현재 분석 전용입니다. 추천만 표시하고 자동 적용하지 않았습니다."
+        ) {
+            TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }, enabled = hasImage) {
+                Text("분석 실행")
+            }
         }
 
         Text(
@@ -182,10 +203,11 @@ fun RemasterToolPanel(
 }
 
 @Composable
-private fun RemasterModelCard(
-    model: RemasterModelCandidate,
-    isActive: Boolean,
-    onSelect: () -> Unit
+private fun ModelHubCard(
+    title: String,
+    status: String,
+    explanation: String,
+    content: @Composable () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -194,19 +216,16 @@ private fun RemasterModelCard(
             .background(RemasterCardBackground)
             .padding(12.dp)
     ) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(model.title, color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
-                Text("${model.category} · ${model.role}", color = RemasterTextSecondary, style = MaterialTheme.typography.bodySmall)
-            }
-            Text(if (isActive) "선택됨" else model.status, color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(title, color = RemasterTextPrimary, fontWeight = FontWeight.SemiBold)
+            Text(status, color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall)
         }
-        Text("성격: ${model.personality}", color = RemasterTextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
-        Text("특징: ${model.strengths}", color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
-        Text("런타임: ${model.runtime} · 메모리: ${model.memoryTier} · 비용: ${model.cost}", color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
-        Text("파일: ${model.assetPath}", color = RemasterTextMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 2.dp))
-        TextButton(onClick = onSelect, modifier = Modifier.padding(top = 4.dp)) {
-            Text(if (isActive) "다시 로드" else "이 모델 선택")
-        }
+        Text(
+            text = explanation,
+            color = RemasterTextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+        )
+        content()
     }
 }

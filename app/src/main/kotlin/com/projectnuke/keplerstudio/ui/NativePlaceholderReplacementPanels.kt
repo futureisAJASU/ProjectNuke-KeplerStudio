@@ -14,11 +14,13 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import com.projectnuke.keplerstudio.editor.PresetColorLook
 import com.projectnuke.keplerstudio.editor.createPresetColorLookFromParams
 
@@ -122,14 +124,61 @@ fun NativeBlurToolPanel(editorViewModel: EditorViewModel = viewModel()) {
 
 @Composable
 fun NativeModelToolPanel(editorViewModel: EditorViewModel = viewModel()) {
+    val context = LocalContext.current
+    val flareMasker = OnDeviceRemasterModels.first { it.id == "flare_masker" }
+    val flareRestorer = OnDeviceRemasterModels.first { it.id == "flare_restorer" }
+    val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
+    val flareMaskerAvailable = RemasterModelSession.hasModelAsset(context, flareMasker.assetPath)
+    val flareRestorerAvailable = RemasterModelSession.hasModelAsset(context, flareRestorer.assetPath)
+    val edgeAssetAvailable = RemasterModelSession.hasModelAsset(context, edgeMasker.assetPath)
     NativeToolCard(
-        title = "모델 및 기본 보조",
-        description = "연결된 모델이 없을 때는 기본 보정과 규칙 기반 분석으로 동작합니다."
+        title = "모델 허브",
+        description = "모델 파일과 런타임 상태에 따라 사용할 수 있는 기능만 실행합니다."
     ) {
+        Text(
+            text = "플레어 자동 선택: ${if (flareMaskerAvailable) "사용 가능" else "모델 파일 없음"}",
+            color = NativePanelTextMuted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
+        Text(
+            text = "AI 번짐 보정: ${if (flareRestorerAvailable) "준비 중" else "모델 파일 없음"}",
+            color = NativePanelTextMuted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
+        Text(
+            text = "Edge Masker: ${if (edgeAssetAvailable) "사용 가능" else "모델 파일 없음"}",
+            color = NativePanelTextMuted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
+        Text(
+            text = "Auto Router v0: 분석 전용",
+            color = NativePanelTextMuted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            text = "현재 모델은 번짐 영역 감지에 사용됩니다. 자동 복원 모델은 아직 연결되지 않았습니다.",
+            color = NativePanelTextMuted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }) { Text("화면 분석") }
-            TextButton(onClick = { editorViewModel.applyFlareOriginalMvp() }) { Text("번짐 완화") }
-            TextButton(onClick = { editorViewModel.applySunFlareOriginalMvp() }) { Text("태양 번짐 완화") }
+            TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }) { Text("분석 실행") }
+            TextButton(
+                onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.NightLight) },
+                enabled = flareMaskerAvailable
+            ) { Text("마스크 기반 기본 보정") }
+            TextButton(onClick = { editorViewModel.applyFlareOriginalMvp() }) { Text("규칙 기반 번짐 완화") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
+            TextButton(
+                onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.DaySun) },
+                enabled = flareMaskerAvailable
+            ) { Text("태양 번짐 마스크 보정") }
+            TextButton(onClick = { editorViewModel.applySunFlareOriginalMvp() }) { Text("태양 번짐 규칙 보정") }
         }
     }
 }

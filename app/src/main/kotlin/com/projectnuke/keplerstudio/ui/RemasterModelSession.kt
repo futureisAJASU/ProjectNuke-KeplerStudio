@@ -17,7 +17,7 @@ object RemasterModelSession {
     var activeModel by mutableStateOf<RemasterModelCandidate?>(null)
         private set
 
-    var statusText by mutableStateOf("로드된 항목이 없습니다")
+    var statusText by mutableStateOf("로드된 모델이 없습니다.")
         private set
 
     var isModelLoaded by mutableStateOf(false)
@@ -28,30 +28,29 @@ object RemasterModelSession {
     fun load(context: Context, candidate: RemasterModelCandidate) {
         unload()
         activeModel = candidate
-        val exists = hasAsset(context, candidate.assetPath)
-        if (!exists) {
+        if (!hasModelAsset(context, candidate.assetPath)) {
             isModelLoaded = false
-            statusText = "${candidate.title} 슬롯을 선택했습니다. ${candidate.assetPath} 파일을 추가하면 활성화됩니다"
+            statusText = "${candidate.title}: 모델 파일 없음"
             return
         }
 
         runCatching {
             closeableModel = when (candidate.id) {
                 "edge_masker" -> createImageSegmenter(context, candidate.assetPath)
-                "universal_balancer", "flare_guard" -> TfliteModelHandle(createTfliteInterpreter(context, candidate.assetPath))
+                "universal_balancer", "flare_masker" -> TfliteModelHandle(createTfliteInterpreter(context, candidate.assetPath))
                 else -> null
             }
         }.onSuccess {
-            isModelLoaded = true
+            isModelLoaded = closeableModel != null
             statusText = if (closeableModel != null) {
-                "${candidate.title} 모델을 로드했습니다"
+                "${candidate.title}: 사용 가능"
             } else {
-                "${candidate.title} 파일을 확인했습니다. 실제 추론 연결은 준비 중입니다"
+                "${candidate.title}: 모델 파일은 있지만 실행 경로는 준비 중입니다."
             }
         }.onFailure {
             closeableModel = null
             isModelLoaded = false
-            statusText = "${candidate.title} 모델 로드에 실패했습니다: ${it.message}"
+            statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
         }
     }
 
@@ -66,7 +65,14 @@ object RemasterModelSession {
         closeableModel = null
         activeModel = null
         isModelLoaded = false
-        statusText = "로드된 항목을 해제했습니다"
+        statusText = "로드된 모델이 없습니다."
+    }
+
+    fun hasModelAsset(context: Context, assetPath: String): Boolean {
+        if (assetPath.isBlank()) return false
+        return runCatching {
+            context.assets.open(assetPath).use { true }
+        }.getOrDefault(false)
     }
 
     private fun createImageSegmenter(context: Context, assetPath: String): ImageSegmenter {
@@ -106,15 +112,15 @@ object RemasterModelSession {
             method.name == "segment" &&
                 method.parameterTypes.size == 1 &&
                 method.parameterTypes[0].isAssignableFrom(mpImage.javaClass)
-        } ?: error("segment 메서드를 찾을 수 없습니다")
+        } ?: error("segment 메서드를 찾을 수 없습니다.")
         val result = segmentMethod.invoke(segmenter, mpImage)
         val categoryMaskOptional = result.javaClass.methods.firstOrNull { method ->
             method.name == "categoryMask" && method.parameterTypes.isEmpty()
-        }?.invoke(result) ?: error("category mask 결과가 없습니다")
+        }?.invoke(result) ?: error("category mask 결과가 없습니다.")
         val isPresent = categoryMaskOptional.javaClass.getMethod("isPresent").invoke(categoryMaskOptional) as Boolean
-        if (!isPresent) error("category mask가 비어 있습니다")
+        if (!isPresent) error("category mask가 비어 있습니다.")
         val maskImage = categoryMaskOptional.javaClass.getMethod("get").invoke(categoryMaskOptional)
-        val rawMask = extractBitmapFromMpImage(maskImage)
+        val rawMask = extractBitmapFromMpImage(maskImage as Any)
         return categoryBitmapToForegroundMask(rawMask, bitmap.width, bitmap.height)
     }
 
@@ -122,7 +128,7 @@ object RemasterModelSession {
         val extractorClass = Class.forName("com.google.mediapipe.framework.image.BitmapExtractor")
         val extractMethod = extractorClass.methods.firstOrNull { method ->
             method.name == "extract" && method.parameterTypes.size == 1 && method.parameterTypes[0].isAssignableFrom(maskImage.javaClass)
-        } ?: error("BitmapExtractor.extract 메서드를 찾을 수 없습니다")
+        } ?: error("BitmapExtractor.extract 메서드를 찾을 수 없습니다.")
         return extractMethod.invoke(null, maskImage) as Bitmap
     }
 
@@ -153,10 +159,6 @@ object RemasterModelSession {
         if (scaledMask !== rawMask) scaledMask.recycle()
         return out
     }
-
-    private fun hasAsset(context: Context, assetPath: String): Boolean = runCatching {
-        context.assets.open(assetPath).use { true }
-    }.getOrDefault(false)
 }
 
 private class TfliteModelHandle(

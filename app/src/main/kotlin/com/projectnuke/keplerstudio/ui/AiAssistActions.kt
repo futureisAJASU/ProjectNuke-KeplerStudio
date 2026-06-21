@@ -11,12 +11,14 @@ import kotlinx.coroutines.withContext
 fun EditorViewModel.runAutoRouterV0Analysis() {
     val bitmap = uiState.value.originalPreviewBitmap ?: uiState.value.previewBitmap
     if (bitmap == null) {
-        updateUiState { it.copy(message = "遺꾩꽍???대?吏媛 ?놁뒿?덈떎") }
+        updateUiState { it.copy(message = "자동 라우터 분석을 실행할 이미지가 없습니다.") }
         return
     }
     val scores = analyzeAutoRouterV0(bitmap)
     val labels = scores.topLabels().joinToString(", ").ifBlank { "normal" }
-    updateUiState { it.copy(message = "Auto Router v0 異붿쿇: $labels") }
+    updateUiState {
+        it.copy(message = "자동 라우터는 현재 분석 전용입니다. 추천 분류: $labels. 추천만 표시하고 자동 적용하지 않았습니다.")
+    }
 }
 
 fun EditorViewModel.applyFlareGuardV0Preview() {

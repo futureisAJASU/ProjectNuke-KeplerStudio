@@ -11,14 +11,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyFlareOriginalMvp() {
-    applyFlareOriginalMvpInternal(FlareGuardMode.NightLight, "번짐 완화", 0.35f)
+    applyFlareRuleFallbackInternal(FlareGuardMode.NightLight, "번짐 완화", 0.28f)
 }
 
 fun EditorViewModel.applySunFlareOriginalMvp() {
-    applyFlareOriginalMvpInternal(FlareGuardMode.DaySun, "태양 번짐 완화", 0.32f)
+    applyFlareRuleFallbackInternal(FlareGuardMode.DaySun, "태양 번짐 완화", 0.24f)
 }
 
-private fun EditorViewModel.applyFlareOriginalMvpInternal(mode: FlareGuardMode, title: String, strength: Float) {
+private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode, title: String, strength: Float) {
     val current = uiState.value
     val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
     if (baseOriginal == null) {
@@ -32,8 +32,8 @@ private fun EditorViewModel.applyFlareOriginalMvpInternal(mode: FlareGuardMode, 
         it.copy(
             isBusy = true,
             revision = nextRevision,
-            message = "$title 적용 중입니다.",
-            flareGuardRuntimeStatus = "$title 적용 중입니다."
+            message = "$title 처리 중입니다.",
+            flareGuardRuntimeStatus = "규칙 기반 보정으로 처리 중입니다."
         )
     }
 
@@ -41,7 +41,16 @@ private fun EditorViewModel.applyFlareOriginalMvpInternal(mode: FlareGuardMode, 
         try {
             val nextOriginal = withContext(Dispatchers.Default) {
                 val copy = baseOriginal.copy(Bitmap.Config.ARGB_8888, true)
-                NativePhotoCore.nativeApplyFlareGuardInPlace(copy, mode.ordinal, strength.coerceIn(0f, 1f), nextRevision)
+                val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
+                    copy,
+                    mode.ordinal,
+                    strength.coerceIn(0f, 1f),
+                    nextRevision
+                )
+                if (result < 0) {
+                    copy.recycle()
+                    error("nativeApplyFlareGuardInPlace failed: $result")
+                }
                 copy
             }
             val nextPreview = withContext(Dispatchers.Default) {
@@ -53,8 +62,8 @@ private fun EditorViewModel.applyFlareOriginalMvpInternal(mode: FlareGuardMode, 
                         originalPreviewBitmap = nextOriginal,
                         previewBitmap = nextPreview,
                         isBusy = false,
-                        message = "$title 적용했습니다. 되돌릴 수 있습니다.",
-                        flareGuardRuntimeStatus = "$title 적용했습니다."
+                        message = "규칙 기반 보정으로 번짐을 완화했습니다.",
+                        flareGuardRuntimeStatus = "규칙 기반 보정으로 번짐을 완화했습니다."
                     )
                 }
                 persistDraftSnapshot()
@@ -66,8 +75,8 @@ private fun EditorViewModel.applyFlareOriginalMvpInternal(mode: FlareGuardMode, 
             updateUiState {
                 it.copy(
                     isBusy = false,
-                    message = "$title 적용에 실패했습니다.",
-                    flareGuardRuntimeStatus = "$title 적용에 실패했습니다."
+                    message = "번짐 완화에 실패했습니다.",
+                    flareGuardRuntimeStatus = "번짐 완화에 실패했습니다."
                 )
             }
         }
@@ -97,7 +106,8 @@ private fun renderPreviewFromState(base: Bitmap, state: EditorUiState, revision:
         state.detailEngine.nativeId,
         state.toneEngine.nativeId,
         state.hazeEngine.nativeId,
-        revision
+        revision,
+        state.presetLook
     )
     return copy
 }
