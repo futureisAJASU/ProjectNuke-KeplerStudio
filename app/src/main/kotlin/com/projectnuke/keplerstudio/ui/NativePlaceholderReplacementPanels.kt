@@ -56,16 +56,26 @@ private val BuiltInProfiles = listOf(
         "선명하게",
         EditParams(contrast = 0.14f, vibrance = 0.16f, saturation = 0.08f, sharpness = 0.18f, clarity = 0.10f),
         createPresetColorLookFromParams(EditParams(contrast = 0.12f, vibrance = 0.18f, saturation = 0.10f), strength = 0.52f)
+    ),
+    BuiltInProfile(
+        "매트",
+        EditParams(contrast = -0.08f, shadows = 0.16f, highlights = -0.14f, blacks = 0.08f, saturation = -0.04f),
+        createPresetColorLookFromParams(EditParams(contrast = -0.08f, shadows = 0.12f, highlights = -0.12f, saturation = -0.04f), strength = 0.50f)
+    ),
+    BuiltInProfile(
+        "야간 클린",
+        EditParams(exposure = 0.10f, shadows = 0.14f, highlights = -0.18f, noiseReduction = 0.18f, dehaze = 0.08f, temperature = -0.06f),
+        createPresetColorLookFromParams(EditParams(shadows = 0.12f, highlights = -0.12f, temperature = -0.08f, vibrance = 0.06f), strength = 0.44f)
     )
 )
 
 @Composable
 fun NativeRemoveToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     NativeToolCard(
-        title = "기본 제거",
-        description = "작은 얼룩을 완화합니다. 이 기능은 AI 기반 객체 제거가 아닙니다."
+        title = "기본 정리",
+        description = "작은 얼룩을 완화합니다. AI 객체 제거가 아닌 기본 정리 기능입니다."
     ) {
-        NativePrimaryButton("작은 얼룩 완화") { editorViewModel.applySpotCleanupMvp() }
+        NativePrimaryButton("작은 얼룩 완화") { editorViewModel.applySpotCleanup() }
     }
 }
 
@@ -73,9 +83,13 @@ fun NativeRemoveToolPanel(editorViewModel: EditorViewModel = viewModel()) {
 fun NativeOpticsToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     NativeToolCard(
         title = "광학 보정",
-        description = "색수차와 주변부 어두움을 완화합니다. 렌즈 프로필 보정은 아직 지원되지 않습니다."
+        description = "색수차와 주변부 어두움을 기본 보정으로 완화합니다."
     ) {
-        NativePrimaryButton("색수차 및 주변부 완화") { editorViewModel.applyOpticsCorrectionMvp() }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { editorViewModel.applyChromaticAberrationReduction() }) { Text("색수차 완화") }
+            TextButton(onClick = { editorViewModel.applyVignetteCorrection() }) { Text("주변부 어두움 완화") }
+        }
+        NativePrimaryButton("통합 광학 보정") { editorViewModel.applyOpticsCorrection() }
     }
 }
 
@@ -99,8 +113,9 @@ fun NativeBlurToolPanel(editorViewModel: EditorViewModel = viewModel()) {
         description = "이미지를 부드럽게 흐립니다."
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { editorViewModel.applySoftBlurMvp(0.28f) }) { Text("약하게") }
-            TextButton(onClick = { editorViewModel.applySoftBlurMvp(0.55f) }) { Text("강하게") }
+            TextButton(onClick = { editorViewModel.applySoftBlur(0.22f) }) { Text("약하게") }
+            TextButton(onClick = { editorViewModel.applySoftBlur(0.38f) }) { Text("보통") }
+            TextButton(onClick = { editorViewModel.applySoftBlur(0.58f) }) { Text("강하게") }
         }
     }
 }
@@ -122,8 +137,8 @@ fun NativeModelToolPanel(editorViewModel: EditorViewModel = viewModel()) {
 @Composable
 fun NativeProfilesToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     NativeToolCard(
-        title = "프로필",
-        description = "기본 프로필입니다. 전용 카메라 프로필은 아직 지원되지 않습니다."
+        title = "룩 엔진",
+        description = "내장 프로필입니다. 전용 카메라 프로필은 아직 지원되지 않습니다."
     ) {
         Text(
             "이 프로필은 내장 색감 프리셋입니다.",

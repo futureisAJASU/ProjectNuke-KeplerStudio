@@ -73,7 +73,7 @@ fun PresetToolPanel(
     val scope = rememberCoroutineScope()
     var presetName by remember { mutableStateOf(defaultPresetName()) }
     var presets by remember { mutableStateOf(emptyList<StoredPreset>()) }
-    var statusMessage by remember { mutableStateOf("현재 편집값 저장, JSON 백업/복원, 이미지 분석 추출을 사용할 수 있습니다") }
+    var statusMessage by remember { mutableStateOf("프리셋 저장, JSON 백업, 통계 기반 추출을 사용할 수 있습니다.") }
     var pendingBeforeUri by remember { mutableStateOf<Uri?>(null) }
 
     fun applyStoredPreset(preset: StoredPreset, message: String) {
@@ -91,7 +91,7 @@ fun PresetToolPanel(
             runCatching {
                 withContext(Dispatchers.IO) { exportPresetsToJson(context, uri, presets) }
             }.onSuccess {
-                statusMessage = "프리셋 JSON 내보내기가 완료되었습니다"
+                statusMessage = "프리셋 JSON 내보내기를 완료했습니다."
             }.onFailure {
                 statusMessage = "프리셋 JSON 내보내기에 실패했습니다: ${it.message}"
             }
@@ -134,9 +134,9 @@ fun PresetToolPanel(
                 )
                 presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
-                applyStoredPreset(item, "전/후 비교 기반 프리셋과 LUT를 추출하고 현재 사진에 적용했습니다")
+                applyStoredPreset(item, "전/후 비교 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
             }.onFailure {
-                statusMessage = "전/후 비교 프리셋 추출에 실패했습니다: ${it.message}"
+                statusMessage = "레퍼런스 프리셋 추출에 실패했습니다: ${it.message}"
             }
         }
     }
@@ -167,16 +167,16 @@ fun PresetToolPanel(
                 )
                 presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
-                applyStoredPreset(item, "레퍼런스 기반 프리셋과 LUT를 추출하고 현재 사진에 적용했습니다")
+                applyStoredPreset(item, "레퍼런스 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
             }.onFailure {
-                statusMessage = "레퍼런스 프리셋 추출에 실패했습니다: ${it.message}"
+                statusMessage = "전/후 비교 프리셋 추출에 실패했습니다: ${it.message}"
             }
         }
     }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
-            text = "현재 보정값을 프리셋으로 저장하거나, 저장된 프리셋을 현재 사진에 적용할 수 있습니다",
+            text = "현재 보정값을 프리셋으로 저장하거나 저장된 프리셋을 현재 사진에 적용할 수 있습니다.",
             color = PresetTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 8.dp)
@@ -207,7 +207,7 @@ fun PresetToolPanel(
                     presets = mergePresets(presets, listOf(item)).take(40)
                     savePresets(context, presets)
                     presetName = defaultPresetName()
-                    statusMessage = "현재 편집값과 LUT를 프리셋으로 저장했습니다"
+                    statusMessage = "현재 편집값과 색감 룩을 프리셋으로 저장했습니다."
                 },
                 colors = ButtonDefaults.buttonColors(containerColor = PresetAccent, contentColor = PresetButtonTextDark)
             ) {
@@ -244,7 +244,7 @@ fun PresetToolPanel(
                 Text("전/후 비교 추출")
             }
             TextButton(onClick = { referencePicker.launch("image/*") }) {
-                Text("레퍼런스 한 장 추출")
+                Text("레퍼런스 추출")
             }
         }
 
@@ -256,7 +256,7 @@ fun PresetToolPanel(
         )
 
         Text(
-            text = "추출 기능은 1차 통계 기반 근사입니다. 추출된 프리셋은 슬라이더값과 LUT를 함께 저장해 색 변환을 더 강하게 재사용합니다",
+            text = "전/후 비교 추출은 통계 기반 근사입니다. 추출된 프리셋은 슬라이더 값과 색감 룩을 함께 저장합니다.",
             color = PresetTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 8.dp)
@@ -264,7 +264,7 @@ fun PresetToolPanel(
 
         if (presets.isEmpty()) {
             Text(
-                text = "아직 저장된 프리셋이 없습니다",
+                text = "저장된 프리셋이 없습니다",
                 color = PresetTextSecondary,
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier.padding(top = 8.dp)
@@ -284,14 +284,14 @@ fun PresetToolPanel(
                             Text(formatPresetSummary(preset), color = PresetTextSecondary, style = MaterialTheme.typography.bodySmall)
                             Text(formatPresetTime(preset.timestampMillis), color = PresetTextMuted, style = MaterialTheme.typography.bodySmall)
                         }
-                        TextButton(onClick = { applyStoredPreset(preset, "선택한 프리셋을 현재 사진에 적용했습니다") }) {
+                        TextButton(onClick = { applyStoredPreset(preset, "프리셋을 적용했습니다.") }) {
                             Text("적용")
                         }
                         TextButton(
                             onClick = {
                                 presets = presets.filterNot { it.id == preset.id }
                                 savePresets(context, presets)
-                                statusMessage = "선택한 프리셋을 삭제했습니다"
+                                statusMessage = "선택한 프리셋을 삭제했습니다."
                             }
                         ) {
                             Text("삭제")

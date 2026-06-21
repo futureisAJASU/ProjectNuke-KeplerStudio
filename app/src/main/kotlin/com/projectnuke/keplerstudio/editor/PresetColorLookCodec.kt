@@ -33,4 +33,4 @@ fun presetColorLookFromJson(obj: JSONObject?): PresetColorLook? {
 }
 
 fun presetColorLookSummary(look: PresetColorLook?): String =
-    if (look == null) "LUT 없음" else "${look.size}³ LUT · 강도 ${String.format("%.2f", look.strength)}"
+    if (look == null) "색감 룩 없음" else "색감 룩 포함 · ${look.size}³ LUT · 강도 ${String.format("%.2f", look.strength)}"

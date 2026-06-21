@@ -522,18 +522,34 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         Log.i(FLARE_GUARD_AI_TAG, "Rotated preview manually: ${preview.width}x${preview.height} -> ${rotatedPreview.width}x${rotatedPreview.height}")
     }
 
-    fun applySpotCleanupMvp() {
-        applyNativeSpecialEffectsMvp(
-            title = "기본 제거",
-            failureMessage = "기본 제거 적용에 실패했습니다.",
+    fun applySpotCleanup() {
+        applyNativeSpecialEffects(
+            title = "기본 정리",
+            failureMessage = "기본 정리 적용에 실패했습니다.",
             operations = listOf(NativeSpecialEffectOp(effect = 0, strength = 0.58f))
         )
     }
 
-    fun applyOpticsCorrectionMvp() {
-        applyNativeSpecialEffectsMvp(
-            title = "광학 보정",
-            failureMessage = "광학 보정 적용에 실패했습니다.",
+    fun applyChromaticAberrationReduction() {
+        applyNativeSpecialEffects(
+            title = "색수차 완화",
+            failureMessage = "색수차 완화 적용에 실패했습니다.",
+            operations = listOf(NativeSpecialEffectOp(effect = 1, strength = 0.62f))
+        )
+    }
+
+    fun applyVignetteCorrection() {
+        applyNativeSpecialEffects(
+            title = "주변부 어두움 완화",
+            failureMessage = "주변부 어두움 완화 적용에 실패했습니다.",
+            operations = listOf(NativeSpecialEffectOp(effect = 2, strength = 0.45f))
+        )
+    }
+
+    fun applyOpticsCorrection() {
+        applyNativeSpecialEffects(
+            title = "통합 광학 보정",
+            failureMessage = "통합 광학 보정 적용에 실패했습니다.",
             operations = listOf(
                 NativeSpecialEffectOp(effect = 1, strength = 0.62f),
                 NativeSpecialEffectOp(effect = 2, strength = 0.45f)
@@ -541,15 +557,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun applySoftBlurMvp(strength: Float = 0.28f) {
-        applyNativeSpecialEffectsMvp(
+    fun applySoftBlur(strength: Float = 0.32f) {
+        applyNativeSpecialEffects(
             title = "부드러운 흐림",
             failureMessage = "부드러운 흐림 적용에 실패했습니다.",
             operations = listOf(NativeSpecialEffectOp(effect = 3, strength = strength.coerceIn(0f, 1f)))
         )
     }
 
-    private fun applyNativeSpecialEffectsMvp(
+    private fun applyNativeSpecialEffects(
         title: String,
         failureMessage: String,
         operations: List<NativeSpecialEffectOp>
