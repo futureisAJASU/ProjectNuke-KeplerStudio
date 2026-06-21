@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -47,12 +48,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.DehazeEngine
 import com.projectnuke.keplerstudio.editor.DetailEngine
@@ -68,6 +72,7 @@ import com.projectnuke.keplerstudio.editor.ToneEngine
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.max
 
 private val V2AppBackground = Color(0xFF101010)
 private val V2TopBarBackground = Color(0xFF171717)
@@ -81,6 +86,7 @@ private val V2TextPrimary = Color(0xFFF2F2F2)
 private val V2TextSecondary = Color(0xFFC8C8C8)
 private val V2TextMuted = Color(0xFF8E8E8E)
 private val V2ButtonTextDark = Color(0xFF111111)
+private const val ChromeAnimationMillis = 320
 
 private val V2DarkColors = darkColorScheme(
     primary = V2Accent,
@@ -129,14 +135,16 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     var panelCollapsed by remember { mutableStateOf(false) }
     var chromeHidden by remember { mutableStateOf(false) }
     val hideChromeForPreview = selectedTab == V2MainTab.Editor && chromeHidden
+    val chromeTween = tween<Int>(durationMillis = ChromeAnimationMillis, easing = FastOutSlowInEasing)
+    val alphaTween = tween<Float>(durationMillis = 220, easing = FastOutSlowInEasing)
 
     MaterialTheme(colorScheme = V2DarkColors) {
         Surface(modifier = Modifier.fillMaxSize(), color = V2AppBackground) {
             Column(modifier = Modifier.fillMaxSize().background(V2AppBackground)) {
                 AnimatedVisibility(
                     visible = !hideChromeForPreview,
-                    enter = slideInVertically(animationSpec = tween(220), initialOffsetY = { -it }) + fadeIn(animationSpec = tween(160)),
-                    exit = slideOutVertically(animationSpec = tween(220), targetOffsetY = { -it }) + fadeOut(animationSpec = tween(160))
+                    enter = slideInVertically(animationSpec = chromeTween, initialOffsetY = { -it }) + fadeIn(animationSpec = alphaTween),
+                    exit = slideOutVertically(animationSpec = chromeTween, targetOffsetY = { -it }) + fadeOut(animationSpec = alphaTween)
                 ) {
                     V2TopBar(
                         nativeVersion = state.nativeVersion,
@@ -173,8 +181,8 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         )
                         AnimatedVisibility(
                             visible = !chromeHidden,
-                            enter = slideInVertically(animationSpec = tween(220), initialOffsetY = { it }) + fadeIn(animationSpec = tween(160)),
-                            exit = slideOutVertically(animationSpec = tween(220), targetOffsetY = { it }) + fadeOut(animationSpec = tween(160))
+                            enter = slideInVertically(animationSpec = chromeTween, initialOffsetY = { it }) + fadeIn(animationSpec = alphaTween),
+                            exit = slideOutVertically(animationSpec = chromeTween, targetOffsetY = { it }) + fadeOut(animationSpec = alphaTween)
                         ) {
                             V2AdjustmentPanel(
                                 editorViewModel = viewModel,
@@ -313,9 +321,15 @@ private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?, onToggleC
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
     var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
     var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }
+    var containerSize by remember(bitmap) { mutableStateOf(IntSize.Zero) }
     val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
 
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onSizeChanged { containerSize = it },
+        contentAlignment = Alignment.Center
+    ) {
         Image(
             bitmap = displayedBitmap.asImageBitmap(),
             contentDescription = "preview",
@@ -324,23 +338,33 @@ private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?, onToggleC
                 .fillMaxSize()
                 .padding(8.dp)
                 .pointerInput(bitmap) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        val nextScale = (scale * zoom).coerceIn(1f, 8f)
+                    detectTransformGestures { centroid, pan, zoom, _ ->
+                        val oldScale = scale
+                        val nextScale = (oldScale * zoom).coerceIn(1f, 8f)
                         scale = nextScale
-                        offset = if (nextScale <= 1.01f) Offset.Zero else offset + pan
+                        offset = if (nextScale <= 1.01f) {
+                            Offset.Zero
+                        } else {
+                            val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
+                            ((offset + centroid - center) * (nextScale / oldScale)) - (centroid - center) + pan
+                        }
                         showOriginal = false
                     }
                 }
-                .pointerInput(bitmap, originalBitmap) {
+                .pointerInput(bitmap, originalBitmap, containerSize) {
                     detectTapGestures(
                         onTap = { onToggleChrome() },
-                        onDoubleTap = {
+                        onDoubleTap = { tap ->
                             if (scale > 1.01f) {
                                 scale = 1f
                                 offset = Offset.Zero
                             } else {
-                                scale = 2.5f
+                                val targetScale = 2.5f
+                                val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
+                                offset = (center - tap) * (targetScale - 1f)
+                                scale = targetScale
                             }
+                            showOriginal = false
                         },
                         onLongPress = { if (originalBitmap != null) showOriginal = true },
                         onPress = {
