@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 import kotlin.math.floor
 import kotlin.math.ln
 import kotlin.math.max
@@ -108,6 +109,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         originalPreviewBitmap = preview,
                         previewBitmap = preview,
                         params = EditParams(),
+                        presetLook = null,
                         canUndo = false,
                         canRedo = false,
                         flareGuardRuntimeStatus = null,
@@ -135,7 +137,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
             val rendered = withContext(Dispatchers.Default) {
-                renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision)
+                renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision, current.presetLook)
             }
             if (_uiState.value.revision == nextRevision) {
                 val context = getApplication<Application>()
@@ -167,7 +169,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val nextParams = withContext(Dispatchers.Default) { computeAutoEnhanceParams(basePreview) }
                 val rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision)
+                    renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision, current.presetLook)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val context = getApplication<Application>()
@@ -252,7 +254,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
             val rendered = withContext(Dispatchers.Default) {
-                renderEditedPreview(basePreview, current.params, nextEngines, nextRevision)
+                renderEditedPreview(basePreview, current.params, nextEngines, nextRevision, current.presetLook)
             }
             if (_uiState.value.revision == nextRevision) {
                 _uiState.update { it.copy(previewBitmap = rendered, isBusy = false, message = message) }
@@ -273,11 +275,52 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     originalPreviewBitmap = preview,
                     previewBitmap = preview,
                     params = EditParams(),
+                    presetLook = null,
                     revision = it.revision + 1,
                     message = "초기화가 완료되었습니다"
                 )
                 saveDraftSnapshot(context, next)
                 next
+            }
+        }
+    }
+
+    fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String) {
+        val current = _uiState.value
+        val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
+        if (basePreview == null) {
+            _uiState.update { it.copy(message = "적용할 이미지가 없습니다.") }
+            return
+        }
+
+        val nextRevision = current.revision + 1
+        renderJob?.cancel()
+        pushUndoSnapshot(clearRedo = true)
+        _uiState.update { it.copy(isBusy = true, presetLook = look, revision = nextRevision, message = message) }
+
+        renderJob = viewModelScope.launch {
+            try {
+                val rendered = withContext(Dispatchers.Default) {
+                    renderEditedPreview(basePreview, params, current.engineSelection(), nextRevision, look)
+                }
+                if (_uiState.value.revision == nextRevision) {
+                    val context = getApplication<Application>()
+                    _uiState.update {
+                        val next = it.copy(
+                            params = params,
+                            presetLook = look,
+                            previewBitmap = rendered,
+                            isBusy = false,
+                            message = message
+                        )
+                        saveDraftSnapshot(context, next)
+                        next
+                    }
+                } else {
+                    rendered.recycle()
+                }
+            } catch (_: Throwable) {
+                _uiState.update { it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.") }
             }
         }
     }
@@ -337,14 +380,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             params = state.params,
                             resolution = state.exportResolution,
                             engines = state.engineSelection(),
-                            revision = state.revision + 1
+                            revision = state.revision + 1,
+                            look = state.presetLook
                         )
                     } ?: renderEditedExport(
                         sourcePath = sourcePath,
                         params = state.params,
                         resolution = state.exportResolution,
                         engines = state.engineSelection(),
-                        revision = state.revision + 1
+                        revision = state.revision + 1,
+                        look = state.presetLook
                     )
                     try {
                         saveBitmapToGallery(context, exportBitmap, fileName, state.exportFormat)
@@ -533,7 +578,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     applyNativeSpecialEffectsToCopy(baseOriginal, operations, nextRevision)
                 }
                 val renderedPreview = withContext(Dispatchers.Default) {
-                    renderEditedPreview(renderedOriginal, current.params, current.engineSelection(), nextRevision)
+                    renderEditedPreview(renderedOriginal, current.params, current.engineSelection(), nextRevision, current.presetLook)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     _uiState.update {
@@ -638,13 +683,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val exportFormat = enumValueOrDefault(prefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
         val exportResolution = enumValueOrDefault(prefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Full)
         val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
+        val presetLook = runCatching {
+            presetColorLookFromJson(prefs.getString(KEY_DRAFT_LOOK, null)?.let(::JSONObject))
+        }.getOrNull()
         val engines = _uiState.value.engineSelection()
 
         _uiState.update { it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다") }
         try {
             val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048) }
             val nextRevision = _uiState.value.revision + 1
-            val rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview, params, engines, nextRevision) }
+            val rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview, params, engines, nextRevision, presetLook) }
             releaseNativeSession()
             nativeSession = NativePhotoCore.nativeCreateSession(sourcePath)
             _uiState.update {
@@ -654,6 +702,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     originalPreviewBitmap = preview,
                     previewBitmap = rendered,
                     params = params,
+                    presetLook = presetLook,
                     exportFormat = exportFormat,
                     exportResolution = exportResolution,
                     draftSavedAtMillis = draftSavedAt,
@@ -685,6 +734,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 params = snapshot.params,
                 previewBitmap = snapshot.previewBitmap,
                 originalPreviewBitmap = snapshot.originalPreviewBitmap,
+                presetLook = snapshot.presetLook,
                 cropState = snapshot.cropState,
                 selectionLayers = snapshot.selectionLayers,
                 activeSelectionLayerId = snapshot.activeSelectionLayerId,
@@ -727,6 +777,7 @@ private data class EditorHistorySnapshot(
     val params: EditParams,
     val previewBitmap: Bitmap?,
     val originalPreviewBitmap: Bitmap?,
+    val presetLook: PresetColorLook?,
     val cropState: CropState,
     val selectionLayers: List<SelectionLayer>,
     val activeSelectionLayerId: String?,
@@ -748,6 +799,7 @@ private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
         params = params,
         previewBitmap = previewCopy,
         originalPreviewBitmap = originalCopy,
+        presetLook = presetLook,
         cropState = cropState,
         selectionLayers = selectionLayers.deepCopy(),
         activeSelectionLayerId = activeSelectionLayerId,
@@ -961,9 +1013,15 @@ private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
     return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
 }
 
-private fun renderEditedPreview(basePreview: Bitmap, params: EditParams, engines: EngineSelection, revision: Int): Bitmap {
+private fun renderEditedPreview(
+    basePreview: Bitmap,
+    params: EditParams,
+    engines: EngineSelection,
+    revision: Int,
+    look: PresetColorLook? = null
+): Bitmap {
     val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
-    renderBitmapInNative(copy, params, engines, revision)
+    renderBitmapInNative(copy, params, engines, revision, look)
     applySelectedToneEngine(copy, engines.toneEngine)
     return copy
 }
@@ -998,11 +1056,12 @@ private fun renderEditedExport(
     params: EditParams,
     resolution: ExportResolution,
     engines: EngineSelection,
-    revision: Int
+    revision: Int,
+    look: PresetColorLook? = null
 ): Bitmap {
     // TODO v0.2: replace whole-bitmap export with ROI/tile rendering to reduce peak memory use.
     val decoded = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE)
-    renderBitmapInNative(decoded, params, engines, revision)
+    renderBitmapInNative(decoded, params, engines, revision, look)
     applySelectedToneEngine(decoded, engines.toneEngine)
 
     val scaled = scaleBitmapForExport(decoded, resolution)
@@ -1015,10 +1074,11 @@ private fun renderEditedExportFromBitmap(
     params: EditParams,
     resolution: ExportResolution,
     engines: EngineSelection,
-    revision: Int
+    revision: Int,
+    look: PresetColorLook? = null
 ): Bitmap {
     val decoded = baseBitmap.copy(Bitmap.Config.ARGB_8888, true)
-    renderBitmapInNative(decoded, params, engines, revision)
+    renderBitmapInNative(decoded, params, engines, revision, look)
     applySelectedToneEngine(decoded, engines.toneEngine)
 
     val scaled = scaleBitmapForExport(decoded, resolution)
@@ -1026,7 +1086,13 @@ private fun renderEditedExportFromBitmap(
     return scaled
 }
 
-private fun renderBitmapInNative(bitmap: Bitmap, params: EditParams, engines: EngineSelection, revision: Int): Int =
+private fun renderBitmapInNative(
+    bitmap: Bitmap,
+    params: EditParams,
+    engines: EngineSelection,
+    revision: Int,
+    look: PresetColorLook? = null
+): Int =
     NativePhotoCore.nativeRenderPreviewInPlace(
         bitmap,
         params.exposure,
@@ -1047,7 +1113,8 @@ private fun renderBitmapInNative(bitmap: Bitmap, params: EditParams, engines: En
         engines.detailEngine.nativeId,
         engines.toneEngine.nativeId,
         engines.hazeEngine.nativeId,
-        revision
+        revision,
+        look
     )
 
 private fun applySelectedToneEngine(bitmap: Bitmap, toneEngine: ToneEngine) {
@@ -1301,6 +1368,7 @@ private fun saveDraftSnapshot(context: Context, state: EditorUiState) {
         .putFloat(KEY_DRAFT_NOISE_REDUCTION, state.params.noiseReduction)
         .putString(KEY_DRAFT_FORMAT, state.exportFormat.name)
         .putString(KEY_DRAFT_RESOLUTION, state.exportResolution.name)
+        .putString(KEY_DRAFT_LOOK, presetColorLookToJson(state.presetLook)?.toString())
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
         .apply()
 }
@@ -1324,6 +1392,7 @@ private fun clearDraftPrefs(context: Context) {
         .remove(KEY_DRAFT_NOISE_REDUCTION)
         .remove(KEY_DRAFT_FORMAT)
         .remove(KEY_DRAFT_RESOLUTION)
+        .remove(KEY_DRAFT_LOOK)
         .remove(KEY_DRAFT_SAVED_AT)
         .apply()
 }
@@ -1471,4 +1540,5 @@ private const val KEY_DRAFT_SHARPNESS = "draft_sharpness"
 private const val KEY_DRAFT_NOISE_REDUCTION = "draft_noise_reduction"
 private const val KEY_DRAFT_FORMAT = "draft_format"
 private const val KEY_DRAFT_RESOLUTION = "draft_resolution"
+private const val KEY_DRAFT_LOOK = "draft_look"
 private const val KEY_DRAFT_SAVED_AT = "draft_saved_at"

@@ -30,8 +30,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.EditParams
+import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.PresetColorLook
-import com.projectnuke.keplerstudio.editor.PresetLookHandoff
 import com.projectnuke.keplerstudio.editor.createPresetColorLookFromParams
 import com.projectnuke.keplerstudio.editor.presetColorLookFromJson
 import com.projectnuke.keplerstudio.editor.presetColorLookSummary
@@ -65,8 +65,9 @@ private data class StoredPreset(
 
 @Composable
 fun PresetToolPanel(
+    editorViewModel: EditorViewModel,
     params: EditParams,
-    onApplyPreset: (EditParams) -> Unit
+    activeLook: PresetColorLook?
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -76,8 +77,7 @@ fun PresetToolPanel(
     var pendingBeforeUri by remember { mutableStateOf<Uri?>(null) }
 
     fun applyStoredPreset(preset: StoredPreset, message: String) {
-        PresetLookHandoff.offer(preset.look)
-        onApplyPreset(preset.params)
+        editorViewModel.applyPresetLook(preset.params, preset.look, message)
         statusMessage = message
     }
 
@@ -202,7 +202,7 @@ fun PresetToolPanel(
                         name = presetName.ifBlank { defaultPresetName() },
                         params = params,
                         timestampMillis = System.currentTimeMillis(),
-                        look = createPresetColorLookFromParams(params, strength = 0.60f)
+                        look = activeLook ?: createPresetColorLookFromParams(params, strength = 0.60f)
                     )
                     presets = mergePresets(presets, listOf(item)).take(40)
                     savePresets(context, presets)
@@ -352,12 +352,13 @@ private fun encodePreset(item: StoredPreset): String = listOf(
     item.params.clarity.toString(),
     item.params.dehaze.toString(),
     item.params.sharpness.toString(),
-    item.params.noiseReduction.toString()
+    item.params.noiseReduction.toString(),
+    Uri.encode(presetColorLookToJson(item.look)?.toString().orEmpty())
 ).joinToString("|") { it.replace("|", " ").replace("\n", " ") }
 
 private fun decodePreset(raw: String): StoredPreset? {
     val p = raw.split("|")
-    if (p.size != 17) return null
+    if (p.size != 17 && p.size != 18) return null
     val params = EditParams(
         exposure = p[3].toFloatOrNull() ?: 0f,
         contrast = p[4].toFloatOrNull() ?: 0f,
@@ -379,7 +380,11 @@ private fun decodePreset(raw: String): StoredPreset? {
         name = p[1],
         timestampMillis = p[2].toLongOrNull() ?: return null,
         params = params,
-        look = createPresetColorLookFromParams(params, strength = 0.60f)
+        look = p.getOrNull(17)
+            ?.takeIf { it.isNotBlank() }
+            ?.let(Uri::decode)
+            ?.let { runCatching { presetColorLookFromJson(JSONObject(it)) }.getOrNull() }
+            ?: createPresetColorLookFromParams(params, strength = 0.60f)
     )
 }
 

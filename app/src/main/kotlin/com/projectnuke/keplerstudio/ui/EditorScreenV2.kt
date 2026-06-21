@@ -56,7 +56,6 @@ import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
 import com.projectnuke.keplerstudio.editor.NoiseEngine
-import com.projectnuke.keplerstudio.editor.PresetLookHandoff
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import java.text.SimpleDateFormat
@@ -114,7 +113,6 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     val state by viewModel.uiState.collectAsState()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
-            PresetLookHandoff.clear()
             viewModel.openImage(uri)
         }
     }
@@ -140,10 +138,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         onUndo = viewModel::undoEdit,
                         onRedo = viewModel::redoEdit,
                         onRotate = viewModel::rotatePreview90,
-                        onReset = {
-                            PresetLookHandoff.clear()
-                            viewModel.resetAdjustments()
-                        },
+                        onReset = viewModel::resetAdjustments,
                         onSave = { showExportDialog = true }
                     )
                 }
@@ -165,14 +160,12 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                                 editorViewModel = viewModel,
                                 selectedTool = selectedTool,
                                 params = state.params,
+                                activeLook = state.presetLook,
                                 panelCollapsed = panelCollapsed,
                                 onTogglePanel = { panelCollapsed = !panelCollapsed },
                                 onFullScreen = { fullScreenPreview = true },
                                 onToolSelected = { selectedTool = it },
-                                onAutoEnhance = {
-                                    PresetLookHandoff.clear()
-                                    viewModel.applyAutoEnhance()
-                                },
+                                onAutoEnhance = viewModel::applyAutoEnhance,
                                 onChange = viewModel::updateParams
                             )
                         }
@@ -360,6 +353,7 @@ private fun V2AdjustmentPanel(
     editorViewModel: EditorViewModel,
     selectedTool: V2EditorTool,
     params: EditParams,
+    activeLook: com.projectnuke.keplerstudio.editor.PresetColorLook?,
     panelCollapsed: Boolean,
     onTogglePanel: () -> Unit,
     onFullScreen: () -> Unit,
@@ -385,8 +379,12 @@ private fun V2AdjustmentPanel(
                 when (selectedTool) {
                     V2EditorTool.Auto -> V2AutoPanel(onAutoEnhance)
                     V2EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance, editorViewModel = editorViewModel)
-                    V2EditorTool.Profiles -> NativeProfilesToolPanel()
-                    V2EditorTool.Presets -> PresetToolPanel(params = params, onApplyPreset = { presetParams -> onChange { presetParams } })
+                    V2EditorTool.Profiles -> NativeProfilesToolPanel(editorViewModel = editorViewModel)
+                    V2EditorTool.Presets -> PresetToolPanel(
+                        editorViewModel = editorViewModel,
+                        params = params,
+                        activeLook = activeLook
+                    )
                     V2EditorTool.Crop -> CropToolPanel()
                     V2EditorTool.Masking -> MaskingToolPanel()
                     V2EditorTool.Remove -> NativeRemoveToolPanel(editorViewModel = editorViewModel)

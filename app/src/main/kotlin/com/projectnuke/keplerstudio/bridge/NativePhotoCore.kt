@@ -1,7 +1,7 @@
 package com.projectnuke.keplerstudio.bridge
 
 import android.graphics.Bitmap
-import com.projectnuke.keplerstudio.editor.PresetLookHandoff
+import com.projectnuke.keplerstudio.editor.PresetColorLook
 import com.projectnuke.keplerstudio.editor.applyPresetColorLookInPlace
 
 /**
@@ -43,7 +43,8 @@ object NativePhotoCore {
         detailEngine: Int,
         toneEngine: Int,
         hazeEngine: Int,
-        revision: Int
+        revision: Int,
+        look: PresetColorLook? = null
     ): Int {
         val result = nativeRenderPreviewInPlaceNative(
             bitmap,
@@ -67,7 +68,7 @@ object NativePhotoCore {
             hazeEngine,
             revision
         )
-        applyPresetColorLookInPlace(bitmap, PresetLookHandoff.consumeActive())
+        applyPresetColorLookInPlace(bitmap, look)
         return result
     }
 

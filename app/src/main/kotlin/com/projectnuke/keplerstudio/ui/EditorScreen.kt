@@ -196,8 +196,10 @@ fun EditorScreen(viewModel: EditorViewModel) {
                         }
 
                         AdjustmentPanel(
+                            viewModel = viewModel,
                             selectedTool = selectedTool,
                             params = state.params,
+                            activeLook = state.presetLook,
                             exportFormat = state.exportFormat,
                             exportResolution = state.exportResolution,
                             draftSavedAtMillis = state.draftSavedAtMillis,
@@ -509,8 +511,10 @@ private fun ZoomablePreview(
 
 @Composable
 private fun AdjustmentPanel(
+    viewModel: EditorViewModel,
     selectedTool: EditorTool,
     params: EditParams,
+    activeLook: com.projectnuke.keplerstudio.editor.PresetColorLook?,
     exportFormat: ExportFormat,
     exportResolution: ExportResolution,
     draftSavedAtMillis: Long?,
@@ -549,8 +553,9 @@ private fun AdjustmentPanel(
                 EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance)
                 EditorTool.Profiles -> PlaceholderPanel("프로필 브라우저와 강도 조절은 다음 단계에서 연결됩니다")
                 EditorTool.Presets -> PresetToolPanel(
+                    editorViewModel = viewModel,
                     params = params,
-                    onApplyPreset = { presetParams -> onChange { presetParams } }
+                    activeLook = activeLook
                 )
                 EditorTool.Light -> LightPanel(params, onChange)
                 EditorTool.Color -> ColorPanel(params, onChange)

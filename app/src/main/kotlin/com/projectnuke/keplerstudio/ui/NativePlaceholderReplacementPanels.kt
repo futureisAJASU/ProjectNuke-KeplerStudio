@@ -17,7 +17,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.PresetColorLook
+import com.projectnuke.keplerstudio.editor.createPresetColorLookFromParams
 
 private val NativePanelBackground = Color(0xFF242424)
 private val NativePanelAccent = Color(0xFFE6E6E6)
@@ -25,6 +28,36 @@ private val NativePanelTextDark = Color(0xFF111111)
 private val NativePanelTextPrimary = Color(0xFFF2F2F2)
 private val NativePanelTextSecondary = Color(0xFFC8C8C8)
 private val NativePanelTextMuted = Color(0xFF8E8E8E)
+
+private data class BuiltInProfile(
+    val title: String,
+    val params: EditParams,
+    val look: PresetColorLook? = null
+)
+
+private val BuiltInProfiles = listOf(
+    BuiltInProfile("뉴트럴", EditParams()),
+    BuiltInProfile(
+        "부드러운 대비",
+        EditParams(contrast = 0.12f, shadows = 0.10f, highlights = -0.08f, clarity = 0.05f),
+        createPresetColorLookFromParams(EditParams(contrast = 0.08f, shadows = 0.06f, highlights = -0.05f), strength = 0.42f)
+    ),
+    BuiltInProfile(
+        "따뜻한 필름",
+        EditParams(temperature = 0.24f, contrast = 0.08f, saturation = 0.06f, vibrance = 0.10f, highlights = -0.10f, blacks = -0.04f),
+        createPresetColorLookFromParams(EditParams(temperature = 0.28f, contrast = 0.10f, saturation = 0.10f, vibrance = 0.12f), strength = 0.58f)
+    ),
+    BuiltInProfile(
+        "차가운 클린",
+        EditParams(temperature = -0.18f, tint = -0.04f, contrast = 0.06f, clarity = 0.08f, dehaze = 0.05f),
+        createPresetColorLookFromParams(EditParams(temperature = -0.20f, tint = -0.04f, contrast = 0.08f, clarity = 0.08f), strength = 0.46f)
+    ),
+    BuiltInProfile(
+        "선명하게",
+        EditParams(contrast = 0.14f, vibrance = 0.16f, saturation = 0.08f, sharpness = 0.18f, clarity = 0.10f),
+        createPresetColorLookFromParams(EditParams(contrast = 0.12f, vibrance = 0.18f, saturation = 0.10f), strength = 0.52f)
+    )
+)
 
 @Composable
 fun NativeRemoveToolPanel(editorViewModel: EditorViewModel = viewModel()) {
@@ -87,12 +120,43 @@ fun NativeModelToolPanel(editorViewModel: EditorViewModel = viewModel()) {
 }
 
 @Composable
-fun NativeProfilesToolPanel() {
+fun NativeProfilesToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     NativeToolCard(
         title = "프로필",
-        description = "전용 LUT 또는 카메라 매트릭스 프로필은 아직 연결되지 않았습니다."
+        description = "기본 프로필입니다. 전용 카메라 프로필은 아직 지원되지 않습니다."
     ) {
-        Text("현재는 프리셋과 동일한 보정값 경로만 사용하고 있습니다.", color = NativePanelTextMuted, style = MaterialTheme.typography.bodySmall)
+        Text(
+            "이 프로필은 내장 색감 프리셋입니다.",
+            color = NativePanelTextMuted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        BuiltInProfiles.chunked(2).forEach { rowItems ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                rowItems.forEach { profile ->
+                    TextButton(
+                        onClick = {
+                            editorViewModel.applyPresetLook(
+                                params = profile.params,
+                                look = profile.look,
+                                message = "프로필을 적용했습니다."
+                            )
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text(profile.title)
+                    }
+                }
+                if (rowItems.size == 1) {
+                    Text("", modifier = Modifier.weight(1f))
+                }
+            }
+        }
     }
 }
 
@@ -109,7 +173,12 @@ private fun NativeToolCard(
             .padding(12.dp)
     ) {
         Text(title, color = NativePanelTextPrimary, fontWeight = FontWeight.SemiBold)
-        Text(description, color = NativePanelTextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp, bottom = 8.dp))
+        Text(
+            description,
+            color = NativePanelTextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
+        )
         content()
     }
 }
