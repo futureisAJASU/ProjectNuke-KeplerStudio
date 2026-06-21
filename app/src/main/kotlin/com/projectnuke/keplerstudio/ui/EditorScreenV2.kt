@@ -389,15 +389,15 @@ private fun V2AdjustmentPanel(
                     V2EditorTool.Presets -> PresetToolPanel(params = params, onApplyPreset = { presetParams -> onChange { presetParams } })
                     V2EditorTool.Crop -> CropToolPanel()
                     V2EditorTool.Masking -> MaskingToolPanel()
-                    V2EditorTool.Remove -> NativeRemoveToolPanel()
+                    V2EditorTool.Remove -> NativeRemoveToolPanel(editorViewModel = editorViewModel)
                     V2EditorTool.Light -> V2LightPanel(params, onChange)
                     V2EditorTool.Color -> V2ColorPanel(params, onChange)
                     V2EditorTool.Effects -> V2EffectsPanel(params, onChange)
                     V2EditorTool.Detail -> V2DetailPanel(params, onChange)
-                    V2EditorTool.Optics -> NativeOpticsToolPanel()
-                    V2EditorTool.Geometry -> NativeGeometryToolPanel()
-                    V2EditorTool.Blur -> NativeBlurToolPanel()
-                    V2EditorTool.Model -> NativeModelToolPanel()
+                    V2EditorTool.Optics -> NativeOpticsToolPanel(editorViewModel = editorViewModel)
+                    V2EditorTool.Geometry -> NativeGeometryToolPanel(editorViewModel = editorViewModel)
+                    V2EditorTool.Blur -> NativeBlurToolPanel(editorViewModel = editorViewModel)
+                    V2EditorTool.Model -> NativeModelToolPanel(editorViewModel = editorViewModel)
                 }
             }
         }

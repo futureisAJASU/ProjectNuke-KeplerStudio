@@ -480,6 +480,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun applySpotCleanupMvp() {
         applyNativeSpecialEffectsMvp(
             title = "기본 제거",
+            failureMessage = "기본 제거 적용에 실패했습니다.",
             operations = listOf(NativeSpecialEffectOp(effect = 0, strength = 0.58f))
         )
     }
@@ -487,6 +488,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun applyOpticsCorrectionMvp() {
         applyNativeSpecialEffectsMvp(
             title = "광학 보정",
+            failureMessage = "광학 보정 적용에 실패했습니다.",
             operations = listOf(
                 NativeSpecialEffectOp(effect = 1, strength = 0.62f),
                 NativeSpecialEffectOp(effect = 2, strength = 0.45f)
@@ -497,11 +499,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun applySoftBlurMvp(strength: Float = 0.28f) {
         applyNativeSpecialEffectsMvp(
             title = "부드러운 흐림",
+            failureMessage = "부드러운 흐림 적용에 실패했습니다.",
             operations = listOf(NativeSpecialEffectOp(effect = 3, strength = strength.coerceIn(0f, 1f)))
         )
     }
 
-    private fun applyNativeSpecialEffectsMvp(title: String, operations: List<NativeSpecialEffectOp>) {
+    private fun applyNativeSpecialEffectsMvp(
+        title: String,
+        failureMessage: String,
+        operations: List<NativeSpecialEffectOp>
+    ) {
         val current = _uiState.value
         val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
         if (baseOriginal == null) {
@@ -544,11 +551,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     renderedPreview.recycle()
                 }
             } catch (t: Throwable) {
-                _uiState.update { it.copy(isBusy = false, message = "$title 적용에 실패했습니다: ${t.message}") }
+                Log.e(FLARE_GUARD_AI_TAG, "$title native special effect failed", t)
+                _uiState.update { it.copy(isBusy = false, message = failureMessage) }
             }
         }
     }
-
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
         val current = _uiState.value
         val source = current.previewBitmap ?: current.originalPreviewBitmap
@@ -973,16 +980,19 @@ private fun applyNativeSpecialEffectsToCopy(
 ): Bitmap {
     val copy = source.copy(Bitmap.Config.ARGB_8888, true)
     operations.forEach { operation ->
-        NativePhotoCore.nativeApplySpecialEffectInPlace(
+        val result = NativePhotoCore.nativeApplySpecialEffectInPlace(
             bitmap = copy,
             effect = operation.effect,
             strength = operation.strength.coerceIn(0f, 1f),
             revision = revision
         )
+        if (result < 0) {
+            copy.recycle()
+            throw IllegalStateException("native special effect failed: effect=${operation.effect} code=$result")
+        }
     }
     return copy
 }
-
 private fun renderEditedExport(
     sourcePath: String,
     params: EditParams,
