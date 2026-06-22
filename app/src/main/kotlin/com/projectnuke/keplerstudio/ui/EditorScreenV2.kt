@@ -80,6 +80,7 @@ private val V2PanelBackground = Color(0xFF1B1B1B)
 private val V2PreviewBackground = Color(0xFF000000)
 private val V2RailBackground = Color(0xFF141414)
 private val V2CardBackground = Color(0xFF242424)
+private val V2SelectedMenuBackground = Color(0xFF343434)
 private val V2BadgeBackground = Color(0xCC000000)
 private val V2Accent = Color(0xFFE6E6E6)
 private val V2TextPrimary = Color(0xFFF2F2F2)
@@ -277,8 +278,12 @@ private fun V2TopBar(
         }
         Row(modifier = Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             V2MainTab.values().forEach { tab ->
-                TextButton(onClick = { onTabSelected(tab) }) {
-                    Text(tab.label, color = if (tab == selectedTab) V2Accent else V2TextSecondary, fontWeight = if (tab == selectedTab) FontWeight.Bold else FontWeight.Normal)
+                val selected = tab == selectedTab
+                TextButton(
+                    onClick = { onTabSelected(tab) },
+                    modifier = Modifier.background(if (selected) V2SelectedMenuBackground else Color.Transparent)
+                ) {
+                    Text(tab.label, color = if (selected) V2Accent else V2TextSecondary, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
                 }
             }
         }
@@ -442,8 +447,12 @@ private fun V2AdjustmentPanel(
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             V2EditorTool.values().forEach { tool ->
-                TextButton(onClick = { onToolSelected(tool) }, modifier = Modifier.width(84.dp)) {
-                    Text(tool.label, color = if (tool == selectedTool) V2Accent else V2TextSecondary, maxLines = 1)
+                val selected = tool == selectedTool
+                TextButton(
+                    onClick = { onToolSelected(tool) },
+                    modifier = Modifier.width(84.dp).background(if (selected) V2SelectedMenuBackground else Color.Transparent)
+                ) {
+                    Text(tool.label, color = if (selected) V2Accent else V2TextSecondary, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal, maxLines = 1)
                 }
             }
         }
