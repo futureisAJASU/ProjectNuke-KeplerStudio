@@ -1,15 +1,22 @@
 package com.projectnuke.keplerstudio
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -24,16 +31,22 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
@@ -187,7 +200,7 @@ private fun EditedGalleryScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text("Kepler Gallery", color = Color(0xFFF2F2F2), style = MaterialTheme.typography.titleLarge)
                     Text("내보낸 사진과 자동복구 상태를 확인합니다", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
                 }
@@ -239,24 +252,123 @@ private fun EditedGalleryScreen(
                     Text("편집 화면에서 저장하면 이곳에 기록이 표시됩니다.", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
                 }
             } else {
-                savedExports.forEach { item ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(Color(0xFF242424))
-                            .padding(12.dp)
+                savedExports.chunked(3).forEach { rowItems ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(item.displayName, color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
-                        Text("${item.formatLabel} · ${item.resolutionLabel}", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
-                        Text(formatMainSavedTime(item.timestampMillis), color = Color(0xFF8E8E8E), style = MaterialTheme.typography.bodySmall)
-                        TextButton(onClick = { onRemoveSavedExport(item.uriString) }) {
-                            Text("기록 삭제")
+                        rowItems.forEach { item ->
+                            SavedExportThumbnailTile(
+                                item = item,
+                                onRemoveSavedExport = onRemoveSavedExport,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        repeat(3 - rowItems.size) {
+                            Box(modifier = Modifier.weight(1f))
                         }
                     }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun SavedExportThumbnailTile(
+    item: SavedExport,
+    onRemoveSavedExport: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .background(Color(0xFF242424))
+            .padding(8.dp)
+    ) {
+        SavedExportThumbnail(
+            uriString = item.uriString,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+        )
+        Text(
+            text = item.displayName,
+            color = Color(0xFFF2F2F2),
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 6.dp)
+        )
+        Text(
+            text = item.formatLabel,
+            color = Color(0xFFC8C8C8),
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1
+        )
+        TextButton(onClick = { onRemoveSavedExport(item.uriString) }) {
+            Text("삭제")
+        }
+    }
+}
+
+@Composable
+private fun SavedExportThumbnail(uriString: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = uriString) {
+        value = withContext(Dispatchers.IO) {
+            decodeSavedExportThumbnail(context, uriString)
+        }
+    }
+
+    Box(
+        modifier = modifier.background(Color(0xFF111111)),
+        contentAlignment = Alignment.Center
+    ) {
+        val bitmap = thumbnail
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Text("미리보기 없음", color = Color(0xFF8E8E8E), style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+private fun decodeSavedExportThumbnail(context: Context, uriString: String, maxSide: Int = 512): Bitmap? {
+    val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    runCatching {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, bounds)
+        }
+    }
+    val sampleSize = calculateThumbnailSampleSize(bounds.outWidth, bounds.outHeight, maxSide)
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sampleSize
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    return runCatching {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, options)
+        }
+    }.getOrNull()
+}
+
+private fun calculateThumbnailSampleSize(width: Int, height: Int, maxSide: Int): Int {
+    if (width <= 0 || height <= 0) return 1
+    var sample = 1
+    var scaledWidth = width
+    var scaledHeight = height
+    while (scaledWidth / 2 >= maxSide || scaledHeight / 2 >= maxSide) {
+        sample *= 2
+        scaledWidth /= 2
+        scaledHeight /= 2
+    }
+    return sample.coerceAtLeast(1)
 }
 
 private fun formatMainSavedTime(timestampMillis: Long): String =
