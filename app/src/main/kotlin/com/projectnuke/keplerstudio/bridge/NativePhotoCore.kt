@@ -51,7 +51,7 @@ object NativePhotoCore {
             exposure,
             contrast,
             shadows,
-            highlights,
+            -highlights,
             whites,
             blacks,
             temperature,
