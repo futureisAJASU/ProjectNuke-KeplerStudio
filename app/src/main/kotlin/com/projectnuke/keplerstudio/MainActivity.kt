@@ -82,7 +82,7 @@ class MainActivity : ComponentActivity() {
             val vm: EditorViewModel = viewModel()
             val state by vm.uiState.collectAsState()
             val scope = rememberCoroutineScope()
-            var appMode by remember { mutableStateOf(AppMode.Editor) }
+            var appMode by remember { mutableStateOf(AppMode.Gallery) }
             var showLeaveDialog by remember { mutableStateOf(false) }
             var showSavingDialog by remember { mutableStateOf(false) }
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -104,7 +104,7 @@ class MainActivity : ComponentActivity() {
                 appMode = AppMode.Gallery
             }
             BackHandler(enabled = appMode == AppMode.Gallery) {
-                appMode = AppMode.Editor
+                finish()
             }
 
             MaterialTheme(colorScheme = MainDarkColors) {
