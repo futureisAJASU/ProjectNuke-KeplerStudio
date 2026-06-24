@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -191,13 +193,14 @@ private fun EditedGalleryScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color(0xFF101010))
+                .statusBarsPadding()
                 .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
@@ -206,9 +209,10 @@ private fun EditedGalleryScreen(
                 }
                 Button(
                     onClick = onOpenPhoto,
+                    modifier = Modifier.widthIn(min = 108.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE6E6E6), contentColor = Color(0xFF111111))
                 ) {
-                    Text("사진 열기")
+                    Text("사진 추가", maxLines = 1)
                 }
             }
 
