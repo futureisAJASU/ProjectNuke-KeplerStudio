@@ -54,12 +54,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.ui.EditorScreenV2
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val MainDarkColors = darkColorScheme(
     primary = Color(0xFFE6E6E6),
@@ -115,6 +117,7 @@ class MainActivity : ComponentActivity() {
                     AppMode.Gallery -> EditedGalleryScreen(
                         savedExports = state.savedExports,
                         draftSavedAtMillis = state.draftSavedAtMillis,
+                        activeSourcePath = state.sourcePath,
                         onOpenPhoto = { picker.launch("image/*") },
                         onContinueEditing = { appMode = AppMode.Editor },
                         onClearSavedExports = vm::clearSavedExports,
@@ -183,6 +186,7 @@ class MainActivity : ComponentActivity() {
 private fun EditedGalleryScreen(
     savedExports: List<SavedExport>,
     draftSavedAtMillis: Long?,
+    activeSourcePath: String?,
     onOpenPhoto: () -> Unit,
     onContinueEditing: () -> Unit,
     onClearSavedExports: () -> Unit,
@@ -234,6 +238,8 @@ private fun EditedGalleryScreen(
                 }
             }
 
+            GalleryCacheManagementCard(activeSourcePath = activeSourcePath)
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -275,6 +281,83 @@ private fun EditedGalleryScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun GalleryCacheManagementCard(activeSourcePath: String?) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var refreshKey by remember { mutableStateOf(0) }
+    var actionMessage by remember { mutableStateOf<String?>(null) }
+    val cacheStats by produceState(initialValue = TemporaryCacheStats(), key1 = refreshKey) {
+        value = withContext(Dispatchers.IO) { calculateTemporaryCacheStats(context) }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF242424))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text("캐시 관리", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
+        Text(
+            "임시 원본 캐시: ${formatCacheBytes(cacheStats.totalBytes)} · ${cacheStats.fileCount}개",
+            color = Color(0xFFC8C8C8),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            "7일 지난 캐시: ${formatCacheBytes(cacheStats.oldBytes)} · ${cacheStats.oldFileCount}개",
+            color = Color(0xFF8E8E8E),
+            style = MaterialTheme.typography.bodySmall
+        )
+        actionMessage?.let {
+            Text(it, color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(
+                onClick = {
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            cleanupTemporarySourceFiles(
+                                context = context,
+                                activeSourcePath = activeSourcePath,
+                                olderThan7DaysOnly = true
+                            )
+                        }
+                        refreshKey += 1
+                        actionMessage = "오래된 임시 원본 ${result.removedCount}개를 정리했습니다. 확보 공간: ${formatCacheBytes(result.removedBytes)}"
+                    }
+                },
+                enabled = cacheStats.oldFileCount > 0
+            ) {
+                Text("오래된 항목 정리")
+            }
+            TextButton(
+                onClick = {
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            cleanupTemporarySourceFiles(
+                                context = context,
+                                activeSourcePath = activeSourcePath,
+                                olderThan7DaysOnly = false
+                            )
+                        }
+                        refreshKey += 1
+                        actionMessage = "현재 편집 원본을 제외하고 임시 원본 ${result.removedCount}개를 정리했습니다. 확보 공간: ${formatCacheBytes(result.removedBytes)}"
+                    }
+                },
+                enabled = cacheStats.fileCount > if (activeSourcePath != null) 1 else 0
+            ) {
+                Text("현재 편집 제외 모두 정리")
+            }
+        }
+        Text(
+            "내보낸 사진 파일은 삭제하지 않고, 앱 내부 임시 원본만 정리합니다.",
+            color = Color(0xFF8E8E8E),
+            style = MaterialTheme.typography.labelSmall
+        )
     }
 }
 
@@ -375,5 +458,71 @@ private fun calculateThumbnailSampleSize(width: Int, height: Int, maxSide: Int):
     return sample.coerceAtLeast(1)
 }
 
+private data class TemporaryCacheStats(
+    val fileCount: Int = 0,
+    val totalBytes: Long = 0L,
+    val oldFileCount: Int = 0,
+    val oldBytes: Long = 0L
+)
+
+private data class TemporaryCacheCleanupResult(
+    val removedCount: Int,
+    val removedBytes: Long
+)
+
+private fun calculateTemporaryCacheStats(context: Context): TemporaryCacheStats {
+    val now = System.currentTimeMillis()
+    val files = listTemporarySourceFiles(context)
+    val oldFiles = files.filter { now - it.lastModified() > TemporarySourceMaxAgeMs }
+    return TemporaryCacheStats(
+        fileCount = files.size,
+        totalBytes = files.sumOf { it.length() },
+        oldFileCount = oldFiles.size,
+        oldBytes = oldFiles.sumOf { it.length() }
+    )
+}
+
+private fun cleanupTemporarySourceFiles(
+    context: Context,
+    activeSourcePath: String?,
+    olderThan7DaysOnly: Boolean
+): TemporaryCacheCleanupResult {
+    val now = System.currentTimeMillis()
+    val activePath = activeSourcePath?.let { File(it).absolutePath }
+    var removedCount = 0
+    var removedBytes = 0L
+
+    listTemporarySourceFiles(context).forEach { file ->
+        val isActive = activePath != null && file.absolutePath == activePath
+        val isOld = now - file.lastModified() > TemporarySourceMaxAgeMs
+        val shouldDelete = !isActive && (!olderThan7DaysOnly || isOld)
+        if (shouldDelete) {
+            val size = file.length()
+            if (file.delete()) {
+                removedCount += 1
+                removedBytes += size
+            }
+        }
+    }
+    return TemporaryCacheCleanupResult(removedCount, removedBytes)
+}
+
+private fun listTemporarySourceFiles(context: Context): List<File> =
+    context.cacheDir.listFiles { file ->
+        file.isFile && file.name.startsWith("source_") && file.name.endsWith(".img")
+    }.orEmpty().toList()
+
+private fun formatCacheBytes(bytes: Long): String {
+    val formatter = DecimalFormat("0.#")
+    return when {
+        bytes >= 1024L * 1024L * 1024L -> "${formatter.format(bytes / 1024.0 / 1024.0 / 1024.0)} GB"
+        bytes >= 1024L * 1024L -> "${formatter.format(bytes / 1024.0 / 1024.0)} MB"
+        bytes >= 1024L -> "${formatter.format(bytes / 1024.0)} KB"
+        else -> "$bytes B"
+    }
+}
+
 private fun formatMainSavedTime(timestampMillis: Long): String =
     SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.KOREA).format(Date(timestampMillis))
+
+private const val TemporarySourceMaxAgeMs = 7L * 24L * 60L * 60L * 1000L
