@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -238,8 +240,6 @@ private fun EditedGalleryScreen(
                 }
             }
 
-            GalleryCacheManagementCard(activeSourcePath = activeSourcePath)
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -280,6 +280,8 @@ private fun EditedGalleryScreen(
                     }
                 }
             }
+
+            GalleryCacheManagementCard(activeSourcePath = activeSourcePath)
         }
     }
 }
@@ -315,9 +317,12 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?) {
         actionMessage?.let {
             Text(it, color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(
-                onClick = {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            LongPressCacheAction(
+                label = "오래된 항목 정리",
+                enabled = cacheStats.oldFileCount > 0,
+                onTapHint = { actionMessage = "삭제하려면 ‘오래된 항목 정리’를 길게 눌러주세요." },
+                onLongPress = {
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
                             cleanupTemporarySourceFiles(
@@ -329,13 +334,13 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?) {
                         refreshKey += 1
                         actionMessage = "오래된 임시 원본 ${result.removedCount}개를 정리했습니다. 확보 공간: ${formatCacheBytes(result.removedBytes)}"
                     }
-                },
-                enabled = cacheStats.oldFileCount > 0
-            ) {
-                Text("오래된 항목 정리")
-            }
-            TextButton(
-                onClick = {
+                }
+            )
+            LongPressCacheAction(
+                label = "현재 편집 제외 모두 정리",
+                enabled = cacheStats.fileCount > if (activeSourcePath != null) 1 else 0,
+                onTapHint = { actionMessage = "삭제하려면 ‘현재 편집 제외 모두 정리’를 길게 눌러주세요." },
+                onLongPress = {
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
                             cleanupTemporarySourceFiles(
@@ -347,18 +352,42 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?) {
                         refreshKey += 1
                         actionMessage = "현재 편집 원본을 제외하고 임시 원본 ${result.removedCount}개를 정리했습니다. 확보 공간: ${formatCacheBytes(result.removedBytes)}"
                     }
-                },
-                enabled = cacheStats.fileCount > if (activeSourcePath != null) 1 else 0
-            ) {
-                Text("현재 편집 제외 모두 정리")
-            }
+                }
+            )
         }
         Text(
-            "내보낸 사진 파일은 삭제하지 않고, 앱 내부 임시 원본만 정리합니다.",
+            "삭제 작업은 실수 방지를 위해 길게 눌러야 실행됩니다. 내보낸 사진 파일은 삭제하지 않고, 앱 내부 임시 원본만 정리합니다.",
             color = Color(0xFF8E8E8E),
             style = MaterialTheme.typography.labelSmall
         )
     }
+}
+
+@Composable
+private fun LongPressCacheAction(
+    label: String,
+    enabled: Boolean,
+    onTapHint: () -> Unit,
+    onLongPress: () -> Unit
+) {
+    val background = if (enabled) Color(0xFF343434) else Color(0xFF1B1B1B)
+    val textColor = if (enabled) Color(0xFFE6E6E6) else Color(0xFF6E6E6E)
+    Text(
+        text = "$label · 길게 누르기",
+        color = textColor,
+        style = MaterialTheme.typography.bodySmall,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .background(background)
+            .pointerInput(enabled) {
+                detectTapGestures(
+                    onTap = { if (enabled) onTapHint() },
+                    onLongPress = { if (enabled) onLongPress() }
+                )
+            }
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    )
 }
 
 @Composable
