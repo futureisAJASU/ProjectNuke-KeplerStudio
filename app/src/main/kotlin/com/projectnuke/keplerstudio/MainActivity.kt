@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
@@ -77,6 +78,7 @@ private val MainDarkColors = darkColorScheme(
 )
 
 private enum class AppMode {
+    Home,
     Gallery,
     Editor
 }
@@ -88,7 +90,7 @@ class MainActivity : ComponentActivity() {
             val vm: EditorViewModel = viewModel()
             val state by vm.uiState.collectAsState()
             val scope = rememberCoroutineScope()
-            var appMode by remember { mutableStateOf(AppMode.Gallery) }
+            var appMode by remember { mutableStateOf(AppMode.Home) }
             var showLeaveDialog by remember { mutableStateOf(false) }
             var showSavingDialog by remember { mutableStateOf(false) }
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -107,22 +109,29 @@ class MainActivity : ComponentActivity() {
                 showLeaveDialog = true
             }
             BackHandler(enabled = appMode == AppMode.Editor && !hasEditableWork) {
-                appMode = AppMode.Gallery
+                appMode = AppMode.Home
             }
             BackHandler(enabled = appMode == AppMode.Gallery) {
+                appMode = AppMode.Home
+            }
+            BackHandler(enabled = appMode == AppMode.Home) {
                 finish()
             }
 
             MaterialTheme(colorScheme = MainDarkColors) {
                 when (appMode) {
                     AppMode.Editor -> EditorScreenV2(viewModel = vm)
-                    AppMode.Gallery -> EditedGalleryScreen(
-                        savedExports = state.savedExports,
+                    AppMode.Home -> HomeScreen(
                         draftSavedAtMillis = state.draftSavedAtMillis,
                         draftSourcePath = state.draftSourcePath,
                         activeSourcePath = state.sourcePath,
                         onOpenPhoto = { picker.launch("image/*") },
-                        onContinueEditing = { appMode = AppMode.Editor },
+                        onOpenGallery = { appMode = AppMode.Gallery },
+                        onContinueEditing = { appMode = AppMode.Editor }
+                    )
+                    AppMode.Gallery -> SavedExportsGalleryScreen(
+                        savedExports = state.savedExports,
+                        onBack = { appMode = AppMode.Home },
                         onClearSavedExports = vm::clearSavedExports,
                         onRemoveSavedExport = vm::removeSavedExport
                     )
@@ -136,7 +145,7 @@ class MainActivity : ComponentActivity() {
                         textContentColor = Color(0xFFC8C8C8),
                         title = { Text("편집을 종료할까요?") },
                         text = {
-                            Text("현재 편집 내용을 자동복구용 임시 저장으로 한 번 더 저장한 뒤, 편집 기록 화면으로 이동합니다.")
+                            Text("현재 편집 내용을 자동복구용 임시 저장으로 한 번 더 저장한 뒤, 홈 화면으로 이동합니다.")
                         },
                         confirmButton = {
                             TextButton(onClick = {
@@ -147,7 +156,7 @@ class MainActivity : ComponentActivity() {
                                         vm.persistDraftSnapshot()
                                     }
                                     showSavingDialog = false
-                                    appMode = AppMode.Gallery
+                                    appMode = AppMode.Home
                                 }
                             }) {
                                 Text("저장하고 나가기")
@@ -186,26 +195,26 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun EditedGalleryScreen(
-    savedExports: List<SavedExport>,
+private fun HomeScreen(
     draftSavedAtMillis: Long?,
     draftSourcePath: String?,
     activeSourcePath: String?,
     onOpenPhoto: () -> Unit,
-    onContinueEditing: () -> Unit,
-    onClearSavedExports: () -> Unit,
-    onRemoveSavedExport: (String) -> Unit
+    onOpenGallery: () -> Unit,
+    onContinueEditing: () -> Unit
 ) {
     val draftSourceExists = remember(draftSourcePath) {
         draftSourcePath?.let { File(it).isFile } == true
     }
     val canContinueDraft = draftSavedAtMillis != null && draftSourceExists
+
     Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF101010)) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color(0xFF101010))
                 .statusBarsPadding()
+                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -216,8 +225,8 @@ private fun EditedGalleryScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Kepler Gallery", color = Color(0xFFF2F2F2), style = MaterialTheme.typography.titleLarge)
-                    Text("내보낸 사진과 자동복구 상태를 확인합니다", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
+                    Text("Kepler Studio", color = Color(0xFFF2F2F2), style = MaterialTheme.typography.titleLarge)
+                    Text("편집을 시작하거나 자동복구 상태를 확인합니다.", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
                 }
                 Button(
                     onClick = onOpenPhoto,
@@ -228,43 +237,115 @@ private fun EditedGalleryScreen(
                 }
             }
 
+            AutoRecoveryCard(
+                draftSavedAtMillis = draftSavedAtMillis,
+                draftSourcePath = draftSourcePath,
+                draftSourceExists = draftSourceExists,
+                canContinueDraft = canContinueDraft,
+                onContinueEditing = onContinueEditing
+            )
+
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(Color(0xFF242424))
-                    .padding(12.dp)
+                    .background(Color(0xFF1B1B1B))
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("자동복구", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
-                Text(
-                    when {
-                        draftSavedAtMillis != null && draftSourceExists -> "마지막 임시 저장: ${formatMainSavedTime(draftSavedAtMillis)}"
-                        draftSavedAtMillis != null -> "임시 저장 원본을 찾을 수 없습니다."
-                        else -> "현재 임시 저장 기록이 없습니다."
-                    },
-                    color = Color(0xFFC8C8C8),
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-                if (draftSourcePath != null) {
-                    DraftSourceThumbnail(
-                        sourcePath = draftSourcePath,
-                        modifier = Modifier
-                            .padding(top = 8.dp)
-                            .fillMaxWidth()
-                            .aspectRatio(16f / 9f)
-                    )
-                }
-                TextButton(onClick = onContinueEditing, enabled = canContinueDraft) {
-                    Text("마지막 편집 계속하기")
+                Text("주요 작업", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onOpenPhoto,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE6E6E6), contentColor = Color(0xFF111111))
+                    ) {
+                        Text("사진 추가")
+                    }
+                    Button(
+                        onClick = onOpenGallery,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF343434), contentColor = Color(0xFFF2F2F2))
+                    ) {
+                        Text("갤러리 보기")
+                    }
                 }
             }
 
+            GalleryCacheManagementCard(
+                activeSourcePath = activeSourcePath,
+                draftSourcePath = draftSourcePath
+            )
+        }
+    }
+}
+
+@Composable
+private fun AutoRecoveryCard(
+    draftSavedAtMillis: Long?,
+    draftSourcePath: String?,
+    draftSourceExists: Boolean,
+    canContinueDraft: Boolean,
+    onContinueEditing: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF242424))
+            .padding(12.dp)
+    ) {
+        Text("자동복구", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
+        Text(
+            when {
+                draftSavedAtMillis != null && draftSourceExists -> "마지막 임시 저장: ${formatMainSavedTime(draftSavedAtMillis)}"
+                draftSavedAtMillis != null -> "임시 저장 원본을 찾을 수 없습니다."
+                else -> "현재 임시 저장 기록이 없습니다."
+            },
+            color = Color(0xFFC8C8C8),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        if (draftSourcePath != null) {
+            DraftSourceThumbnail(
+                sourcePath = draftSourcePath,
+                modifier = Modifier
+                    .padding(top = 8.dp)
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+            )
+        }
+        TextButton(onClick = onContinueEditing, enabled = canContinueDraft) {
+            Text("마지막 편집 계속하기")
+        }
+    }
+}
+
+@Composable
+private fun SavedExportsGalleryScreen(
+    savedExports: List<SavedExport>,
+    onBack: () -> Unit,
+    onClearSavedExports: () -> Unit,
+    onRemoveSavedExport: (String) -> Unit
+) {
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF101010)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF101010))
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("내보낸 사진", color = Color(0xFFF2F2F2), style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = onBack) {
+                    Text("뒤로")
+                }
+                Text("내보낸 사진", color = Color(0xFFF2F2F2), style = MaterialTheme.typography.titleLarge)
                 TextButton(onClick = onClearSavedExports, enabled = savedExports.isNotEmpty()) {
                     Text("기록 비우기")
                 }
@@ -278,7 +359,7 @@ private fun EditedGalleryScreen(
                         .padding(16.dp)
                 ) {
                     Text("아직 내보낸 사진이 없습니다.", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
-                    Text("편집 화면에서 저장하면 이곳에 기록이 표시됩니다.", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
+                    Text("편집 화면에서 내보내기하면 이곳에 기록이 표시됩니다.", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
                 }
             } else {
                 savedExports.chunked(3).forEach { rowItems ->
@@ -299,11 +380,6 @@ private fun EditedGalleryScreen(
                     }
                 }
             }
-
-            GalleryCacheManagementCard(
-                activeSourcePath = activeSourcePath,
-                draftSourcePath = draftSourcePath
-            )
         }
     }
 }
@@ -343,7 +419,7 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?, draftSourcePat
             LongPressCacheAction(
                 label = "오래된 항목 정리",
                 enabled = cacheStats.oldFileCount > 0,
-                onTapHint = { actionMessage = "삭제하려면 ‘오래된 항목 정리’를 길게 눌러주세요." },
+                onTapHint = { actionMessage = "삭제하려면 오래된 항목 정리를 길게 눌러주세요." },
                 onLongPress = {
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
@@ -362,7 +438,7 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?, draftSourcePat
             LongPressCacheAction(
                 label = "현재 편집 제외 모두 정리",
                 enabled = cacheStats.fileCount > listOfNotNull(activeSourcePath, draftSourcePath).distinct().size,
-                onTapHint = { actionMessage = "삭제하려면 ‘현재 편집 제외 모두 정리’를 길게 눌러주세요." },
+                onTapHint = { actionMessage = "삭제하려면 현재 편집 제외 모두 정리를 길게 눌러주세요." },
                 onLongPress = {
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
@@ -440,13 +516,13 @@ private fun SavedExportThumbnailTile(
             modifier = Modifier.padding(top = 6.dp)
         )
         Text(
-            text = item.formatLabel,
+            text = "${item.formatLabel} · ${item.resolutionLabel}",
             color = Color(0xFFC8C8C8),
             style = MaterialTheme.typography.labelSmall,
             maxLines = 1
         )
         TextButton(onClick = { onRemoveSavedExport(item.uriString) }) {
-            Text("삭제")
+            Text("기록 삭제")
         }
     }
 }
