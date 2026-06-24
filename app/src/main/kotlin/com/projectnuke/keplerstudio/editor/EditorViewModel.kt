@@ -56,7 +56,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun persistDraftSnapshot() {
-        saveDraftSnapshot(getApplication(), _uiState.value)
+        val saved = saveDraftSnapshot(getApplication(), _uiState.value) ?: return
+        _uiState.update {
+            it.copy(
+                draftSavedAtMillis = saved.savedAtMillis,
+                draftSourcePath = saved.sourcePath
+            )
+        }
     }
 
     fun appContext(): Context = getApplication<Application>().applicationContext
@@ -116,8 +122,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         revision = it.revision + 1,
                         message = "원본 캐시가 완료되었습니다: ${preview.width}x${preview.height} preview"
                     )
-                    saveDraftSnapshot(context, next)
-                    next
+                    next.withSavedDraft(context)
                 }
             } catch (t: Throwable) {
                 _uiState.update { it.copy(isBusy = false, message = "이미지를 열지 못했습니다: ${t.message}") }
@@ -143,8 +148,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val context = getApplication<Application>()
                 _uiState.update {
                     val next = it.copy(previewBitmap = rendered, isBusy = false, message = "미리보기 렌더링이 완료되었습니다")
-                    saveDraftSnapshot(context, next)
-                    next
+                    next.withSavedDraft(context)
                 }
             } else {
                 rendered.recycle()
@@ -180,8 +184,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             isBusy = false,
                             message = "자동 보정이 적용되었습니다"
                         )
-                        saveDraftSnapshot(context, next)
-                        next
+                        next.withSavedDraft(context)
                     }
                 } else {
                     rendered.recycle()
@@ -279,8 +282,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     revision = it.revision + 1,
                     message = "초기화가 완료되었습니다"
                 )
-                saveDraftSnapshot(context, next)
-                next
+                next.withSavedDraft(context)
             }
         }
     }
@@ -313,8 +315,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             isBusy = false,
                             message = message
                         )
-                        saveDraftSnapshot(context, next)
-                        next
+                        next.withSavedDraft(context)
                     }
                 } else {
                     rendered.recycle()
@@ -329,8 +330,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val context = getApplication<Application>()
         _uiState.update {
             val next = it.copy(exportFormat = format, message = "파일 형식이 ${format.label}로 설정되었습니다")
-            saveDraftSnapshot(context, next)
-            next
+            next.withSavedDraft(context)
         }
     }
 
@@ -338,8 +338,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val context = getApplication<Application>()
         _uiState.update {
             val next = it.copy(exportResolution = resolution, message = "해상도가 ${resolution.label}로 설정되었습니다")
-            saveDraftSnapshot(context, next)
-            next
+            next.withSavedDraft(context)
         }
     }
 
@@ -426,6 +425,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.update {
             it.copy(
                 draftSavedAtMillis = null,
+                draftSourcePath = null,
                 message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다"
             )
         }
@@ -604,8 +604,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             isBusy = false,
                             message = "$title 적용했습니다. 되돌릴 수 있습니다."
                         )
-                        saveDraftSnapshot(getApplication(), next)
-                        next
+                        next.withSavedDraft(getApplication())
                     }
                 } else {
                     renderedOriginal.recycle()
@@ -659,8 +658,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             message = result.status.uiText,
                             flareGuardRuntimeStatus = result.status.uiText
                         )
-                        saveDraftSnapshot(getApplication(), next)
-                        next
+                        next.withSavedDraft(getApplication())
                     }
                     Log.i(FLARE_GUARD_AI_TAG, "Finished FlareGuard preview: mode=$mode status=${result.status} output=${result.bitmap.width}x${result.bitmap.height}")
                 } else {
@@ -730,6 +728,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     exportFormat = exportFormat,
                     exportResolution = exportResolution,
                     draftSavedAtMillis = draftSavedAt,
+                    draftSourcePath = sourcePath,
                     revision = nextRevision,
                     message = "임시저장된 편집을 불러왔습니다"
                 )
@@ -1371,8 +1370,21 @@ private fun writeHeifToUri(context: Context, uri: Uri, bitmap: Bitmap) {
     }
 }
 
-private fun saveDraftSnapshot(context: Context, state: EditorUiState) {
-    val sourcePath = state.sourcePath ?: return
+private fun EditorUiState.withSavedDraft(context: Context): EditorUiState {
+    val saved = saveDraftSnapshot(context, this) ?: return this
+    return copy(
+        draftSavedAtMillis = saved.savedAtMillis,
+        draftSourcePath = saved.sourcePath
+    )
+}
+
+private data class DraftSaveResult(
+    val sourcePath: String,
+    val savedAtMillis: Long
+)
+
+private fun saveDraftSnapshot(context: Context, state: EditorUiState): DraftSaveResult? {
+    val sourcePath = state.sourcePath ?: return null
     val savedAt = System.currentTimeMillis()
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
         .putString(KEY_DRAFT_SOURCE, sourcePath)
@@ -1395,6 +1407,7 @@ private fun saveDraftSnapshot(context: Context, state: EditorUiState) {
         .putString(KEY_DRAFT_LOOK, presetColorLookToJson(state.presetLook)?.toString())
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
         .apply()
+    return DraftSaveResult(sourcePath, savedAt)
 }
 
 private fun clearDraftPrefs(context: Context) {

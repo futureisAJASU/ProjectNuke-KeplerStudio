@@ -19,6 +19,7 @@ data class EditorUiState(
     val hazeEngine: DehazeEngine = DehazeEngine.FastContrast,
     val savedExports: List<SavedExport> = emptyList(),
     val draftSavedAtMillis: Long? = null,
+    val draftSourcePath: String? = null,
     val viewport: ViewportState = ViewportState(),
     val selectionLayers: List<SelectionLayer> = emptyList(),
     val activeSelectionLayerId: String? = null,

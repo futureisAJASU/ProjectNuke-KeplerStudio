@@ -119,6 +119,7 @@ class MainActivity : ComponentActivity() {
                     AppMode.Gallery -> EditedGalleryScreen(
                         savedExports = state.savedExports,
                         draftSavedAtMillis = state.draftSavedAtMillis,
+                        draftSourcePath = state.draftSourcePath,
                         activeSourcePath = state.sourcePath,
                         onOpenPhoto = { picker.launch("image/*") },
                         onContinueEditing = { appMode = AppMode.Editor },
@@ -188,12 +189,17 @@ class MainActivity : ComponentActivity() {
 private fun EditedGalleryScreen(
     savedExports: List<SavedExport>,
     draftSavedAtMillis: Long?,
+    draftSourcePath: String?,
     activeSourcePath: String?,
     onOpenPhoto: () -> Unit,
     onContinueEditing: () -> Unit,
     onClearSavedExports: () -> Unit,
     onRemoveSavedExport: (String) -> Unit
 ) {
+    val draftSourceExists = remember(draftSourcePath) {
+        draftSourcePath?.let { File(it).isFile } == true
+    }
+    val canContinueDraft = draftSavedAtMillis != null && draftSourceExists
     Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF101010)) {
         Column(
             modifier = Modifier
@@ -230,12 +236,25 @@ private fun EditedGalleryScreen(
             ) {
                 Text("자동복구", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
                 Text(
-                    draftSavedAtMillis?.let { "마지막 임시 저장: ${formatMainSavedTime(it)}" } ?: "현재 임시 저장 기록이 없습니다.",
+                    when {
+                        draftSavedAtMillis != null && draftSourceExists -> "마지막 임시 저장: ${formatMainSavedTime(draftSavedAtMillis)}"
+                        draftSavedAtMillis != null -> "임시 저장 원본을 찾을 수 없습니다."
+                        else -> "현재 임시 저장 기록이 없습니다."
+                    },
                     color = Color(0xFFC8C8C8),
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 4.dp)
                 )
-                TextButton(onClick = onContinueEditing, enabled = draftSavedAtMillis != null) {
+                if (draftSourcePath != null) {
+                    DraftSourceThumbnail(
+                        sourcePath = draftSourcePath,
+                        modifier = Modifier
+                            .padding(top = 8.dp)
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 9f)
+                    )
+                }
+                TextButton(onClick = onContinueEditing, enabled = canContinueDraft) {
                     Text("마지막 편집 계속하기")
                 }
             }
@@ -281,13 +300,16 @@ private fun EditedGalleryScreen(
                 }
             }
 
-            GalleryCacheManagementCard(activeSourcePath = activeSourcePath)
+            GalleryCacheManagementCard(
+                activeSourcePath = activeSourcePath,
+                draftSourcePath = draftSourcePath
+            )
         }
     }
 }
 
 @Composable
-private fun GalleryCacheManagementCard(activeSourcePath: String?) {
+private fun GalleryCacheManagementCard(activeSourcePath: String?, draftSourcePath: String?) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var refreshKey by remember { mutableStateOf(0) }
@@ -328,6 +350,7 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?) {
                             cleanupTemporarySourceFiles(
                                 context = context,
                                 activeSourcePath = activeSourcePath,
+                                draftSourcePath = draftSourcePath,
                                 olderThan7DaysOnly = true
                             )
                         }
@@ -338,7 +361,7 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?) {
             )
             LongPressCacheAction(
                 label = "현재 편집 제외 모두 정리",
-                enabled = cacheStats.fileCount > if (activeSourcePath != null) 1 else 0,
+                enabled = cacheStats.fileCount > listOfNotNull(activeSourcePath, draftSourcePath).distinct().size,
                 onTapHint = { actionMessage = "삭제하려면 ‘현재 편집 제외 모두 정리’를 길게 눌러주세요." },
                 onLongPress = {
                     scope.launch {
@@ -346,11 +369,12 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?) {
                             cleanupTemporarySourceFiles(
                                 context = context,
                                 activeSourcePath = activeSourcePath,
+                                draftSourcePath = draftSourcePath,
                                 olderThan7DaysOnly = false
                             )
                         }
                         refreshKey += 1
-                        actionMessage = "현재 편집 원본을 제외하고 임시 원본 ${result.removedCount}개를 정리했습니다. 확보 공간: ${formatCacheBytes(result.removedBytes)}"
+                        actionMessage = "현재 편집 원본과 임시 저장 원본을 제외하고 임시 원본 ${result.removedCount}개를 정리했습니다. 확보 공간: ${formatCacheBytes(result.removedBytes)}"
                     }
                 }
             )
@@ -428,6 +452,32 @@ private fun SavedExportThumbnailTile(
 }
 
 @Composable
+private fun DraftSourceThumbnail(sourcePath: String, modifier: Modifier = Modifier) {
+    val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = sourcePath) {
+        value = withContext(Dispatchers.IO) {
+            decodeFileThumbnail(sourcePath)
+        }
+    }
+
+    Box(
+        modifier = modifier.background(Color(0xFF111111)),
+        contentAlignment = Alignment.Center
+    ) {
+        val bitmap = thumbnail
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Text("임시 저장 미리보기를 불러올 수 없습니다.", color = Color(0xFF8E8E8E), style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
 private fun SavedExportThumbnail(uriString: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = uriString) {
@@ -474,6 +524,18 @@ private fun decodeSavedExportThumbnail(context: Context, uriString: String, maxS
     }.getOrNull()
 }
 
+private fun decodeFileThumbnail(sourcePath: String, maxSide: Int = 512): Bitmap? {
+    val source = File(sourcePath).takeIf { it.isFile } ?: return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(source.absolutePath, bounds)
+    val sampleSize = calculateThumbnailSampleSize(bounds.outWidth, bounds.outHeight, maxSide)
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sampleSize
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    return runCatching { BitmapFactory.decodeFile(source.absolutePath, options) }.getOrNull()
+}
+
 private fun calculateThumbnailSampleSize(width: Int, height: Int, maxSide: Int): Int {
     if (width <= 0 || height <= 0) return 1
     var sample = 1
@@ -514,15 +576,18 @@ private fun calculateTemporaryCacheStats(context: Context): TemporaryCacheStats 
 private fun cleanupTemporarySourceFiles(
     context: Context,
     activeSourcePath: String?,
+    draftSourcePath: String?,
     olderThan7DaysOnly: Boolean
 ): TemporaryCacheCleanupResult {
     val now = System.currentTimeMillis()
-    val activePath = activeSourcePath?.let { File(it).absolutePath }
+    val protectedPaths = listOfNotNull(activeSourcePath, draftSourcePath)
+        .map { File(it).absolutePath }
+        .toSet()
     var removedCount = 0
     var removedBytes = 0L
 
     listTemporarySourceFiles(context).forEach { file ->
-        val isActive = activePath != null && file.absolutePath == activePath
+        val isActive = file.absolutePath in protectedPaths
         val isOld = now - file.lastModified() > TemporarySourceMaxAgeMs
         val shouldDelete = !isActive && (!olderThan7DaysOnly || isOld)
         if (shouldDelete) {
