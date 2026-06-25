@@ -682,8 +682,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun restoreDraftIfAvailable(context: Context) {
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val sourcePath = prefs.getString(KEY_DRAFT_SOURCE, null) ?: return
-        val sourceFile = File(sourcePath)
+        val storedSourcePath = prefs.getString(KEY_DRAFT_SOURCE, null) ?: return
+        val sourceFile = withContext(Dispatchers.IO) {
+            migrateDraftSourceIfNeeded(context, storedSourcePath)
+        } ?: return
+        val sourcePath = sourceFile.absolutePath
         if (!sourceFile.exists()) return
 
         val params = EditParams(
@@ -709,6 +712,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             presetColorLookFromJson(prefs.getString(KEY_DRAFT_LOOK, null)?.let(::JSONObject))
         }.getOrNull()
         val engines = _uiState.value.engineSelection()
+        _uiState.update {
+            it.copy(
+                draftSavedAtMillis = draftSavedAt,
+                draftSourcePath = sourcePath
+            )
+        }
 
         _uiState.update { it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다") }
         try {
@@ -973,6 +982,56 @@ private fun copyUriToCache(context: Context, uri: Uri): File {
     }
     return outFile
 }
+
+private fun migrateDraftSourceIfNeeded(context: Context, storedSourcePath: String): File? {
+    val storedSource = File(storedSourcePath)
+    if (!storedSource.isFile) return null
+    val draftSource = persistDraftSourceFile(context, storedSource.absolutePath) ?: return null
+    saveDraftThumbnailFile(context, draftSource)
+    if (draftSource.absolutePath != storedSource.absolutePath) {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+            .putString(KEY_DRAFT_SOURCE, draftSource.absolutePath)
+            .apply()
+    }
+    return draftSource
+}
+
+private fun persistDraftSourceFile(context: Context, sourcePath: String): File? {
+    val source = File(sourcePath).takeIf { it.isFile } ?: return null
+    val draftSource = persistentDraftSourceFile(context)
+    if (source.absolutePath == draftSource.absolutePath) return draftSource
+
+    draftSource.parentFile?.mkdirs()
+    val temp = File(draftSource.parentFile, "${draftSource.name}.tmp")
+    source.inputStream().use { input ->
+        FileOutputStream(temp).use { output -> input.copyTo(output) }
+    }
+    if (draftSource.exists()) draftSource.delete()
+    check(temp.renameTo(draftSource)) { "failed to persist draft source" }
+    return draftSource
+}
+
+private fun saveDraftThumbnailFile(context: Context, source: File) {
+    runCatching {
+        val thumbnail = decodeSampledMutableBitmapWithExif(source.absolutePath, maxSide = 512)
+        try {
+            FileOutputStream(persistentDraftThumbnailFile(context)).use { output ->
+                thumbnail.compress(Bitmap.CompressFormat.JPEG, 90, output)
+            }
+        } finally {
+            thumbnail.recycle()
+        }
+    }
+}
+
+private fun persistentDraftSourceFile(context: Context): File =
+    File(persistentDraftDirectory(context), DRAFT_SOURCE_FILE_NAME)
+
+private fun persistentDraftThumbnailFile(context: Context): File =
+    File(persistentDraftDirectory(context), DRAFT_THUMBNAIL_FILE_NAME)
+
+private fun persistentDraftDirectory(context: Context): File =
+    File(context.filesDir, "drafts/current").apply { mkdirs() }
 
 private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1385,9 +1444,11 @@ private data class DraftSaveResult(
 
 private fun saveDraftSnapshot(context: Context, state: EditorUiState): DraftSaveResult? {
     val sourcePath = state.sourcePath ?: return null
+    val draftSource = persistDraftSourceFile(context, sourcePath) ?: return null
+    saveDraftThumbnailFile(context, draftSource)
     val savedAt = System.currentTimeMillis()
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
-        .putString(KEY_DRAFT_SOURCE, sourcePath)
+        .putString(KEY_DRAFT_SOURCE, draftSource.absolutePath)
         .putFloat(KEY_DRAFT_EXPOSURE, state.params.exposure)
         .putFloat(KEY_DRAFT_CONTRAST, state.params.contrast)
         .putFloat(KEY_DRAFT_SHADOWS, state.params.shadows)
@@ -1407,10 +1468,12 @@ private fun saveDraftSnapshot(context: Context, state: EditorUiState): DraftSave
         .putString(KEY_DRAFT_LOOK, presetColorLookToJson(state.presetLook)?.toString())
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
         .apply()
-    return DraftSaveResult(sourcePath, savedAt)
+    return DraftSaveResult(draftSource.absolutePath, savedAt)
 }
 
 private fun clearDraftPrefs(context: Context) {
+    persistentDraftSourceFile(context).delete()
+    persistentDraftThumbnailFile(context).delete()
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
         .remove(KEY_DRAFT_SOURCE)
         .remove(KEY_DRAFT_EXPOSURE)
@@ -1553,6 +1616,8 @@ private fun exportTimestamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss", Loca
 private const val FLARE_GUARD_AI_TAG = "KeplerFlareAI"
 private const val EDITOR_HISTORY_MAX = 10
 private const val EXPORT_MAX_SIDE = 8192
+private const val DRAFT_SOURCE_FILE_NAME = "source.img"
+private const val DRAFT_THUMBNAIL_FILE_NAME = "thumbnail.jpg"
 private const val PREF_NAME = "kepler_studio_editor"
 private const val KEY_SAVED_EXPORTS = "saved_exports"
 private const val KEY_EXPORT_HISTORY_RETENTION = "export_history_retention"
