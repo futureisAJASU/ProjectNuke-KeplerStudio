@@ -75,7 +75,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val retention = loadExportHistoryRetention(context)
             val engines = loadEngineSelection(context)
             val saved = withContext(Dispatchers.IO) {
-                pruneSavedExportsIfNeeded(context, loadSavedExportsFromPrefs(context), retention)
+                val savedFromPrefs = loadSavedExportsFromPrefs(context)
+                val seed = if (savedFromPrefs.isEmpty()) rebuildSavedExportsFromMediaStore(context) else savedFromPrefs
+                pruneSavedExportsIfNeeded(context, seed, retention)
             }
             _uiState.update {
                 it.copy(
@@ -426,9 +428,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 draftSavedAtMillis = null,
                 draftSourcePath = null,
+                recoveryDebugInfo = null,
+                showRecoveryDebugCard = false,
                 message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다"
             )
         }
+    }
+
+    fun dismissRecoveryDebugCard() {
+        _uiState.update { it.copy(showRecoveryDebugCard = false) }
     }
 
     fun cleanupOldTemporarySources() {
@@ -683,11 +691,32 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun restoreDraftIfAvailable(context: Context) {
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
         val storedSourcePath = prefs.getString(KEY_DRAFT_SOURCE, null) ?: return
-        val sourceFile = withContext(Dispatchers.IO) {
-            migrateDraftSourceIfNeeded(context, storedSourcePath)
-        } ?: return
+        val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
+        val recovery = withContext(Dispatchers.IO) {
+            resolveDraftRecovery(context, storedSourcePath)
+        }
+        _uiState.update {
+            it.copy(
+                draftSavedAtMillis = draftSavedAt,
+                draftSourcePath = recovery.debugInfo.draftSourcePath,
+                recoveryDebugInfo = recovery.debugInfo,
+                showRecoveryDebugCard = true
+            )
+        }
+        val sourceFile = recovery.sourceFile
+        if (sourceFile == null) {
+            _uiState.update {
+                it.copy(
+                    message = if (recovery.missingLegacyCacheDraft) {
+                        "기존 임시 저장 원본이 삭제되어 복구할 수 없습니다."
+                    } else {
+                        "?꾩떆 ??? ?먮낯??李얠쓣 ???놁뒿?덈떎."
+                    }
+                )
+            }
+            return
+        }
         val sourcePath = sourceFile.absolutePath
-        if (!sourceFile.exists()) return
 
         val params = EditParams(
             exposure = prefs.getFloat(KEY_DRAFT_EXPOSURE, 0f),
@@ -707,7 +736,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
         val exportFormat = enumValueOrDefault(prefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
         val exportResolution = enumValueOrDefault(prefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Full)
-        val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
         val presetLook = runCatching {
             presetColorLookFromJson(prefs.getString(KEY_DRAFT_LOOK, null)?.let(::JSONObject))
         }.getOrNull()
@@ -994,6 +1022,41 @@ private fun migrateDraftSourceIfNeeded(context: Context, storedSourcePath: Strin
             .apply()
     }
     return draftSource
+}
+
+private data class DraftRecoveryResolution(
+    val sourceFile: File?,
+    val missingLegacyCacheDraft: Boolean,
+    val debugInfo: RecoveryDebugInfo
+)
+
+private fun resolveDraftRecovery(context: Context, storedSourcePath: String): DraftRecoveryResolution {
+    val storedSource = File(storedSourcePath)
+    val persistentSource = persistentDraftSourceFile(context)
+    val storedExists = storedSource.isFile
+    val persistentExists = persistentSource.isFile
+    val storedInCache = storedSource.absolutePath.startsWith(context.cacheDir.absolutePath)
+    val sourceFile = when {
+        storedExists -> migrateDraftSourceIfNeeded(context, storedSource.absolutePath)
+        storedInCache && persistentExists -> {
+            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+                .putString(KEY_DRAFT_SOURCE, persistentSource.absolutePath)
+                .apply()
+            persistentSource
+        }
+        storedSource.absolutePath == persistentSource.absolutePath && persistentExists -> persistentSource
+        else -> null
+    }
+    return DraftRecoveryResolution(
+        sourceFile = sourceFile,
+        missingLegacyCacheDraft = storedInCache && !storedExists,
+        debugInfo = RecoveryDebugInfo(
+            draftSourcePath = sourceFile?.absolutePath ?: storedSource.absolutePath,
+            draftSourceExists = sourceFile?.isFile == true || storedExists,
+            filesDirDraftPath = persistentSource.absolutePath,
+            filesDirDraftExists = persistentExists
+        )
+    )
 }
 
 private fun persistDraftSourceFile(context: Context, sourcePath: String): File? {
@@ -1556,6 +1619,66 @@ private fun loadSavedExportsFromPrefs(context: Context): List<SavedExport> {
         ?: return emptyList()
     return raw.lines().mapNotNull { decodeSavedExport(it) }
 }
+
+private fun rebuildSavedExportsFromMediaStore(context: Context): List<SavedExport> {
+    val projection = arrayOf(
+        MediaStore.Images.Media._ID,
+        MediaStore.Images.Media.DISPLAY_NAME,
+        MediaStore.Images.Media.MIME_TYPE,
+        MediaStore.Images.Media.WIDTH,
+        MediaStore.Images.Media.HEIGHT,
+        MediaStore.Images.Media.DATE_ADDED,
+        MediaStore.Images.Media.RELATIVE_PATH
+    )
+    val items = mutableListOf<SavedExport>()
+    context.contentResolver.query(
+        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+        projection,
+        null,
+        null,
+        "${MediaStore.Images.Media.DATE_ADDED} DESC"
+    )?.use { cursor ->
+        val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+        val nameIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+        val mimeIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE)
+        val widthIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.WIDTH)
+        val heightIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.HEIGHT)
+        val dateAddedIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+        val relativePathIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH)
+        while (cursor.moveToNext() && items.size < 60) {
+            val relativePath = cursor.getString(relativePathIndex).orEmpty()
+            if (!relativePath.startsWith("${Environment.DIRECTORY_PICTURES}/KeplerStudio")) continue
+            val id = cursor.getLong(idIndex)
+            val displayName = cursor.getString(nameIndex).orEmpty().ifBlank { "KeplerStudio_$id" }
+            val mimeType = cursor.getString(mimeIndex).orEmpty()
+            val width = cursor.getInt(widthIndex)
+            val height = cursor.getInt(heightIndex)
+            val dateAddedSeconds = cursor.getLong(dateAddedIndex)
+            items += SavedExport(
+                displayName = displayName,
+                uriString = Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString()).toString(),
+                formatLabel = mimeTypeToExportLabel(mimeType, displayName),
+                resolutionLabel = if (width > 0 && height > 0) "${width}x${height}" else "원본",
+                timestampMillis = if (dateAddedSeconds > 0L) dateAddedSeconds * 1000L else System.currentTimeMillis()
+            )
+        }
+    }
+    if (items.isNotEmpty()) saveSavedExportsToPrefs(context, items)
+    return items
+}
+
+private fun mimeTypeToExportLabel(mimeType: String, displayName: String): String =
+    when {
+        mimeType.equals("image/jpeg", ignoreCase = true) -> "JPEG"
+        mimeType.equals("image/png", ignoreCase = true) -> "PNG"
+        mimeType.equals("image/webp", ignoreCase = true) -> "WebP"
+        mimeType.equals("image/heic", ignoreCase = true) || mimeType.equals("image/heif", ignoreCase = true) -> "HEIF"
+        displayName.endsWith(".jpg", ignoreCase = true) || displayName.endsWith(".jpeg", ignoreCase = true) -> "JPEG"
+        displayName.endsWith(".png", ignoreCase = true) -> "PNG"
+        displayName.endsWith(".webp", ignoreCase = true) -> "WebP"
+        displayName.endsWith(".heic", ignoreCase = true) || displayName.endsWith(".heif", ignoreCase = true) -> "HEIF"
+        else -> "사진"
+    }
 
 private fun saveExportHistoryRetention(context: Context, retention: ExportHistoryRetention) {
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()

@@ -20,6 +20,8 @@ data class EditorUiState(
     val savedExports: List<SavedExport> = emptyList(),
     val draftSavedAtMillis: Long? = null,
     val draftSourcePath: String? = null,
+    val recoveryDebugInfo: RecoveryDebugInfo? = null,
+    val showRecoveryDebugCard: Boolean = false,
     val viewport: ViewportState = ViewportState(),
     val selectionLayers: List<SelectionLayer> = emptyList(),
     val activeSelectionLayerId: String? = null,
@@ -31,4 +33,11 @@ data class EditorUiState(
     val revision: Int = 0,
     val nativeVersion: String = "",
     val message: String? = null
+)
+
+data class RecoveryDebugInfo(
+    val draftSourcePath: String?,
+    val draftSourceExists: Boolean,
+    val filesDirDraftPath: String,
+    val filesDirDraftExists: Boolean
 )

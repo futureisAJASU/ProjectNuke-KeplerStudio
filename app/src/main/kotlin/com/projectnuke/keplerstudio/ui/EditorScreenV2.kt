@@ -67,6 +67,7 @@ import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
 import com.projectnuke.keplerstudio.editor.NoiseEngine
 import com.projectnuke.keplerstudio.editor.PresetColorLook
+import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import java.text.SimpleDateFormat
@@ -209,6 +210,8 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         exportHistoryRetention = state.exportHistoryRetention,
                         savedExportCount = state.savedExports.size,
                         draftSavedAtMillis = state.draftSavedAtMillis,
+                        recoveryDebugInfo = state.recoveryDebugInfo,
+                        showRecoveryDebugCard = state.showRecoveryDebugCard,
                         noiseEngine = state.noiseEngine,
                         detailEngine = state.detailEngine,
                         toneEngine = state.toneEngine,
@@ -219,6 +222,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         onToneEngineSelected = viewModel::setToneEngine,
                         onHazeEngineSelected = viewModel::setHazeEngine,
                         onClearDraft = viewModel::clearDraft,
+                        onDismissRecoveryDebugCard = viewModel::dismissRecoveryDebugCard,
                         onCleanupOldTemporarySources = viewModel::cleanupOldTemporarySources,
                         onClearSavedExports = viewModel::clearSavedExports,
                         modifier = Modifier.weight(1f).fillMaxWidth()
@@ -602,6 +606,8 @@ private fun V2SettingsScreen(
     exportHistoryRetention: ExportHistoryRetention,
     savedExportCount: Int,
     draftSavedAtMillis: Long?,
+    recoveryDebugInfo: RecoveryDebugInfo?,
+    showRecoveryDebugCard: Boolean,
     noiseEngine: NoiseEngine,
     detailEngine: DetailEngine,
     toneEngine: ToneEngine,
@@ -612,11 +618,21 @@ private fun V2SettingsScreen(
     onToneEngineSelected: (ToneEngine) -> Unit,
     onHazeEngineSelected: (DehazeEngine) -> Unit,
     onClearDraft: () -> Unit,
+    onDismissRecoveryDebugCard: () -> Unit,
     onCleanupOldTemporarySources: () -> Unit,
     onClearSavedExports: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (showRecoveryDebugCard && recoveryDebugInfo != null) {
+            V2SettingsCard("복구 확인") {
+                Text("draft_source: ${recoveryDebugInfo.draftSourcePath ?: "없음"}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text("draft_source 파일 존재: ${if (recoveryDebugInfo.draftSourceExists) "예" else "아니오"}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text("filesDir draft 존재: ${if (recoveryDebugInfo.filesDirDraftExists) "예" else "아니오"}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text("filesDir 경로: ${recoveryDebugInfo.filesDirDraftPath}", color = V2TextMuted, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = onDismissRecoveryDebugCard) { Text("닫기") }
+            }
+        }
         V2SettingsCard("저장 기록") {
             Text("현재 기록 수: $savedExportCount", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
             V2OptionRow("보관 정책", ExportHistoryRetention.values().toList(), exportHistoryRetention, { it.label }, onRetentionSelected)
