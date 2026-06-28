@@ -58,6 +58,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.ui.EditorScreenV2
 import java.io.File
@@ -121,10 +122,12 @@ class MainActivity : ComponentActivity() {
                     AppMode.Home -> HomeScreen(
                         draftSavedAtMillis = state.draftSavedAtMillis,
                         draftSourcePath = state.draftSourcePath,
+                        recoveryDebugInfo = state.recoveryDebugInfo,
                         activeSourcePath = state.sourcePath,
                         onOpenPhoto = { picker.launch("image/*") },
                         onOpenGallery = { appMode = AppMode.Gallery },
-                        onContinueEditing = { appMode = AppMode.Editor }
+                        onContinueEditing = { appMode = AppMode.Editor },
+                        onClearDraft = vm::clearDraft
                     )
                     AppMode.Gallery -> GalleryScreen(
                         mode = galleryMode,
@@ -132,6 +135,7 @@ class MainActivity : ComponentActivity() {
                         savedExports = state.savedExports,
                         draftSavedAtMillis = state.draftSavedAtMillis,
                         draftSourcePath = state.draftSourcePath,
+                        recoveryDebugInfo = state.recoveryDebugInfo,
                         onBack = { appMode = AppMode.Home },
                         onContinueEditing = { appMode = AppMode.Editor },
                         onClearDraft = vm::clearDraft,
@@ -190,10 +194,12 @@ class MainActivity : ComponentActivity() {
 private fun HomeScreen(
     draftSavedAtMillis: Long?,
     draftSourcePath: String?,
+    recoveryDebugInfo: RecoveryDebugInfo?,
     activeSourcePath: String?,
     onOpenPhoto: () -> Unit,
     onOpenGallery: () -> Unit,
-    onContinueEditing: () -> Unit
+    onContinueEditing: () -> Unit,
+    onClearDraft: () -> Unit
 ) {
     val draftSourceExists = remember(draftSourcePath) { draftSourcePath?.let { File(it).isFile } == true }
     val canContinueDraft = draftSavedAtMillis != null && draftSourceExists
@@ -220,7 +226,15 @@ private fun HomeScreen(
                 ) { Text("\uC0AC\uC9C4 \uCD94\uAC00", maxLines = 1) }
             }
 
-            AutoRecoveryCard(draftSavedAtMillis, draftSourcePath, draftSourceExists, canContinueDraft, onContinueEditing)
+            AutoRecoveryCard(
+                draftSavedAtMillis = draftSavedAtMillis,
+                draftSourcePath = draftSourcePath,
+                draftSourceExists = draftSourceExists,
+                recoveryDebugInfo = recoveryDebugInfo,
+                canContinueDraft = canContinueDraft,
+                onContinueEditing = onContinueEditing,
+                onClearDraft = onClearDraft
+            )
 
             Column(
                 modifier = Modifier.fillMaxWidth().background(Color(0xFF1B1B1B)).padding(12.dp),
@@ -251,9 +265,12 @@ private fun AutoRecoveryCard(
     draftSavedAtMillis: Long?,
     draftSourcePath: String?,
     draftSourceExists: Boolean,
+    recoveryDebugInfo: RecoveryDebugInfo?,
     canContinueDraft: Boolean,
-    onContinueEditing: () -> Unit
+    onContinueEditing: () -> Unit,
+    onClearDraft: () -> Unit
 ) {
+    var showDebugDetails by remember { mutableStateOf(false) }
     Column(modifier = Modifier.fillMaxWidth().background(Color(0xFF242424)).padding(12.dp)) {
         Text("\uC790\uB3D9\uBCF5\uAD6C", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
         Text(
@@ -262,13 +279,24 @@ private fun AutoRecoveryCard(
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 4.dp)
         )
-        if (draftSourcePath != null) {
+        if (draftSourceExists && draftSourcePath != null) {
             DraftSourceThumbnail(
                 sourcePath = draftSourcePath,
                 modifier = Modifier.padding(top = 8.dp).fillMaxWidth().aspectRatio(16f / 9f)
             )
         }
-        TextButton(onClick = onContinueEditing, enabled = canContinueDraft) { Text("\uB9C8\uC9C0\uB9C9 \uD3B8\uC9D1 \uACC4\uC18D\uD558\uAE30") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = onContinueEditing, enabled = canContinueDraft) { Text("\uB9C8\uC9C0\uB9C9 \uD3B8\uC9D1 \uACC4\uC18D\uD558\uAE30") }
+            TextButton(onClick = onClearDraft, enabled = draftSavedAtMillis != null || draftSourcePath != null) { Text("\uC784\uC2DC \uC800\uC7A5 \uAE30\uB85D \uC0AD\uC81C") }
+        }
+        if (recoveryDebugInfo != null) {
+            TextButton(onClick = { showDebugDetails = !showDebugDetails }) {
+                Text(if (showDebugDetails) "\uB514\uBC84\uADF8 \uC815\uBCF4 \uC228\uAE30\uAE30" else "\uB514\uBC84\uADF8 \uC815\uBCF4 \uBCF4\uAE30")
+            }
+            if (showDebugDetails) {
+                RecoveryDebugDetails(recoveryDebugInfo)
+            }
+        }
     }
 }
 
@@ -279,6 +307,7 @@ private fun GalleryScreen(
     savedExports: List<SavedExport>,
     draftSavedAtMillis: Long?,
     draftSourcePath: String?,
+    recoveryDebugInfo: RecoveryDebugInfo?,
     onBack: () -> Unit,
     onContinueEditing: () -> Unit,
     onClearDraft: () -> Unit,
@@ -329,6 +358,7 @@ private fun GalleryScreen(
                     draftSavedAtMillis = draftSavedAtMillis,
                     draftSourcePath = draftSourcePath,
                     draftSourceExists = draftSourceExists,
+                    recoveryDebugInfo = recoveryDebugInfo,
                     canContinueDraft = canContinueDraft,
                     onContinueEditing = onContinueEditing,
                     onClearDraft = onClearDraft
@@ -344,10 +374,12 @@ private fun DraftGalleryContent(
     draftSavedAtMillis: Long?,
     draftSourcePath: String?,
     draftSourceExists: Boolean,
+    recoveryDebugInfo: RecoveryDebugInfo?,
     canContinueDraft: Boolean,
     onContinueEditing: () -> Unit,
     onClearDraft: () -> Unit
 ) {
+    var showDebugDetails by remember { mutableStateOf(false) }
     val hasDraft = draftSavedAtMillis != null || draftSourcePath != null
     if (!hasDraft) {
         Column(modifier = Modifier.fillMaxWidth().background(Color(0xFF1B1B1B)).padding(16.dp)) {
@@ -359,12 +391,20 @@ private fun DraftGalleryContent(
     Column(modifier = Modifier.fillMaxWidth().background(Color(0xFF242424)).padding(12.dp)) {
         Text("\uC790\uB3D9\uBCF5\uAD6C \uC784\uC2DC \uC800\uC7A5", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
         Text(draftStatusText(draftSavedAtMillis, draftSourceExists), color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-        if (draftSourcePath != null) {
+        if (draftSourceExists && draftSourcePath != null) {
             DraftSourceThumbnail(sourcePath = draftSourcePath, modifier = Modifier.padding(top = 8.dp).fillMaxWidth().aspectRatio(16f / 9f))
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onContinueEditing, enabled = canContinueDraft) { Text("\uB9C8\uC9C0\uB9C9 \uD3B8\uC9D1 \uACC4\uC18D\uD558\uAE30") }
-            TextButton(onClick = onClearDraft) { Text(if (draftSourceExists) "\uC784\uC2DC \uC800\uC7A5 \uC0AD\uC81C" else "\uC784\uC2DC \uC800\uC7A5 \uAE30\uB85D \uC0AD\uC81C") }
+            TextButton(onClick = onClearDraft) { Text("\uC784\uC2DC \uC800\uC7A5 \uAE30\uB85D \uC0AD\uC81C") }
+        }
+        if (recoveryDebugInfo != null) {
+            TextButton(onClick = { showDebugDetails = !showDebugDetails }) {
+                Text(if (showDebugDetails) "\uB514\uBC84\uADF8 \uC815\uBCF4 \uC228\uAE30\uAE30" else "\uB514\uBC84\uADF8 \uC815\uBCF4 \uBCF4\uAE30")
+            }
+            if (showDebugDetails) {
+                RecoveryDebugDetails(recoveryDebugInfo)
+            }
         }
     }
 }
@@ -489,10 +529,26 @@ private fun ThumbnailBox(thumbnail: Bitmap?, emptyText: String, modifier: Modifi
     }
 }
 
+@Composable
+private fun RecoveryDebugDetails(info: RecoveryDebugInfo) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF1B1B1B))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text("draft_source 파일 존재: ${if (info.draftSourceExists) "\uC608" else "\uC544\uB2C8\uC624"}", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
+        Text("filesDir draft 존재: ${if (info.filesDirDraftExists) "\uC608" else "\uC544\uB2C8\uC624"}", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
+        Text("draft_source 경로: ${info.draftSourcePath ?: "\uC5C6\uC74C"}", color = Color(0xFF8E8E8E), style = MaterialTheme.typography.labelSmall)
+        Text("filesDir 경로: ${info.filesDirDraftPath}", color = Color(0xFF8E8E8E), style = MaterialTheme.typography.labelSmall)
+    }
+}
+
 private fun draftStatusText(draftSavedAtMillis: Long?, draftSourceExists: Boolean): String =
     when {
         draftSavedAtMillis != null && draftSourceExists -> "\uB9C8\uC9C0\uB9C9 \uC784\uC2DC \uC800\uC7A5: ${formatMainSavedTime(draftSavedAtMillis)}"
-        draftSavedAtMillis != null -> "\uC784\uC2DC \uC800\uC7A5 \uC6D0\uBCF8\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4."
+        draftSavedAtMillis != null -> "\uC784\uC2DC \uC800\uC7A5 \uC6D0\uBCF8\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uAE30\uC874 \uC784\uC2DC \uC800\uC7A5 \uD30C\uC77C\uC774 \uC0AD\uC81C\uB418\uC5B4 \uBCF5\uAD6C\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4."
         else -> "\uD604\uC7AC \uC784\uC2DC \uC800\uC7A5 \uAE30\uB85D\uC774 \uC5C6\uC2B5\uB2C8\uB2E4."
     }
 

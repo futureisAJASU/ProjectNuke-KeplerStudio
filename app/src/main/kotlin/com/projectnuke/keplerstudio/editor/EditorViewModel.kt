@@ -519,13 +519,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // TODO: model manual rotation as editor state instead of mutating preview bitmaps directly.
         val rotatedPreview = rotateBitmap90(preview)
         val rotatedOriginal = if (original != null && original !== preview) rotateBitmap90(original) else rotatedPreview
+        val context = getApplication<Application>()
         _uiState.update {
-            it.copy(
+            val next = it.copy(
                 previewBitmap = rotatedPreview,
                 originalPreviewBitmap = rotatedOriginal,
                 revision = it.revision + 1,
                 message = "미리보기를 90도 회전했습니다."
             )
+            next.withSavedDraft(context)
         }
         Log.i(FLARE_GUARD_AI_TAG, "Rotated preview manually: ${preview.width}x${preview.height} -> ${rotatedPreview.width}x${rotatedPreview.height}")
     }
@@ -705,6 +707,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val sourceFile = recovery.sourceFile
         if (sourceFile == null) {
+            val missingDraftMessage = "\uc784\uc2dc \uc800\uc7a5 \uc6d0\ubcf8\uc744 \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4. \uae30\uc874 \uc784\uc2dc \uc800\uc7a5 \ud30c\uc77c\uc774 \uc0ad\uc81c\ub418\uc5b4 \ubcf5\uad6c\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4."
+            _uiState.update { it.copy(message = missingDraftMessage) }
+            return
             _uiState.update {
                 it.copy(
                     message = if (recovery.missingLegacyCacheDraft) {
@@ -789,8 +794,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun applyHistorySnapshot(snapshot: EditorHistorySnapshot, message: String) {
+        val context = getApplication<Application>()
         _uiState.update {
-            it.copy(
+            val next = it.copy(
                 params = snapshot.params,
                 previewBitmap = snapshot.previewBitmap,
                 originalPreviewBitmap = snapshot.originalPreviewBitmap,
@@ -805,6 +811,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 revision = it.revision + 1,
                 message = message
             )
+            next.withSavedDraft(context)
         }
     }
 
@@ -1071,6 +1078,18 @@ private fun persistDraftSourceFile(context: Context, sourcePath: String): File? 
     }
     if (draftSource.exists()) draftSource.delete()
     check(temp.renameTo(draftSource)) { "failed to persist draft source" }
+    return draftSource
+}
+
+private fun persistDraftBitmapFile(context: Context, bitmap: Bitmap): File? {
+    val draftSource = persistentDraftSourceFile(context)
+    draftSource.parentFile?.mkdirs()
+    val temp = File(draftSource.parentFile, "${draftSource.name}.tmp")
+    FileOutputStream(temp).use { output ->
+        check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "failed to encode draft bitmap" }
+    }
+    if (draftSource.exists()) draftSource.delete()
+    check(temp.renameTo(draftSource)) { "failed to persist draft bitmap" }
     return draftSource
 }
 
@@ -1506,8 +1525,12 @@ private data class DraftSaveResult(
 )
 
 private fun saveDraftSnapshot(context: Context, state: EditorUiState): DraftSaveResult? {
-    val sourcePath = state.sourcePath ?: return null
-    val draftSource = persistDraftSourceFile(context, sourcePath) ?: return null
+    val draftSource = when {
+        state.originalPreviewBitmap != null -> persistDraftBitmapFile(context, state.originalPreviewBitmap)
+        state.sourcePath != null -> persistDraftSourceFile(context, state.sourcePath)
+        state.previewBitmap != null -> persistDraftBitmapFile(context, state.previewBitmap)
+        else -> null
+    } ?: return null
     saveDraftThumbnailFile(context, draftSource)
     val savedAt = System.currentTimeMillis()
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
