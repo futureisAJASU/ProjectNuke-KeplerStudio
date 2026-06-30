@@ -489,6 +489,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         redoHistory.addLast(_uiState.value.toHistorySnapshot())
         val snapshot = undoHistory.removeLast()
         applyHistorySnapshot(snapshot, "이전 편집 상태로 되돌렸습니다.")
+        val context = getApplication<Application>()
+        _uiState.update { it.withSavedDraft(context) }
         updateHistoryFlags()
         Log.i(FLARE_GUARD_AI_TAG, "Undo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
     }
@@ -503,6 +505,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         trimHistory(undoHistory)
         val snapshot = redoHistory.removeLast()
         applyHistorySnapshot(snapshot, "다음 편집 상태를 다시 적용했습니다.")
+        val context = getApplication<Application>()
+        _uiState.update { it.withSavedDraft(context) }
         updateHistoryFlags()
         Log.i(FLARE_GUARD_AI_TAG, "Redo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
     }
@@ -710,16 +714,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val missingDraftMessage = "\uc784\uc2dc \uc800\uc7a5 \uc6d0\ubcf8\uc744 \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4. \uae30\uc874 \uc784\uc2dc \uc800\uc7a5 \ud30c\uc77c\uc774 \uc0ad\uc81c\ub418\uc5b4 \ubcf5\uad6c\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4."
             _uiState.update { it.copy(message = missingDraftMessage) }
             return
-            _uiState.update {
-                it.copy(
-                    message = if (recovery.missingLegacyCacheDraft) {
-                        "기존 임시 저장 원본이 삭제되어 복구할 수 없습니다."
-                    } else {
-                        "?꾩떆 ??? ?먮낯??李얠쓣 ???놁뒿?덈떎."
-                    }
-                )
-            }
-            return
         }
         val sourcePath = sourceFile.absolutePath
 
@@ -794,9 +788,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun applyHistorySnapshot(snapshot: EditorHistorySnapshot, message: String) {
-        val context = getApplication<Application>()
         _uiState.update {
-            val next = it.copy(
+            it.copy(
                 params = snapshot.params,
                 previewBitmap = snapshot.previewBitmap,
                 originalPreviewBitmap = snapshot.originalPreviewBitmap,
@@ -811,7 +804,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 revision = it.revision + 1,
                 message = message
             )
-            next.withSavedDraft(context)
         }
     }
 
