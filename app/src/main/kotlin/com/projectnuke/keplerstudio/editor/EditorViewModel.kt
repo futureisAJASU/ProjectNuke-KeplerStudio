@@ -913,14 +913,14 @@ private fun historyParamSummaries(current: EditParams, target: EditParams): List
 
 private fun historyExposureSummary(current: Float, target: Float): String? {
     if (!historyValueChanged(current, target)) return null
-    val value = if (historyIsZero(target)) "0.0" else String.format(Locale.US, "%+.1f", target)
+    val value = if (historyIsZero(target)) "0.00" else String.format(Locale.US, "%+.2f", target)
     return "노출 $value"
 }
 
 private fun historySliderSummary(label: String, current: Float, target: Float): String? {
     if (!historyValueChanged(current, target)) return null
-    val value = (target * 100f).roundToInt()
-    val formatted = if (value == 0) "0" else String.format(Locale.US, "%+d", value)
+    val value = target * 100f
+    val formatted = if (historyIsZero(value)) "0.00" else String.format(Locale.US, "%+.2f", value)
     return "$label $formatted"
 }
 

@@ -53,6 +53,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -363,6 +364,7 @@ private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?, onToggleC
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .clipToBounds()
             .onSizeChanged { containerSize = it },
         contentAlignment = Alignment.Center
     ) {
