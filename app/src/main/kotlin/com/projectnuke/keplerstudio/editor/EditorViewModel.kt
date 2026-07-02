@@ -488,7 +488,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         redoHistory.addLast(_uiState.value.toHistorySnapshot())
         val snapshot = undoHistory.removeLast()
-        applyHistorySnapshot(snapshot, "이전 편집 상태로 되돌렸습니다.")
+        val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "이전 편집 상태를 적용했습니다")
+        applyHistorySnapshot(snapshot, message)
         val context = getApplication<Application>()
         _uiState.update { it.withSavedDraft(context) }
         updateHistoryFlags()
@@ -504,7 +505,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         undoHistory.addLast(_uiState.value.toHistorySnapshot())
         trimHistory(undoHistory)
         val snapshot = redoHistory.removeLast()
-        applyHistorySnapshot(snapshot, "다음 편집 상태를 다시 적용했습니다.")
+        val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "다음 편집 상태를 적용했습니다")
+        applyHistorySnapshot(snapshot, message)
         val context = getApplication<Application>()
         _uiState.update { it.withSavedDraft(context) }
         updateHistoryFlags()
@@ -867,6 +869,65 @@ private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
         flareGuardRuntimeStatus = flareGuardRuntimeStatus
     )
 }
+
+private fun buildHistoryAppliedMessage(
+    current: EditorUiState,
+    target: EditorHistorySnapshot,
+    prefix: String
+): String {
+    val changedParams = historyParamSummaries(current.params, target.params)
+    if (changedParams.isNotEmpty()) {
+        return "$prefix: ${changedParams.take(3).joinToString(", ")}"
+    }
+    val changedImageState = current.presetLook != target.presetLook ||
+        current.cropState != target.cropState ||
+        current.selectionLayers != target.selectionLayers ||
+        current.activeSelectionLayerId != target.activeSelectionLayerId ||
+        current.selectionPaintSettings != target.selectionPaintSettings ||
+        current.showSelectionOverlay != target.showSelectionOverlay ||
+        current.previewBitmap !== target.previewBitmap ||
+        current.originalPreviewBitmap !== target.originalPreviewBitmap
+    return if (changedImageState) {
+        "$prefix: 이미지 상태 변경"
+    } else {
+        prefix
+    }
+}
+
+private fun historyParamSummaries(current: EditParams, target: EditParams): List<String> = listOfNotNull(
+    historyExposureSummary(current.exposure, target.exposure),
+    historySliderSummary("대비", current.contrast, target.contrast),
+    historySliderSummary("하이라이트", current.highlights, target.highlights),
+    historySliderSummary("그림자", current.shadows, target.shadows),
+    historySliderSummary("화이트", current.whites, target.whites),
+    historySliderSummary("블랙", current.blacks, target.blacks),
+    historySliderSummary("색온도", current.temperature, target.temperature),
+    historySliderSummary("색조", current.tint, target.tint),
+    historySliderSummary("채도", current.saturation, target.saturation),
+    historySliderSummary("생동감", current.vibrance, target.vibrance),
+    historySliderSummary("명료도", current.clarity, target.clarity),
+    historySliderSummary("디헤이즈", current.dehaze, target.dehaze),
+    historySliderSummary("선명도", current.sharpness, target.sharpness),
+    historySliderSummary("노이즈 감소", current.noiseReduction, target.noiseReduction)
+)
+
+private fun historyExposureSummary(current: Float, target: Float): String? {
+    if (!historyValueChanged(current, target)) return null
+    val value = if (historyIsZero(target)) "0.0" else String.format(Locale.US, "%+.1f", target)
+    return "노출 $value"
+}
+
+private fun historySliderSummary(label: String, current: Float, target: Float): String? {
+    if (!historyValueChanged(current, target)) return null
+    val value = (target * 100f).roundToInt()
+    val formatted = if (value == 0) "0" else String.format(Locale.US, "%+d", value)
+    return "$label $formatted"
+}
+
+private fun historyValueChanged(current: Float, target: Float): Boolean =
+    kotlin.math.abs(current - target) >= 0.0005f
+
+private fun historyIsZero(value: Float): Boolean = kotlin.math.abs(value) < 0.0005f
 
 private fun List<SelectionLayer>.deepCopy(): List<SelectionLayer> = map { layer ->
     layer.copy(bitmap = layer.bitmap.copy(Bitmap.Config.ARGB_8888, true))

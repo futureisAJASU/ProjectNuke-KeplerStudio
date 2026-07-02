@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -73,6 +74,7 @@ import com.projectnuke.keplerstudio.editor.ToneEngine
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.delay
 import kotlin.math.max
 
 private val V2AppBackground = Color(0xFF101010)
@@ -89,6 +91,7 @@ private val V2TextSecondary = Color(0xFFC8C8C8)
 private val V2TextMuted = Color(0xFF8E8E8E)
 private val V2ButtonTextDark = Color(0xFF111111)
 private const val ChromeAnimationMillis = 320
+private const val TransientMessageMillis = 2_000L
 
 private val V2DarkColors = darkColorScheme(
     primary = V2Accent,
@@ -304,6 +307,15 @@ private fun V2PreviewArea(
     onToggleChrome: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showMessage by remember(message, isBusy) { mutableStateOf(!message.isNullOrBlank()) }
+    LaunchedEffect(message, isBusy) {
+        showMessage = !message.isNullOrBlank()
+        if (!message.isNullOrBlank() && shouldAutoHidePreviewMessage(message, isBusy)) {
+            delay(TransientMessageMillis)
+            showMessage = false
+        }
+    }
+
     Box(modifier = modifier.background(V2PreviewBackground), contentAlignment = Alignment.Center) {
         if (bitmap == null) {
             Text("사진을 선택해 주세요", color = V2TextPrimary)
@@ -314,15 +326,30 @@ private fun V2PreviewArea(
             CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
         }
         if (!chromeHidden) {
-            message?.let {
+            AnimatedVisibility(
+                visible = showMessage && !message.isNullOrBlank(),
+                enter = fadeIn(animationSpec = tween(durationMillis = 160, easing = FastOutSlowInEasing)),
+                exit = fadeOut(animationSpec = tween(durationMillis = 300, easing = FastOutSlowInEasing)),
+                modifier = Modifier.align(Alignment.BottomStart).padding(12.dp)
+            ) {
                 Text(
-                    text = it,
+                    text = message.orEmpty(),
                     color = V2TextPrimary,
-                    modifier = Modifier.align(Alignment.BottomStart).padding(12.dp).background(V2BadgeBackground).padding(horizontal = 10.dp, vertical = 6.dp)
+                    modifier = Modifier.background(V2BadgeBackground).padding(horizontal = 10.dp, vertical = 6.dp)
                 )
             }
         }
     }
+}
+
+private fun shouldAutoHidePreviewMessage(message: String, isBusy: Boolean): Boolean {
+    if (isBusy) return false
+    return !isImportantPreviewMessage(message)
+}
+
+private fun isImportantPreviewMessage(message: String): Boolean {
+    val importantTerms = listOf("실패", "복구", "찾을 수 없습니다", "없습니다", "못했습니다", "오류")
+    return importantTerms.any { message.contains(it) }
 }
 
 @Composable
