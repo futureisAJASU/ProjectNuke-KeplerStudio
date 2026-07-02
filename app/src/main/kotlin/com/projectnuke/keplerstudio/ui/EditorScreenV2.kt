@@ -317,7 +317,12 @@ private fun V2PreviewArea(
         }
     }
 
-    Box(modifier = modifier.background(V2PreviewBackground), contentAlignment = Alignment.Center) {
+    Box(
+        modifier = modifier
+            .background(V2PreviewBackground)
+            .clipToBounds(),
+        contentAlignment = Alignment.Center
+    ) {
         if (bitmap == null) {
             Text("사진을 선택해 주세요", color = V2TextPrimary)
         } else {

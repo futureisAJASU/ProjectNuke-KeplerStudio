@@ -913,21 +913,22 @@ private fun historyParamSummaries(current: EditParams, target: EditParams): List
 
 private fun historyExposureSummary(current: Float, target: Float): String? {
     if (!historyValueChanged(current, target)) return null
-    val value = if (historyIsZero(target)) "0.00" else String.format(Locale.US, "%+.2f", target)
+    val value = historySignedValue(target)
     return "노출 $value"
 }
 
 private fun historySliderSummary(label: String, current: Float, target: Float): String? {
     if (!historyValueChanged(current, target)) return null
-    val value = target * 100f
-    val formatted = if (historyIsZero(value)) "0.00" else String.format(Locale.US, "%+.2f", value)
-    return "$label $formatted"
+    return "$label ${historySignedValue(target)}"
 }
 
 private fun historyValueChanged(current: Float, target: Float): Boolean =
     kotlin.math.abs(current - target) >= 0.0005f
 
 private fun historyIsZero(value: Float): Boolean = kotlin.math.abs(value) < 0.0005f
+
+private fun historySignedValue(value: Float): String =
+    if (historyIsZero(value)) "0.00" else String.format(Locale.US, "%+.2f", value)
 
 private fun List<SelectionLayer>.deepCopy(): List<SelectionLayer> = map { layer ->
     layer.copy(bitmap = layer.bitmap.copy(Bitmap.Config.ARGB_8888, true))
