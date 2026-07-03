@@ -691,9 +691,16 @@ private fun EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditPara
 
 @Composable
 private fun DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    AdjustmentSlider("샤픈", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
-    AdjustmentSlider("노이즈 감소", params.noiseReduction, 0f, 1f) { v -> onChange { it.copy(noiseReduction = v) } }
-    UnavailablePanel("반경, 디테일 마스킹, 컬러 노이즈 감소는 아직 지원되지 않습니다")
+    AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
+    AdjustmentSlider("노이즈 감소", params.luminanceNoiseReduction, 0f, 1f) { v ->
+        onChange { it.copy(noiseReduction = v, luminanceNoiseReduction = v) }
+    }
+    AdjustmentSlider("색상 노이즈 감소", params.colorNoiseReduction, 0f, 1f) { v ->
+        onChange { it.copy(colorNoiseReduction = v) }
+    }
+    AdjustmentSlider("디테일 보호", params.noiseDetailProtection, 0f, 1f) { v ->
+        onChange { it.copy(noiseDetailProtection = v) }
+    }
 }
 
 @Composable

@@ -265,7 +265,10 @@ private fun mergeParams(base: EditParams, local: EditParams): EditParams = EditP
     clarity = (base.clarity + local.clarity).coerceIn(-1f, 1f),
     dehaze = (base.dehaze + local.dehaze).coerceIn(-1f, 1f),
     sharpness = (base.sharpness + local.sharpness).coerceIn(0f, 1f),
-    noiseReduction = (base.noiseReduction + local.noiseReduction).coerceIn(0f, 1f)
+    noiseReduction = (base.noiseReduction + local.noiseReduction).coerceIn(0f, 1f),
+    luminanceNoiseReduction = (base.luminanceNoiseReduction + local.luminanceNoiseReduction).coerceIn(0f, 1f),
+    colorNoiseReduction = (base.colorNoiseReduction + local.colorNoiseReduction).coerceIn(0f, 1f),
+    noiseDetailProtection = (base.noiseDetailProtection + local.noiseDetailProtection - 0.50f).coerceIn(0f, 1f)
 )
 
 private fun renderWithParams(base: Bitmap, params: EditParams, state: EditorUiState, revision: Int): Bitmap {
@@ -286,6 +289,9 @@ private fun renderWithParams(base: Bitmap, params: EditParams, state: EditorUiSt
         params.dehaze,
         params.sharpness,
         params.noiseReduction,
+        params.luminanceNoiseReduction,
+        params.colorNoiseReduction,
+        params.noiseDetailProtection,
         state.noiseEngine.nativeId,
         state.detailEngine.nativeId,
         state.toneEngine.nativeId,

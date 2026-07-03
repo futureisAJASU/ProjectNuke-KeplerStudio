@@ -17,7 +17,10 @@ private val UniversalBalancerOutputOrder = listOf(
     "clarity",
     "dehaze",
     "sharpness",
-    "noiseReduction"
+    "noiseReduction",
+    "luminanceNoiseReduction",
+    "colorNoiseReduction",
+    "noiseDetailProtection"
 )
 
 fun EditParams.toUniversalBalancerTargetVector(): List<Float> = listOf(
@@ -34,7 +37,10 @@ fun EditParams.toUniversalBalancerTargetVector(): List<Float> = listOf(
     clarity,
     dehaze,
     sharpness,
-    noiseReduction
+    noiseReduction,
+    luminanceNoiseReduction,
+    colorNoiseReduction,
+    noiseDetailProtection
 )
 
 fun buildUniversalBalancerTrainingRow(
@@ -61,6 +67,9 @@ fun buildUniversalBalancerTrainingRow(
         put("dehaze", params.dehaze.toDouble())
         put("sharpness", params.sharpness.toDouble())
         put("noiseReduction", params.noiseReduction.toDouble())
+        put("luminanceNoiseReduction", params.luminanceNoiseReduction.toDouble())
+        put("colorNoiseReduction", params.colorNoiseReduction.toDouble())
+        put("noiseDetailProtection", params.noiseDetailProtection.toDouble())
     }
     return JSONObject().apply {
         put("id", id)

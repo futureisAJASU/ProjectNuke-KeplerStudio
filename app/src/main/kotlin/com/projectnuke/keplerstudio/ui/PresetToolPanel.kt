@@ -353,12 +353,16 @@ private fun encodePreset(item: StoredPreset): String = listOf(
     item.params.dehaze.toString(),
     item.params.sharpness.toString(),
     item.params.noiseReduction.toString(),
+    item.params.luminanceNoiseReduction.toString(),
+    item.params.colorNoiseReduction.toString(),
+    item.params.noiseDetailProtection.toString(),
     Uri.encode(presetColorLookToJson(item.look)?.toString().orEmpty())
 ).joinToString("|") { it.replace("|", " ").replace("\n", " ") }
 
 private fun decodePreset(raw: String): StoredPreset? {
     val p = raw.split("|")
-    if (p.size != 17 && p.size != 18) return null
+    if (p.size != 17 && p.size != 18 && p.size != 20 && p.size != 21) return null
+    val legacyNoiseReduction = p[16].toFloatOrNull() ?: 0f
     val params = EditParams(
         exposure = p[3].toFloatOrNull() ?: 0f,
         contrast = p[4].toFloatOrNull() ?: 0f,
@@ -373,14 +377,17 @@ private fun decodePreset(raw: String): StoredPreset? {
         clarity = p[13].toFloatOrNull() ?: 0f,
         dehaze = p[14].toFloatOrNull() ?: 0f,
         sharpness = p[15].toFloatOrNull() ?: 0f,
-        noiseReduction = p[16].toFloatOrNull() ?: 0f
+        noiseReduction = legacyNoiseReduction,
+        luminanceNoiseReduction = p.getOrNull(17)?.toFloatOrNull() ?: legacyNoiseReduction,
+        colorNoiseReduction = p.getOrNull(18)?.toFloatOrNull() ?: legacyNoiseReduction,
+        noiseDetailProtection = p.getOrNull(19)?.toFloatOrNull() ?: 0.50f
     )
     return StoredPreset(
         id = p[0],
         name = p[1],
         timestampMillis = p[2].toLongOrNull() ?: return null,
         params = params,
-        look = p.getOrNull(17)
+        look = p.getOrNull(if (p.size >= 21) 20 else 17)
             ?.takeIf { it.isNotBlank() }
             ?.let(Uri::decode)
             ?.let { runCatching { presetColorLookFromJson(JSONObject(it)) }.getOrNull() }
@@ -448,24 +455,33 @@ private fun editParamsToJson(params: EditParams): JSONObject = JSONObject().appl
     put("dehaze", params.dehaze)
     put("sharpness", params.sharpness)
     put("noiseReduction", params.noiseReduction)
+    put("luminanceNoiseReduction", params.luminanceNoiseReduction)
+    put("colorNoiseReduction", params.colorNoiseReduction)
+    put("noiseDetailProtection", params.noiseDetailProtection)
 }
 
-private fun editParamsFromJson(obj: JSONObject): EditParams = EditParams(
-    exposure = obj.optDouble("exposure", 0.0).toFloat(),
-    contrast = obj.optDouble("contrast", 0.0).toFloat(),
-    shadows = obj.optDouble("shadows", 0.0).toFloat(),
-    highlights = obj.optDouble("highlights", 0.0).toFloat(),
-    whites = obj.optDouble("whites", 0.0).toFloat(),
-    blacks = obj.optDouble("blacks", 0.0).toFloat(),
-    temperature = obj.optDouble("temperature", 0.0).toFloat(),
-    tint = obj.optDouble("tint", 0.0).toFloat(),
-    saturation = obj.optDouble("saturation", 0.0).toFloat(),
-    vibrance = obj.optDouble("vibrance", 0.0).toFloat(),
-    clarity = obj.optDouble("clarity", 0.0).toFloat(),
-    dehaze = obj.optDouble("dehaze", 0.0).toFloat(),
-    sharpness = obj.optDouble("sharpness", 0.0).toFloat(),
-    noiseReduction = obj.optDouble("noiseReduction", 0.0).toFloat()
-)
+private fun editParamsFromJson(obj: JSONObject): EditParams {
+    val legacyNoiseReduction = obj.optDouble("noiseReduction", 0.0).toFloat()
+    return EditParams(
+        exposure = obj.optDouble("exposure", 0.0).toFloat(),
+        contrast = obj.optDouble("contrast", 0.0).toFloat(),
+        shadows = obj.optDouble("shadows", 0.0).toFloat(),
+        highlights = obj.optDouble("highlights", 0.0).toFloat(),
+        whites = obj.optDouble("whites", 0.0).toFloat(),
+        blacks = obj.optDouble("blacks", 0.0).toFloat(),
+        temperature = obj.optDouble("temperature", 0.0).toFloat(),
+        tint = obj.optDouble("tint", 0.0).toFloat(),
+        saturation = obj.optDouble("saturation", 0.0).toFloat(),
+        vibrance = obj.optDouble("vibrance", 0.0).toFloat(),
+        clarity = obj.optDouble("clarity", 0.0).toFloat(),
+        dehaze = obj.optDouble("dehaze", 0.0).toFloat(),
+        sharpness = obj.optDouble("sharpness", 0.0).toFloat(),
+        noiseReduction = legacyNoiseReduction,
+        luminanceNoiseReduction = obj.optDouble("luminanceNoiseReduction", legacyNoiseReduction.toDouble()).toFloat(),
+        colorNoiseReduction = obj.optDouble("colorNoiseReduction", legacyNoiseReduction.toDouble()).toFloat(),
+        noiseDetailProtection = obj.optDouble("noiseDetailProtection", 0.50).toFloat()
+    )
+}
 
 private const val PRESET_PREF_NAME = "kepler_studio_presets"
 private const val KEY_PRESETS = "presets"

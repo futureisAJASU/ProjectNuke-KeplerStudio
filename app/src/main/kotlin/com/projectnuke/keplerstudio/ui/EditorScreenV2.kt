@@ -538,8 +538,15 @@ private fun V2EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditPa
 @Composable
 private fun V2DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
     V2AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
-    V2AdjustmentSlider("노이즈 감소", params.noiseReduction, 0f, 1f) { v -> onChange { it.copy(noiseReduction = v) } }
-    V2PlaceholderPanel("반경, 디테일 마스킹, 컬러 노이즈 감소는 아직 연결하지 않았습니다")
+    V2AdjustmentSlider("노이즈 감소", params.luminanceNoiseReduction, 0f, 1f) { v ->
+        onChange { it.copy(noiseReduction = v, luminanceNoiseReduction = v) }
+    }
+    V2AdjustmentSlider("색상 노이즈 감소", params.colorNoiseReduction, 0f, 1f) { v ->
+        onChange { it.copy(colorNoiseReduction = v) }
+    }
+    V2AdjustmentSlider("디테일 보호", params.noiseDetailProtection, 0f, 1f) { v ->
+        onChange { it.copy(noiseDetailProtection = v) }
+    }
 }
 
 @Composable

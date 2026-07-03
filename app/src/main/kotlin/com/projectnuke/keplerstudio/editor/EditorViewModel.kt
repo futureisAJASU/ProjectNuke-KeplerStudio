@@ -719,6 +719,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val sourcePath = sourceFile.absolutePath
 
+        val legacyNoiseReduction = prefs.getFloat(KEY_DRAFT_NOISE_REDUCTION, 0f)
         val params = EditParams(
             exposure = prefs.getFloat(KEY_DRAFT_EXPOSURE, 0f),
             contrast = prefs.getFloat(KEY_DRAFT_CONTRAST, 0f),
@@ -733,7 +734,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             clarity = prefs.getFloat(KEY_DRAFT_CLARITY, 0f),
             dehaze = prefs.getFloat(KEY_DRAFT_DEHAZE, 0f),
             sharpness = prefs.getFloat(KEY_DRAFT_SHARPNESS, 0f),
-            noiseReduction = prefs.getFloat(KEY_DRAFT_NOISE_REDUCTION, 0f)
+            noiseReduction = legacyNoiseReduction,
+            luminanceNoiseReduction = prefs.getFloat(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION, legacyNoiseReduction),
+            colorNoiseReduction = prefs.getFloat(KEY_DRAFT_COLOR_NOISE_REDUCTION, legacyNoiseReduction),
+            noiseDetailProtection = prefs.getFloat(KEY_DRAFT_NOISE_DETAIL_PROTECTION, 0.50f)
         )
         val exportFormat = enumValueOrDefault(prefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
         val exportResolution = enumValueOrDefault(prefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Full)
@@ -908,7 +912,9 @@ private fun historyParamSummaries(current: EditParams, target: EditParams): List
     historySliderSummary("명료도", current.clarity, target.clarity),
     historySliderSummary("디헤이즈", current.dehaze, target.dehaze),
     historySliderSummary("선명도", current.sharpness, target.sharpness),
-    historySliderSummary("노이즈 감소", current.noiseReduction, target.noiseReduction)
+    historyAbsoluteSliderSummary("노이즈 감소", current.luminanceNoiseReduction, target.luminanceNoiseReduction),
+    historyAbsoluteSliderSummary("색상 노이즈 감소", current.colorNoiseReduction, target.colorNoiseReduction),
+    historyAbsoluteSliderSummary("디테일 보호", current.noiseDetailProtection, target.noiseDetailProtection)
 )
 
 private fun historyExposureSummary(current: Float, target: Float): String? {
@@ -920,6 +926,11 @@ private fun historyExposureSummary(current: Float, target: Float): String? {
 private fun historySliderSummary(label: String, current: Float, target: Float): String? {
     if (!historyValueChanged(current, target)) return null
     return "$label ${historySignedValue(target)}"
+}
+
+private fun historyAbsoluteSliderSummary(label: String, current: Float, target: Float): String? {
+    if (!historyValueChanged(current, target)) return null
+    return "$label ${String.format(Locale.US, "%.2f", target)}"
 }
 
 private fun historyValueChanged(current: Float, target: Float): Boolean =
@@ -1327,6 +1338,9 @@ private fun renderBitmapInNative(
         params.dehaze,
         params.sharpness,
         params.noiseReduction,
+        params.luminanceNoiseReduction,
+        params.colorNoiseReduction,
+        params.noiseDetailProtection,
         engines.noiseEngine.nativeId,
         engines.detailEngine.nativeId,
         engines.toneEngine.nativeId,
@@ -1603,6 +1617,9 @@ private fun saveDraftSnapshot(context: Context, state: EditorUiState): DraftSave
         .putFloat(KEY_DRAFT_DEHAZE, state.params.dehaze)
         .putFloat(KEY_DRAFT_SHARPNESS, state.params.sharpness)
         .putFloat(KEY_DRAFT_NOISE_REDUCTION, state.params.noiseReduction)
+        .putFloat(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION, state.params.luminanceNoiseReduction)
+        .putFloat(KEY_DRAFT_COLOR_NOISE_REDUCTION, state.params.colorNoiseReduction)
+        .putFloat(KEY_DRAFT_NOISE_DETAIL_PROTECTION, state.params.noiseDetailProtection)
         .putString(KEY_DRAFT_FORMAT, state.exportFormat.name)
         .putString(KEY_DRAFT_RESOLUTION, state.exportResolution.name)
         .putString(KEY_DRAFT_LOOK, presetColorLookToJson(state.presetLook)?.toString())
@@ -1630,6 +1647,9 @@ private fun clearDraftPrefs(context: Context) {
         .remove(KEY_DRAFT_DEHAZE)
         .remove(KEY_DRAFT_SHARPNESS)
         .remove(KEY_DRAFT_NOISE_REDUCTION)
+        .remove(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION)
+        .remove(KEY_DRAFT_COLOR_NOISE_REDUCTION)
+        .remove(KEY_DRAFT_NOISE_DETAIL_PROTECTION)
         .remove(KEY_DRAFT_FORMAT)
         .remove(KEY_DRAFT_RESOLUTION)
         .remove(KEY_DRAFT_LOOK)
@@ -1840,6 +1860,9 @@ private const val KEY_DRAFT_CLARITY = "draft_clarity"
 private const val KEY_DRAFT_DEHAZE = "draft_dehaze"
 private const val KEY_DRAFT_SHARPNESS = "draft_sharpness"
 private const val KEY_DRAFT_NOISE_REDUCTION = "draft_noise_reduction"
+private const val KEY_DRAFT_LUMINANCE_NOISE_REDUCTION = "draft_luminance_noise_reduction"
+private const val KEY_DRAFT_COLOR_NOISE_REDUCTION = "draft_color_noise_reduction"
+private const val KEY_DRAFT_NOISE_DETAIL_PROTECTION = "draft_noise_detail_protection"
 private const val KEY_DRAFT_FORMAT = "draft_format"
 private const val KEY_DRAFT_RESOLUTION = "draft_resolution"
 private const val KEY_DRAFT_LOOK = "draft_look"

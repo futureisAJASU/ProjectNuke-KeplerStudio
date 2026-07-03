@@ -75,7 +75,7 @@ static void apply_adjustment_rgba8888(
     float vibrance,
     float clarity,
     float dehaze,
-    float noiseReduction
+    float colorNoiseReduction
 ) {
     const float exposureMul = std::pow(2.0f, exposure);
     const float contrastMul = 1.0f + contrast * 0.72f;
@@ -85,7 +85,7 @@ static void apply_adjustment_rgba8888(
     const float blackStrength = blacks * 0.34f;
     const float clarityStrength = clarity * 0.42f;
     const float dehazeStrength = dehaze * 0.36f;
-    const float chromaDamping = clamp01(noiseReduction) * 0.18f;
+    const float chromaDamping = clamp01(colorNoiseReduction) * 0.14f;
 
     const float tempR = 1.0f + temperature * 0.11f;
     const float tempG = 1.0f;
@@ -188,10 +188,14 @@ static void apply_edge_aware_noise_reduction_rgba8888(
     int width,
     int height,
     int stride,
-    float noiseReduction
+    float luminanceNoiseReduction,
+    float colorNoiseReduction,
+    float noiseDetailProtection
 ) {
-    const float strength = clamp01(noiseReduction);
-    if (strength <= 0.001f || width < 3 || height < 3) return;
+    const float lumaStrength = clamp01(luminanceNoiseReduction);
+    const float chromaStrength = clamp01(colorNoiseReduction);
+    const float detailProtection = clamp01(noiseDetailProtection);
+    if ((lumaStrength <= 0.001f && chromaStrength <= 0.001f) || width < 3 || height < 3) return;
 
     std::vector<uint8_t> prev(static_cast<size_t>(stride));
     std::vector<uint8_t> curr(static_cast<size_t>(stride));
@@ -201,7 +205,8 @@ static void apply_edge_aware_noise_reduction_rgba8888(
     copy_row(next.data(), base + stride, stride);
     copy_row(prev.data(), curr.data(), stride);
 
-    const float sigma = 0.035f + (1.0f - strength) * 0.145f;
+    const float strength = std::max(lumaStrength, chromaStrength);
+    const float sigma = 0.030f + (1.0f - strength) * 0.150f;
     const float sigma2 = std::max(0.0001f, sigma * sigma * 2.0f);
 
     for (int y = 0; y < height; ++y) {
@@ -214,11 +219,13 @@ static void apply_edge_aware_noise_reduction_rgba8888(
             const float centerG = channel_at(curr, x, 1);
             const float centerB = channel_at(curr, x, 2);
             const float centerL = luma_of(centerR, centerG, centerB);
+            const float centerCb = centerB - centerL;
+            const float centerCr = centerR - centerL;
             const uint8_t alpha = curr[static_cast<size_t>(x) * 4U + 3U];
 
-            float sumR = 0.0f;
-            float sumG = 0.0f;
-            float sumB = 0.0f;
+            float sumL = 0.0f;
+            float sumCb = 0.0f;
+            float sumCr = 0.0f;
             float sumW = 0.0f;
 
             for (int dy = -1; dy <= 1; ++dy) {
@@ -233,23 +240,34 @@ static void apply_edge_aware_noise_reduction_rgba8888(
                     const float diff = nl - centerL;
                     const float range = std::exp(-(diff * diff) / sigma2);
                     const float w = spatial * range;
-                    sumR += nr * w;
-                    sumG += ng * w;
-                    sumB += nb * w;
+                    sumL += nl * w;
+                    sumCb += (nb - nl) * w;
+                    sumCr += (nr - nl) * w;
                     sumW += w;
                 }
             }
 
             const float invW = sumW > 0.0001f ? (1.0f / sumW) : 1.0f;
-            const float avgR = sumR * invW;
-            const float avgG = sumG * invW;
-            const float avgB = sumB * invW;
+            const float avgL = sumL * invW;
+            const float avgCb = sumCb * invW;
+            const float avgCr = sumCr * invW;
+            const int lx = std::max(0, x - 1);
+            const int rx = std::min(width - 1, x + 1);
+            const float edgeDetail = std::fabs(centerL - ((centerL * 4.0f + luma_at(curr, lx) + luma_at(curr, rx) + luma_at(prev, x) + luma_at(next, x)) / 8.0f));
+            const float detailGuard = 1.0f - detailProtection * smoothstep(0.010f, 0.075f, edgeDetail);
             const float shadowBoost = 0.75f + (1.0f - centerL) * 0.35f;
-            const float mix = clamp01(strength * 0.78f * shadowBoost);
+            const float lumaMix = clamp01(lumaStrength * 0.74f * shadowBoost * detailGuard);
+            const float chromaMix = clamp01(chromaStrength * 0.92f * (0.55f + 0.45f * detailGuard));
+            const float outL = lerp(centerL, avgL, lumaMix);
+            const float outCb = lerp(centerCb, avgCb, chromaMix);
+            const float outCr = lerp(centerCr, avgCr, chromaMix);
+            const float outB = outL + outCb;
+            const float outR = outL + outCr;
+            const float outG = (outL - 0.2126f * outR - 0.0722f * outB) / 0.7152f;
 
-            outPx[0] = to_u8(lerp(centerR, avgR, mix));
-            outPx[1] = to_u8(lerp(centerG, avgG, mix));
-            outPx[2] = to_u8(lerp(centerB, avgB, mix));
+            outPx[0] = to_u8(outR);
+            outPx[1] = to_u8(outG);
+            outPx[2] = to_u8(outB);
             outPx[3] = alpha;
         }
 
@@ -309,9 +327,21 @@ static void apply_guided_noise_reduction_rgba8888(
     int width,
     int height,
     int stride,
-    float noiseReduction
+    float luminanceNoiseReduction,
+    float colorNoiseReduction,
+    float noiseDetailProtection
 ) {
-    const float strength = clamp01(noiseReduction);
+    apply_edge_aware_noise_reduction_rgba8888(
+        base,
+        width,
+        height,
+        stride,
+        luminanceNoiseReduction * 0.92f,
+        colorNoiseReduction,
+        noiseDetailProtection
+    );
+    return;
+    const float strength = clamp01(luminanceNoiseReduction);
     if (strength <= 0.001f || width < 3 || height < 3) return;
 
     std::vector<uint8_t> prev(static_cast<size_t>(stride));
@@ -480,6 +510,9 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     jfloat dehaze,
     jfloat sharpness,
     jfloat noiseReduction,
+    jfloat luminanceNoiseReduction,
+    jfloat colorNoiseReduction,
+    jfloat noiseDetailProtection,
     jint noiseEngine,
     jint detailEngine,
     jint toneEngine,
@@ -525,7 +558,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         vibrance,
         clarity,
         dehaze,
-        noiseReduction
+        colorNoiseReduction
     );
 
     if (noiseEngine == 1) {
@@ -534,7 +567,9 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             static_cast<int>(info.width),
             static_cast<int>(info.height),
             static_cast<int>(info.stride),
-            noiseReduction
+            luminanceNoiseReduction,
+            colorNoiseReduction,
+            noiseDetailProtection
         );
     } else if (noiseEngine == 2) {
         apply_edge_aware_noise_reduction_rgba8888(
@@ -542,14 +577,18 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             static_cast<int>(info.width),
             static_cast<int>(info.height),
             static_cast<int>(info.stride),
-            noiseReduction * 0.70f
+            luminanceNoiseReduction * 0.70f,
+            colorNoiseReduction * 0.80f,
+            noiseDetailProtection
         );
         apply_guided_noise_reduction_rgba8888(
             bytes,
             static_cast<int>(info.width),
             static_cast<int>(info.height),
             static_cast<int>(info.stride),
-            noiseReduction * 0.85f
+            luminanceNoiseReduction * 0.85f,
+            colorNoiseReduction,
+            noiseDetailProtection
         );
     } else {
         apply_edge_aware_noise_reduction_rgba8888(
@@ -557,7 +596,9 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             static_cast<int>(info.width),
             static_cast<int>(info.height),
             static_cast<int>(info.stride),
-            noiseReduction
+            luminanceNoiseReduction,
+            colorNoiseReduction,
+            noiseDetailProtection
         );
     }
 
@@ -567,7 +608,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         static_cast<int>(info.height),
         static_cast<int>(info.stride),
         sharpness,
-        noiseReduction
+        luminanceNoiseReduction
     );
 
     AndroidBitmap_unlockPixels(env, bitmap);

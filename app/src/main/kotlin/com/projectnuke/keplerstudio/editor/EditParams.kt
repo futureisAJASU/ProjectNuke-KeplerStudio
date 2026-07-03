@@ -16,7 +16,10 @@ data class EditParams(
     val clarity: Float = 0f,         // -1.0 .. +1.0
     val dehaze: Float = 0f,          // -1.0 .. +1.0
     val sharpness: Float = 0f,       //  0.0 .. +1.0
-    val noiseReduction: Float = 0f   //  0.0 .. +1.0
+    val noiseReduction: Float = 0f,  //  0.0 .. +1.0 legacy
+    val luminanceNoiseReduction: Float = noiseReduction, //  0.0 .. +1.0
+    val colorNoiseReduction: Float = noiseReduction,     //  0.0 .. +1.0
+    val noiseDetailProtection: Float = 0.50f             //  0.0 .. +1.0
 ) {
     fun stableHash(): Int {
         return listOf(
@@ -33,7 +36,10 @@ data class EditParams(
             clarity,
             dehaze,
             sharpness,
-            noiseReduction
+            noiseReduction,
+            luminanceNoiseReduction,
+            colorNoiseReduction,
+            noiseDetailProtection
         ).fold(17) { acc, v -> acc * 31 + (v * 1000f).roundToInt() }
     }
 }
