@@ -75,7 +75,7 @@ static void apply_adjustment_rgba8888(
     float vibrance,
     float clarity,
     float dehaze,
-    float colorNoiseReduction
+    float /*colorNoiseReduction*/
 ) {
     const float exposureMul = std::pow(2.0f, exposure);
     const float contrastMul = 1.0f + contrast * 0.72f;
@@ -85,7 +85,6 @@ static void apply_adjustment_rgba8888(
     const float blackStrength = blacks * 0.34f;
     const float clarityStrength = clarity * 0.42f;
     const float dehazeStrength = dehaze * 0.36f;
-    const float chromaDamping = clamp01(colorNoiseReduction) * 0.14f;
 
     const float tempR = 1.0f + temperature * 0.11f;
     const float tempG = 1.0f;
@@ -167,13 +166,6 @@ static void apply_adjustment_rgba8888(
             r = luma + (r - luma) * colorMul;
             g = luma + (g - luma) * colorMul;
             b = luma + (b - luma) * colorMul;
-
-            if (chromaDamping > 0.0f) {
-                const float nrLuma = luma_of(r, g, b);
-                r = nrLuma + (r - nrLuma) * (1.0f - chromaDamping);
-                g = nrLuma + (g - nrLuma) * (1.0f - chromaDamping);
-                b = nrLuma + (b - nrLuma) * (1.0f - chromaDamping);
-            }
 
             px[0] = to_u8(r);
             px[1] = to_u8(g);
@@ -283,13 +275,23 @@ static void apply_edge_aware_noise_reduction_rgba8888(
     }
 }
 
-static float guided_estimate_channel(
+static float guided_component_at(const std::vector<uint8_t>& row, int x, int component) {
+    const float r = channel_at(row, x, 0);
+    const float g = channel_at(row, x, 1);
+    const float b = channel_at(row, x, 2);
+    const float y = luma_of(r, g, b);
+    if (component == 0) return y;
+    if (component == 1) return b - y;
+    return r - y;
+}
+
+static float guided_estimate_component(
     const std::vector<uint8_t>& prev,
     const std::vector<uint8_t>& curr,
     const std::vector<uint8_t>& next,
     int width,
     int x,
-    int channel,
+    int component,
     float eps
 ) {
     float meanI = 0.0f;
@@ -302,7 +304,7 @@ static float guided_estimate_channel(
         for (int dx = -1; dx <= 1; ++dx) {
             const int nx = std::min(width - 1, std::max(0, x + dx));
             const float i = luma_at(*row, nx);
-            const float p = channel_at(*row, nx, channel);
+            const float p = guided_component_at(*row, nx, component);
             meanI += i;
             meanP += p;
             corrI += i * i;
@@ -319,7 +321,7 @@ static float guided_estimate_channel(
     const float covIP = corrIP - meanI * meanP;
     const float a = covIP / (varI + eps);
     const float b = meanP - a * meanI;
-    return clamp01(a * luma_at(curr, x) + b);
+    return a * luma_at(curr, x) + b;
 }
 
 static void apply_guided_noise_reduction_rgba8888(
@@ -331,18 +333,10 @@ static void apply_guided_noise_reduction_rgba8888(
     float colorNoiseReduction,
     float noiseDetailProtection
 ) {
-    apply_edge_aware_noise_reduction_rgba8888(
-        base,
-        width,
-        height,
-        stride,
-        luminanceNoiseReduction * 0.92f,
-        colorNoiseReduction,
-        noiseDetailProtection
-    );
-    return;
-    const float strength = clamp01(luminanceNoiseReduction);
-    if (strength <= 0.001f || width < 3 || height < 3) return;
+    const float lumaStrength = clamp01(luminanceNoiseReduction);
+    const float chromaStrength = clamp01(colorNoiseReduction);
+    const float detailProtection = clamp01(noiseDetailProtection);
+    if ((lumaStrength <= 0.001f && chromaStrength <= 0.001f) || width < 3 || height < 3) return;
 
     std::vector<uint8_t> prev(static_cast<size_t>(stride));
     std::vector<uint8_t> curr(static_cast<size_t>(stride));
@@ -352,7 +346,9 @@ static void apply_guided_noise_reduction_rgba8888(
     copy_row(next.data(), base + stride, stride);
     copy_row(prev.data(), curr.data(), stride);
 
-    const float eps = 0.0008f + (1.0f - strength) * 0.006f;
+    const float maxStrength = std::max(lumaStrength, chromaStrength);
+    const float lumaEps = 0.0005f + (1.0f - lumaStrength) * 0.0045f;
+    const float chromaEps = 0.0012f + (1.0f - maxStrength) * 0.0075f;
 
     for (int y = 0; y < height; ++y) {
         auto* outRow = base + y * stride;
@@ -364,15 +360,32 @@ static void apply_guided_noise_reduction_rgba8888(
             const float centerG = channel_at(curr, x, 1);
             const float centerB = channel_at(curr, x, 2);
             const float centerL = luma_of(centerR, centerG, centerB);
-            const float guidedR = guided_estimate_channel(prev, curr, next, width, x, 0, eps);
-            const float guidedG = guided_estimate_channel(prev, curr, next, width, x, 1, eps);
-            const float guidedB = guided_estimate_channel(prev, curr, next, width, x, 2, eps);
-            const float mix = clamp01(strength * (0.64f + (1.0f - centerL) * 0.24f));
+            const float centerCb = centerB - centerL;
+            const float centerCr = centerR - centerL;
+            const int lx = std::max(0, x - 1);
+            const int rx = std::min(width - 1, x + 1);
+            const float horiz = std::fabs(luma_at(curr, rx) - luma_at(curr, lx));
+            const float vert = std::fabs(luma_at(next, x) - luma_at(prev, x));
+            const float lap = std::fabs(centerL - ((centerL * 4.0f + luma_at(curr, lx) + luma_at(curr, rx) + luma_at(prev, x) + luma_at(next, x)) / 8.0f));
+            const float detail = std::max(lap, (horiz + vert) * 0.5f);
+            const float detailGuard = 1.0f - detailProtection * smoothstep(0.008f, 0.065f, detail);
+            const float guidedL = clamp01(guided_estimate_component(prev, curr, next, width, x, 0, lumaEps));
+            const float guidedCb = guided_estimate_component(prev, curr, next, width, x, 1, chromaEps);
+            const float guidedCr = guided_estimate_component(prev, curr, next, width, x, 2, chromaEps);
+            const float shadowBoost = 0.72f + (1.0f - centerL) * 0.28f;
+            const float lumaMix = clamp01(lumaStrength * 0.66f * shadowBoost * detailGuard);
+            const float chromaMix = clamp01(chromaStrength * 0.86f * (0.50f + detailGuard * 0.50f));
+            const float outL = lerp(centerL, guidedL, lumaMix);
+            const float outCb = lerp(centerCb, guidedCb, chromaMix);
+            const float outCr = lerp(centerCr, guidedCr, chromaMix);
+            const float outB = outL + outCb;
+            const float outR = outL + outCr;
+            const float outG = (outL - 0.2126f * outR - 0.0722f * outB) / 0.7152f;
             const uint8_t alpha = curr[static_cast<size_t>(x) * 4U + 3U];
 
-            outPx[0] = to_u8(lerp(centerR, guidedR, mix));
-            outPx[1] = to_u8(lerp(centerG, guidedG, mix));
-            outPx[2] = to_u8(lerp(centerB, guidedB, mix));
+            outPx[0] = to_u8(outR);
+            outPx[1] = to_u8(outG);
+            outPx[2] = to_u8(outB);
             outPx[3] = alpha;
         }
 
