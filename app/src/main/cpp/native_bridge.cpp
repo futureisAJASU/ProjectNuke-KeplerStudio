@@ -54,6 +54,145 @@ static inline float luma_at(const std::vector<uint8_t>& row, int x) {
     return luma_of(channel_at(row, x, 0), channel_at(row, x, 1), channel_at(row, x, 2));
 }
 
+static inline float local_luma_detail(
+    const std::vector<uint8_t>& prev,
+    const std::vector<uint8_t>& curr,
+    const std::vector<uint8_t>& next,
+    int width,
+    int x,
+    float centerL
+) {
+    const int lx = std::max(0, x - 1);
+    const int rx = std::min(width - 1, x + 1);
+    const float horiz = std::fabs(luma_at(curr, rx) - luma_at(curr, lx));
+    const float vert = std::fabs(luma_at(next, x) - luma_at(prev, x));
+    const float crossMean = (
+        luma_at(curr, lx) +
+        luma_at(curr, rx) +
+        luma_at(prev, x) +
+        luma_at(next, x)
+    ) * 0.25f;
+    const float lap = std::fabs(centerL - crossMean);
+    return std::max(lap, (horiz + vert) * 0.50f);
+}
+
+static inline float shadow_mask_for_luma(float centerL) {
+    return 1.0f - smoothstep(0.12f, 0.55f, centerL);
+}
+
+static inline float detail_mask_for_detail(float detail) {
+    return smoothstep(0.008f, 0.065f, detail);
+}
+
+static inline float flat_mask_for_detail(float detail) {
+    return 1.0f - detail_mask_for_detail(detail);
+}
+
+static inline float detail_guard_for_detail(float detail, float detailProtection) {
+    return 1.0f - clamp01(detailProtection) * detail_mask_for_detail(detail);
+}
+
+static inline float chroma_cb_at(const std::vector<uint8_t>& row, int x) {
+    const float r = channel_at(row, x, 0);
+    const float g = channel_at(row, x, 1);
+    const float b = channel_at(row, x, 2);
+    return b - luma_of(r, g, b);
+}
+
+static inline float chroma_cr_at(const std::vector<uint8_t>& row, int x) {
+    const float r = channel_at(row, x, 0);
+    const float g = channel_at(row, x, 1);
+    const float b = channel_at(row, x, 2);
+    return r - luma_of(r, g, b);
+}
+
+static void sparse_chroma_estimate(
+    const std::vector<uint8_t>& prev2,
+    const std::vector<uint8_t>& prev,
+    const std::vector<uint8_t>& curr,
+    const std::vector<uint8_t>& next,
+    const std::vector<uint8_t>& next2,
+    int width,
+    int x,
+    float centerL,
+    float sigma2,
+    float& outCb,
+    float& outCr
+) {
+    const std::vector<uint8_t>* rows[5] = { &prev2, &prev, &curr, &next, &next2 };
+    float sumCb = 0.0f;
+    float sumCr = 0.0f;
+    float sumW = 0.0f;
+
+    for (int dy = -2; dy <= 2; ++dy) {
+        const auto& row = *rows[dy + 2];
+        for (int dx = -2; dx <= 2; ++dx) {
+            const int adx = std::abs(dx);
+            const int ady = std::abs(dy);
+            const bool useSample = (adx <= 1 && ady <= 1) ||
+                (dy == 0 && adx == 2) ||
+                (dx == 0 && ady == 2) ||
+                (adx == 2 && ady == 2);
+            if (!useSample) continue;
+
+            const int nx = std::min(width - 1, std::max(0, x + dx));
+            const float nl = luma_at(row, nx);
+            const float range = std::exp(-((nl - centerL) * (nl - centerL)) / sigma2);
+            const float distance = static_cast<float>(adx + ady);
+            const float spatial = (dx == 0 && dy == 0) ? 0.12f : (1.0f / (1.0f + distance));
+            const float w = spatial * range;
+            sumCb += chroma_cb_at(row, nx) * w;
+            sumCr += chroma_cr_at(row, nx) * w;
+            sumW += w;
+        }
+    }
+
+    const float invW = sumW > 0.0001f ? (1.0f / sumW) : 1.0f;
+    outCb = sumCb * invW;
+    outCr = sumCr * invW;
+}
+
+static void local_neighbor_estimate_3x3(
+    const std::vector<uint8_t>& prev,
+    const std::vector<uint8_t>& curr,
+    const std::vector<uint8_t>& next,
+    int width,
+    int x,
+    float& outL,
+    float& outCb,
+    float& outCr,
+    float& outRange
+) {
+    const std::vector<uint8_t>* rows[3] = { &prev, &curr, &next };
+    float sumL = 0.0f;
+    float sumCb = 0.0f;
+    float sumCr = 0.0f;
+    float minL = 1.0f;
+    float maxL = 0.0f;
+    float count = 0.0f;
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        const auto& row = *rows[dy + 1];
+        for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            const int nx = std::min(width - 1, std::max(0, x + dx));
+            const float nl = luma_at(row, nx);
+            sumL += nl;
+            sumCb += chroma_cb_at(row, nx);
+            sumCr += chroma_cr_at(row, nx);
+            minL = std::min(minL, nl);
+            maxL = std::max(maxL, nl);
+            count += 1.0f;
+        }
+    }
+
+    const float invCount = count > 0.0f ? (1.0f / count) : 1.0f;
+    outL = sumL * invCount;
+    outCb = sumCb * invCount;
+    outCr = sumCr * invCount;
+    outRange = maxL - minL;
+}
+
 static void copy_row(uint8_t* dst, const uint8_t* src, int stride) {
     std::copy(src, src + stride, dst);
 }
@@ -189,13 +328,17 @@ static void apply_edge_aware_noise_reduction_rgba8888(
     const float detailProtection = clamp01(noiseDetailProtection);
     if ((lumaStrength <= 0.001f && chromaStrength <= 0.001f) || width < 3 || height < 3) return;
 
+    std::vector<uint8_t> prev2(static_cast<size_t>(stride));
     std::vector<uint8_t> prev(static_cast<size_t>(stride));
     std::vector<uint8_t> curr(static_cast<size_t>(stride));
     std::vector<uint8_t> next(static_cast<size_t>(stride));
+    std::vector<uint8_t> next2(static_cast<size_t>(stride));
 
     copy_row(curr.data(), base, stride);
     copy_row(next.data(), base + stride, stride);
+    copy_row(next2.data(), (height > 2) ? (base + stride * 2) : (base + stride), stride);
     copy_row(prev.data(), curr.data(), stride);
+    copy_row(prev2.data(), curr.data(), stride);
 
     const float strength = std::max(lumaStrength, chromaStrength);
     const float sigma = 0.030f + (1.0f - strength) * 0.150f;
@@ -204,6 +347,7 @@ static void apply_edge_aware_noise_reduction_rgba8888(
     for (int y = 0; y < height; ++y) {
         auto* outRow = base + y * stride;
         if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
+        if (y + 2 >= height) copy_row(next2.data(), next.data(), stride);
 
         for (int x = 0; x < width; ++x) {
             auto* outPx = outRow + x * 4;
@@ -243,16 +387,44 @@ static void apply_edge_aware_noise_reduction_rgba8888(
             const float avgL = sumL * invW;
             const float avgCb = sumCb * invW;
             const float avgCr = sumCr * invW;
-            const int lx = std::max(0, x - 1);
-            const int rx = std::min(width - 1, x + 1);
-            const float edgeDetail = std::fabs(centerL - ((centerL * 4.0f + luma_at(curr, lx) + luma_at(curr, rx) + luma_at(prev, x) + luma_at(next, x)) / 8.0f));
-            const float detailGuard = 1.0f - detailProtection * smoothstep(0.010f, 0.075f, edgeDetail);
-            const float shadowBoost = 0.75f + (1.0f - centerL) * 0.35f;
-            const float lumaMix = clamp01(lumaStrength * 0.74f * shadowBoost * detailGuard);
-            const float chromaMix = clamp01(chromaStrength * 0.92f * (0.55f + 0.45f * detailGuard));
-            const float outL = lerp(centerL, avgL, lumaMix);
-            const float outCb = lerp(centerCb, avgCb, chromaMix);
-            const float outCr = lerp(centerCr, avgCr, chromaMix);
+            const float detail = local_luma_detail(prev, curr, next, width, x, centerL);
+            const float shadowMask = shadow_mask_for_luma(centerL);
+            const float flatMask = flat_mask_for_detail(detail);
+            const float detailGuard = detail_guard_for_detail(detail, detailProtection);
+            const float lumaMix = clamp01(lumaStrength * (0.56f + 0.30f * shadowMask + 0.28f * flatMask) * detailGuard);
+            const float chromaMix = clamp01(chromaStrength * (0.68f + 0.34f * shadowMask + 0.24f * flatMask) * (0.65f + 0.35f * detailGuard));
+            float outL = lerp(centerL, avgL, lumaMix);
+            float outCb = lerp(centerCb, avgCb, chromaMix);
+            float outCr = lerp(centerCr, avgCr, chromaMix);
+
+            if (chromaStrength > 0.010f) {
+                float blotchCb = centerCb;
+                float blotchCr = centerCr;
+                sparse_chroma_estimate(prev2, prev, curr, next, next2, width, x, centerL, sigma2, blotchCb, blotchCr);
+                const float blotchMix = clamp01(chromaStrength * (0.20f + 0.34f * shadowMask + 0.28f * flatMask) * (0.55f + 0.45f * detailGuard));
+                outCb = lerp(outCb, blotchCb, blotchMix);
+                outCr = lerp(outCr, blotchCr, blotchMix);
+            }
+
+            const float cleanupStrength = clamp01(std::max(lumaStrength * 0.42f, chromaStrength * 0.58f));
+            if (cleanupStrength > 0.010f) {
+                float neighL = centerL;
+                float neighCb = centerCb;
+                float neighCr = centerCr;
+                float neighRange = 1.0f;
+                local_neighbor_estimate_3x3(prev, curr, next, width, x, neighL, neighCb, neighCr, neighRange);
+                const float lumaOutlier = std::fabs(centerL - neighL);
+                const float chromaOutlier = std::max(std::fabs(centerCb - neighCb), std::fabs(centerCr - neighCr));
+                const float isolatedMask = (1.0f - smoothstep(0.055f, 0.145f, neighRange)) * (0.35f + 0.65f * flatMask);
+                const float chromaSpeck = smoothstep(0.070f, 0.180f, chromaOutlier);
+                const float lumaSpeck = smoothstep(0.160f, 0.310f, lumaOutlier) * (0.35f + 0.65f * chromaSpeck);
+                const float highlightGuard = (centerL > neighL && centerL > 0.78f && chromaOutlier < 0.060f) ? 0.25f : 1.0f;
+                const float speckMix = clamp01(cleanupStrength * isolatedMask * std::max(chromaSpeck, lumaSpeck) * highlightGuard);
+                outL = lerp(outL, neighL, speckMix * 0.45f * lumaStrength);
+                outCb = lerp(outCb, neighCb, speckMix * (0.62f + 0.28f * chromaStrength));
+                outCr = lerp(outCr, neighCr, speckMix * (0.62f + 0.28f * chromaStrength));
+            }
+
             const float outB = outL + outCb;
             const float outR = outL + outCr;
             const float outG = (outL - 0.2126f * outR - 0.0722f * outB) / 0.7152f;
@@ -264,12 +436,14 @@ static void apply_edge_aware_noise_reduction_rgba8888(
         }
 
         if (y + 1 < height) {
+            prev2.swap(prev);
             prev.swap(curr);
             curr.swap(next);
+            next.swap(next2);
             if (y + 2 < height) {
-                copy_row(next.data(), base + (y + 2) * stride, stride);
+                copy_row(next2.data(), base + (y + 3 < height ? y + 3 : height - 1) * stride, stride);
             } else {
-                copy_row(next.data(), curr.data(), stride);
+                copy_row(next2.data(), next.data(), stride);
             }
         }
     }
@@ -338,13 +512,17 @@ static void apply_guided_noise_reduction_rgba8888(
     const float detailProtection = clamp01(noiseDetailProtection);
     if ((lumaStrength <= 0.001f && chromaStrength <= 0.001f) || width < 3 || height < 3) return;
 
+    std::vector<uint8_t> prev2(static_cast<size_t>(stride));
     std::vector<uint8_t> prev(static_cast<size_t>(stride));
     std::vector<uint8_t> curr(static_cast<size_t>(stride));
     std::vector<uint8_t> next(static_cast<size_t>(stride));
+    std::vector<uint8_t> next2(static_cast<size_t>(stride));
 
     copy_row(curr.data(), base, stride);
     copy_row(next.data(), base + stride, stride);
+    copy_row(next2.data(), (height > 2) ? (base + stride * 2) : (base + stride), stride);
     copy_row(prev.data(), curr.data(), stride);
+    copy_row(prev2.data(), curr.data(), stride);
 
     const float maxStrength = std::max(lumaStrength, chromaStrength);
     const float lumaEps = 0.0005f + (1.0f - lumaStrength) * 0.0045f;
@@ -353,6 +531,7 @@ static void apply_guided_noise_reduction_rgba8888(
     for (int y = 0; y < height; ++y) {
         auto* outRow = base + y * stride;
         if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
+        if (y + 2 >= height) copy_row(next2.data(), next.data(), stride);
 
         for (int x = 0; x < width; ++x) {
             auto* outPx = outRow + x * 4;
@@ -362,22 +541,47 @@ static void apply_guided_noise_reduction_rgba8888(
             const float centerL = luma_of(centerR, centerG, centerB);
             const float centerCb = centerB - centerL;
             const float centerCr = centerR - centerL;
-            const int lx = std::max(0, x - 1);
-            const int rx = std::min(width - 1, x + 1);
-            const float horiz = std::fabs(luma_at(curr, rx) - luma_at(curr, lx));
-            const float vert = std::fabs(luma_at(next, x) - luma_at(prev, x));
-            const float lap = std::fabs(centerL - ((centerL * 4.0f + luma_at(curr, lx) + luma_at(curr, rx) + luma_at(prev, x) + luma_at(next, x)) / 8.0f));
-            const float detail = std::max(lap, (horiz + vert) * 0.5f);
-            const float detailGuard = 1.0f - detailProtection * smoothstep(0.008f, 0.065f, detail);
+            const float detail = local_luma_detail(prev, curr, next, width, x, centerL);
+            const float shadowMask = shadow_mask_for_luma(centerL);
+            const float flatMask = flat_mask_for_detail(detail);
+            const float detailGuard = detail_guard_for_detail(detail, detailProtection);
             const float guidedL = clamp01(guided_estimate_component(prev, curr, next, width, x, 0, lumaEps));
             const float guidedCb = guided_estimate_component(prev, curr, next, width, x, 1, chromaEps);
             const float guidedCr = guided_estimate_component(prev, curr, next, width, x, 2, chromaEps);
-            const float shadowBoost = 0.72f + (1.0f - centerL) * 0.28f;
-            const float lumaMix = clamp01(lumaStrength * 0.66f * shadowBoost * detailGuard);
-            const float chromaMix = clamp01(chromaStrength * 0.86f * (0.50f + detailGuard * 0.50f));
-            const float outL = lerp(centerL, guidedL, lumaMix);
-            const float outCb = lerp(centerCb, guidedCb, chromaMix);
-            const float outCr = lerp(centerCr, guidedCr, chromaMix);
+            const float lumaMix = clamp01(lumaStrength * (0.50f + 0.26f * shadowMask + 0.36f * flatMask) * detailGuard);
+            const float chromaMix = clamp01(chromaStrength * (0.70f + 0.38f * shadowMask + 0.30f * flatMask) * (0.58f + 0.42f * detailGuard));
+            float outL = lerp(centerL, guidedL, lumaMix);
+            float outCb = lerp(centerCb, guidedCb, chromaMix);
+            float outCr = lerp(centerCr, guidedCr, chromaMix);
+
+            if (chromaStrength > 0.010f) {
+                float blotchCb = centerCb;
+                float blotchCr = centerCr;
+                sparse_chroma_estimate(prev2, prev, curr, next, next2, width, x, centerL, chromaEps * 18.0f, blotchCb, blotchCr);
+                const float blotchMix = clamp01(chromaStrength * (0.18f + 0.36f * shadowMask + 0.34f * flatMask) * (0.48f + 0.52f * detailGuard));
+                outCb = lerp(outCb, blotchCb, blotchMix);
+                outCr = lerp(outCr, blotchCr, blotchMix);
+            }
+
+            const float cleanupStrength = clamp01(std::max(lumaStrength * 0.38f, chromaStrength * 0.54f));
+            if (cleanupStrength > 0.010f) {
+                float neighL = centerL;
+                float neighCb = centerCb;
+                float neighCr = centerCr;
+                float neighRange = 1.0f;
+                local_neighbor_estimate_3x3(prev, curr, next, width, x, neighL, neighCb, neighCr, neighRange);
+                const float lumaOutlier = std::fabs(centerL - neighL);
+                const float chromaOutlier = std::max(std::fabs(centerCb - neighCb), std::fabs(centerCr - neighCr));
+                const float isolatedMask = (1.0f - smoothstep(0.050f, 0.135f, neighRange)) * (0.30f + 0.70f * flatMask);
+                const float chromaSpeck = smoothstep(0.065f, 0.170f, chromaOutlier);
+                const float lumaSpeck = smoothstep(0.175f, 0.330f, lumaOutlier) * (0.30f + 0.70f * chromaSpeck);
+                const float highlightGuard = (centerL > neighL && centerL > 0.78f && chromaOutlier < 0.060f) ? 0.22f : 1.0f;
+                const float speckMix = clamp01(cleanupStrength * isolatedMask * std::max(chromaSpeck, lumaSpeck) * highlightGuard);
+                outL = lerp(outL, neighL, speckMix * 0.38f * lumaStrength);
+                outCb = lerp(outCb, neighCb, speckMix * (0.58f + 0.26f * chromaStrength));
+                outCr = lerp(outCr, neighCr, speckMix * (0.58f + 0.26f * chromaStrength));
+            }
+
             const float outB = outL + outCb;
             const float outR = outL + outCr;
             const float outG = (outL - 0.2126f * outR - 0.0722f * outB) / 0.7152f;
@@ -390,12 +594,14 @@ static void apply_guided_noise_reduction_rgba8888(
         }
 
         if (y + 1 < height) {
+            prev2.swap(prev);
             prev.swap(curr);
             curr.swap(next);
+            next.swap(next2);
             if (y + 2 < height) {
-                copy_row(next.data(), base + (y + 2) * stride, stride);
+                copy_row(next2.data(), base + (y + 3 < height ? y + 3 : height - 1) * stride, stride);
             } else {
-                copy_row(next.data(), curr.data(), stride);
+                copy_row(next2.data(), next.data(), stride);
             }
         }
     }
@@ -599,8 +805,8 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             static_cast<int>(info.width),
             static_cast<int>(info.height),
             static_cast<int>(info.stride),
-            luminanceNoiseReduction * 0.85f,
-            colorNoiseReduction,
+            luminanceNoiseReduction * 0.75f,
+            colorNoiseReduction * 0.90f,
             noiseDetailProtection
         );
     } else {
