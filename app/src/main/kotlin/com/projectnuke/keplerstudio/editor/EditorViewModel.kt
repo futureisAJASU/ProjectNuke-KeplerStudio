@@ -17,13 +17,16 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import java.util.ArrayDeque
+import java.util.Collections
 import java.io.File
 import java.io.FileOutputStream
+import java.util.IdentityHashMap
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -48,7 +51,51 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val redoHistory = ArrayDeque<EditorHistorySnapshot>()
 
     fun updateUiState(transform: (EditorUiState) -> EditorUiState) {
-        _uiState.update(transform)
+        updateUiStateAndRecycleReplaced(transform)
+    }
+
+    private fun updateUiStateAndRecycleReplaced(transform: (EditorUiState) -> EditorUiState) {
+        var previousState: EditorUiState? = null
+        var nextState: EditorUiState? = null
+        _uiState.update { current ->
+            previousState = current
+            transform(current).also { nextState = it }
+        }
+        val previous = previousState ?: return
+        val next = nextState ?: return
+        recycleReplacedLiveBitmaps(previous, next)
+    }
+
+    private fun recycleReplacedLiveBitmaps(previous: EditorUiState, next: EditorUiState) {
+        val retained = identityBitmapSet()
+        next.previewBitmap?.let(retained::add)
+        next.originalPreviewBitmap?.let(retained::add)
+        next.selectionLayers.forEach { retained.add(it.bitmap) }
+
+        val candidates = identityBitmapSet()
+        previous.previewBitmap?.let(candidates::add)
+        previous.originalPreviewBitmap?.let(candidates::add)
+        previous.selectionLayers.forEach { candidates.add(it.bitmap) }
+
+        candidates
+            .filterNot { it in retained }
+            .forEach { recycleBitmapSoon(it) }
+    }
+
+    private fun recycleBitmapSoon(bitmap: Bitmap) {
+        if (bitmap.isRecycled) return
+        viewModelScope.launch {
+            yield()
+            if (!bitmap.isRecycled) bitmap.recycle()
+        }
+    }
+
+    private fun recycleLiveStateBitmapsNow(state: EditorUiState) {
+        val bitmaps = identityBitmapSet()
+        state.previewBitmap?.let(bitmaps::add)
+        state.originalPreviewBitmap?.let(bitmaps::add)
+        state.selectionLayers.forEach { bitmaps.add(it.bitmap) }
+        bitmaps.forEach { if (!it.isRecycled) it.recycle() }
     }
 
     fun recordUserEditForUndo(clearRedo: Boolean = true) {
@@ -57,7 +104,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun persistDraftSnapshot() {
         val saved = saveDraftSnapshot(getApplication(), _uiState.value) ?: return
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 draftSavedAtMillis = saved.savedAtMillis,
                 draftSourcePath = saved.sourcePath
@@ -79,7 +126,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val seed = if (savedFromPrefs.isEmpty()) rebuildSavedExportsFromMediaStore(context) else savedFromPrefs
                 pruneSavedExportsIfNeeded(context, seed, retention)
             }
-            _uiState.update {
+            updateUiStateAndRecycleReplaced {
                 it.copy(
                     savedExports = saved,
                     exportHistoryRetention = retention,
@@ -96,38 +143,42 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun openImage(uri: Uri) {
         renderJob?.cancel()
         clearEditHistory()
-        _uiState.update { it.copy(isBusy = true, message = "이미지를 여는 중입니다") }
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "이미지를 여는 중입니다") }
 
         viewModelScope.launch {
+            var preview: Bitmap? = null
             try {
                 val context = getApplication<Application>()
                 val sourceFile = withContext(Dispatchers.IO) { copyUriToCache(context, uri) }
-                val preview = withContext(Dispatchers.IO) {
+                preview = withContext(Dispatchers.IO) {
                     decodeSampledMutableBitmapWithExif(sourceFile.absolutePath, maxSide = 2048)
                 }
-                Log.i(FLARE_GUARD_AI_TAG, "Opened image with EXIF orientation: ${sourceFile.name} preview=${preview.width}x${preview.height}")
+                val decodedPreview = preview!!
+                Log.i(FLARE_GUARD_AI_TAG, "Opened image with EXIF orientation: ${sourceFile.name} preview=${decodedPreview.width}x${decodedPreview.height}")
 
                 releaseNativeSession()
                 nativeSession = NativePhotoCore.nativeCreateSession(sourceFile.absolutePath)
 
-                _uiState.update {
+                updateUiStateAndRecycleReplaced {
                     val next = it.copy(
                         isBusy = false,
                         sourcePath = sourceFile.absolutePath,
-                        originalPreviewBitmap = preview,
-                        previewBitmap = preview,
+                        originalPreviewBitmap = decodedPreview,
+                        previewBitmap = decodedPreview,
                         params = EditParams(),
                         presetLook = null,
                         canUndo = false,
                         canRedo = false,
                         flareGuardRuntimeStatus = null,
                         revision = it.revision + 1,
-                        message = "원본 캐시가 완료되었습니다: ${preview.width}x${preview.height} preview"
+                        message = "원본 캐시가 완료되었습니다: ${decodedPreview.width}x${decodedPreview.height} preview"
                     )
                     next.withSavedDraft(context)
                 }
+                preview = null
             } catch (t: Throwable) {
-                _uiState.update { it.copy(isBusy = false, message = "이미지를 열지 못했습니다: ${t.message}") }
+                preview?.recycle()
+                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "이미지를 열지 못했습니다: ${t.message}") }
             }
         }
     }
@@ -140,7 +191,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val nextRevision = current.revision + 1
 
         pushUndoSnapshot(clearRedo = true)
-        _uiState.update { it.copy(params = nextParams, revision = nextRevision, isBusy = true, message = "미리보기를 렌더링하는 중입니다") }
+        updateUiStateAndRecycleReplaced { it.copy(params = nextParams, revision = nextRevision, isBusy = true, message = "미리보기를 렌더링하는 중입니다") }
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
             val rendered = withContext(Dispatchers.Default) {
@@ -148,7 +199,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             if (_uiState.value.revision == nextRevision) {
                 val context = getApplication<Application>()
-                _uiState.update {
+                updateUiStateAndRecycleReplaced {
                     val next = it.copy(previewBitmap = rendered, isBusy = false, message = "미리보기 렌더링이 완료되었습니다")
                     next.withSavedDraft(context)
                 }
@@ -162,14 +213,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
-            _uiState.update { it.copy(message = "자동 보정을 적용할 이미지가 없습니다") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정을 적용할 이미지가 없습니다") }
             return
         }
 
         val nextRevision = current.revision + 1
         renderJob?.cancel()
         pushUndoSnapshot(clearRedo = true)
-        _uiState.update { it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다") }
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다") }
 
         renderJob = viewModelScope.launch {
             try {
@@ -179,7 +230,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val context = getApplication<Application>()
-                    _uiState.update {
+                    updateUiStateAndRecycleReplaced {
                         val next = it.copy(
                             params = nextParams,
                             previewBitmap = rendered,
@@ -192,7 +243,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     rendered.recycle()
                 }
             } catch (t: Throwable) {
-                _uiState.update { it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}") }
+                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}") }
             }
         }
     }
@@ -232,7 +283,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
-            _uiState.update {
+            updateUiStateAndRecycleReplaced {
                 it.copy(
                     noiseEngine = nextEngines.noiseEngine,
                     detailEngine = nextEngines.detailEngine,
@@ -245,7 +296,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         val nextRevision = current.revision + 1
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 noiseEngine = nextEngines.noiseEngine,
                 detailEngine = nextEngines.detailEngine,
@@ -262,7 +313,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 renderEditedPreview(basePreview, current.params, nextEngines, nextRevision, current.presetLook)
             }
             if (_uiState.value.revision == nextRevision) {
-                _uiState.update { it.copy(previewBitmap = rendered, isBusy = false, message = message) }
+                updateUiStateAndRecycleReplaced { it.copy(previewBitmap = rendered, isBusy = false, message = message) }
             } else {
                 rendered.recycle()
             }
@@ -275,7 +326,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val context = getApplication<Application>()
             val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(path, maxSide = 2048) }
-            _uiState.update {
+            updateUiStateAndRecycleReplaced {
                 val next = it.copy(
                     originalPreviewBitmap = preview,
                     previewBitmap = preview,
@@ -293,14 +344,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
-            _uiState.update { it.copy(message = "적용할 이미지가 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "적용할 이미지가 없습니다.") }
             return
         }
 
         val nextRevision = current.revision + 1
         renderJob?.cancel()
         pushUndoSnapshot(clearRedo = true)
-        _uiState.update { it.copy(isBusy = true, presetLook = look, revision = nextRevision, message = message) }
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, presetLook = look, revision = nextRevision, message = message) }
 
         renderJob = viewModelScope.launch {
             try {
@@ -309,7 +360,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val context = getApplication<Application>()
-                    _uiState.update {
+                    updateUiStateAndRecycleReplaced {
                         val next = it.copy(
                             params = params,
                             presetLook = look,
@@ -323,14 +374,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     rendered.recycle()
                 }
             } catch (_: Throwable) {
-                _uiState.update { it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.") }
+                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.") }
             }
         }
     }
 
     fun setExportFormat(format: ExportFormat) {
         val context = getApplication<Application>()
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             val next = it.copy(exportFormat = format, message = "파일 형식이 ${format.label}로 설정되었습니다")
             next.withSavedDraft(context)
         }
@@ -338,7 +389,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setExportResolution(resolution: ExportResolution) {
         val context = getApplication<Application>()
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             val next = it.copy(exportResolution = resolution, message = "해상도가 ${resolution.label}로 설정되었습니다")
             next.withSavedDraft(context)
         }
@@ -351,7 +402,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val saved = withContext(Dispatchers.IO) {
                 pruneSavedExportsIfNeeded(context, _uiState.value.savedExports, retention)
             }
-            _uiState.update {
+            updateUiStateAndRecycleReplaced {
                 it.copy(
                     exportHistoryRetention = retention,
                     savedExports = saved,
@@ -365,11 +416,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val state = _uiState.value
         val sourcePath = state.sourcePath
         if (sourcePath == null) {
-            _uiState.update { it.copy(message = "내보낼 원본 이미지가 없습니다") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "내보낼 원본 이미지가 없습니다") }
             return
         }
 
-        _uiState.update { it.copy(isBusy = true, message = "원본 기준으로 내보내는 중입니다") }
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "원본 기준으로 내보내는 중입니다") }
         viewModelScope.launch {
             try {
                 val context = getApplication<Application>()
@@ -408,7 +459,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val savedExports = withContext(Dispatchers.IO) {
                     rememberSavedExport(context, savedItem, state.exportHistoryRetention)
                 }
-                _uiState.update {
+                updateUiStateAndRecycleReplaced {
                     it.copy(
                         isBusy = false,
                         savedExports = savedExports,
@@ -416,7 +467,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             } catch (t: Throwable) {
-                _uiState.update { it.copy(isBusy = false, message = "내보내기에 실패했습니다: ${t.message}") }
+                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "내보내기에 실패했습니다: ${t.message}") }
             }
         }
     }
@@ -424,7 +475,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun clearDraft() {
         val context = getApplication<Application>()
         clearDraftPrefs(context)
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 draftSavedAtMillis = null,
                 draftSourcePath = null,
@@ -436,7 +487,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dismissRecoveryDebugCard() {
-        _uiState.update { it.copy(showRecoveryDebugCard = false) }
+        updateUiStateAndRecycleReplaced { it.copy(showRecoveryDebugCard = false) }
     }
 
     fun cleanupOldTemporarySources() {
@@ -446,7 +497,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val removedCount = withContext(Dispatchers.IO) {
                 cleanupTemporarySourceFiles(context, activeSourcePath = activeSourcePath)
             }
-            _uiState.update {
+            updateUiStateAndRecycleReplaced {
                 it.copy(message = "7일이 지난 임시 원본 캐시를 정리했습니다. 삭제된 파일: ${removedCount}개")
             }
         }
@@ -455,7 +506,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun clearSavedExports() {
         val context = getApplication<Application>()
         clearSavedExportsPrefs(context)
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 savedExports = emptyList(),
                 message = "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다"
@@ -467,7 +518,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val context = getApplication<Application>()
         val next = _uiState.value.savedExports.filterNot { it.uriString == uriString }
         saveSavedExportsToPrefs(context, next)
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 savedExports = next,
                 message = "선택한 내보낸 사진 기록을 삭제했습니다. 갤러리 파일은 삭제되지 않습니다"
@@ -476,13 +527,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateViewport(viewport: ViewportState) {
-        _uiState.update { it.copy(viewport = viewport) }
+        updateUiStateAndRecycleReplaced { it.copy(viewport = viewport) }
         // TODO v0.2: viewport가 scale 임계값 이상이면 ROI 타일 렌더 Job 발행.
     }
 
     fun undoEdit() {
         if (undoHistory.isEmpty()) {
-            _uiState.update { it.copy(message = "되돌릴 편집 기록이 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "되돌릴 편집 기록이 없습니다.") }
             return
         }
         renderJob?.cancel()
@@ -491,14 +542,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "이전 편집 상태를 적용했습니다")
         applyHistorySnapshot(snapshot, message)
         val context = getApplication<Application>()
-        _uiState.update { it.withSavedDraft(context) }
+        updateUiStateAndRecycleReplaced { it.withSavedDraft(context) }
         updateHistoryFlags()
         Log.i(FLARE_GUARD_AI_TAG, "Undo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
     }
 
     fun redoEdit() {
         if (redoHistory.isEmpty()) {
-            _uiState.update { it.copy(message = "다시 실행할 편집 기록이 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "다시 실행할 편집 기록이 없습니다.") }
             return
         }
         renderJob?.cancel()
@@ -508,7 +559,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "다음 편집 상태를 적용했습니다")
         applyHistorySnapshot(snapshot, message)
         val context = getApplication<Application>()
-        _uiState.update { it.withSavedDraft(context) }
+        updateUiStateAndRecycleReplaced { it.withSavedDraft(context) }
         updateHistoryFlags()
         Log.i(FLARE_GUARD_AI_TAG, "Redo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
     }
@@ -517,7 +568,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val current = _uiState.value
         val preview = current.previewBitmap
         if (preview == null) {
-            _uiState.update { it.copy(message = "회전할 이미지가 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "회전할 이미지가 없습니다.") }
             return
         }
         pushUndoSnapshot(clearRedo = true)
@@ -526,7 +577,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val rotatedPreview = rotateBitmap90(preview)
         val rotatedOriginal = if (original != null && original !== preview) rotateBitmap90(original) else rotatedPreview
         val context = getApplication<Application>()
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             val next = it.copy(
                 previewBitmap = rotatedPreview,
                 originalPreviewBitmap = rotatedOriginal,
@@ -589,14 +640,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val current = _uiState.value
         val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
         if (baseOriginal == null) {
-            _uiState.update { it.copy(message = "적용할 이미지가 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "적용할 이미지가 없습니다.") }
             return
         }
 
         pushUndoSnapshot(clearRedo = true)
         val nextRevision = current.revision + 1
         renderJob?.cancel()
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 isBusy = true,
                 revision = nextRevision,
@@ -605,30 +656,40 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         renderJob = viewModelScope.launch {
+            var renderedOriginal: Bitmap? = null
+            var renderedPreview: Bitmap? = null
             try {
-                val renderedOriginal = withContext(Dispatchers.Default) {
+                renderedOriginal = withContext(Dispatchers.Default) {
                     applyNativeSpecialEffectsToCopy(baseOriginal, operations, nextRevision)
                 }
-                val renderedPreview = withContext(Dispatchers.Default) {
-                    renderEditedPreview(renderedOriginal, current.params, current.engineSelection(), nextRevision, current.presetLook)
+                renderedPreview = withContext(Dispatchers.Default) {
+                    renderEditedPreview(renderedOriginal!!, current.params, current.engineSelection(), nextRevision, current.presetLook)
                 }
                 if (_uiState.value.revision == nextRevision) {
-                    _uiState.update {
+                    val adoptedOriginal = renderedOriginal!!
+                    val adoptedPreview = renderedPreview!!
+                    updateUiStateAndRecycleReplaced {
                         val next = it.copy(
-                            originalPreviewBitmap = renderedOriginal,
-                            previewBitmap = renderedPreview,
+                            originalPreviewBitmap = adoptedOriginal,
+                            previewBitmap = adoptedPreview,
                             isBusy = false,
                             message = "$title 적용했습니다. 되돌릴 수 있습니다."
                         )
                         next.withSavedDraft(getApplication())
                     }
+                    renderedOriginal = null
+                    renderedPreview = null
                 } else {
-                    renderedOriginal.recycle()
-                    renderedPreview.recycle()
+                    renderedOriginal?.recycle()
+                    renderedPreview?.recycle()
+                    renderedOriginal = null
+                    renderedPreview = null
                 }
             } catch (t: Throwable) {
+                renderedOriginal?.recycle()
+                renderedPreview?.recycle()
                 Log.e(FLARE_GUARD_AI_TAG, "$title native special effect failed", t)
-                _uiState.update { it.copy(isBusy = false, message = failureMessage) }
+                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = failureMessage) }
             }
         }
     }
@@ -636,7 +697,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val current = _uiState.value
         val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
         if (baseOriginal == null) {
-            _uiState.update { it.copy(message = "번짐 완화를 적용할 이미지가 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화를 적용할 이미지가 없습니다.") }
             return
         }
 
@@ -647,7 +708,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val nextRevision = current.revision + 1
         val appContext = context.applicationContext
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 isBusy = true,
                 revision = nextRevision,
@@ -658,33 +719,44 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         Log.i(FLARE_GUARD_AI_TAG, "Starting FlareGuard preview: mode=$mode source=${baseOriginal.width}x${baseOriginal.height} revision=$nextRevision")
 
         viewModelScope.launch {
+            var resultBitmap: Bitmap? = null
+            var renderedPreview: Bitmap? = null
             try {
                 val result = withContext(Dispatchers.Default) {
                     applyFlareGuardModelOrRuleResultV0(appContext, baseOriginal, mode, allowRuleFallback = true)
                 }
-                val renderedPreview = withContext(Dispatchers.Default) {
-                    renderEditedPreview(result.bitmap, current.params, current.engineSelection(), nextRevision, current.presetLook)
+                resultBitmap = result.bitmap
+                renderedPreview = withContext(Dispatchers.Default) {
+                    renderEditedPreview(resultBitmap!!, current.params, current.engineSelection(), nextRevision, current.presetLook)
                 }
                 if (_uiState.value.revision == nextRevision) {
-                    _uiState.update {
+                    val adoptedOriginal = resultBitmap!!
+                    val adoptedPreview = renderedPreview!!
+                    updateUiStateAndRecycleReplaced {
                         val next = it.copy(
-                            originalPreviewBitmap = result.bitmap,
-                            previewBitmap = renderedPreview,
+                            originalPreviewBitmap = adoptedOriginal,
+                            previewBitmap = adoptedPreview,
                             isBusy = false,
                             message = result.status.uiText,
                             flareGuardRuntimeStatus = result.status.uiText
                         )
                         next.withSavedDraft(getApplication())
                     }
+                    resultBitmap = null
+                    renderedPreview = null
                     Log.i(FLARE_GUARD_AI_TAG, "Finished FlareGuard preview: mode=$mode status=${result.status} output=${result.bitmap.width}x${result.bitmap.height}")
                 } else {
-                    result.bitmap.recycle()
-                    renderedPreview.recycle()
+                    resultBitmap?.recycle()
+                    renderedPreview?.recycle()
+                    resultBitmap = null
+                    renderedPreview = null
                     Log.w(FLARE_GUARD_AI_TAG, "Discarded stale FlareGuard preview: expected=$nextRevision actual=${_uiState.value.revision}")
                 }
             } catch (t: Throwable) {
+                resultBitmap?.recycle()
+                renderedPreview?.recycle()
                 Log.e(FLARE_GUARD_AI_TAG, "FlareGuard preview failed", t)
-                _uiState.update {
+                updateUiStateAndRecycleReplaced {
                     it.copy(
                         isBusy = false,
                         message = "번짐 영역 감지에 실패했습니다.",
@@ -703,7 +775,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val recovery = withContext(Dispatchers.IO) {
             resolveDraftRecovery(context, storedSourcePath)
         }
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 draftSavedAtMillis = draftSavedAt,
                 draftSourcePath = recovery.debugInfo.draftSourcePath,
@@ -714,7 +786,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val sourceFile = recovery.sourceFile
         if (sourceFile == null) {
             val missingDraftMessage = "\uc784\uc2dc \uc800\uc7a5 \uc6d0\ubcf8\uc744 \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4. \uae30\uc874 \uc784\uc2dc \uc800\uc7a5 \ud30c\uc77c\uc774 \uc0ad\uc81c\ub418\uc5b4 \ubcf5\uad6c\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4."
-            _uiState.update { it.copy(message = missingDraftMessage) }
+            updateUiStateAndRecycleReplaced { it.copy(message = missingDraftMessage) }
             return
         }
         val sourcePath = sourceFile.absolutePath
@@ -745,26 +817,30 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             presetColorLookFromJson(prefs.getString(KEY_DRAFT_LOOK, null)?.let(::JSONObject))
         }.getOrNull()
         val engines = _uiState.value.engineSelection()
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 draftSavedAtMillis = draftSavedAt,
                 draftSourcePath = sourcePath
             )
         }
 
-        _uiState.update { it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다") }
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다") }
+        var preview: Bitmap? = null
+        var rendered: Bitmap? = null
         try {
-            val preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048) }
+            preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048) }
             val nextRevision = _uiState.value.revision + 1
-            val rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview, params, engines, nextRevision, presetLook) }
+            rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview!!, params, engines, nextRevision, presetLook) }
             releaseNativeSession()
             nativeSession = NativePhotoCore.nativeCreateSession(sourcePath)
-            _uiState.update {
+            val adoptedPreview = preview!!
+            val adoptedRendered = rendered!!
+            updateUiStateAndRecycleReplaced {
                 it.copy(
                     isBusy = false,
                     sourcePath = sourcePath,
-                    originalPreviewBitmap = preview,
-                    previewBitmap = rendered,
+                    originalPreviewBitmap = adoptedPreview,
+                    previewBitmap = adoptedRendered,
                     params = params,
                     presetLook = presetLook,
                     exportFormat = exportFormat,
@@ -775,8 +851,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     message = "임시저장된 편집을 불러왔습니다"
                 )
             }
+            preview = null
+            rendered = null
         } catch (t: Throwable) {
-            _uiState.update { it.copy(isBusy = false, message = "임시저장을 불러오지 못했습니다: ${t.message}") }
+            preview?.recycle()
+            rendered?.recycle()
+            updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "임시저장을 불러오지 못했습니다: ${t.message}") }
         }
     }
 
@@ -794,7 +874,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun applyHistorySnapshot(snapshot: EditorHistorySnapshot, message: String) {
-        _uiState.update {
+        updateUiStateAndRecycleReplaced {
             it.copy(
                 params = snapshot.params,
                 previewBitmap = snapshot.previewBitmap,
@@ -814,7 +894,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun updateHistoryFlags() {
-        _uiState.update { it.copy(canUndo = undoHistory.isNotEmpty(), canRedo = redoHistory.isNotEmpty()) }
+        updateUiStateAndRecycleReplaced { it.copy(canUndo = undoHistory.isNotEmpty(), canRedo = redoHistory.isNotEmpty()) }
     }
 
     private fun clearEditHistory() {
@@ -833,7 +913,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        renderJob?.cancel()
         releaseNativeSession()
+        recycleLiveStateBitmapsNow(_uiState.value)
+        clearEditHistory()
         super.onCleared()
     }
 }
@@ -944,6 +1027,9 @@ private fun historySignedValue(value: Float): String =
 private fun List<SelectionLayer>.deepCopy(): List<SelectionLayer> = map { layer ->
     layer.copy(bitmap = layer.bitmap.copy(Bitmap.Config.ARGB_8888, true))
 }
+
+private fun identityBitmapSet(): MutableSet<Bitmap> =
+    Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
 
 private fun trimHistory(stack: ArrayDeque<EditorHistorySnapshot>) {
     while (stack.size > EDITOR_HISTORY_MAX) {
@@ -1250,9 +1336,14 @@ private fun renderEditedPreview(
     look: PresetColorLook? = null
 ): Bitmap {
     val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
-    renderBitmapInNative(copy, params, engines, revision, look)
-    applySelectedToneEngine(copy, engines.toneEngine)
-    return copy
+    return try {
+        renderBitmapInNative(copy, params, engines, revision, look)
+        applySelectedToneEngine(copy, engines.toneEngine)
+        copy
+    } catch (t: Throwable) {
+        copy.recycle()
+        throw t
+    }
 }
 
 private data class NativeSpecialEffectOp(
