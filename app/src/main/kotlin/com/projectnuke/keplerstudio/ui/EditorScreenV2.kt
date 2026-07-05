@@ -67,6 +67,10 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
+import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DEHAZE_ENGINES
+import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DETAIL_ENGINES
+import com.projectnuke.keplerstudio.editor.IMPLEMENTED_NOISE_ENGINES
+import com.projectnuke.keplerstudio.editor.IMPLEMENTED_TONE_ENGINES
 import com.projectnuke.keplerstudio.editor.NoiseEngine
 import com.projectnuke.keplerstudio.editor.PresetColorLook
 import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
@@ -687,10 +691,10 @@ private fun V2SettingsScreen(
             }
         }
         V2SettingsCard("엔진 선택") {
-            V2OptionRow("노이즈 감소", NoiseEngine.values().toList(), noiseEngine, { it.label }, onNoiseEngineSelected)
-            V2OptionRow("디테일", DetailEngine.values().toList(), detailEngine, { it.label }, onDetailEngineSelected)
-            V2OptionRow("톤", ToneEngine.values().toList(), toneEngine, { it.label }, onToneEngineSelected)
-            V2OptionRow("디헤이즈", DehazeEngine.values().toList(), hazeEngine, { it.label }, onHazeEngineSelected)
+            V2OptionRow("노이즈 감소", IMPLEMENTED_NOISE_ENGINES, noiseEngine, { it.label }, onNoiseEngineSelected)
+            V2OptionRow("디테일", IMPLEMENTED_DETAIL_ENGINES, detailEngine, { it.label }, onDetailEngineSelected)
+            V2OptionRow("톤", IMPLEMENTED_TONE_ENGINES, toneEngine, { it.label }, onToneEngineSelected)
+            V2OptionRow("디헤이즈", IMPLEMENTED_DEHAZE_ENGINES, hazeEngine, { it.label }, onHazeEngineSelected)
         }
     }
 }

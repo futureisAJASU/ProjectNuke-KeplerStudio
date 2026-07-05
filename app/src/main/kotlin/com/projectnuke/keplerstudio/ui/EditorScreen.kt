@@ -55,6 +55,10 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
+import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DEHAZE_ENGINES
+import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DETAIL_ENGINES
+import com.projectnuke.keplerstudio.editor.IMPLEMENTED_NOISE_ENGINES
+import com.projectnuke.keplerstudio.editor.IMPLEMENTED_TONE_ENGINES
 import com.projectnuke.keplerstudio.editor.NoiseEngine
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ToneEngine
@@ -354,14 +358,14 @@ private fun SettingsScreen(
 
         SettingsCard(title = "보정 엔진") {
             Text(
-                "사진 특성에 맞게 알고리즘을 바꿔 테스트할 수 있습니다. 지원 준비 중인 엔진은 선택값을 저장해 두고, 구현되는 순서대로 활성화됩니다",
+                "현재 구현된 보정 엔진만 선택할 수 있습니다.",
                 color = TextSecondary,
                 style = MaterialTheme.typography.bodySmall
             )
-            OptionRow(title = "노이즈", values = NoiseEngine.values().toList(), selected = noiseEngine, label = { it.label }, onSelected = onNoiseEngineSelected)
-            OptionRow(title = "디테일", values = DetailEngine.values().toList(), selected = detailEngine, label = { it.label }, onSelected = onDetailEngineSelected)
-            OptionRow(title = "톤", values = ToneEngine.values().toList(), selected = toneEngine, label = { it.label }, onSelected = onToneEngineSelected)
-            OptionRow(title = "안개", values = DehazeEngine.values().toList(), selected = hazeEngine, label = { it.label }, onSelected = onHazeEngineSelected)
+            OptionRow(title = "노이즈", values = IMPLEMENTED_NOISE_ENGINES, selected = noiseEngine, label = { it.label }, onSelected = onNoiseEngineSelected)
+            OptionRow(title = "디테일", values = IMPLEMENTED_DETAIL_ENGINES, selected = detailEngine, label = { it.label }, onSelected = onDetailEngineSelected)
+            OptionRow(title = "톤", values = IMPLEMENTED_TONE_ENGINES, selected = toneEngine, label = { it.label }, onSelected = onToneEngineSelected)
+            OptionRow(title = "안개", values = IMPLEMENTED_DEHAZE_ENGINES, selected = hazeEngine, label = { it.label }, onSelected = onHazeEngineSelected)
         }
 
         SettingsCard(title = "내보낸 사진 기록") {

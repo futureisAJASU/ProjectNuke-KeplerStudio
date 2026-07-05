@@ -52,6 +52,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var draftSaveJob: Job? = null
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
+    private var restoreDraftToken: Long = 0L
     private val undoHistory = ArrayDeque<EditorHistorySnapshot>()
     private val redoHistory = ArrayDeque<EditorHistorySnapshot>()
 
@@ -112,7 +113,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val context = getApplication<Application>()
         val state = _uiState.value
         val saved = runBlocking {
-            withContext(Dispatchers.IO) { saveDraftSnapshot(context, state) }
+            withContext(Dispatchers.IO) { saveDraftSnapshotSafely(context, state) }
         } ?: return
         updateUiStateAndRecycleReplaced {
             it.copy(
@@ -140,7 +141,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun persistDraftSnapshotInternal() {
         val context = getApplication<Application>()
         val state = _uiState.value
-        val saved = withContext(Dispatchers.IO) { saveDraftSnapshot(context, state) } ?: return
+        val saved = try {
+            withContext(Dispatchers.IO) { saveDraftSnapshot(context, state) }
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            logDraftSaveFailure(t)
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "\uc784\uc2dc \uc800\uc7a5\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. \ud3b8\uc9d1\uc740 \uacc4\uc18d\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.")
+            }
+            null
+        } ?: return
         updateUiStateAndRecycleReplaced {
             it.copy(
                 draftSavedAtMillis = saved.savedAtMillis,
@@ -179,6 +190,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openImage(uri: Uri) {
         renderJob?.cancel()
+        restoreDraftToken += 1L
         clearEditHistory()
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "이미지를 여는 중입니다") }
 
@@ -337,7 +349,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             detailEngine = detailEngine ?: current.detailEngine,
             toneEngine = toneEngine ?: current.toneEngine,
             hazeEngine = hazeEngine ?: current.hazeEngine
-        )
+        ).coerceImplemented()
         val context = getApplication<Application>()
         saveEngineSelection(context, nextEngines)
 
@@ -786,6 +798,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     renderedOriginal = null
                     renderedPreview = null
                 }
+            } catch (ce: CancellationException) {
+                renderedOriginal?.recycle()
+                renderedPreview?.recycle()
+                throw ce
             } catch (t: Throwable) {
                 renderedOriginal?.recycle()
                 renderedPreview?.recycle()
@@ -876,12 +892,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
 
     private suspend fun restoreDraftIfAvailable(context: Context) {
+        val restoreToken = ++restoreDraftToken
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
         val storedSourcePath = prefs.getString(KEY_DRAFT_SOURCE, null) ?: return
         val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
-        val recovery = withContext(Dispatchers.IO) {
-            resolveDraftRecovery(context, storedSourcePath)
+        val recovery = try {
+            withContext(Dispatchers.IO) {
+                resolveDraftRecovery(context, storedSourcePath)
+            }
+        } catch (ce: CancellationException) {
+            throw ce
         }
+        if (restoreToken != restoreDraftToken) return
         updateUiStateAndRecycleReplaced {
             it.copy(
                 draftSavedAtMillis = draftSavedAt,
@@ -938,8 +960,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048) }
             val nextRevision = _uiState.value.revision + 1
             rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview!!, params, engines, nextRevision, presetLook) }
+            if (restoreToken != restoreDraftToken) {
+                preview?.recycle()
+                rendered?.recycle()
+                preview = null
+                rendered = null
+                return
+            }
             releaseNativeSession()
             nativeSession = NativePhotoCore.nativeCreateSession(sourcePath)
+            if (restoreToken != restoreDraftToken) {
+                preview?.recycle()
+                rendered?.recycle()
+                preview = null
+                rendered = null
+                releaseNativeSession()
+                return
+            }
             val adoptedPreview = preview!!
             val adoptedRendered = rendered!!
             updateUiStateAndRecycleReplaced {
@@ -1368,6 +1405,21 @@ private fun persistDraftSourceFile(context: Context, sourcePath: String): File? 
     return draftSource
 }
 
+private fun persistDraftSourceFileIfNeeded(context: Context, sourcePath: String): DraftSourceResult? {
+    val source = File(sourcePath).takeIf { it.isFile } ?: return null
+    val draftSource = persistentDraftSourceFile(context)
+    if (source.absolutePath == draftSource.absolutePath) {
+        return DraftSourceResult(draftSource, changed = false)
+    }
+    val currentDraftIsFresh = draftSource.isFile &&
+        draftSource.length() == source.length() &&
+        draftSource.lastModified() >= source.lastModified()
+    if (currentDraftIsFresh) {
+        return DraftSourceResult(draftSource, changed = false)
+    }
+    return persistDraftSourceFile(context, source.absolutePath)?.let { DraftSourceResult(it, changed = true) }
+}
+
 private fun persistDraftBitmapFile(context: Context, bitmap: Bitmap): File? {
     val draftSource = persistentDraftSourceFile(context)
     draftSource.parentFile?.mkdirs()
@@ -1391,6 +1443,10 @@ private fun saveDraftThumbnailFile(context: Context, source: File) {
             thumbnail.recycle()
         }
     }
+}
+
+private fun logDraftSaveFailure(t: Throwable) {
+    Log.w(FLARE_GUARD_AI_TAG, "Draft autosave failed", t)
 }
 
 private fun persistentDraftSourceFile(context: Context): File =
@@ -1582,8 +1638,8 @@ private fun renderBitmapInNative(
     engines: EngineSelection,
     revision: Int,
     look: PresetColorLook? = null
-): Int =
-    NativePhotoCore.nativeRenderPreviewInPlace(
+): Int {
+    val result = NativePhotoCore.nativeRenderPreviewInPlace(
         bitmap,
         params.exposure,
         params.contrast,
@@ -1609,6 +1665,11 @@ private fun renderBitmapInNative(
         revision,
         look
     )
+    if (result < 0) {
+        throw IllegalStateException("native render failed: code=$result")
+    }
+    return result
+}
 
 private fun applySelectedToneEngine(bitmap: Bitmap, toneEngine: ToneEngine) {
     if (toneEngine == ToneEngine.Clahe) {
@@ -1841,7 +1902,7 @@ private fun writeHeifToUri(context: Context, uri: Uri, bitmap: Bitmap) {
 }
 
 private fun EditorUiState.withSavedDraft(context: Context): EditorUiState {
-    val saved = saveDraftSnapshot(context, this) ?: return this
+    val saved = saveDraftSnapshotSafely(context, this) ?: return this
     return copy(
         draftSavedAtMillis = saved.savedAtMillis,
         draftSourcePath = saved.sourcePath
@@ -1853,17 +1914,30 @@ private data class DraftSaveResult(
     val savedAtMillis: Long
 )
 
+private data class DraftSourceResult(
+    val file: File,
+    val changed: Boolean
+)
+
+private fun saveDraftSnapshotSafely(context: Context, state: EditorUiState): DraftSaveResult? =
+    try {
+        saveDraftSnapshot(context, state)
+    } catch (t: Throwable) {
+        logDraftSaveFailure(t)
+        null
+    }
+
 private fun saveDraftSnapshot(context: Context, state: EditorUiState): DraftSaveResult? {
     val draftSource = when {
-        !state.baseBitmapDirty && state.sourcePath != null -> persistDraftSourceFile(context, state.sourcePath)
-        state.originalPreviewBitmap != null -> persistDraftBitmapFile(context, state.originalPreviewBitmap)
-        state.previewBitmap != null -> persistDraftBitmapFile(context, state.previewBitmap)
+        !state.baseBitmapDirty && state.sourcePath != null -> persistDraftSourceFileIfNeeded(context, state.sourcePath)
+        state.originalPreviewBitmap != null -> persistDraftBitmapFile(context, state.originalPreviewBitmap)?.let { DraftSourceResult(it, changed = true) }
+        state.previewBitmap != null -> persistDraftBitmapFile(context, state.previewBitmap)?.let { DraftSourceResult(it, changed = true) }
         else -> null
     } ?: return null
-    saveDraftThumbnailFile(context, draftSource)
+    if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
     val savedAt = System.currentTimeMillis()
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
-        .putString(KEY_DRAFT_SOURCE, draftSource.absolutePath)
+        .putString(KEY_DRAFT_SOURCE, draftSource.file.absolutePath)
         .putFloat(KEY_DRAFT_EXPOSURE, state.params.exposure)
         .putFloat(KEY_DRAFT_CONTRAST, state.params.contrast)
         .putFloat(KEY_DRAFT_SHADOWS, state.params.shadows)
@@ -1886,7 +1960,7 @@ private fun saveDraftSnapshot(context: Context, state: EditorUiState): DraftSave
         .putString(KEY_DRAFT_LOOK, presetColorLookToJson(state.presetLook)?.toString())
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
         .apply()
-    return DraftSaveResult(draftSource.absolutePath, savedAt)
+    return DraftSaveResult(draftSource.file.absolutePath, savedAt)
 }
 
 private fun clearDraftPrefs(context: Context) {
@@ -2066,8 +2140,15 @@ private fun loadEngineSelection(context: Context): EngineSelection {
         detailEngine = enumValueOrDefault(prefs.getString(KEY_DETAIL_ENGINE, null), DetailEngine.MaskedUnsharp),
         toneEngine = enumValueOrDefault(prefs.getString(KEY_TONE_ENGINE, null), ToneEngine.HistogramAuto),
         hazeEngine = enumValueOrDefault(prefs.getString(KEY_HAZE_ENGINE, null), DehazeEngine.FastContrast)
-    )
+    ).coerceImplemented()
 }
+
+private fun EngineSelection.coerceImplemented(): EngineSelection = copy(
+    noiseEngine = noiseEngine.takeIf { it in IMPLEMENTED_NOISE_ENGINES } ?: NoiseEngine.FastEdgeAware,
+    detailEngine = detailEngine.takeIf { it in IMPLEMENTED_DETAIL_ENGINES } ?: DetailEngine.MaskedUnsharp,
+    toneEngine = toneEngine.takeIf { it in IMPLEMENTED_TONE_ENGINES } ?: ToneEngine.HistogramAuto,
+    hazeEngine = hazeEngine.takeIf { it in IMPLEMENTED_DEHAZE_ENGINES } ?: DehazeEngine.FastContrast
+)
 
 private fun encodeSavedExport(item: SavedExport): String = listOf(
     item.displayName,
@@ -2128,3 +2209,11 @@ private const val KEY_DRAFT_FORMAT = "draft_format"
 private const val KEY_DRAFT_RESOLUTION = "draft_resolution"
 private const val KEY_DRAFT_LOOK = "draft_look"
 private const val KEY_DRAFT_SAVED_AT = "draft_saved_at"
+internal val IMPLEMENTED_NOISE_ENGINES = listOf(
+    NoiseEngine.FastEdgeAware,
+    NoiseEngine.GuidedFilter,
+    NoiseEngine.NonLocalMeansLite
+)
+internal val IMPLEMENTED_DETAIL_ENGINES = listOf(DetailEngine.MaskedUnsharp)
+internal val IMPLEMENTED_TONE_ENGINES = listOf(ToneEngine.HistogramAuto, ToneEngine.Clahe)
+internal val IMPLEMENTED_DEHAZE_ENGINES = listOf(DehazeEngine.FastContrast)
