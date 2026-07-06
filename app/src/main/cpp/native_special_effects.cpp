@@ -115,38 +115,65 @@ static void apply_small_spot_cleanup(uint8_t* base, int width, int height, int s
     if (s <= 0.001f || width < 3 || height < 3) return;
     std::vector<uint8_t> src(static_cast<size_t>(stride) * static_cast<size_t>(height));
     std::copy(base, base + static_cast<size_t>(stride) * static_cast<size_t>(height), src.data());
-    for (int y = 1; y < height - 1; ++y) {
+    for (int y = 0; y < height; ++y) {
         auto* outRow = base + y * stride;
-        for (int x = 1; x < width - 1; ++x) {
+        for (int x = 0; x < width; ++x) {
             const auto* center = src.data() + y * stride + x * 4;
             float cr = center[0] / 255.0f;
             float cg = center[1] / 255.0f;
             float cb = center[2] / 255.0f;
             const float cy = luma(cr, cg, cb);
-            float avg[3] = {0.0f, 0.0f, 0.0f};
-            float avgY = 0.0f;
-            int count = 0;
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
+            float sum[3] = {0.0f, 0.0f, 0.0f};
+            float sumY = 0.0f;
+            float sumW = 0.0f;
+            float rangeSumY = 0.0f;
+            float rangeSumY2 = 0.0f;
+            float rangeSumW = 0.0f;
+            float minY = 1.0f;
+            float maxY = 0.0f;
+            for (int dy = -2; dy <= 2; ++dy) {
+                const int yy = std::min(height - 1, std::max(0, y + dy));
+                for (int dx = -2; dx <= 2; ++dx) {
                     if (dx == 0 && dy == 0) continue;
-                    const auto* p = src.data() + (y + dy) * stride + (x + dx) * 4;
+                    const int xx = std::min(width - 1, std::max(0, x + dx));
+                    const auto* p = src.data() + yy * stride + xx * 4;
                     const float r = p[0] / 255.0f;
                     const float g = p[1] / 255.0f;
                     const float b = p[2] / 255.0f;
-                    avg[0] += r;
-                    avg[1] += g;
-                    avg[2] += b;
-                    avgY += luma(r, g, b);
-                    ++count;
+                    const float py = luma(r, g, b);
+                    const float diff = py - cy;
+                    const float spatial = 1.0f / (1.0f + static_cast<float>(std::abs(dx) + std::abs(dy)));
+                    const float range = 0.08f + 0.92f * std::exp(-(diff * diff) / 0.020f);
+                    const float w = spatial * range;
+                    sum[0] += r * w;
+                    sum[1] += g * w;
+                    sum[2] += b * w;
+                    sumY += py * w;
+                    sumW += w;
+                    rangeSumY += py * w;
+                    rangeSumY2 += py * py * w;
+                    rangeSumW += w;
+                    minY = std::min(minY, py);
+                    maxY = std::max(maxY, py);
                 }
             }
-            const float inv = 1.0f / static_cast<float>(count);
-            avg[0] *= inv;
-            avg[1] *= inv;
-            avg[2] *= inv;
-            avgY *= inv;
-            const float isolated = smoothstep(0.09f, 0.24f, std::fabs(cy - avgY));
-            const float mix = isolated * s * 0.86f;
+            if (sumW <= 0.0001f || rangeSumW <= 0.0001f) continue;
+            const float inv = 1.0f / sumW;
+            const float avg[3] = { sum[0] * inv, sum[1] * inv, sum[2] * inv };
+            const float avgY = sumY * inv;
+            const float rangeMean = rangeSumY / rangeSumW;
+            const float variance = std::max(0.0f, rangeSumY2 / rangeSumW - rangeMean * rangeMean);
+            const float localRange = std::max((maxY - minY) * 0.65f, std::sqrt(variance) * 2.35f);
+            const float chromaOutlier = std::max(
+                std::fabs((cr - cy) - (avg[0] - avgY)),
+                std::fabs((cb - cy) - (avg[2] - avgY))
+            );
+            const float isolated = std::max(
+                smoothstep(0.10f, 0.26f, std::fabs(cy - avgY)),
+                smoothstep(0.08f, 0.22f, chromaOutlier)
+            );
+            const float detailGuard = 1.0f - smoothstep(0.055f, 0.180f, localRange);
+            const float mix = isolated * detailGuard * s * 0.72f;
             auto* out = outRow + x * 4;
             out[0] = to_u8(cr + (avg[0] - cr) * mix);
             out[1] = to_u8(cg + (avg[1] - cg) * mix);

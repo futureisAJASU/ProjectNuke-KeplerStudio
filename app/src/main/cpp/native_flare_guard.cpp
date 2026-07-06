@@ -80,9 +80,25 @@ static int flare_luma_scale_for_size(int width, int height) {
 }
 
 static inline float sample_local_max(const std::vector<float>& localMax, int scaledWidth, int scaledHeight, int scale, int x, int y) {
-    const int sx = std::min(scaledWidth - 1, std::max(0, x / std::max(1, scale)));
-    const int sy = std::min(scaledHeight - 1, std::max(0, y / std::max(1, scale)));
-    return localMax[static_cast<size_t>(sy) * scaledWidth + sx];
+    const int safeScale = std::max(1, scale);
+    if (safeScale == 1) {
+        const int sx = std::min(scaledWidth - 1, std::max(0, x));
+        const int sy = std::min(scaledHeight - 1, std::max(0, y));
+        return localMax[static_cast<size_t>(sy) * scaledWidth + sx];
+    }
+    const float fx = std::max(0.0f, static_cast<float>(x) / static_cast<float>(safeScale));
+    const float fy = std::max(0.0f, static_cast<float>(y) / static_cast<float>(safeScale));
+    const int x0 = std::min(scaledWidth - 1, static_cast<int>(std::floor(fx)));
+    const int y0 = std::min(scaledHeight - 1, static_cast<int>(std::floor(fy)));
+    const int x1 = std::min(scaledWidth - 1, x0 + 1);
+    const int y1 = std::min(scaledHeight - 1, y0 + 1);
+    const float tx = clamp01(fx - static_cast<float>(x0));
+    const float ty = clamp01(fy - static_cast<float>(y0));
+    const float a = localMax[static_cast<size_t>(y0) * scaledWidth + x0];
+    const float b = localMax[static_cast<size_t>(y0) * scaledWidth + x1];
+    const float c = localMax[static_cast<size_t>(y1) * scaledWidth + x0];
+    const float d = localMax[static_cast<size_t>(y1) * scaledWidth + x1];
+    return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * ty;
 }
 
 static std::vector<float> build_local_max_plane(

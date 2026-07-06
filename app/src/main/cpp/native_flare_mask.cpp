@@ -28,29 +28,46 @@ static void box_blur_u8(std::vector<uint8_t>& data, int width, int height, int r
     std::vector<uint8_t> tmp(data.size());
     for (int pass = 0; pass < passes; ++pass) {
         for (int y = 0; y < height; ++y) {
+            const size_t rowStart = static_cast<size_t>(y) * width;
+            int left = 0;
+            int right = std::min(width - 1, radius);
+            int sum = 0;
+            for (int xx = left; xx <= right; ++xx) {
+                sum += data[rowStart + xx];
+            }
             for (int x = 0; x < width; ++x) {
-                int sum = 0;
-                int count = 0;
-                const int left = std::max(0, x - radius);
-                const int right = std::min(width - 1, x + radius);
-                for (int xx = left; xx <= right; ++xx) {
-                    sum += data[static_cast<size_t>(y) * width + xx];
-                    ++count;
+                tmp[rowStart + x] = static_cast<uint8_t>(sum / std::max(1, right - left + 1));
+                const int nextLeft = std::max(0, x + 1 - radius);
+                const int nextRight = std::min(width - 1, x + 1 + radius);
+                while (left < nextLeft) {
+                    sum -= data[rowStart + left];
+                    ++left;
                 }
-                tmp[static_cast<size_t>(y) * width + x] = static_cast<uint8_t>(sum / std::max(1, count));
+                while (right < nextRight) {
+                    ++right;
+                    sum += data[rowStart + right];
+                }
             }
         }
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                int sum = 0;
-                int count = 0;
-                const int top = std::max(0, y - radius);
-                const int bottom = std::min(height - 1, y + radius);
-                for (int yy = top; yy <= bottom; ++yy) {
-                    sum += tmp[static_cast<size_t>(yy) * width + x];
-                    ++count;
+        for (int x = 0; x < width; ++x) {
+            int top = 0;
+            int bottom = std::min(height - 1, radius);
+            int sum = 0;
+            for (int yy = top; yy <= bottom; ++yy) {
+                sum += tmp[static_cast<size_t>(yy) * width + x];
+            }
+            for (int y = 0; y < height; ++y) {
+                data[static_cast<size_t>(y) * width + x] = static_cast<uint8_t>(sum / std::max(1, bottom - top + 1));
+                const int nextTop = std::max(0, y + 1 - radius);
+                const int nextBottom = std::min(height - 1, y + 1 + radius);
+                while (top < nextTop) {
+                    sum -= tmp[static_cast<size_t>(top) * width + x];
+                    ++top;
                 }
-                data[static_cast<size_t>(y) * width + x] = static_cast<uint8_t>(sum / std::max(1, count));
+                while (bottom < nextBottom) {
+                    ++bottom;
+                    sum += tmp[static_cast<size_t>(bottom) * width + x];
+                }
             }
         }
     }
