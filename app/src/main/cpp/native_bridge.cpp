@@ -108,6 +108,7 @@ static inline float chroma_cr_at(const std::vector<uint8_t>& row, int x) {
     return r - luma_of(r, g, b);
 }
 
+// Sparse 5x5 chroma cleanup targets color blotches without broad desaturation.
 static void sparse_chroma_estimate(
     const std::vector<uint8_t>& prev2,
     const std::vector<uint8_t>& prev,
@@ -154,45 +155,55 @@ static void sparse_chroma_estimate(
     outCr = sumCr * invW;
 }
 
-static void local_neighbor_estimate_3x3(
+static void local_neighbor_estimate_adaptive_5x5(
+    const std::vector<uint8_t>& prev2,
     const std::vector<uint8_t>& prev,
     const std::vector<uint8_t>& curr,
     const std::vector<uint8_t>& next,
+    const std::vector<uint8_t>& next2,
     int width,
     int x,
+    float centerL,
     float& outL,
     float& outCb,
     float& outCr,
     float& outRange
 ) {
-    const std::vector<uint8_t>* rows[3] = { &prev, &curr, &next };
+    const std::vector<uint8_t>* rows[5] = { &prev2, &prev, &curr, &next, &next2 };
     float sumL = 0.0f;
     float sumCb = 0.0f;
     float sumCr = 0.0f;
+    float sumL2 = 0.0f;
+    float sumW = 0.0f;
     float minL = 1.0f;
     float maxL = 0.0f;
-    float count = 0.0f;
 
-    for (int dy = -1; dy <= 1; ++dy) {
-        const auto& row = *rows[dy + 1];
-        for (int dx = -1; dx <= 1; ++dx) {
-            if (dx == 0 && dy == 0) continue;
+    for (int dy = -2; dy <= 2; ++dy) {
+        const auto& row = *rows[dy + 2];
+        for (int dx = -2; dx <= 2; ++dx) {
             const int nx = std::min(width - 1, std::max(0, x + dx));
             const float nl = luma_at(row, nx);
-            sumL += nl;
-            sumCb += chroma_cb_at(row, nx);
-            sumCr += chroma_cr_at(row, nx);
+            const float diff = nl - centerL;
+            const float range = std::exp(-(diff * diff) / 0.0180f);
+            const float distance = static_cast<float>(std::abs(dx) + std::abs(dy));
+            const float spatial = (dx == 0 && dy == 0) ? 0.035f : (1.0f / (1.0f + distance));
+            const float w = spatial * range;
+            sumL += nl * w;
+            sumCb += chroma_cb_at(row, nx) * w;
+            sumCr += chroma_cr_at(row, nx) * w;
+            sumL2 += nl * nl * w;
+            sumW += w;
             minL = std::min(minL, nl);
             maxL = std::max(maxL, nl);
-            count += 1.0f;
         }
     }
 
-    const float invCount = count > 0.0f ? (1.0f / count) : 1.0f;
-    outL = sumL * invCount;
-    outCb = sumCb * invCount;
-    outCr = sumCr * invCount;
-    outRange = maxL - minL;
+    const float invW = sumW > 0.0001f ? (1.0f / sumW) : 1.0f;
+    outL = sumL * invW;
+    outCb = sumCb * invW;
+    outCr = sumCr * invW;
+    const float variance = std::max(0.0f, sumL2 * invW - outL * outL);
+    outRange = std::max((maxL - minL) * 0.65f, std::sqrt(variance) * 2.35f);
 }
 
 static void copy_row(uint8_t* dst, const uint8_t* src, int stride) {
@@ -414,7 +425,8 @@ static void apply_edge_aware_noise_reduction_rgba8888(
                 float neighCb = centerCb;
                 float neighCr = centerCr;
                 float neighRange = 1.0f;
-                local_neighbor_estimate_3x3(prev, curr, next, width, x, neighL, neighCb, neighCr, neighRange);
+                // 5x5 cleanup targets isolated speckles while range weighting protects edges.
+                local_neighbor_estimate_adaptive_5x5(prev2, prev, curr, next, next2, width, x, centerL, neighL, neighCb, neighCr, neighRange);
                 const float lumaOutlier = std::fabs(centerL - neighL);
                 const float chromaOutlier = std::max(std::fabs(centerCb - neighCb), std::fabs(centerCr - neighCr));
                 const float isolatedMask = (1.0f - smoothstep(0.055f, 0.145f, neighRange)) * (0.35f + 0.65f * flatMask);
@@ -571,7 +583,8 @@ static void apply_guided_noise_reduction_rgba8888(
                 float neighCb = centerCb;
                 float neighCr = centerCr;
                 float neighRange = 1.0f;
-                local_neighbor_estimate_3x3(prev, curr, next, width, x, neighL, neighCb, neighCr, neighRange);
+                // 5x5 cleanup targets isolated speckles while range weighting protects edges.
+                local_neighbor_estimate_adaptive_5x5(prev2, prev, curr, next, next2, width, x, centerL, neighL, neighCb, neighCr, neighRange);
                 const float lumaOutlier = std::fabs(centerL - neighL);
                 const float chromaOutlier = std::max(std::fabs(centerCb - neighCb), std::fabs(centerCr - neighCr));
                 const float isolatedMask = (1.0f - smoothstep(0.045f, 0.120f, neighRange)) * (0.36f + 0.64f * flatMask) * (0.72f + 0.28f * shadowMask);
@@ -804,7 +817,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         );
     } else if (noiseEngine == 2) {
         // Kotlin-side NonLocalMeansLite maps to a lightweight approximation here:
-        // edge-aware cleanup followed by guided 3x3 refinement, not a full NLM search.
+        // edge-aware/guided refinement plus 5x5 speckle and chroma cleanup, not a full NLM search.
         apply_edge_aware_noise_reduction_rgba8888(
             bytes,
             width,
