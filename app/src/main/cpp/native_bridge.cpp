@@ -2,12 +2,14 @@
 #include <android/bitmap.h>
 #include <android/log.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 #define LOG_TAG "KeplerPhotoCore"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
@@ -548,8 +550,8 @@ static void apply_guided_noise_reduction_rgba8888(
             const float guidedL = clamp01(guided_estimate_component(prev, curr, next, width, x, 0, lumaEps));
             const float guidedCb = guided_estimate_component(prev, curr, next, width, x, 1, chromaEps);
             const float guidedCr = guided_estimate_component(prev, curr, next, width, x, 2, chromaEps);
-            const float lumaMix = clamp01(lumaStrength * (0.50f + 0.26f * shadowMask + 0.36f * flatMask) * detailGuard);
-            const float chromaMix = clamp01(chromaStrength * (0.70f + 0.38f * shadowMask + 0.30f * flatMask) * (0.58f + 0.42f * detailGuard));
+            const float lumaMix = clamp01(lumaStrength * (0.46f + 0.22f * shadowMask + 0.28f * flatMask) * (0.88f + 0.12f * detailGuard));
+            const float chromaMix = clamp01(chromaStrength * (0.76f + 0.48f * shadowMask + 0.36f * flatMask) * (0.54f + 0.46f * detailGuard));
             float outL = lerp(centerL, guidedL, lumaMix);
             float outCb = lerp(centerCb, guidedCb, chromaMix);
             float outCr = lerp(centerCr, guidedCr, chromaMix);
@@ -558,12 +560,12 @@ static void apply_guided_noise_reduction_rgba8888(
                 float blotchCb = centerCb;
                 float blotchCr = centerCr;
                 sparse_chroma_estimate(prev2, prev, curr, next, next2, width, x, centerL, chromaEps * 18.0f, blotchCb, blotchCr);
-                const float blotchMix = clamp01(chromaStrength * (0.18f + 0.36f * shadowMask + 0.34f * flatMask) * (0.48f + 0.52f * detailGuard));
+                const float blotchMix = clamp01(chromaStrength * (0.24f + 0.46f * shadowMask + 0.42f * flatMask) * (0.46f + 0.54f * detailGuard));
                 outCb = lerp(outCb, blotchCb, blotchMix);
                 outCr = lerp(outCr, blotchCr, blotchMix);
             }
 
-            const float cleanupStrength = clamp01(std::max(lumaStrength * 0.38f, chromaStrength * 0.54f));
+            const float cleanupStrength = clamp01(std::max(lumaStrength * 0.34f, chromaStrength * 0.62f));
             if (cleanupStrength > 0.010f) {
                 float neighL = centerL;
                 float neighCb = centerCb;
@@ -572,14 +574,14 @@ static void apply_guided_noise_reduction_rgba8888(
                 local_neighbor_estimate_3x3(prev, curr, next, width, x, neighL, neighCb, neighCr, neighRange);
                 const float lumaOutlier = std::fabs(centerL - neighL);
                 const float chromaOutlier = std::max(std::fabs(centerCb - neighCb), std::fabs(centerCr - neighCr));
-                const float isolatedMask = (1.0f - smoothstep(0.050f, 0.135f, neighRange)) * (0.30f + 0.70f * flatMask);
-                const float chromaSpeck = smoothstep(0.065f, 0.170f, chromaOutlier);
-                const float lumaSpeck = smoothstep(0.175f, 0.330f, lumaOutlier) * (0.30f + 0.70f * chromaSpeck);
+                const float isolatedMask = (1.0f - smoothstep(0.045f, 0.120f, neighRange)) * (0.36f + 0.64f * flatMask) * (0.72f + 0.28f * shadowMask);
+                const float chromaSpeck = smoothstep(0.055f, 0.150f, chromaOutlier);
+                const float lumaSpeck = smoothstep(0.190f, 0.345f, lumaOutlier) * (0.24f + 0.76f * chromaSpeck);
                 const float highlightGuard = (centerL > neighL && centerL > 0.78f && chromaOutlier < 0.060f) ? 0.22f : 1.0f;
                 const float speckMix = clamp01(cleanupStrength * isolatedMask * std::max(chromaSpeck, lumaSpeck) * highlightGuard);
-                outL = lerp(outL, neighL, speckMix * 0.38f * lumaStrength);
-                outCb = lerp(outCb, neighCb, speckMix * (0.58f + 0.26f * chromaStrength));
-                outCr = lerp(outCr, neighCr, speckMix * (0.58f + 0.26f * chromaStrength));
+                outL = lerp(outL, neighL, speckMix * 0.30f * lumaStrength);
+                outCb = lerp(outCb, neighCb, speckMix * (0.68f + 0.24f * chromaStrength));
+                outCr = lerp(outCr, neighCr, speckMix * (0.68f + 0.24f * chromaStrength));
             }
 
             const float outB = outL + outCb;
@@ -645,10 +647,11 @@ static void apply_sharpness_rgba8888(
                 luma_at(next, x)
             ) / 8.0f;
             const float detail = std::fabs(centerL - blurL);
-            const float textureMask = smoothstep(0.010f + noiseReduction * 0.020f, 0.070f + noiseReduction * 0.025f, detail);
-            const float shadowMask = smoothstep(0.045f, 0.28f, centerL);
+            const float textureMask = smoothstep(0.012f + noiseReduction * 0.028f, 0.075f + noiseReduction * 0.032f, detail);
+            const float shadowMask = smoothstep(0.080f, 0.34f, centerL);
+            const float flatShadowGuard = 1.0f - (1.0f - shadowMask) * (1.0f - textureMask) * (0.55f + 0.35f * clamp01(noiseReduction));
             const float highlightGuard = 1.0f - 0.50f * smoothstep(0.90f, 1.0f, centerL);
-            const float amount = baseAmount * textureMask * shadowMask * highlightGuard;
+            const float amount = baseAmount * textureMask * flatShadowGuard * highlightGuard;
 
             for (int c = 0; c < 3; ++c) {
                 const float center = channel_at(curr, x, c);
@@ -659,7 +662,7 @@ static void apply_sharpness_rgba8888(
                     channel_at(prev, x, c) +
                     channel_at(next, x, c)
                 ) / 8.0f;
-                const float delta = clampf((center - blur) * amount, -0.105f, 0.105f);
+                const float delta = clampf((center - blur) * amount, -0.080f, 0.080f);
                 outPx[c] = to_u8(center + delta);
             }
             outPx[3] = alpha;
@@ -741,6 +744,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     (void)detailEngine;
     (void)toneEngine;
     (void)hazeEngine;
+    (void)noiseReduction;
 
     AndroidBitmapInfo info{};
     if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
@@ -760,11 +764,17 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     }
 
     auto* bytes = static_cast<uint8_t*>(pixels);
+    const int width = static_cast<int>(info.width);
+    const int height = static_cast<int>(info.height);
+    const int stride = static_cast<int>(info.stride);
+    const auto totalStart = std::chrono::steady_clock::now();
+
+    const auto toneStart = std::chrono::steady_clock::now();
     apply_adjustment_rgba8888(
         bytes,
-        static_cast<int>(info.width),
-        static_cast<int>(info.height),
-        static_cast<int>(info.stride),
+        width,
+        height,
+        stride,
         exposure,
         contrast,
         shadows,
@@ -779,32 +789,36 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         dehaze,
         colorNoiseReduction
     );
+    const auto toneEnd = std::chrono::steady_clock::now();
 
+    const auto denoiseStart = std::chrono::steady_clock::now();
     if (noiseEngine == 1) {
         apply_guided_noise_reduction_rgba8888(
             bytes,
-            static_cast<int>(info.width),
-            static_cast<int>(info.height),
-            static_cast<int>(info.stride),
+            width,
+            height,
+            stride,
             luminanceNoiseReduction,
             colorNoiseReduction,
             noiseDetailProtection
         );
     } else if (noiseEngine == 2) {
+        // Kotlin-side NonLocalMeansLite maps to a lightweight approximation here:
+        // edge-aware cleanup followed by guided 3x3 refinement, not a full NLM search.
         apply_edge_aware_noise_reduction_rgba8888(
             bytes,
-            static_cast<int>(info.width),
-            static_cast<int>(info.height),
-            static_cast<int>(info.stride),
+            width,
+            height,
+            stride,
             luminanceNoiseReduction * 0.70f,
             colorNoiseReduction * 0.80f,
             noiseDetailProtection
         );
         apply_guided_noise_reduction_rgba8888(
             bytes,
-            static_cast<int>(info.width),
-            static_cast<int>(info.height),
-            static_cast<int>(info.stride),
+            width,
+            height,
+            stride,
             luminanceNoiseReduction * 0.75f,
             colorNoiseReduction * 0.90f,
             noiseDetailProtection
@@ -812,22 +826,38 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     } else {
         apply_edge_aware_noise_reduction_rgba8888(
             bytes,
-            static_cast<int>(info.width),
-            static_cast<int>(info.height),
-            static_cast<int>(info.stride),
+            width,
+            height,
+            stride,
             luminanceNoiseReduction,
             colorNoiseReduction,
             noiseDetailProtection
         );
     }
+    const auto denoiseEnd = std::chrono::steady_clock::now();
 
+    const auto sharpenStart = std::chrono::steady_clock::now();
     apply_sharpness_rgba8888(
         bytes,
-        static_cast<int>(info.width),
-        static_cast<int>(info.height),
-        static_cast<int>(info.stride),
+        width,
+        height,
+        stride,
         sharpness,
         luminanceNoiseReduction
+    );
+    const auto sharpenEnd = std::chrono::steady_clock::now();
+    const auto totalEnd = std::chrono::steady_clock::now();
+
+    LOGD(
+        "render %dx%d engine=%d denoise=%.2fms tone=%.2fms dehazeContrast=%.2fms sharpen=%.2fms total=%.2fms",
+        width,
+        height,
+        noiseEngine,
+        std::chrono::duration<double, std::milli>(denoiseEnd - denoiseStart).count(),
+        std::chrono::duration<double, std::milli>(toneEnd - toneStart).count(),
+        std::chrono::duration<double, std::milli>(toneEnd - toneStart).count(),
+        std::chrono::duration<double, std::milli>(sharpenEnd - sharpenStart).count(),
+        std::chrono::duration<double, std::milli>(totalEnd - totalStart).count()
     );
 
     AndroidBitmap_unlockPixels(env, bitmap);
