@@ -849,12 +849,11 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     const auto totalEnd = std::chrono::steady_clock::now();
 
     LOGD(
-        "render %dx%d engine=%d denoise=%.2fms tone=%.2fms dehazeContrast=%.2fms sharpen=%.2fms total=%.2fms",
+        "render %dx%d engine=%d denoise=%.2fms tone=%.2fms sharpen=%.2fms total=%.2fms",
         width,
         height,
         noiseEngine,
         std::chrono::duration<double, std::milli>(denoiseEnd - denoiseStart).count(),
-        std::chrono::duration<double, std::milli>(toneEnd - toneStart).count(),
         std::chrono::duration<double, std::milli>(toneEnd - toneStart).count(),
         std::chrono::duration<double, std::milli>(sharpenEnd - sharpenStart).count(),
         std::chrono::duration<double, std::milli>(totalEnd - totalStart).count()
