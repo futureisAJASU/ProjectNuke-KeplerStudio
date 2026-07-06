@@ -136,6 +136,7 @@ static void apply_small_spot_cleanup(uint8_t* base, int width, int height, int s
                 for (int dx = -2; dx <= 2; ++dx) {
                     if (dx == 0 && dy == 0) continue;
                     const int xx = std::min(width - 1, std::max(0, x + dx));
+                    if (xx == x && yy == y) continue;
                     const auto* p = src.data() + yy * stride + xx * 4;
                     const float r = p[0] / 255.0f;
                     const float g = p[1] / 255.0f;
