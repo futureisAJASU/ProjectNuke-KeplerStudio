@@ -35,17 +35,38 @@ static inline const uint8_t* pixel_at(const std::vector<uint8_t>& src, int strid
     return src.data() + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4U;
 }
 
+static void sliding_max_row(const float* input, float* output, int length, int radius);
+static void sliding_max_column(const std::vector<float>& input, std::vector<float>& output, int width, int height, int x, int radius);
+
 static std::vector<float> build_luma_plane(const std::vector<uint8_t>& src, int width, int height, int stride, int scale = 1) {
     const int safeScale = std::max(1, scale);
     const int scaledWidth = std::max(1, (width + safeScale - 1) / safeScale);
     const int scaledHeight = std::max(1, (height + safeScale - 1) / safeScale);
     std::vector<float> luma(static_cast<size_t>(scaledWidth) * static_cast<size_t>(scaledHeight), 0.0f);
+    if (safeScale == 1) {
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const uint8_t* p = pixel_at(src, stride, x, y);
+                luma[static_cast<size_t>(y) * width + x] = luma_of(p[0], p[1], p[2]);
+            }
+        }
+        return luma;
+    }
+
     for (int y = 0; y < scaledHeight; ++y) {
-        const int srcY = std::min(height - 1, y * safeScale);
+        const int srcTop = y * safeScale;
+        const int srcBottom = std::min(height, srcTop + safeScale);
         for (int x = 0; x < scaledWidth; ++x) {
-            const int srcX = std::min(width - 1, x * safeScale);
-            const uint8_t* p = pixel_at(src, stride, srcX, srcY);
-            luma[static_cast<size_t>(y) * scaledWidth + x] = luma_of(p[0], p[1], p[2]);
+            const int srcLeft = x * safeScale;
+            const int srcRight = std::min(width, srcLeft + safeScale);
+            float maxLuma = 0.0f;
+            for (int yy = srcTop; yy < srcBottom; ++yy) {
+                for (int xx = srcLeft; xx < srcRight; ++xx) {
+                    const uint8_t* p = pixel_at(src, stride, xx, yy);
+                    maxLuma = std::max(maxLuma, luma_of(p[0], p[1], p[2]));
+                }
+            }
+            luma[static_cast<size_t>(y) * scaledWidth + x] = maxLuma;
         }
     }
     return luma;
@@ -140,10 +161,8 @@ static void apply_night_flare(uint8_t* dst, const std::vector<uint8_t>& src, int
     const int lumaScale = flare_luma_scale_for_size(width, height);
     int scaledWidth = 1;
     int scaledHeight = 1;
-    const auto lumaStart = std::chrono::steady_clock::now();
-    const std::vector<float> localMax = build_local_max_plane(src, width, height, stride, radius, lumaScale, scaledWidth, scaledHeight);
-    const auto lumaEnd = std::chrono::steady_clock::now();
     const auto localMaxStart = std::chrono::steady_clock::now();
+    const std::vector<float> localMax = build_local_max_plane(src, width, height, stride, radius, lumaScale, scaledWidth, scaledHeight);
     const auto localMaxEnd = std::chrono::steady_clock::now();
     const auto pixelLoopStart = std::chrono::steady_clock::now();
     for (int y = 0; y < height; ++y) {
@@ -172,12 +191,11 @@ static void apply_night_flare(uint8_t* dst, const std::vector<uint8_t>& src, int
     }
     const auto pixelLoopEnd = std::chrono::steady_clock::now();
     LOGD(
-        "night flare %dx%d radius=%d scale=%d luma=%.2fms localMax=%.2fms pixels=%.2fms",
+        "night flare %dx%d radius=%d scale=%d localMaxBuild=%.2fms pixels=%.2fms",
         width,
         height,
         radius,
         lumaScale,
-        std::chrono::duration<double, std::milli>(lumaEnd - lumaStart).count(),
         std::chrono::duration<double, std::milli>(localMaxEnd - localMaxStart).count(),
         std::chrono::duration<double, std::milli>(pixelLoopEnd - pixelLoopStart).count()
     );
@@ -190,10 +208,8 @@ static void apply_day_sun_flare(uint8_t* dst, const std::vector<uint8_t>& src, i
     const int lumaScale = flare_luma_scale_for_size(width, height);
     int scaledWidth = 1;
     int scaledHeight = 1;
-    const auto lumaStart = std::chrono::steady_clock::now();
-    const std::vector<float> localMax = build_local_max_plane(src, width, height, stride, radius, lumaScale, scaledWidth, scaledHeight);
-    const auto lumaEnd = std::chrono::steady_clock::now();
     const auto localMaxStart = std::chrono::steady_clock::now();
+    const std::vector<float> localMax = build_local_max_plane(src, width, height, stride, radius, lumaScale, scaledWidth, scaledHeight);
     const auto localMaxEnd = std::chrono::steady_clock::now();
     const auto pixelLoopStart = std::chrono::steady_clock::now();
     for (int y = 0; y < height; ++y) {
@@ -227,12 +243,11 @@ static void apply_day_sun_flare(uint8_t* dst, const std::vector<uint8_t>& src, i
     }
     const auto pixelLoopEnd = std::chrono::steady_clock::now();
     LOGD(
-        "day flare %dx%d radius=%d scale=%d luma=%.2fms localMax=%.2fms pixels=%.2fms",
+        "day flare %dx%d radius=%d scale=%d localMaxBuild=%.2fms pixels=%.2fms",
         width,
         height,
         radius,
         lumaScale,
-        std::chrono::duration<double, std::milli>(lumaEnd - lumaStart).count(),
         std::chrono::duration<double, std::milli>(localMaxEnd - localMaxStart).count(),
         std::chrono::duration<double, std::milli>(pixelLoopEnd - pixelLoopStart).count()
     );
