@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <vector>
 
 #define LOG_TAG "KeplerNativeFlare"
@@ -32,24 +33,83 @@ static inline const uint8_t* pixel_at(const std::vector<uint8_t>& src, int strid
     return src.data() + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4U;
 }
 
-static float local_max_luma(const std::vector<uint8_t>& src, int width, int height, int stride, int x, int y, int radius) {
-    float maxL = 0.0f;
-    const int left = std::max(0, x - radius);
-    const int right = std::min(width - 1, x + radius);
-    const int top = std::max(0, y - radius);
-    const int bottom = std::min(height - 1, y + radius);
-    for (int yy = top; yy <= bottom; ++yy) {
-        for (int xx = left; xx <= right; ++xx) {
-            const uint8_t* p = pixel_at(src, stride, xx, yy);
-            maxL = std::max(maxL, luma_of(p[0], p[1], p[2]));
+static std::vector<float> build_luma_plane(const std::vector<uint8_t>& src, int width, int height, int stride) {
+    std::vector<float> luma(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const uint8_t* p = pixel_at(src, stride, x, y);
+            luma[static_cast<size_t>(y) * width + x] = luma_of(p[0], p[1], p[2]);
         }
     }
-    return maxL;
+    return luma;
+}
+
+static void sliding_max_row(const float* input, float* output, int length, int radius) {
+    std::deque<int> deque;
+    int rightAdded = -1;
+    for (int i = 0; i < length; ++i) {
+        const int left = std::max(0, i - radius);
+        const int right = std::min(length - 1, i + radius);
+        while (rightAdded < right) {
+            ++rightAdded;
+            while (!deque.empty() && input[deque.back()] <= input[rightAdded]) {
+                deque.pop_back();
+            }
+            deque.push_back(rightAdded);
+        }
+        while (!deque.empty() && deque.front() < left) {
+            deque.pop_front();
+        }
+        output[i] = deque.empty() ? 0.0f : input[deque.front()];
+    }
+}
+
+static void sliding_max_column(const std::vector<float>& input, std::vector<float>& output, int width, int height, int x, int radius) {
+    std::deque<int> deque;
+    int bottomAdded = -1;
+    for (int y = 0; y < height; ++y) {
+        const int top = std::max(0, y - radius);
+        const int bottom = std::min(height - 1, y + radius);
+        while (bottomAdded < bottom) {
+            ++bottomAdded;
+            const float candidate = input[static_cast<size_t>(bottomAdded) * width + x];
+            while (!deque.empty() && input[static_cast<size_t>(deque.back()) * width + x] <= candidate) {
+                deque.pop_back();
+            }
+            deque.push_back(bottomAdded);
+        }
+        while (!deque.empty() && deque.front() < top) {
+            deque.pop_front();
+        }
+        output[static_cast<size_t>(y) * width + x] =
+            deque.empty() ? 0.0f : input[static_cast<size_t>(deque.front()) * width + x];
+    }
+}
+
+static std::vector<float> local_max_luma_plane(const std::vector<uint8_t>& src, int width, int height, int stride, int radius) {
+    if (width <= 0 || height <= 0) {
+        return {};
+    }
+    const int safeRadius = std::max(0, radius);
+    std::vector<float> luma = build_luma_plane(src, width, height, stride);
+    std::vector<float> temp(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+    std::vector<float> localMax(static_cast<size_t>(width) * static_cast<size_t>(height), 0.0f);
+
+    for (int y = 0; y < height; ++y) {
+        const size_t rowStart = static_cast<size_t>(y) * width;
+        sliding_max_row(luma.data() + rowStart, temp.data() + rowStart, width, safeRadius);
+    }
+    for (int x = 0; x < width; ++x) {
+        sliding_max_column(temp, localMax, width, height, x, safeRadius);
+    }
+    return localMax;
 }
 
 static void apply_night_flare(uint8_t* dst, const std::vector<uint8_t>& src, int width, int height, int stride, float strength) {
+    if (width <= 0 || height <= 0) return;
     const float s = clamp01(strength);
     const int radius = std::max(3, std::max(width, height) / 160);
+    const std::vector<float> localMax = local_max_luma_plane(src, width, height, stride, radius);
     for (int y = 0; y < height; ++y) {
         auto* outRow = dst + static_cast<size_t>(y) * stride;
         for (int x = 0; x < width; ++x) {
@@ -59,7 +119,7 @@ static void apply_night_flare(uint8_t* dst, const std::vector<uint8_t>& src, int
             float g = in[1] / 255.0f;
             float b = in[2] / 255.0f;
             const float l = luma_of(in[0], in[1], in[2]);
-            const float local = local_max_luma(src, width, height, stride, x, y, radius);
+            const float local = localMax[static_cast<size_t>(y) * width + x];
             const float halo = smoothstep(0.70f, 0.97f, local);
             const float coreProtect = smoothstep(0.90f, 1.0f, l);
             const float amount = halo * s * (1.0f - 0.88f * coreProtect);
@@ -77,8 +137,10 @@ static void apply_night_flare(uint8_t* dst, const std::vector<uint8_t>& src, int
 }
 
 static void apply_day_sun_flare(uint8_t* dst, const std::vector<uint8_t>& src, int width, int height, int stride, float strength) {
+    if (width <= 0 || height <= 0) return;
     const float s = clamp01(strength);
     const int radius = std::max(6, std::max(width, height) / 96);
+    const std::vector<float> localMax = local_max_luma_plane(src, width, height, stride, radius);
     for (int y = 0; y < height; ++y) {
         auto* outRow = dst + static_cast<size_t>(y) * stride;
         for (int x = 0; x < width; ++x) {
@@ -88,7 +150,7 @@ static void apply_day_sun_flare(uint8_t* dst, const std::vector<uint8_t>& src, i
             float g = in[1] / 255.0f;
             float b = in[2] / 255.0f;
             const float l = luma_of(in[0], in[1], in[2]);
-            const float local = local_max_luma(src, width, height, stride, x, y, radius);
+            const float local = localMax[static_cast<size_t>(y) * width + x];
             const float veil = smoothstep(0.64f, 0.95f, local) * smoothstep(0.42f, 0.88f, l);
             const float coreProtect = smoothstep(0.86f, 1.0f, l);
             const float amount = veil * s * (1.0f - 0.90f * coreProtect);
