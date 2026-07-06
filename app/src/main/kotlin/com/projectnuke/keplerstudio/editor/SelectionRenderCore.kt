@@ -14,13 +14,18 @@ fun renderBitmapWithSelectionLayers(
 
     for (layer in enabledLayers) {
         val local = renderSelectionBitmapWithParams(base, mergeSelectionParams(state.params, layer.localParams), state, revision)
-        NativePhotoCore.nativeBlendSelectionLayerInPlace(
+        val result = NativePhotoCore.nativeBlendSelectionLayerInPlace(
             target = global,
             local = local,
             mask = layer.bitmap,
             inverted = layer.inverted,
             opacity = layer.opacity.coerceIn(0f, 1f)
         )
+        if (result < 0) {
+            local.recycle()
+            global.recycle()
+            throw IllegalStateException("native selection blend failed: code=$result")
+        }
         local.recycle()
     }
     return global
@@ -53,7 +58,7 @@ private fun renderSelectionBitmapWithParams(
     revision: Int
 ): Bitmap {
     val out = base.copy(Bitmap.Config.ARGB_8888, true)
-    NativePhotoCore.nativeRenderPreviewInPlace(
+    val result = NativePhotoCore.nativeRenderPreviewInPlace(
         out,
         params.exposure,
         params.contrast,
@@ -78,5 +83,9 @@ private fun renderSelectionBitmapWithParams(
         state.hazeEngine.nativeId,
         revision
     )
+    if (result < 0) {
+        out.recycle()
+        throw IllegalStateException("native selection render failed: code=$result")
+    }
     return out
 }

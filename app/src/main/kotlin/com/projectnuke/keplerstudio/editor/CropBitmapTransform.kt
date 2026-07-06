@@ -15,7 +15,7 @@ fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap {
     val outWidth = ((state.cropRight - state.cropLeft).coerceIn(0.01f, 1f) * size.first).roundToInt().coerceAtLeast(1)
     val outHeight = ((state.cropBottom - state.cropTop).coerceIn(0.01f, 1f) * size.second).roundToInt().coerceAtLeast(1)
     val output = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
-    NativePhotoCore.nativeRenderCropTransform(
+    val result = NativePhotoCore.nativeRenderCropTransform(
         source,
         output,
         state.cropLeft,
@@ -26,6 +26,10 @@ fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap {
         state.flipHorizontal,
         0
     )
+    if (result < 0) {
+        output.recycle()
+        throw IllegalStateException("native crop transform failed: code=$result")
+    }
     return output
 }
 

@@ -189,7 +189,9 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplySpecialEffec
         case 1: apply_chroma_fringe_reduce(bytes, width, height, stride, strength); break;
         case 2: apply_vignette_correction(bytes, width, height, stride, strength); break;
         case 3: apply_soft_blur(bytes, width, height, stride, strength); break;
-        default: break;
+        default:
+            AndroidBitmap_unlockPixels(env, bitmap);
+            return -10;
     }
     AndroidBitmap_unlockPixels(env, bitmap);
     return revision;
