@@ -29,3 +29,13 @@ app/src/main/assets/models/*.gguf
 
 .DS_Store
 Thumbs.db
+
+# Local debug/test artifacts
+# Only root-level text files are ignored so docs and tool requirements stay trackable.
+/*.txt
+*.log
+*.tmp
+/logs/
+/test-output/
+/captures/
+/scratch/
