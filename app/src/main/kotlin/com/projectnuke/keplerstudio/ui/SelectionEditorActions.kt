@@ -103,7 +103,7 @@ fun EditorViewModel.deleteActiveSelectionLayer() {
 
 fun EditorViewModel.invertActiveSelectionLayer() {
     val activeId = uiState.value.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "마스크를 선택했습니다.") }
+        updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
         return
     }
     recordUserEditForUndo(clearRedo = true)
@@ -120,7 +120,7 @@ fun EditorViewModel.invertActiveSelectionLayer() {
 
 fun EditorViewModel.clearActiveSelectionLayer() {
     val activeId = uiState.value.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "마스크를 선택했습니다.") }
+        updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
         return
     }
     recordUserEditForUndo(clearRedo = true)
@@ -146,7 +146,7 @@ fun EditorViewModel.updateSelectionPaintSettings(transform: (SelectionPaintSetti
 
 fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
     val activeId = uiState.value.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "마스크를 선택했습니다.") }
+        updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
         return
     }
     updateUiState { current ->
@@ -168,7 +168,7 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {
     val activeId = uiState.value.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "마스크를 선택했습니다.") }
+        updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
         return
     }
     updateUiState { current ->
