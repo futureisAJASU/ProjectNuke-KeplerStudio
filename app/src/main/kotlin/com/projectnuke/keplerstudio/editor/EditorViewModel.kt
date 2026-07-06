@@ -27,13 +27,15 @@ import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlin.math.floor
@@ -50,6 +52,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var nativeSession: Long = 0L
     private var renderJob: Job? = null
     private var draftSaveJob: Job? = null
+    private val draftSaveMutex = Mutex()
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
     private var restoreDraftToken: Long = 0L
@@ -109,18 +112,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun persistDraftSnapshot() {
-        draftSaveJob?.cancel()
-        val context = getApplication<Application>()
-        val state = _uiState.value
-        val saved = runBlocking {
-            withContext(Dispatchers.IO) { saveDraftSnapshotSafely(context, state) }
-        } ?: return
-        updateUiStateAndRecycleReplaced {
-            it.copy(
-                draftSavedAtMillis = saved.savedAtMillis,
-                draftSourcePath = saved.sourcePath
-            )
-        }
+        forceDraftSaveAsync()
+    }
+
+    suspend fun persistDraftSnapshotNow() {
+        draftSaveJob?.cancelAndJoin()
+        persistDraftSnapshotInternal()
     }
 
     private fun scheduleDraftAutosave(delayMs: Long = 2000L) {
@@ -142,7 +139,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val context = getApplication<Application>()
         val state = _uiState.value
         val saved = try {
-            withContext(Dispatchers.IO) { saveDraftSnapshot(context, state) }
+            withContext(Dispatchers.IO) {
+                draftSaveMutex.withLock {
+                    saveDraftSnapshot(context, state)
+                }
+            }
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {

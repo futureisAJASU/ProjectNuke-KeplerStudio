@@ -1,5 +1,6 @@
 package com.projectnuke.keplerstudio.ui
 
+import android.graphics.Bitmap
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.CropAspectRatio
 import com.projectnuke.keplerstudio.editor.CropState
@@ -9,6 +10,7 @@ import com.projectnuke.keplerstudio.editor.estimateAutoStraightenDegreesV0
 import com.projectnuke.keplerstudio.editor.normalized
 import com.projectnuke.keplerstudio.editor.renderCropTransform
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -113,25 +115,38 @@ fun EditorViewModel.applyCropTransform() {
         it.copy(isBusy = true, revision = nextRevision, message = "변경사항을 적용하는 중입니다.")
     }
     viewModelScope.launch {
+        var renderedOriginal: Bitmap? = null
+        var renderedPreview: Bitmap? = null
         try {
-            val renderedOriginal = withContext(Dispatchers.Default) { original?.let { renderCropTransform(it, crop) } }
-            val renderedPreview = withContext(Dispatchers.Default) { preview?.let { renderCropTransform(it, crop) } }
+            renderedOriginal = withContext(Dispatchers.Default) { original?.let { renderCropTransform(it, crop) } }
+            renderedPreview = withContext(Dispatchers.Default) { preview?.let { renderCropTransform(it, crop) } }
             if (uiState.value.revision == nextRevision) {
                 updateUiState {
                     it.copy(
                         originalPreviewBitmap = renderedOriginal ?: renderedPreview,
                         previewBitmap = renderedPreview ?: renderedOriginal,
+                        baseBitmapDirty = true,
                         cropState = CropState(),
                         isBusy = false,
                         message = "변경사항을 적용했습니다."
                     )
                 }
+                renderedOriginal = null
+                renderedPreview = null
                 persistDraftSnapshot()
             } else {
                 renderedOriginal?.recycle()
                 renderedPreview?.recycle()
+                renderedOriginal = null
+                renderedPreview = null
             }
+        } catch (ce: CancellationException) {
+            renderedOriginal?.recycle()
+            renderedPreview?.recycle()
+            throw ce
         } catch (t: Throwable) {
+            renderedOriginal?.recycle()
+            renderedPreview?.recycle()
             updateUiState {
                 it.copy(isBusy = false, message = "자르기에 실패했습니다: ${t.message}")
             }

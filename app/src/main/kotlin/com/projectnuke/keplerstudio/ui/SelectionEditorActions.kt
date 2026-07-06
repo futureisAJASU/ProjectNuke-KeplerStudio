@@ -22,24 +22,24 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val state = uiState.value
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     if (base == null) {
-        updateUiState { it.copy(message = "留덉뒪?щ? 留뚮뱾 ?대?吏媛 ?놁뒿?덈떎") }
+        updateUiState { it.copy(message = "마스크를 만들 이미지가 없습니다.") }
         return
     }
     if (RemasterModelSession.activeModel?.id != "edge_masker" || !RemasterModelSession.isModelLoaded) {
-        updateUiState { it.copy(message = "Edge Masker 紐⑤뜽??癒쇱? 濡쒕뱶??二쇱꽭??") }
+        updateUiState { it.copy(message = "Edge Masker 모델을 먼저 로드해 주세요.") }
         return
     }
 
     recordUserEditForUndo(clearRedo = true)
-    updateUiState { it.copy(isBusy = true, message = "?쇱궗泥?留덉뒪?щ? ?앹꽦?섎뒗 以묒엯?덈떎") }
+    updateUiState { it.copy(isBusy = true, message = "피사체 마스크를 생성하는 중입니다.") }
     viewModelScope.launch {
         try {
             val layer = withContext(Dispatchers.Default) {
                 val mask = RemasterModelSession.createForegroundMask(base)
-                    ?: error("留덉뒪?щ? ?앹꽦?섏? 紐삵뻽?듬땲??")
+                    ?: error("마스크를 생성하지 못했습니다.")
                 SelectionLayer(
                     id = newSelectionId(),
-                    name = "?쇱궗泥?留덉뒪??",
+                    name = "피사체 마스크",
                     kind = SelectionLayerKind.Subject,
                     bitmap = mask.copy(Bitmap.Config.ARGB_8888, true)
                 )
@@ -49,12 +49,12 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                     isBusy = false,
                     selectionLayers = current.selectionLayers + layer,
                     activeSelectionLayerId = layer.id,
-                    message = "?쇱궗泥?留덉뒪?щ? 異붽??덉뒿?덈떎"
+                    message = "피사체 마스크를 추가했습니다."
                 )
             }
             persistDraftSnapshot()
         } catch (t: Throwable) {
-            updateUiState { it.copy(isBusy = false, message = "?쇱궗泥?留덉뒪???앹꽦???ㅽ뙣?덉뒿?덈떎: ${t.message}") }
+            updateUiState { it.copy(isBusy = false, message = "피사체 마스크 생성에 실패했습니다: ${t.message}") }
         }
     }
 }
@@ -63,13 +63,13 @@ fun EditorViewModel.createBrushSelection() {
     val state = uiState.value
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     if (base == null) {
-        updateUiState { it.copy(message = "釉뚮윭??留덉뒪?щ? 留뚮뱾 ?대?吏媛 ?놁뒿?덈떎") }
+        updateUiState { it.copy(message = "브러시 마스크를 만들 이미지가 없습니다.") }
         return
     }
     recordUserEditForUndo(clearRedo = true)
     val layer = SelectionLayer(
         id = newSelectionId(),
-        name = "釉뚮윭??留덉뒪??${state.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
+        name = "브러시 마스크 ${state.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
         kind = SelectionLayerKind.Brush,
         bitmap = Bitmap.createBitmap(base.width, base.height, Bitmap.Config.ARGB_8888)
     )
@@ -77,14 +77,14 @@ fun EditorViewModel.createBrushSelection() {
         it.copy(
             selectionLayers = it.selectionLayers + layer,
             activeSelectionLayerId = layer.id,
-            message = "釉뚮윭??留덉뒪?щ? 留뚮뱾?덉뒿?덈떎"
+            message = "브러시 마스크를 만들었습니다."
         )
     }
     persistDraftSnapshot()
 }
 
 fun EditorViewModel.selectSelectionLayer(id: String) {
-    updateUiState { it.copy(activeSelectionLayerId = id, message = "留덉뒪?щ? ?좏깮?덉뒿?덈떎") }
+    updateUiState { it.copy(activeSelectionLayerId = id, message = "마스크를 선택했습니다.") }
 }
 
 fun EditorViewModel.deleteActiveSelectionLayer() {
@@ -95,7 +95,7 @@ fun EditorViewModel.deleteActiveSelectionLayer() {
         current.copy(
             selectionLayers = nextLayers,
             activeSelectionLayerId = nextLayers.lastOrNull()?.id,
-            message = "?좏깮??留덉뒪?щ? ??젣?덉뒿?덈떎"
+            message = "선택한 마스크를 삭제했습니다."
         )
     }
     persistDraftSnapshot()
@@ -103,7 +103,7 @@ fun EditorViewModel.deleteActiveSelectionLayer() {
 
 fun EditorViewModel.invertActiveSelectionLayer() {
     val activeId = uiState.value.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "선택한 마스크가 없습니다") }
+        updateUiState { it.copy(message = "마스크를 선택했습니다.") }
         return
     }
     recordUserEditForUndo(clearRedo = true)
@@ -112,7 +112,7 @@ fun EditorViewModel.invertActiveSelectionLayer() {
             selectionLayers = current.selectionLayers.map { layer ->
                 if (layer.id == activeId) layer.copy(inverted = !layer.inverted) else layer
             },
-            message = "留덉뒪??諛섏쟾???꾪솚?덉뒿?덈떎"
+            message = "마스크 반전을 전환했습니다."
         )
     }
     persistDraftSnapshot()
@@ -120,7 +120,7 @@ fun EditorViewModel.invertActiveSelectionLayer() {
 
 fun EditorViewModel.clearActiveSelectionLayer() {
     val activeId = uiState.value.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "선택한 마스크가 없습니다") }
+        updateUiState { it.copy(message = "마스크를 선택했습니다.") }
         return
     }
     recordUserEditForUndo(clearRedo = true)
@@ -134,7 +134,7 @@ fun EditorViewModel.clearActiveSelectionLayer() {
                     layer
                 }
             },
-            message = "留덉뒪?щ? 鍮꾩썱?듬땲??"
+            message = "마스크를 비웠습니다."
         )
     }
     persistDraftSnapshot()
@@ -146,7 +146,7 @@ fun EditorViewModel.updateSelectionPaintSettings(transform: (SelectionPaintSetti
 
 fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
     val activeId = uiState.value.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요") }
+        updateUiState { it.copy(message = "마스크를 선택했습니다.") }
         return
     }
     updateUiState { current ->
@@ -161,14 +161,14 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
         current.copy(
             selectionLayers = nextLayers,
             revision = current.revision + if (changed) 1 else 0,
-            message = if (changed) "留덉뒪?щ? ?섏젙?덉뒿?덈떎" else current.message
+            message = if (changed) "마스크를 수정했습니다." else current.message
         )
     }
 }
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {
     val activeId = uiState.value.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "선택한 마스크가 없습니다") }
+        updateUiState { it.copy(message = "마스크를 선택했습니다.") }
         return
     }
     updateUiState { current ->
@@ -176,7 +176,7 @@ fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditP
             selectionLayers = current.selectionLayers.map { layer ->
                 if (layer.id == activeId) layer.copy(localParams = transform(layer.localParams)) else layer
             },
-            message = "留덉뒪??蹂댁젙媛믪쓣 蹂寃쏀뻽?듬땲??"
+            message = "마스크 보정값을 변경했습니다."
         )
     }
 }
@@ -186,12 +186,12 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val layer = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId }
     if (base == null || layer == null) {
-        updateUiState { it.copy(message = "?곸슜??留덉뒪???먮뒗 ?대?吏媛 ?놁뒿?덈떎") }
+        updateUiState { it.copy(message = "적용할 마스크 또는 이미지가 없습니다.") }
         return
     }
     recordUserEditForUndo(clearRedo = true)
     val nextRevision = state.revision + 1
-    updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "留덉뒪??蹂댁젙???곸슜?섎뒗 以묒엯?덈떎") }
+    updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "마스크 보정을 적용하는 중입니다.") }
     viewModelScope.launch {
         try {
             val rendered = withContext(Dispatchers.Default) {
@@ -199,14 +199,14 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
             }
             if (uiState.value.revision == nextRevision) {
                 updateUiState {
-                    it.copy(previewBitmap = rendered, isBusy = false, message = "?좏깮??留덉뒪??蹂댁젙???곸슜?덉뒿?덈떎")
+                    it.copy(previewBitmap = rendered, isBusy = false, message = "선택한 마스크 보정을 적용했습니다.")
                 }
                 persistDraftSnapshot()
             } else {
                 rendered.recycle()
             }
         } catch (t: Throwable) {
-            updateUiState { it.copy(isBusy = false, message = "留덉뒪??蹂댁젙???ㅽ뙣?덉뒿?덈떎: ${t.message}") }
+            updateUiState { it.copy(isBusy = false, message = "마스크 보정 적용에 실패했습니다: ${t.message}") }
         }
     }
 }

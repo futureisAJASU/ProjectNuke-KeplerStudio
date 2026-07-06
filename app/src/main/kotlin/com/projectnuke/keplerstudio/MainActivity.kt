@@ -157,7 +157,7 @@ class MainActivity : ComponentActivity() {
                                 showLeaveDialog = false
                                 showSavingDialog = true
                                 scope.launch {
-                                    withContext(Dispatchers.IO) { vm.persistDraftSnapshot() }
+                                    vm.persistDraftSnapshotNow()
                                     showSavingDialog = false
                                     appMode = AppMode.Home
                                 }
