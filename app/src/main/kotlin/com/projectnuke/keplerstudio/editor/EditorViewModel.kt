@@ -220,6 +220,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         canUndo = false,
                         canRedo = false,
                         flareGuardRuntimeStatus = null,
+                        recoveryDebugInfo = null,
+                        showRecoveryDebugCard = false,
                         revision = it.revision + 1,
                         message = "원본 캐시가 완료되었습니다: ${decodedPreview.width}x${decodedPreview.height} preview"
                     )
@@ -902,6 +904,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
         } catch (ce: CancellationException) {
             throw ce
+        } catch (t: Throwable) {
+            logDraftSaveFailure(t)
+            if (restoreToken == restoreDraftToken) {
+                updateUiStateAndRecycleReplaced {
+                    it.copy(
+                        isBusy = false,
+                        message = "임시저장 복구 정보를 확인하지 못했습니다. 편집은 계속할 수 있습니다."
+                    )
+                }
+            }
+            return
         }
         if (restoreToken != restoreDraftToken) return
         updateUiStateAndRecycleReplaced {
