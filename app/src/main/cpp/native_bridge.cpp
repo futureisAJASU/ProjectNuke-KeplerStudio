@@ -173,8 +173,10 @@ static void local_neighbor_estimate_adaptive_5x5(
     float sumL = 0.0f;
     float sumCb = 0.0f;
     float sumCr = 0.0f;
-    float sumL2 = 0.0f;
     float sumW = 0.0f;
+    float rangeSumL = 0.0f;
+    float rangeSumL2 = 0.0f;
+    float rangeSumW = 0.0f;
     float minL = 1.0f;
     float maxL = 0.0f;
 
@@ -191,10 +193,14 @@ static void local_neighbor_estimate_adaptive_5x5(
             sumL += nl * w;
             sumCb += chroma_cb_at(row, nx) * w;
             sumCr += chroma_cr_at(row, nx) * w;
-            sumL2 += nl * nl * w;
             sumW += w;
-            minL = std::min(minL, nl);
-            maxL = std::max(maxL, nl);
+            if (dx != 0 || dy != 0) {
+                rangeSumL += nl * w;
+                rangeSumL2 += nl * nl * w;
+                rangeSumW += w;
+                minL = std::min(minL, nl);
+                maxL = std::max(maxL, nl);
+            }
         }
     }
 
@@ -202,8 +208,14 @@ static void local_neighbor_estimate_adaptive_5x5(
     outL = sumL * invW;
     outCb = sumCb * invW;
     outCr = sumCr * invW;
-    const float variance = std::max(0.0f, sumL2 * invW - outL * outL);
-    outRange = std::max((maxL - minL) * 0.65f, std::sqrt(variance) * 2.35f);
+    if (rangeSumW > 0.0001f) {
+        const float invRangeW = 1.0f / rangeSumW;
+        const float rangeMean = rangeSumL * invRangeW;
+        const float variance = std::max(0.0f, rangeSumL2 * invRangeW - rangeMean * rangeMean);
+        outRange = std::max((maxL - minL) * 0.65f, std::sqrt(variance) * 2.35f);
+    } else {
+        outRange = 1.0f;
+    }
 }
 
 static void copy_row(uint8_t* dst, const uint8_t* src, int stride) {
