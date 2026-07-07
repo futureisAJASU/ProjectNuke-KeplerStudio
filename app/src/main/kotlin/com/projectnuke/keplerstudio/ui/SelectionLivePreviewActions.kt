@@ -67,11 +67,13 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
             throw ce
         } catch (t: Throwable) {
             preview?.recycle()
-            updateUiState {
-                it.copy(
-                    isBusy = false,
-                    message = "선택 마스크 미리보기를 적용하지 못했습니다: ${t.message}"
-                )
+            if (uiState.value.revision == nextRevision) {
+                updateUiState {
+                    it.copy(
+                        isBusy = false,
+                        message = "선택 마스크 미리보기를 적용하지 못했습니다: ${t.message}"
+                    )
+                }
             }
         }
     }
