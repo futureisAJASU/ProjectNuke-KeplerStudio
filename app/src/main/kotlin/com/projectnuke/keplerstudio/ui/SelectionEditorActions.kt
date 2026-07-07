@@ -11,6 +11,7 @@ import com.projectnuke.keplerstudio.editor.SelectionLayerKind
 import com.projectnuke.keplerstudio.editor.SelectionPaintMode
 import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -199,12 +200,14 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
             }
             if (uiState.value.revision == nextRevision) {
                 updateUiState {
-                    it.copy(previewBitmap = rendered, isBusy = false, message = "선택한 마스크 보정을 적용했습니다.")
+                    it.copy(previewBitmap = rendered, baseBitmapDirty = true, isBusy = false, message = "선택한 마스크 보정을 적용했습니다.")
                 }
                 persistDraftSnapshot()
             } else {
                 rendered.recycle()
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (t: Throwable) {
             updateUiState { it.copy(isBusy = false, message = "마스크 보정 적용에 실패했습니다: ${t.message}") }
         }
@@ -246,9 +249,17 @@ private fun applyPaintStroke(bitmap: Bitmap, cx: Float, cy: Float, settings: Sel
 }
 
 private fun renderSelectionLocalEdit(base: Bitmap, state: EditorUiState, layer: SelectionLayer, revision: Int): Bitmap {
-    val global = renderWithParams(base, state.params, state, revision)
-    val local = renderWithParams(base, mergeParams(state.params, layer.localParams), state, revision)
-    return blendWithSelectionMask(local, global, layer)
+    var global: Bitmap? = null
+    var local: Bitmap? = null
+    try {
+        global = renderWithParams(base, state.params, state, revision)
+        local = renderWithParams(base, mergeParams(state.params, layer.localParams), state, revision)
+        return blendWithSelectionMask(local, global, layer)
+    } catch (t: Throwable) {
+        global?.recycle()
+        local?.recycle()
+        throw t
+    }
 }
 
 private fun mergeParams(base: EditParams, local: EditParams): EditParams = EditParams(
@@ -273,7 +284,7 @@ private fun mergeParams(base: EditParams, local: EditParams): EditParams = EditP
 
 private fun renderWithParams(base: Bitmap, params: EditParams, state: EditorUiState, revision: Int): Bitmap {
     val out = base.copy(Bitmap.Config.ARGB_8888, true)
-    NativePhotoCore.nativeRenderPreviewInPlace(
+    val result = NativePhotoCore.nativeRenderPreviewInPlace(
         out,
         params.exposure,
         params.contrast,
@@ -298,6 +309,10 @@ private fun renderWithParams(base: Bitmap, params: EditParams, state: EditorUiSt
         state.hazeEngine.nativeId,
         revision
     )
+    if (result < 0) {
+        out.recycle()
+        throw IllegalStateException("native selection render failed: code=$result")
+    }
     return out
 }
 

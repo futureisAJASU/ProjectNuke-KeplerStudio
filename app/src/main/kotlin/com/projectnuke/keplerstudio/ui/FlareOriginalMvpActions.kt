@@ -6,6 +6,7 @@ import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -38,8 +39,10 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
     }
 
     viewModelScope.launch {
+        var nextOriginal: Bitmap? = null
+        var nextPreview: Bitmap? = null
         try {
-            val nextOriginal = withContext(Dispatchers.Default) {
+            nextOriginal = withContext(Dispatchers.Default) {
                 val copy = baseOriginal.copy(Bitmap.Config.ARGB_8888, true)
                 val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
                     copy,
@@ -53,25 +56,37 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                 }
                 copy
             }
-            val nextPreview = withContext(Dispatchers.Default) {
-                renderPreviewFromState(nextOriginal, current, nextRevision)
+            nextPreview = withContext(Dispatchers.Default) {
+                renderPreviewFromState(nextOriginal ?: error("missing flare original"), current, nextRevision)
             }
+            val adoptedOriginal = nextOriginal ?: error("missing flare original")
+            val adoptedPreview = nextPreview ?: error("missing flare preview")
             if (uiState.value.revision == nextRevision) {
                 updateUiState {
                     it.copy(
-                        originalPreviewBitmap = nextOriginal,
-                        previewBitmap = nextPreview,
+                        originalPreviewBitmap = adoptedOriginal,
+                        previewBitmap = adoptedPreview,
                         isBusy = false,
                         message = "규칙 기반 보정으로 번짐을 완화했습니다.",
                         flareGuardRuntimeStatus = "규칙 기반 보정으로 번짐을 완화했습니다."
                     )
                 }
+                nextOriginal = null
+                nextPreview = null
                 persistDraftSnapshot()
             } else {
-                nextOriginal.recycle()
-                nextPreview.recycle()
+                nextOriginal?.recycle()
+                nextOriginal = null
+                nextPreview?.recycle()
+                nextPreview = null
             }
+        } catch (ce: CancellationException) {
+            nextOriginal?.recycle()
+            nextPreview?.recycle()
+            throw ce
         } catch (_: Throwable) {
+            nextOriginal?.recycle()
+            nextPreview?.recycle()
             updateUiState {
                 it.copy(
                     isBusy = false,
@@ -86,7 +101,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
 private fun renderPreviewFromState(base: Bitmap, state: EditorUiState, revision: Int): Bitmap {
     val copy = base.copy(Bitmap.Config.ARGB_8888, true)
     val params = state.params
-    NativePhotoCore.nativeRenderPreviewInPlace(
+    val result = NativePhotoCore.nativeRenderPreviewInPlace(
         copy,
         params.exposure,
         params.contrast,
@@ -112,5 +127,9 @@ private fun renderPreviewFromState(base: Bitmap, state: EditorUiState, revision:
         revision,
         state.presetLook
     )
+    if (result < 0) {
+        copy.recycle()
+        throw IllegalStateException("native flare preview render failed: code=$result")
+    }
     return copy
 }

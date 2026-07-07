@@ -8,6 +8,7 @@ import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -52,6 +53,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     it.copy(
                         params = params,
                         previewBitmap = rendered,
+                        baseBitmapDirty = true,
                         isBusy = false,
                         message = "Edge Masker 기반 마스크 보정을 적용했습니다."
                     )
@@ -60,6 +62,8 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             } else {
                 rendered.recycle()
             }
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (t: Throwable) {
             updateUiState {
                 it.copy(
@@ -96,13 +100,23 @@ private fun renderMaskAwareRemaster(
         sharpness = (baseParams.sharpness + 0.08f).coerceIn(0f, 1f)
     )
 
-    val foreground = renderWithState(basePreview, foregroundParams, state, revision)
-    val background = renderWithState(basePreview, backgroundParams, state, revision)
+    var foreground: Bitmap? = null
+    var background: Bitmap? = null
     try {
-        return blendForegroundOverBackground(foreground, background, mask)
-    } finally {
+        foreground = renderWithState(basePreview, foregroundParams, state, revision)
+        background = renderWithState(basePreview, backgroundParams, state, revision)
+        val result = blendForegroundOverBackground(foreground, background, mask)
+        // blend writes into background which is now returned as result;
+        // foreground and mask are no longer needed.
         foreground.recycle()
+        foreground = null
         mask.recycle()
+        return result
+    } catch (t: Throwable) {
+        foreground?.recycle()
+        background?.recycle()
+        mask.recycle()
+        throw t
     }
 }
 
@@ -113,7 +127,7 @@ private fun renderWithState(
     revision: Int
 ): Bitmap {
     val out = basePreview.copy(Bitmap.Config.ARGB_8888, true)
-    NativePhotoCore.nativeRenderPreviewInPlace(
+    val result = NativePhotoCore.nativeRenderPreviewInPlace(
         out,
         params.exposure,
         params.contrast,
@@ -138,6 +152,10 @@ private fun renderWithState(
         state.hazeEngine.nativeId,
         revision
     )
+    if (result < 0) {
+        out.recycle()
+        throw IllegalStateException("native mask-aware render failed: code=$result")
+    }
     return out
 }
 

@@ -1,9 +1,11 @@
 package com.projectnuke.keplerstudio.ui
 
+import android.graphics.Bitmap
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -32,35 +34,50 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     }
 
     viewModelScope.launch {
+        var bakedOriginal: Bitmap? = null
+        var renderedPreview: Bitmap? = null
         try {
-            val bakedOriginal = withContext(Dispatchers.Default) {
+            bakedOriginal = withContext(Dispatchers.Default) {
                 val localOnlyState = current.copy(params = EditParams())
                 renderBitmapWithSelectionLayers(baseOriginal, localOnlyState, nextRevision)
             }
-            val renderedPreview = withContext(Dispatchers.Default) {
+            renderedPreview = withContext(Dispatchers.Default) {
                 val globalOnlyState = current.copy(
                     selectionLayers = emptyList(),
                     activeSelectionLayerId = null
                 )
-                renderBitmapWithSelectionLayers(bakedOriginal, globalOnlyState, nextRevision)
+                renderBitmapWithSelectionLayers(bakedOriginal ?: error("missing baked original"), globalOnlyState, nextRevision)
             }
+            val adoptedOriginal = bakedOriginal ?: error("missing baked original")
+            val adoptedPreview = renderedPreview ?: error("missing rendered preview")
             if (uiState.value.revision == nextRevision) {
                 updateUiState {
                     it.copy(
-                        originalPreviewBitmap = bakedOriginal,
-                        previewBitmap = renderedPreview,
+                        originalPreviewBitmap = adoptedOriginal,
+                        previewBitmap = adoptedPreview,
+                        baseBitmapDirty = true,
                         selectionLayers = emptyList(),
                         activeSelectionLayerId = null,
                         isBusy = false,
                         message = "선택 마스크 보정을 원본에 적용했습니다. 저장 결과에도 반영됩니다."
                     )
                 }
+                bakedOriginal = null
+                renderedPreview = null
                 persistDraftSnapshot()
             } else {
-                bakedOriginal.recycle()
-                renderedPreview.recycle()
+                bakedOriginal?.recycle()
+                bakedOriginal = null
+                renderedPreview?.recycle()
+                renderedPreview = null
             }
+        } catch (ce: CancellationException) {
+            bakedOriginal?.recycle()
+            renderedPreview?.recycle()
+            throw ce
         } catch (_: Throwable) {
+            bakedOriginal?.recycle()
+            renderedPreview?.recycle()
             updateUiState {
                 it.copy(
                     isBusy = false,
