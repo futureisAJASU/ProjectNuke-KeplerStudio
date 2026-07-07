@@ -194,21 +194,45 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
     val nextRevision = state.revision + 1
     updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "마스크 보정을 적용하는 중입니다.") }
     viewModelScope.launch {
+        var renderedOriginal: Bitmap? = null
+        var renderedPreview: Bitmap? = null
         try {
-            val rendered = withContext(Dispatchers.Default) {
+            renderedOriginal = withContext(Dispatchers.Default) {
                 renderSelectionLocalEdit(base, state, layer, nextRevision)
             }
+            renderedPreview = withContext(Dispatchers.Default) {
+                renderedOriginal?.copy(Bitmap.Config.ARGB_8888, true) ?: error("missing selection render")
+            }
             if (uiState.value.revision == nextRevision) {
+                val adoptedOriginal = renderedOriginal ?: error("missing selection original")
+                val adoptedPreview = renderedPreview ?: error("missing selection preview")
                 updateUiState {
-                    it.copy(previewBitmap = rendered, baseBitmapDirty = true, isBusy = false, message = "선택한 마스크 보정을 적용했습니다.")
+                    it.copy(
+                        // The selection composite is baked into the base bitmap; neutral params avoid export double-application.
+                        params = EditParams(),
+                        originalPreviewBitmap = adoptedOriginal,
+                        previewBitmap = adoptedPreview,
+                        baseBitmapDirty = true,
+                        isBusy = false,
+                        message = "선택한 마스크 보정을 적용했습니다."
+                    )
                 }
+                renderedOriginal = null
+                renderedPreview = null
                 persistDraftSnapshot()
             } else {
-                rendered.recycle()
+                renderedOriginal?.recycle()
+                renderedOriginal = null
+                renderedPreview?.recycle()
+                renderedPreview = null
             }
         } catch (ce: CancellationException) {
+            renderedOriginal?.recycle()
+            renderedPreview?.recycle()
             throw ce
         } catch (t: Throwable) {
+            renderedOriginal?.recycle()
+            renderedPreview?.recycle()
             updateUiState { it.copy(isBusy = false, message = "마스크 보정 적용에 실패했습니다: ${t.message}") }
         }
     }

@@ -66,6 +66,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                     it.copy(
                         originalPreviewBitmap = adoptedOriginal,
                         previewBitmap = adoptedPreview,
+                        baseBitmapDirty = true,
                         isBusy = false,
                         message = "규칙 기반 보정으로 번짐을 완화했습니다.",
                         flareGuardRuntimeStatus = "규칙 기반 보정으로 번짐을 완화했습니다."

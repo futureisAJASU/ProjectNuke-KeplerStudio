@@ -36,8 +36,10 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     }
 
     viewModelScope.launch {
+        var renderedOriginal: Bitmap? = null
+        var renderedPreview: Bitmap? = null
         try {
-            val rendered = withContext(Dispatchers.Default) {
+            renderedOriginal = withContext(Dispatchers.Default) {
                 val mask = RemasterModelSession.createForegroundMask(basePreview)
                     ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
                 renderMaskAwareRemaster(
@@ -47,24 +49,39 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     revision = nextRevision
                 )
             }
+            renderedPreview = withContext(Dispatchers.Default) {
+                renderedOriginal?.copy(Bitmap.Config.ARGB_8888, true) ?: error("missing mask-aware render")
+            }
             if (uiState.value.revision == nextRevision) {
-                val params = computeMaskAwareBaseParams(basePreview)
+                val adoptedOriginal = renderedOriginal ?: error("missing mask-aware original")
+                val adoptedPreview = renderedPreview ?: error("missing mask-aware preview")
                 updateUiState {
                     it.copy(
-                        params = params,
-                        previewBitmap = rendered,
+                        // The mask-aware composite is now baked into the base bitmap; neutral params avoid export double-application.
+                        params = EditParams(),
+                        originalPreviewBitmap = adoptedOriginal,
+                        previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
                         isBusy = false,
                         message = "Edge Masker 기반 마스크 보정을 적용했습니다."
                     )
                 }
+                renderedOriginal = null
+                renderedPreview = null
                 persistDraftSnapshot()
             } else {
-                rendered.recycle()
+                renderedOriginal?.recycle()
+                renderedOriginal = null
+                renderedPreview?.recycle()
+                renderedPreview = null
             }
         } catch (ce: CancellationException) {
+            renderedOriginal?.recycle()
+            renderedPreview?.recycle()
             throw ce
         } catch (t: Throwable) {
+            renderedOriginal?.recycle()
+            renderedPreview?.recycle()
             updateUiState {
                 it.copy(
                     isBusy = false,
