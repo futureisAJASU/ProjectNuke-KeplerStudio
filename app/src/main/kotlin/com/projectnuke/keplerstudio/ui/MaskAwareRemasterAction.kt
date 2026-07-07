@@ -196,20 +196,23 @@ private fun blendForegroundOverBackground(
     val currMaskRow = IntArray(width)
     val nextMaskRow = IntArray(width)
 
-    for (y in 0 until height) {
-        foreground.getPixels(fgRow, 0, width, 0, y, width, 1)
-        output.getPixels(bgRow, 0, width, 0, y, width, 1)
-        scaledMask.getPixels(currMaskRow, 0, width, 0, y, width, 1)
-        scaledMask.getPixels(prevMaskRow, 0, width, 0, max(0, y - 1), width, 1)
-        scaledMask.getPixels(nextMaskRow, 0, width, 0, kotlin.math.min(height - 1, y + 1), width, 1)
+    try {
+        for (y in 0 until height) {
+            foreground.getPixels(fgRow, 0, width, 0, y, width, 1)
+            output.getPixels(bgRow, 0, width, 0, y, width, 1)
+            scaledMask.getPixels(currMaskRow, 0, width, 0, y, width, 1)
+            scaledMask.getPixels(prevMaskRow, 0, width, 0, max(0, y - 1), width, 1)
+            scaledMask.getPixels(nextMaskRow, 0, width, 0, kotlin.math.min(height - 1, y + 1), width, 1)
 
-        for (x in 0 until width) {
-            val a = featheredMaskAlpha(prevMaskRow, currMaskRow, nextMaskRow, x, width)
-            bgRow[x] = blendArgb(fgRow[x], bgRow[x], a)
+            for (x in 0 until width) {
+                val a = featheredMaskAlpha(prevMaskRow, currMaskRow, nextMaskRow, x, width)
+                bgRow[x] = blendArgb(fgRow[x], bgRow[x], a)
+            }
+            output.setPixels(bgRow, 0, width, 0, y, width, 1)
         }
-        output.setPixels(bgRow, 0, width, 0, y, width, 1)
+    } finally {
+        if (scaledMask !== mask) scaledMask.recycle()
     }
-    if (scaledMask !== mask) scaledMask.recycle()
     return output
 }
 

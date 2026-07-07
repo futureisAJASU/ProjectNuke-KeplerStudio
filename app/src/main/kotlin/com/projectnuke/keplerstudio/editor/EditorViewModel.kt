@@ -51,6 +51,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private var nativeSession: Long = 0L
     private var renderJob: Job? = null
+    internal var selectionLivePreviewJob: Job? = null
     private var draftSaveJob: Job? = null
     private val draftSaveMutex = Mutex()
     private var paramUndoWindowJob: Job? = null
@@ -535,6 +536,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "원본 기준으로 내보내는 중입니다") }
         viewModelScope.launch {
+            val exportRevision = state.revision
+            val exportSourcePath = sourcePath
             try {
                 val context = getApplication<Application>()
                 val fileName = "KeplerStudio_${exportTimestamp()}.${state.exportFormat.extension}"
@@ -576,6 +579,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val savedExports = withContext(Dispatchers.IO) {
                     rememberSavedExport(context, savedItem, state.exportHistoryRetention)
                 }
+                val currentState = _uiState.value
+                if (currentState.sourcePath != exportSourcePath || currentState.revision != exportRevision) {
+                    return@launch
+                }
                 updateUiStateAndRecycleReplaced {
                     it.copy(
                         isBusy = false,
@@ -583,8 +590,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         message = "갤러리에 저장되었습니다: $fileName"
                     )
                 }
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (t: Throwable) {
-                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "내보내기에 실패했습니다: ${t.message}") }
+                val currentState = _uiState.value
+                if (currentState.sourcePath == exportSourcePath && currentState.revision == exportRevision) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "내보내기에 실패했습니다: ${t.message}") }
+                }
             }
         }
     }
@@ -1097,6 +1109,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         renderJob?.cancel()
+        selectionLivePreviewJob?.cancel()
         draftSaveJob?.cancel()
         paramUndoWindowJob?.cancel()
         releaseNativeSession()

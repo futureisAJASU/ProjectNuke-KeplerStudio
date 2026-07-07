@@ -6,7 +6,9 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -38,20 +40,39 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
     )
     updateUiState { nextState }
 
-    viewModelScope.launch {
-        val preview = withContext(Dispatchers.Default) {
-            renderLiveSelectionPreview(base, nextState, nextRevision)
-        }
-        if (uiState.value.revision == nextRevision) {
+    selectionLivePreviewJob?.cancel()
+    selectionLivePreviewJob = viewModelScope.launch {
+        var preview: Bitmap? = null
+        try {
+            delay(120L)
+            preview = withContext(Dispatchers.Default) {
+                renderLiveSelectionPreview(base, nextState, nextRevision)
+            }
+            if (uiState.value.revision == nextRevision) {
+                val adopted = preview ?: error("missing selection live preview")
+                updateUiState {
+                    it.copy(
+                        previewBitmap = adopted,
+                        isBusy = false,
+                        message = "선택 마스크 미리보기가 적용되었습니다."
+                    )
+                }
+                preview = null
+            } else {
+                preview?.recycle()
+                preview = null
+            }
+        } catch (ce: CancellationException) {
+            preview?.recycle()
+            throw ce
+        } catch (t: Throwable) {
+            preview?.recycle()
             updateUiState {
                 it.copy(
-                    previewBitmap = preview,
                     isBusy = false,
-                    message = "선택 마스크 미리보기가 적용되었습니다."
+                    message = "선택 마스크 미리보기를 적용하지 못했습니다: ${t.message}"
                 )
             }
-        } else {
-            preview.recycle()
         }
     }
 }

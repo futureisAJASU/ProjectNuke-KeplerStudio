@@ -34,15 +34,22 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     recordUserEditForUndo(clearRedo = true)
     updateUiState { it.copy(isBusy = true, message = "피사체 마스크를 생성하는 중입니다.") }
     viewModelScope.launch {
+        var pendingLayerBitmap: Bitmap? = null
         try {
             val layer = withContext(Dispatchers.Default) {
                 val mask = RemasterModelSession.createForegroundMask(base)
                     ?: error("마스크를 생성하지 못했습니다.")
+                val ownedMask = try {
+                    mask.copy(Bitmap.Config.ARGB_8888, true)
+                } finally {
+                    mask.recycle()
+                }
+                pendingLayerBitmap = ownedMask
                 SelectionLayer(
                     id = newSelectionId(),
                     name = "피사체 마스크",
                     kind = SelectionLayerKind.Subject,
-                    bitmap = mask.copy(Bitmap.Config.ARGB_8888, true)
+                    bitmap = ownedMask
                 )
             }
             updateUiState { current ->
@@ -53,8 +60,13 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                     message = "피사체 마스크를 추가했습니다."
                 )
             }
+            pendingLayerBitmap = null
             persistDraftSnapshot()
+        } catch (ce: CancellationException) {
+            pendingLayerBitmap?.recycle()
+            throw ce
         } catch (t: Throwable) {
+            pendingLayerBitmap?.recycle()
             updateUiState { it.copy(isBusy = false, message = "피사체 마스크 생성에 실패했습니다: ${t.message}") }
         }
     }
@@ -343,7 +355,7 @@ private fun renderWithParams(base: Bitmap, params: EditParams, state: EditorUiSt
 private fun blendWithSelectionMask(local: Bitmap, global: Bitmap, layer: SelectionLayer): Bitmap {
     val width = global.width
     val height = global.height
-    val mask = if (layer.bitmap.width == width && layer.bitmap.height == height) {
+    val scaledMask = if (layer.bitmap.width == width && layer.bitmap.height == height) {
         layer.bitmap
     } else {
         Bitmap.createScaledBitmap(layer.bitmap, width, height, true)
@@ -351,18 +363,21 @@ private fun blendWithSelectionMask(local: Bitmap, global: Bitmap, layer: Selecti
     val localRow = IntArray(width)
     val globalRow = IntArray(width)
     val maskRow = IntArray(width)
-    for (y in 0 until height) {
-        local.getPixels(localRow, 0, width, 0, y, width, 1)
-        global.getPixels(globalRow, 0, width, 0, y, width, 1)
-        mask.getPixels(maskRow, 0, width, 0, y, width, 1)
-        for (x in 0 until width) {
-            val raw = ((maskRow[x] ushr 16) and 0xff) / 255f
-            val a = (if (layer.inverted) 1f - raw else raw) * layer.opacity.coerceIn(0f, 1f)
-            globalRow[x] = blendArgb(localRow[x], globalRow[x], a)
+    try {
+        for (y in 0 until height) {
+            local.getPixels(localRow, 0, width, 0, y, width, 1)
+            global.getPixels(globalRow, 0, width, 0, y, width, 1)
+            scaledMask.getPixels(maskRow, 0, width, 0, y, width, 1)
+            for (x in 0 until width) {
+                val raw = ((maskRow[x] ushr 16) and 0xff) / 255f
+                val a = (if (layer.inverted) 1f - raw else raw) * layer.opacity.coerceIn(0f, 1f)
+                globalRow[x] = blendArgb(localRow[x], globalRow[x], a)
+            }
+            global.setPixels(globalRow, 0, width, 0, y, width, 1)
         }
-        global.setPixels(globalRow, 0, width, 0, y, width, 1)
+    } finally {
+        if (scaledMask !== layer.bitmap) scaledMask.recycle()
     }
-    if (mask !== layer.bitmap) mask.recycle()
     local.recycle()
     return global
 }
