@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -58,6 +59,44 @@ jint runNativeGuarded(const char* functionName, Fn&& fn) {
         LOGE("%s failed: unknown exception", functionName);
         return -22;
     }
+}
+
+constexpr size_t kMaxTemporaryBytes = 256ull * 1024ull * 1024ull;
+
+static bool validateRgbaBitmapLayout(const AndroidBitmapInfo& info) {
+    if (info.width == 0 || info.height == 0 || info.stride == 0) return false;
+    if (info.width > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.height > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.stride > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (static_cast<size_t>(info.width) > std::numeric_limits<size_t>::max() / 4ULL) return false;
+    return static_cast<size_t>(info.stride) >= static_cast<size_t>(info.width) * 4ULL;
+}
+
+static bool checkedBitmapByteCount(const AndroidBitmapInfo& info, size_t& out) {
+    if (!validateRgbaBitmapLayout(info)) return false;
+    const size_t stride = static_cast<size_t>(info.stride);
+    const size_t height = static_cast<size_t>(info.height);
+    if (height != 0 && stride > std::numeric_limits<size_t>::max() / height) return false;
+    out = stride * height;
+    return true;
+}
+
+static bool checkedFloatPlaneByteCount(int width, int height, size_t& out) {
+    if (width <= 0 || height <= 0) return false;
+    const size_t w = static_cast<size_t>(width);
+    const size_t h = static_cast<size_t>(height);
+    if (w != 0 && h > std::numeric_limits<size_t>::max() / w) return false;
+    const size_t count = w * h;
+    if (count > std::numeric_limits<size_t>::max() / sizeof(float)) return false;
+    out = count * sizeof(float);
+    return true;
+}
+
+static bool hasFlareTemporaryBudget(size_t bitmapBytes, size_t planeBytes) {
+    if (planeBytes > std::numeric_limits<size_t>::max() / 3ULL) return false;
+    const size_t planeTotal = planeBytes * 3ULL;
+    if (bitmapBytes > std::numeric_limits<size_t>::max() - planeTotal) return false;
+    return bitmapBytes + planeTotal <= kMaxTemporaryBytes;
 }
 
 static inline float clamp01(float v) {
@@ -336,16 +375,34 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplyFlareGuardIn
             LOGE("Unsupported bitmap format: %d", info.format);
             return -2;
         }
+        if (!validateRgbaBitmapLayout(info)) {
+            LOGE("Invalid bitmap dimensions or stride");
+            return -11;
+        }
+        size_t bitmapByteCount = 0;
+        if (!checkedBitmapByteCount(info, bitmapByteCount)) {
+            LOGE("Temporary bitmap copy too large");
+            return -12;
+        }
+        const int width = static_cast<int>(info.width);
+        const int height = static_cast<int>(info.height);
+        const int lumaScale = flare_luma_scale_for_size(width, height);
+        const int scaledWidth = std::max(1, (width + lumaScale - 1) / lumaScale);
+        const int scaledHeight = std::max(1, (height + lumaScale - 1) / lumaScale);
+        size_t planeBytes = 0;
+        if (!checkedFloatPlaneByteCount(scaledWidth, scaledHeight, planeBytes) ||
+            !hasFlareTemporaryBudget(bitmapByteCount, planeBytes)) {
+            LOGE("Temporary flare buffers too large");
+            return -12;
+        }
         LockedBitmap locked(env, bitmap);
         if (locked.lock() != 0) {
             return -3;
         }
         auto* bytes = static_cast<uint8_t*>(locked.pixels);
-        const size_t byteCount = static_cast<size_t>(info.stride) * static_cast<size_t>(info.height);
+        const size_t byteCount = bitmapByteCount;
         std::vector<uint8_t> src(byteCount);
         std::copy(bytes, bytes + byteCount, src.data());
-        const int width = static_cast<int>(info.width);
-        const int height = static_cast<int>(info.height);
         const int stride = static_cast<int>(info.stride);
         if (mode == 1) {
             apply_day_sun_flare(bytes, src, width, height, stride, strength);

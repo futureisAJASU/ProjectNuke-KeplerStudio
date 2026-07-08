@@ -5,6 +5,7 @@
 #include <exception>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -55,6 +56,26 @@ jint runNativeGuarded(const char* functionName, Fn&& fn) {
         LOGE("%s failed: unknown exception", functionName);
         return -22;
     }
+}
+
+constexpr size_t kMaxTemporaryBytes = 256ull * 1024ull * 1024ull;
+
+static bool validateRgbaBitmapLayout(const AndroidBitmapInfo& info) {
+    if (info.width == 0 || info.height == 0 || info.stride == 0) return false;
+    if (info.width > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.height > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.stride > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (static_cast<size_t>(info.width) > std::numeric_limits<size_t>::max() / 4ULL) return false;
+    return static_cast<size_t>(info.stride) >= static_cast<size_t>(info.width) * 4ULL;
+}
+
+static bool checkedBitmapByteCount(const AndroidBitmapInfo& info, size_t& out) {
+    if (!validateRgbaBitmapLayout(info)) return false;
+    const size_t stride = static_cast<size_t>(info.stride);
+    const size_t height = static_cast<size_t>(info.height);
+    if (height != 0 && stride > std::numeric_limits<size_t>::max() / height) return false;
+    out = stride * height;
+    return out <= kMaxTemporaryBytes;
 }
 
 static inline float clamp01(float v) {
@@ -123,11 +144,11 @@ static void apply_vignette_correction(uint8_t* base, int width, int height, int 
     }
 }
 
-static void apply_soft_blur(uint8_t* base, int width, int height, int stride, float strength) {
+static void apply_soft_blur(uint8_t* base, int width, int height, int stride, float strength, size_t byteCount) {
     const float s = clamp01(strength);
     if (s <= 0.001f || width < 3 || height < 3) return;
-    std::vector<uint8_t> src(static_cast<size_t>(stride) * static_cast<size_t>(height));
-    std::copy(base, base + static_cast<size_t>(stride) * static_cast<size_t>(height), src.data());
+    std::vector<uint8_t> src(byteCount);
+    std::copy(base, base + byteCount, src.data());
     for (int y = 0; y < height; ++y) {
         auto* outRow = base + y * stride;
         for (int x = 0; x < width; ++x) {
@@ -156,11 +177,11 @@ static void apply_soft_blur(uint8_t* base, int width, int height, int stride, fl
     }
 }
 
-static void apply_small_spot_cleanup(uint8_t* base, int width, int height, int stride, float strength) {
+static void apply_small_spot_cleanup(uint8_t* base, int width, int height, int stride, float strength, size_t byteCount) {
     const float s = clamp01(strength);
     if (s <= 0.001f || width < 3 || height < 3) return;
-    std::vector<uint8_t> src(static_cast<size_t>(stride) * static_cast<size_t>(height));
-    std::copy(base, base + static_cast<size_t>(stride) * static_cast<size_t>(height), src.data());
+    std::vector<uint8_t> src(byteCount);
+    std::copy(base, base + byteCount, src.data());
     for (int y = 0; y < height; ++y) {
         auto* outRow = base + y * stride;
         for (int x = 0; x < width; ++x) {
@@ -250,6 +271,17 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplySpecialEffec
             LOGE("Unsupported bitmap format: %d", info.format);
             return -2;
         }
+        if (!validateRgbaBitmapLayout(info)) {
+            LOGE("Invalid bitmap dimensions or stride");
+            return -11;
+        }
+        size_t byteCount = 0;
+        if (effect == 0 || effect == 3) {
+            if (!checkedBitmapByteCount(info, byteCount)) {
+                LOGE("Temporary bitmap copy too large");
+                return -12;
+            }
+        }
         LockedBitmap locked(env, bitmap);
         if (locked.lock() != 0) {
             LOGE("AndroidBitmap_lockPixels failed");
@@ -260,10 +292,10 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplySpecialEffec
         const int height = static_cast<int>(info.height);
         const int stride = static_cast<int>(info.stride);
         switch (effect) {
-            case 0: apply_small_spot_cleanup(bytes, width, height, stride, strength); break;
+            case 0: apply_small_spot_cleanup(bytes, width, height, stride, strength, byteCount); break;
             case 1: apply_chroma_fringe_reduce(bytes, width, height, stride, strength); break;
             case 2: apply_vignette_correction(bytes, width, height, stride, strength); break;
-            case 3: apply_soft_blur(bytes, width, height, stride, strength); break;
+            case 3: apply_soft_blur(bytes, width, height, stride, strength, byteCount); break;
             default:
                 return -10;
         }

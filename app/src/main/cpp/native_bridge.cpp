@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <new>
 #include <string>
 #include <vector>
@@ -48,6 +49,8 @@ struct LockedBitmap {
     LockedBitmap& operator=(const LockedBitmap&) = delete;
 };
 
+constexpr size_t kMaxTemporaryBytes = 256ull * 1024ull * 1024ull;
+
 template <typename Fn>
 jint runNativeGuarded(const char* functionName, Fn&& fn) {
     try {
@@ -62,6 +65,31 @@ jint runNativeGuarded(const char* functionName, Fn&& fn) {
         LOGE("%s failed: unknown exception", functionName);
         return -22;
     }
+}
+
+static bool validateRgbaBitmapLayout(const AndroidBitmapInfo& info) {
+    if (info.width == 0 || info.height == 0 || info.stride == 0) return false;
+    if (info.width > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.height > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.stride > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (static_cast<size_t>(info.width) > std::numeric_limits<size_t>::max() / 4ULL) return false;
+    const size_t minStride = static_cast<size_t>(info.width) * 4ULL;
+    return static_cast<size_t>(info.stride) >= minStride;
+}
+
+static bool checkedBitmapByteCount(const AndroidBitmapInfo& info, size_t& out) {
+    if (!validateRgbaBitmapLayout(info)) return false;
+    const size_t stride = static_cast<size_t>(info.stride);
+    const size_t height = static_cast<size_t>(info.height);
+    if (height != 0 && stride > std::numeric_limits<size_t>::max() / height) return false;
+    out = stride * height;
+    return true;
+}
+
+static bool hasRowBufferBudget(const AndroidBitmapInfo& info, size_t rowBuffers) {
+    if (!validateRgbaBitmapLayout(info) || rowBuffers == 0) return false;
+    const size_t stride = static_cast<size_t>(info.stride);
+    return stride <= kMaxTemporaryBytes / rowBuffers;
 }
 
 static inline float clamp01(float v) {
@@ -827,6 +855,20 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
             LOGE("Unsupported bitmap format: %d", info.format);
             return -2;
+        }
+        if (!validateRgbaBitmapLayout(info)) {
+            LOGE("Invalid bitmap dimensions or stride");
+            return -11;
+        }
+        size_t bitmapByteCount = 0;
+        if (!checkedBitmapByteCount(info, bitmapByteCount)) {
+            LOGE("Bitmap byte count overflow");
+            return -11;
+        }
+        (void)bitmapByteCount;
+        if (!hasRowBufferBudget(info, 5)) {
+            LOGE("Temporary row buffers too large");
+            return -12;
         }
 
         LockedBitmap locked(env, bitmap);

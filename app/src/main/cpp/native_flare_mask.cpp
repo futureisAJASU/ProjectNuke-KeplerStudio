@@ -5,6 +5,7 @@
 #include <exception>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <new>
 #include <vector>
 
@@ -55,6 +56,32 @@ jint runNativeGuarded(const char* functionName, Fn&& fn) {
         LOGE("%s failed: unknown exception", functionName);
         return -22;
     }
+}
+
+constexpr size_t kMaxTemporaryBytes = 256ull * 1024ull * 1024ull;
+
+static bool validateRgbaBitmapLayout(const AndroidBitmapInfo& info) {
+    if (info.width == 0 || info.height == 0 || info.stride == 0) return false;
+    if (info.width > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.height > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.stride > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (static_cast<size_t>(info.width) > std::numeric_limits<size_t>::max() / 4ULL) return false;
+    return static_cast<size_t>(info.stride) >= static_cast<size_t>(info.width) * 4ULL;
+}
+
+static bool checkedPixelCount(const AndroidBitmapInfo& info, size_t& out) {
+    if (!validateRgbaBitmapLayout(info)) return false;
+    const size_t width = static_cast<size_t>(info.width);
+    const size_t height = static_cast<size_t>(info.height);
+    if (height != 0 && width > std::numeric_limits<size_t>::max() / height) return false;
+    out = width * height;
+    return true;
+}
+
+static bool hasMaskBudget(size_t pixelCount, bool needsBlur) {
+    const size_t factor = needsBlur ? 2ULL : 1ULL;
+    if (factor != 0 && pixelCount > kMaxTemporaryBytes / factor) return false;
+    return true;
 }
 
 static inline float clamp01(float v) {
@@ -143,9 +170,23 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
             LOGE("Unsupported bitmap format");
             return -2;
         }
+        if (!validateRgbaBitmapLayout(srcInfo) || !validateRgbaBitmapLayout(maskInfo)) {
+            LOGE("Invalid bitmap dimensions or stride");
+            return -11;
+        }
         if (srcInfo.width != maskInfo.width || srcInfo.height != maskInfo.height) {
             LOGE("Mask size mismatch");
             return -3;
+        }
+        size_t pixelCount = 0;
+        if (!checkedPixelCount(srcInfo, pixelCount)) {
+            LOGE("Temporary bitmap copy too large");
+            return -12;
+        }
+        const bool needsBlur = std::max(0, radius) > 0 && std::max(0, passes) > 0 && srcInfo.width > 1 && srcInfo.height > 1;
+        if (!hasMaskBudget(pixelCount, needsBlur)) {
+            LOGE("Temporary mask buffers too large");
+            return -12;
         }
 
         LockedBitmap srcLock(env, sourceBitmap);
@@ -158,7 +199,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
         const float safeThreshold = std::max(0.70f, std::min(0.98f, threshold));
         const auto* src = static_cast<const uint8_t*>(srcLock.pixels);
         auto* mask = static_cast<uint8_t*>(maskLock.pixels);
-        std::vector<uint8_t> alpha(static_cast<size_t>(width) * height);
+        std::vector<uint8_t> alpha(pixelCount);
 
         for (int y = 0; y < height; ++y) {
             const auto* row = src + static_cast<size_t>(y) * srcInfo.stride;

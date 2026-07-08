@@ -5,6 +5,7 @@
 #include <exception>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <new>
 
 #define LOG_TAG "KeplerNativeCrop"
@@ -54,6 +55,15 @@ jint runNativeGuarded(const char* functionName, Fn&& fn) {
         LOGE("%s failed: unknown exception", functionName);
         return -22;
     }
+}
+
+static bool validateRgbaBitmapLayout(const AndroidBitmapInfo& info) {
+    if (info.width == 0 || info.height == 0 || info.stride == 0) return false;
+    if (info.width > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.height > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (info.stride > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
+    if (static_cast<size_t>(info.width) > std::numeric_limits<size_t>::max() / 4ULL) return false;
+    return static_cast<size_t>(info.stride) >= static_cast<size_t>(info.width) * 4ULL;
 }
 
 struct Bounds {
@@ -174,6 +184,10 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderCropTransfo
         if (srcInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888 || dstInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
             LOGE("Unsupported bitmap format");
             return -2;
+        }
+        if (!validateRgbaBitmapLayout(srcInfo) || !validateRgbaBitmapLayout(dstInfo)) {
+            LOGE("Invalid bitmap dimensions or stride");
+            return -11;
         }
 
         LockedBitmap srcLock(env, sourceBitmap);
