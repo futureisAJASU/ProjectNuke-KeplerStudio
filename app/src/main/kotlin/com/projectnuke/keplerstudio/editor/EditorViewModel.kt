@@ -1057,7 +1057,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         closeParamUndoWindow()
         val state = _uiState.value
         if (state.previewBitmap == null && state.originalPreviewBitmap == null) return
-        undoHistory.addLast(state.toHistorySnapshot())
+        val snapshot = try {
+            state.toHistorySnapshot()
+        } catch (t: Throwable) {
+            Log.w(FLARE_GUARD_AI_TAG, "Failed to create undo snapshot", t)
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
+            }
+            return
+        }
+        undoHistory.addLast(snapshot)
         trimHistory(undoHistory)
         if (clearRedo) {
             recycleHistory(redoHistory)
@@ -1134,27 +1143,42 @@ private data class EditorHistorySnapshot(
 )
 
 private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
-    val previewCopy = previewBitmap?.copy(Bitmap.Config.ARGB_8888, true)
-    val originalCopy = if (originalPreviewBitmap == null) {
-        null
-    } else if (originalPreviewBitmap === previewBitmap) {
-        previewCopy
-    } else {
-        originalPreviewBitmap.copy(Bitmap.Config.ARGB_8888, true)
+    var previewCopy: Bitmap? = null
+    var originalCopy: Bitmap? = null
+    val selectionCopies = ArrayList<SelectionLayer>(selectionLayers.size)
+    try {
+        previewCopy = previewBitmap?.copy(Bitmap.Config.ARGB_8888, true)
+        originalCopy = if (originalPreviewBitmap == null) {
+            null
+        } else if (originalPreviewBitmap === previewBitmap) {
+            previewCopy
+        } else {
+            originalPreviewBitmap.copy(Bitmap.Config.ARGB_8888, true)
+        }
+        selectionLayers.forEach { layer ->
+            selectionCopies.add(layer.copy(bitmap = layer.bitmap.copy(Bitmap.Config.ARGB_8888, true)))
+        }
+        return EditorHistorySnapshot(
+            params = params,
+            baseBitmapDirty = baseBitmapDirty,
+            previewBitmap = previewCopy,
+            originalPreviewBitmap = originalCopy,
+            presetLook = presetLook,
+            cropState = cropState,
+            selectionLayers = selectionCopies,
+            activeSelectionLayerId = activeSelectionLayerId,
+            selectionPaintSettings = selectionPaintSettings,
+            showSelectionOverlay = showSelectionOverlay,
+            flareGuardRuntimeStatus = flareGuardRuntimeStatus
+        )
+    } catch (t: Throwable) {
+        previewCopy?.recycle()
+        if (originalCopy != null && originalCopy !== previewCopy) {
+            originalCopy.recycle()
+        }
+        selectionCopies.forEach { it.bitmap.recycle() }
+        throw t
     }
-    return EditorHistorySnapshot(
-        params = params,
-        baseBitmapDirty = baseBitmapDirty,
-        previewBitmap = previewCopy,
-        originalPreviewBitmap = originalCopy,
-        presetLook = presetLook,
-        cropState = cropState,
-        selectionLayers = selectionLayers.deepCopy(),
-        activeSelectionLayerId = activeSelectionLayerId,
-        selectionPaintSettings = selectionPaintSettings,
-        showSelectionOverlay = showSelectionOverlay,
-        flareGuardRuntimeStatus = flareGuardRuntimeStatus
-    )
 }
 
 private fun buildHistoryAppliedMessage(
@@ -1223,10 +1247,6 @@ private fun historyIsZero(value: Float): Boolean = kotlin.math.abs(value) < 0.00
 
 private fun historySignedValue(value: Float): String =
     if (historyIsZero(value)) "0.00" else String.format(Locale.US, "%+.2f", value)
-
-private fun List<SelectionLayer>.deepCopy(): List<SelectionLayer> = map { layer ->
-    layer.copy(bitmap = layer.bitmap.copy(Bitmap.Config.ARGB_8888, true))
-}
 
 private fun identityBitmapSet(): MutableSet<Bitmap> =
     Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
@@ -2203,7 +2223,7 @@ private inline fun <reified T : Enum<T>> enumValueOrDefault(name: String?, defau
 private fun exportTimestamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
 private const val FLARE_GUARD_AI_TAG = "KeplerFlareAI"
-private const val EDITOR_HISTORY_MAX = 10
+private const val EDITOR_HISTORY_MAX = 5
 private const val EXPORT_MAX_SIDE = 8192
 private const val DRAFT_SOURCE_FILE_NAME = "source.img"
 private const val DRAFT_THUMBNAIL_FILE_NAME = "thumbnail.jpg"
