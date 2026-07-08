@@ -10,25 +10,34 @@ fun renderBitmapWithSelectionLayers(
 ): Bitmap {
     val enabledLayers = state.selectionLayers.filter { it.enabled }
     val global = renderSelectionBitmapWithParams(base, state.params, state, revision)
-    if (enabledLayers.isEmpty()) return global
-
-    for (layer in enabledLayers) {
-        val local = renderSelectionBitmapWithParams(base, mergeSelectionParams(state.params, layer.localParams), state, revision)
-        val result = NativePhotoCore.nativeBlendSelectionLayerInPlace(
-            target = global,
-            local = local,
-            mask = layer.bitmap,
-            inverted = layer.inverted,
-            opacity = layer.opacity.coerceIn(0f, 1f)
-        )
-        if (result < 0) {
-            local.recycle()
-            global.recycle()
-            throw IllegalStateException("native selection blend failed: code=$result")
-        }
-        local.recycle()
+    if (enabledLayers.isEmpty()) {
+        applyActiveQuickEffectsToBitmap(global, state.activeQuickEffects, revision)
+        return global
     }
-    return global
+
+    try {
+        for (layer in enabledLayers) {
+            val local = renderSelectionBitmapWithParams(base, mergeSelectionParams(state.params, layer.localParams), state, revision)
+            val result = NativePhotoCore.nativeBlendSelectionLayerInPlace(
+                target = global,
+                local = local,
+                mask = layer.bitmap,
+                inverted = layer.inverted,
+                opacity = layer.opacity.coerceIn(0f, 1f)
+            )
+            if (result < 0) {
+                local.recycle()
+                global.recycle()
+                throw IllegalStateException("native selection blend failed: code=$result")
+            }
+            local.recycle()
+        }
+        applyActiveQuickEffectsToBitmap(global, state.activeQuickEffects, revision)
+        return global
+    } catch (t: Throwable) {
+        if (!global.isRecycled) global.recycle()
+        throw t
+    }
 }
 
 private fun mergeSelectionParams(base: EditParams, local: EditParams): EditParams = EditParams(
@@ -87,6 +96,5 @@ private fun renderSelectionBitmapWithParams(
         out.recycle()
         throw IllegalStateException("native selection render failed: code=$result")
     }
-    applyActiveQuickEffectsToBitmap(out, state.activeQuickEffects, revision)
     return out
 }

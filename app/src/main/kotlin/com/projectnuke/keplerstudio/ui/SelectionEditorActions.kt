@@ -214,7 +214,14 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                 renderSelectionLocalEdit(base, state, layer, nextRevision)
             }
             renderedPreview = withContext(Dispatchers.Default) {
-                renderedOriginal?.copy(Bitmap.Config.ARGB_8888, true) ?: error("missing selection render")
+                val preview = renderedOriginal?.copy(Bitmap.Config.ARGB_8888, true) ?: error("missing selection render")
+                try {
+                    applyActiveQuickEffectsToBitmap(preview, state.activeQuickEffects, nextRevision)
+                    preview
+                } catch (t: Throwable) {
+                    preview.recycle()
+                    throw t
+                }
             }
             if (uiState.value.revision == nextRevision) {
                 val adoptedOriginal = renderedOriginal ?: error("missing selection original")
@@ -350,7 +357,6 @@ private fun renderWithParams(base: Bitmap, params: EditParams, state: EditorUiSt
         out.recycle()
         throw IllegalStateException("native selection render failed: code=$result")
     }
-    applyActiveQuickEffectsToBitmap(out, state.activeQuickEffects, revision)
     return out
 }
 

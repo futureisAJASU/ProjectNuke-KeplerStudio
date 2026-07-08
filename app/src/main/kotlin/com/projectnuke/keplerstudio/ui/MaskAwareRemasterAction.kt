@@ -51,7 +51,14 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 )
             }
             renderedPreview = withContext(Dispatchers.Default) {
-                renderedOriginal?.copy(Bitmap.Config.ARGB_8888, true) ?: error("missing mask-aware render")
+                val preview = renderedOriginal?.copy(Bitmap.Config.ARGB_8888, true) ?: error("missing mask-aware render")
+                try {
+                    applyActiveQuickEffectsToBitmap(preview, state.activeQuickEffects, nextRevision)
+                    preview
+                } catch (t: Throwable) {
+                    preview.recycle()
+                    throw t
+                }
             }
             if (uiState.value.revision == nextRevision) {
                 val adoptedOriginal = renderedOriginal ?: error("missing mask-aware original")
@@ -174,7 +181,6 @@ private fun renderWithState(
         out.recycle()
         throw IllegalStateException("native mask-aware render failed: code=$result")
     }
-    applyActiveQuickEffectsToBitmap(out, state.activeQuickEffects, revision)
     return out
 }
 
