@@ -78,7 +78,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         } catch (_: Throwable) {
             bakedOriginal?.recycle()
             renderedPreview?.recycle()
-            updateUiState {
+            if (uiState.value.revision == nextRevision) updateUiState {
                 it.copy(
                     isBusy = false,
                     message = "선택 마스크 보정 적용에 실패했습니다."

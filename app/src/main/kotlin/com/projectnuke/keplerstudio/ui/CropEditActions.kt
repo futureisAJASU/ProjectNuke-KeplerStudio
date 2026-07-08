@@ -147,8 +147,10 @@ fun EditorViewModel.applyCropTransform() {
         } catch (t: Throwable) {
             renderedOriginal?.recycle()
             renderedPreview?.recycle()
-            updateUiState {
-                it.copy(isBusy = false, message = "자르기에 실패했습니다: ${t.message}")
+            if (uiState.value.revision == nextRevision) {
+                updateUiState {
+                    it.copy(isBusy = false, message = "자르기에 실패했습니다: ${t.message}")
+                }
             }
         }
     }

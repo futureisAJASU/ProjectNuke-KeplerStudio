@@ -68,7 +68,9 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             throw ce
         } catch (t: Throwable) {
             pendingLayerBitmap?.recycle()
-            updateUiState { it.copy(isBusy = false, message = "피사체 마스크 생성에 실패했습니다: ${t.message}") }
+            if (uiState.value.originalPreviewBitmap === base || uiState.value.previewBitmap === base) {
+                updateUiState { it.copy(isBusy = false, message = "피사체 마스크 생성에 실패했습니다: ${t.message}") }
+            }
         }
     }
 }
@@ -253,7 +255,9 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         } catch (t: Throwable) {
             renderedOriginal?.recycle()
             renderedPreview?.recycle()
-            updateUiState { it.copy(isBusy = false, message = "마스크 보정 적용에 실패했습니다: ${t.message}") }
+            if (uiState.value.revision == nextRevision) {
+                updateUiState { it.copy(isBusy = false, message = "마스크 보정 적용에 실패했습니다: ${t.message}") }
+            }
         }
     }
 }

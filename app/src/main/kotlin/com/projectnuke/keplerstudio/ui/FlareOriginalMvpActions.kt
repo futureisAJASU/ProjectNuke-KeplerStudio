@@ -89,7 +89,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         } catch (_: Throwable) {
             nextOriginal?.recycle()
             nextPreview?.recycle()
-            updateUiState {
+            if (uiState.value.revision == nextRevision) updateUiState {
                 it.copy(
                     isBusy = false,
                     message = "번짐 완화에 실패했습니다.",

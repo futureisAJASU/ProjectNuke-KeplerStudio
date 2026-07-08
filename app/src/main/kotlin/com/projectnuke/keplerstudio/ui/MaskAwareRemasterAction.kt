@@ -90,7 +90,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         } catch (t: Throwable) {
             renderedOriginal?.recycle()
             renderedPreview?.recycle()
-            updateUiState {
+            if (uiState.value.revision == nextRevision) updateUiState {
                 it.copy(
                     isBusy = false,
                     message = "Edge Masker 기반 마스크 보정 적용에 실패했습니다: ${t.message}"

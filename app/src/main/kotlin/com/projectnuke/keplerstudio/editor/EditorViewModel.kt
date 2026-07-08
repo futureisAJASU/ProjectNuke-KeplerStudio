@@ -96,8 +96,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (bitmap.isRecycled) return
         viewModelScope.launch {
             delay(150L)
-            if (!bitmap.isRecycled) bitmap.recycle()
+            if (!bitmap.isRecycled && !isBitmapRetainedByCurrentState(bitmap)) bitmap.recycle()
         }
+    }
+
+    private fun isBitmapRetainedByCurrentState(bitmap: Bitmap): Boolean {
+        val state = _uiState.value
+        if (state.previewBitmap === bitmap) return true
+        if (state.originalPreviewBitmap === bitmap) return true
+        return state.selectionLayers.any { it.bitmap === bitmap }
     }
 
     private fun recycleLiveStateBitmapsNow(state: EditorUiState) {
@@ -138,11 +145,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun persistDraftSnapshotInternal() {
         val context = getApplication<Application>()
-        val state = _uiState.value
+        val payload = try {
+            createDraftSavePayload(_uiState.value)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            logDraftSaveFailure(t)
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "\uc784\uc2dc \uc800\uc7a5\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. \ud3b8\uc9d1\uc740 \uacc4\uc18d\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.")
+            }
+            return
+        }
         val saved = try {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
-                    saveDraftSnapshot(context, state)
+                    saveDraftSnapshot(context, payload)
                 }
             }
         } catch (ce: CancellationException) {
@@ -153,6 +170,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(message = "\uc784\uc2dc \uc800\uc7a5\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. \ud3b8\uc9d1\uc740 \uacc4\uc18d\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.")
             }
             null
+        } finally {
+            payload.dirtyBitmapCopy?.takeIf { !it.isRecycled }?.recycle()
         } ?: return
         updateUiStateAndRecycleReplaced {
             it.copy(
@@ -192,9 +211,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openImage(uri: Uri) {
         renderJob?.cancel()
-        restoreDraftToken += 1L
+        selectionLivePreviewJob?.cancel()
+        closeParamUndoWindow()
+        val openToken = restoreDraftToken + 1L
+        restoreDraftToken = openToken
+        val invalidateRevision = _uiState.value.revision + 1
         clearEditHistory()
-        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "이미지를 여는 중입니다") }
+        val openingMessage = "\uc774\ubbf8\uc9c0\ub97c \uc5ec\ub294 \uc911\uc785\ub2c8\ub2e4"
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = invalidateRevision, message = openingMessage) }
 
         viewModelScope.launch {
             var preview: Bitmap? = null
@@ -204,11 +228,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 preview = withContext(Dispatchers.IO) {
                     decodeSampledMutableBitmapWithExif(sourceFile.absolutePath, maxSide = 2048)
                 }
+                if (openToken != restoreDraftToken) {
+                    preview?.recycle()
+                    preview = null
+                    return@launch
+                }
                 val decodedPreview = preview!!
                 Log.i(FLARE_GUARD_AI_TAG, "Opened image with EXIF orientation: ${sourceFile.name} preview=${decodedPreview.width}x${decodedPreview.height}")
 
                 releaseNativeSession()
                 nativeSession = NativePhotoCore.nativeCreateSession(sourceFile.absolutePath)
+                if (openToken != restoreDraftToken) {
+                    preview?.recycle()
+                    preview = null
+                    releaseNativeSession()
+                    return@launch
+                }
 
                 updateUiStateAndRecycleReplaced {
                     val next = it.copy(
@@ -225,7 +260,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         flareGuardRuntimeStatus = null,
                         recoveryDebugInfo = null,
                         showRecoveryDebugCard = false,
-                        revision = it.revision + 1,
+                        revision = invalidateRevision + 1,
                         message = "원본 캐시가 완료되었습니다: ${decodedPreview.width}x${decodedPreview.height} preview"
                     )
                     next
@@ -237,7 +272,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 throw ce
             } catch (t: Throwable) {
                 preview?.recycle()
-                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "이미지를 열지 못했습니다: ${t.message}") }
+                if (openToken == restoreDraftToken && _uiState.value.revision == invalidateRevision) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "이미지를 열지 못했습니다: ${t.message}") }
+                }
             }
         }
     }
@@ -274,7 +311,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 throw ce
             } catch (t: Throwable) {
                 rendered?.recycle()
-                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
+                if (_uiState.value.revision == nextRevision) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
+                }
             }
         }
     }
@@ -320,7 +359,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 throw ce
             } catch (t: Throwable) {
                 rendered?.recycle()
-                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}") }
+                if (_uiState.value.revision == nextRevision) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}") }
+                }
             }
         }
     }
@@ -405,7 +446,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 throw ce
             } catch (t: Throwable) {
                 rendered?.recycle()
-                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
+                if (_uiState.value.revision == nextRevision) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
+                }
             }
         }
     }
@@ -445,7 +488,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 throw ce
             } catch (t: Throwable) {
                 preview?.recycle()
-                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "초기화에 실패했습니다: ${t.message}") }
+                if (_uiState.value.revision == nextRevision) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "초기화에 실패했습니다: ${t.message}") }
+                }
             }
         }
     }
@@ -489,9 +534,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (ce: CancellationException) {
                 rendered?.recycle()
                 throw ce
-            } catch (_: Throwable) {
+            } catch (t: Throwable) {
                 rendered?.recycle()
-                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.") }
+                if (_uiState.value.revision == nextRevision) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.") }
+                }
             }
         }
     }
@@ -606,15 +653,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearDraft() {
         val context = getApplication<Application>()
-        clearDraftPrefs(context)
-        updateUiStateAndRecycleReplaced {
-            it.copy(
-                draftSavedAtMillis = null,
-                draftSourcePath = null,
-                recoveryDebugInfo = null,
-                showRecoveryDebugCard = false,
-                message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다"
-            )
+        viewModelScope.launch {
+            draftSaveJob?.cancelAndJoin()
+            withContext(Dispatchers.IO) {
+                draftSaveMutex.withLock {
+                    clearDraftPrefs(context)
+                }
+            }
+            updateUiStateAndRecycleReplaced {
+                it.copy(
+                    draftSavedAtMillis = null,
+                    draftSourcePath = null,
+                    recoveryDebugInfo = null,
+                    showRecoveryDebugCard = false,
+                    message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다"
+                )
+            }
         }
     }
 
@@ -669,7 +723,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         renderJob?.cancel()
-        redoHistory.addLast(_uiState.value.toHistorySnapshot())
+        val redoSnapshot = try {
+            _uiState.value.toHistorySnapshot()
+        } catch (t: Throwable) {
+            Log.w(FLARE_GUARD_AI_TAG, "Failed to create redo snapshot", t)
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
+            }
+            return
+        }
+        redoHistory.addLast(redoSnapshot)
         val snapshot = undoHistory.removeLast()
         val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "이전 편집 상태를 적용했습니다")
         applyHistorySnapshot(snapshot, message)
@@ -684,7 +747,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         renderJob?.cancel()
-        undoHistory.addLast(_uiState.value.toHistorySnapshot())
+        val undoSnapshot = try {
+            _uiState.value.toHistorySnapshot()
+        } catch (t: Throwable) {
+            Log.w(FLARE_GUARD_AI_TAG, "Failed to create undo snapshot for redo", t)
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
+            }
+            return
+        }
+        undoHistory.addLast(undoSnapshot)
         trimHistory(undoHistory)
         val snapshot = redoHistory.removeLast()
         val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "다음 편집 상태를 적용했습니다")
@@ -826,7 +898,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (t: Throwable) {
                 renderedPreview?.recycle()
                 Log.e(FLARE_GUARD_AI_TAG, "$title native special effect failed", t)
-                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = failureMessage) }
+                if (_uiState.value.revision == nextRevision) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = failureMessage) }
+                }
             }
         }
     }
@@ -899,12 +973,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 resultBitmap?.recycle()
                 renderedPreview?.recycle()
                 Log.e(FLARE_GUARD_AI_TAG, "FlareGuard preview failed", t)
-                updateUiStateAndRecycleReplaced {
-                    it.copy(
-                        isBusy = false,
-                        message = "번짐 영역 감지에 실패했습니다.",
-                        flareGuardRuntimeStatus = "번짐 영역 감지에 실패했습니다."
-                    )
+                if (_uiState.value.revision == nextRevision) {
+                    updateUiStateAndRecycleReplaced {
+                        it.copy(
+                            isBusy = false,
+                            message = "번짐 영역 감지에 실패했습니다.",
+                            flareGuardRuntimeStatus = "번짐 영역 감지에 실패했습니다."
+                        )
+                    }
                 }
             }
         }
@@ -1975,6 +2051,17 @@ private data class DraftSaveResult(
     val savedAtMillis: Long
 )
 
+private data class DraftSavePayload(
+    val sourcePath: String?,
+    val baseBitmapDirty: Boolean,
+    val dirtyBitmapCopy: Bitmap?,
+    val params: EditParams,
+    val exportFormat: ExportFormat,
+    val exportResolution: ExportResolution,
+    val presetLook: PresetColorLook?,
+    val activeQuickEffects: List<ActiveQuickEffect>
+)
+
 private data class DraftSourceResult(
     val file: File,
     val changed: Boolean
@@ -1986,46 +2073,78 @@ private enum class QuickEffectGroup {
     Blur
 }
 
-private fun saveDraftSnapshotSafely(context: Context, state: EditorUiState): DraftSaveResult? =
-    try {
-        saveDraftSnapshot(context, state)
+private fun saveDraftSnapshotSafely(context: Context, state: EditorUiState): DraftSaveResult? {
+    val payload = try {
+        createDraftSavePayload(state)
+    } catch (ce: CancellationException) {
+        throw ce
     } catch (t: Throwable) {
         logDraftSaveFailure(t)
         null
+    } ?: return null
+    return try {
+        saveDraftSnapshot(context, payload)
+    } catch (ce: CancellationException) {
+        throw ce
+    } catch (t: Throwable) {
+        logDraftSaveFailure(t)
+        null
+    } finally {
+        payload.dirtyBitmapCopy?.takeIf { !it.isRecycled }?.recycle()
     }
+}
 
-private fun saveDraftSnapshot(context: Context, state: EditorUiState): DraftSaveResult? {
+private fun createDraftSavePayload(state: EditorUiState): DraftSavePayload {
+    val dirtyBitmapCopy = when {
+        !state.baseBitmapDirty && state.sourcePath != null -> null
+        else -> (state.originalPreviewBitmap ?: state.previewBitmap)?.copy(Bitmap.Config.ARGB_8888, true)
+    }
+    if (state.baseBitmapDirty && dirtyBitmapCopy == null) {
+        error("draft save bitmap is missing")
+    }
+    return DraftSavePayload(
+        sourcePath = state.sourcePath,
+        baseBitmapDirty = state.baseBitmapDirty,
+        dirtyBitmapCopy = dirtyBitmapCopy,
+        params = state.params,
+        exportFormat = state.exportFormat,
+        exportResolution = state.exportResolution,
+        presetLook = state.presetLook,
+        activeQuickEffects = state.activeQuickEffects
+    )
+}
+
+private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): DraftSaveResult? {
     val draftSource = when {
-        !state.baseBitmapDirty && state.sourcePath != null -> persistDraftSourceFileIfNeeded(context, state.sourcePath)
-        state.originalPreviewBitmap != null -> persistDraftBitmapFile(context, state.originalPreviewBitmap)?.let { DraftSourceResult(it, changed = true) }
-        state.previewBitmap != null -> persistDraftBitmapFile(context, state.previewBitmap)?.let { DraftSourceResult(it, changed = true) }
+        !payload.baseBitmapDirty && payload.sourcePath != null -> persistDraftSourceFileIfNeeded(context, payload.sourcePath)
+        payload.dirtyBitmapCopy != null -> persistDraftBitmapFile(context, payload.dirtyBitmapCopy)?.let { DraftSourceResult(it, changed = true) }
         else -> null
     } ?: return null
     if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
     val savedAt = System.currentTimeMillis()
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
         .putString(KEY_DRAFT_SOURCE, draftSource.file.absolutePath)
-        .putFloat(KEY_DRAFT_EXPOSURE, state.params.exposure)
-        .putFloat(KEY_DRAFT_CONTRAST, state.params.contrast)
-        .putFloat(KEY_DRAFT_SHADOWS, state.params.shadows)
-        .putFloat(KEY_DRAFT_HIGHLIGHTS, state.params.highlights)
-        .putFloat(KEY_DRAFT_WHITES, state.params.whites)
-        .putFloat(KEY_DRAFT_BLACKS, state.params.blacks)
-        .putFloat(KEY_DRAFT_TEMPERATURE, state.params.temperature)
-        .putFloat(KEY_DRAFT_TINT, state.params.tint)
-        .putFloat(KEY_DRAFT_SATURATION, state.params.saturation)
-        .putFloat(KEY_DRAFT_VIBRANCE, state.params.vibrance)
-        .putFloat(KEY_DRAFT_CLARITY, state.params.clarity)
-        .putFloat(KEY_DRAFT_DEHAZE, state.params.dehaze)
-        .putFloat(KEY_DRAFT_SHARPNESS, state.params.sharpness)
-        .putFloat(KEY_DRAFT_NOISE_REDUCTION, state.params.noiseReduction)
-        .putFloat(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION, state.params.luminanceNoiseReduction)
-        .putFloat(KEY_DRAFT_COLOR_NOISE_REDUCTION, state.params.colorNoiseReduction)
-        .putFloat(KEY_DRAFT_NOISE_DETAIL_PROTECTION, state.params.noiseDetailProtection)
-        .putString(KEY_DRAFT_FORMAT, state.exportFormat.name)
-        .putString(KEY_DRAFT_RESOLUTION, state.exportResolution.name)
-        .putString(KEY_DRAFT_LOOK, presetColorLookToJson(state.presetLook)?.toString())
-        .putString(KEY_DRAFT_QUICK_EFFECTS, state.activeQuickEffects.toDraftString())
+        .putFloat(KEY_DRAFT_EXPOSURE, payload.params.exposure)
+        .putFloat(KEY_DRAFT_CONTRAST, payload.params.contrast)
+        .putFloat(KEY_DRAFT_SHADOWS, payload.params.shadows)
+        .putFloat(KEY_DRAFT_HIGHLIGHTS, payload.params.highlights)
+        .putFloat(KEY_DRAFT_WHITES, payload.params.whites)
+        .putFloat(KEY_DRAFT_BLACKS, payload.params.blacks)
+        .putFloat(KEY_DRAFT_TEMPERATURE, payload.params.temperature)
+        .putFloat(KEY_DRAFT_TINT, payload.params.tint)
+        .putFloat(KEY_DRAFT_SATURATION, payload.params.saturation)
+        .putFloat(KEY_DRAFT_VIBRANCE, payload.params.vibrance)
+        .putFloat(KEY_DRAFT_CLARITY, payload.params.clarity)
+        .putFloat(KEY_DRAFT_DEHAZE, payload.params.dehaze)
+        .putFloat(KEY_DRAFT_SHARPNESS, payload.params.sharpness)
+        .putFloat(KEY_DRAFT_NOISE_REDUCTION, payload.params.noiseReduction)
+        .putFloat(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION, payload.params.luminanceNoiseReduction)
+        .putFloat(KEY_DRAFT_COLOR_NOISE_REDUCTION, payload.params.colorNoiseReduction)
+        .putFloat(KEY_DRAFT_NOISE_DETAIL_PROTECTION, payload.params.noiseDetailProtection)
+        .putString(KEY_DRAFT_FORMAT, payload.exportFormat.name)
+        .putString(KEY_DRAFT_RESOLUTION, payload.exportResolution.name)
+        .putString(KEY_DRAFT_LOOK, presetColorLookToJson(payload.presetLook)?.toString())
+        .putString(KEY_DRAFT_QUICK_EFFECTS, payload.activeQuickEffects.toDraftString())
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
         .apply()
     return DraftSaveResult(draftSource.file.absolutePath, savedAt)
