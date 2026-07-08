@@ -74,6 +74,7 @@ struct Bounds {
 };
 
 static inline float clampf(float v, float lo, float hi) {
+    if (lo > hi) std::swap(lo, hi);
     return std::max(lo, std::min(hi, v));
 }
 

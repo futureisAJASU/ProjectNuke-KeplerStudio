@@ -38,7 +38,11 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         var renderedPreview: Bitmap? = null
         try {
             bakedOriginal = withContext(Dispatchers.Default) {
-                val localOnlyState = current.copy(params = EditParams())
+                // Keep the adopted original free of non-destructive quick effects.
+                val localOnlyState = current.copy(
+                    params = EditParams(),
+                    activeQuickEffects = emptyList()
+                )
                 renderBitmapWithSelectionLayers(baseOriginal, localOnlyState, nextRevision)
             }
             renderedPreview = withContext(Dispatchers.Default) {

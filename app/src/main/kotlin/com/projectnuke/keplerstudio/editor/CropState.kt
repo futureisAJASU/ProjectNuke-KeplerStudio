@@ -27,18 +27,40 @@ data class CropState(
     val cropHeight: Float get() = (cropBottom - cropTop).coerceIn(0f, 1f)
 }
 
+private fun normalizeRange(a: Float, b: Float, minSize: Float): Pair<Float, Float> {
+    val safeMinSize = minSize.coerceIn(0f, 1f)
+    var start = min(a, b).coerceIn(0f, 1f)
+    var end = max(a, b).coerceIn(0f, 1f)
+
+    if (end - start < safeMinSize) {
+        val center = ((start + end) * 0.5f).coerceIn(0f, 1f)
+        start = center - safeMinSize * 0.5f
+        end = center + safeMinSize * 0.5f
+
+        if (start < 0f) {
+            end -= start
+            start = 0f
+        }
+        if (end > 1f) {
+            start -= end - 1f
+            end = 1f
+        }
+
+        start = start.coerceIn(0f, 1f)
+        end = end.coerceIn(0f, 1f)
+    }
+
+    return start to end
+}
+
 fun CropState.normalized(minSize: Float = 0.08f): CropState {
-    val left = min(cropLeft, cropRight).coerceIn(0f, 1f)
-    val right = max(cropLeft, cropRight).coerceIn(0f, 1f)
-    val top = min(cropTop, cropBottom).coerceIn(0f, 1f)
-    val bottom = max(cropTop, cropBottom).coerceIn(0f, 1f)
-    val fixedRight = if (right - left < minSize) (left + minSize).coerceAtMost(1f) else right
-    val fixedBottom = if (bottom - top < minSize) (top + minSize).coerceAtMost(1f) else bottom
+    val (left, right) = normalizeRange(cropLeft, cropRight, minSize)
+    val (top, bottom) = normalizeRange(cropTop, cropBottom, minSize)
     return copy(
-        cropLeft = fixedRight.minus(fixedRight - left).coerceIn(0f, 1f),
-        cropTop = fixedBottom.minus(fixedBottom - top).coerceIn(0f, 1f),
-        cropRight = fixedRight,
-        cropBottom = fixedBottom,
+        cropLeft = left,
+        cropTop = top,
+        cropRight = right,
+        cropBottom = bottom,
         rotationDegrees = ((rotationDegrees % 360) + 360) % 360,
         straightenDegrees = straightenDegrees.coerceIn(-45f, 45f)
     )
