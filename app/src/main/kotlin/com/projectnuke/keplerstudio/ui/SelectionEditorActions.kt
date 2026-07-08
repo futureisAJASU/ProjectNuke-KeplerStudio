@@ -7,6 +7,7 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.SelectionLayer
+import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
 import com.projectnuke.keplerstudio.editor.SelectionPaintMode
 import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
@@ -349,6 +350,7 @@ private fun renderWithParams(base: Bitmap, params: EditParams, state: EditorUiSt
         out.recycle()
         throw IllegalStateException("native selection render failed: code=$result")
     }
+    applyActiveQuickEffectsToBitmap(out, state.activeQuickEffects, revision)
     return out
 }
 

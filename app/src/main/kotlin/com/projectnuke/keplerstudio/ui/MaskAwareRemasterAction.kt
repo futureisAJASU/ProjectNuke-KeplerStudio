@@ -6,6 +6,7 @@ import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
@@ -173,6 +174,7 @@ private fun renderWithState(
         out.recycle()
         throw IllegalStateException("native mask-aware render failed: code=$result")
     }
+    applyActiveQuickEffectsToBitmap(out, state.activeQuickEffects, revision)
     return out
 }
 

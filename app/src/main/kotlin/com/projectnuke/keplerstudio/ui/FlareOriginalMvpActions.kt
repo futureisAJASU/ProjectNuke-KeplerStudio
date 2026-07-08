@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
+import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
@@ -132,5 +133,6 @@ private fun renderPreviewFromState(base: Bitmap, state: EditorUiState, revision:
         copy.recycle()
         throw IllegalStateException("native flare preview render failed: code=$result")
     }
+    applyActiveQuickEffectsToBitmap(copy, state.activeQuickEffects, revision)
     return copy
 }

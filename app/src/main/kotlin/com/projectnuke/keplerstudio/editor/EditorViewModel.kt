@@ -217,6 +217,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         baseBitmapDirty = false,
                         originalPreviewBitmap = decodedPreview,
                         previewBitmap = decodedPreview,
+                        activeQuickEffects = emptyList(),
                         params = EditParams(),
                         presetLook = null,
                         canUndo = false,
@@ -255,7 +256,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var rendered: Bitmap? = null
             try {
                 rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision, current.presetLook)
+                    renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
@@ -296,7 +297,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val nextParams = withContext(Dispatchers.Default) { computeAutoEnhanceParams(basePreview) }
                 rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision, current.presetLook)
+                    renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
@@ -388,7 +389,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var rendered: Bitmap? = null
             try {
                 rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(basePreview, current.params, nextEngines, nextRevision, current.presetLook)
+                    renderEditedPreview(basePreview, current.params, nextEngines, nextRevision, current.presetLook, current.activeQuickEffects)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
@@ -466,7 +467,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var rendered: Bitmap? = null
             try {
                 rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(basePreview, params, current.engineSelection(), nextRevision, look)
+                    renderEditedPreview(basePreview, params, current.engineSelection(), nextRevision, look, current.activeQuickEffects)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
@@ -549,7 +550,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             resolution = state.exportResolution,
                             engines = state.engineSelection(),
                             revision = state.revision + 1,
-                            look = state.presetLook
+                            look = state.presetLook,
+                            quickEffects = state.activeQuickEffects
                         )
                     } else {
                         val baseBitmap = state.originalPreviewBitmap ?: state.previewBitmap
@@ -560,7 +562,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             resolution = state.exportResolution,
                             engines = state.engineSelection(),
                             revision = state.revision + 1,
-                            look = state.presetLook
+                            look = state.presetLook,
+                            quickEffects = state.activeQuickEffects
                         )
                     }
                     try {
@@ -720,7 +723,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         applyNativeSpecialEffects(
             title = "기본 정리",
             failureMessage = "기본 정리 적용에 실패했습니다.",
-            operations = listOf(NativeSpecialEffectOp(effect = 0, strength = 0.58f))
+            effect = ActiveQuickEffect(QuickEffectKind.SpotCleanup)
         )
     }
 
@@ -728,7 +731,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         applyNativeSpecialEffects(
             title = "색수차 완화",
             failureMessage = "색수차 완화 적용에 실패했습니다.",
-            operations = listOf(NativeSpecialEffectOp(effect = 1, strength = 0.62f))
+            effect = ActiveQuickEffect(QuickEffectKind.ChromaticAberrationReduction)
         )
     }
 
@@ -736,7 +739,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         applyNativeSpecialEffects(
             title = "주변부 어두움 완화",
             failureMessage = "주변부 어두움 완화 적용에 실패했습니다.",
-            operations = listOf(NativeSpecialEffectOp(effect = 2, strength = 0.45f))
+            effect = ActiveQuickEffect(QuickEffectKind.VignetteCorrection)
         )
     }
 
@@ -744,10 +747,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         applyNativeSpecialEffects(
             title = "통합 광학 보정",
             failureMessage = "통합 광학 보정 적용에 실패했습니다.",
-            operations = listOf(
-                NativeSpecialEffectOp(effect = 1, strength = 0.62f),
-                NativeSpecialEffectOp(effect = 2, strength = 0.45f)
-            )
+            effect = ActiveQuickEffect(QuickEffectKind.OpticsCorrection)
         )
     }
 
@@ -755,14 +755,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         applyNativeSpecialEffects(
             title = "부드러운 흐림",
             failureMessage = "부드러운 흐림 적용에 실패했습니다.",
-            operations = listOf(NativeSpecialEffectOp(effect = 3, strength = strength.coerceIn(0f, 1f)))
+            effect = ActiveQuickEffect(
+                kind = QuickEffectKind.SoftBlur,
+                strength = strength.toQuickEffectStrength()
+            )
         )
     }
 
     private fun applyNativeSpecialEffects(
         title: String,
         failureMessage: String,
-        operations: List<NativeSpecialEffectOp>
+        effect: ActiveQuickEffect
     ) {
         val current = _uiState.value
         val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
@@ -771,6 +774,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
+        val nextActiveQuickEffects = current.activeQuickEffects.toggle(effect)
+        if (nextActiveQuickEffects == current.activeQuickEffects) return
         pushUndoSnapshot(clearRedo = true)
         val nextRevision = current.revision + 1
         renderJob?.cancel()
@@ -783,42 +788,42 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         renderJob = viewModelScope.launch {
-            var renderedOriginal: Bitmap? = null
             var renderedPreview: Bitmap? = null
             try {
-                renderedOriginal = withContext(Dispatchers.Default) {
-                    applyNativeSpecialEffectsToCopy(baseOriginal, operations, nextRevision)
-                }
                 renderedPreview = withContext(Dispatchers.Default) {
-                    renderEditedPreview(renderedOriginal!!, current.params, current.engineSelection(), nextRevision, current.presetLook)
+                    renderEditedPreview(
+                        baseOriginal,
+                        current.params,
+                        current.engineSelection(),
+                        nextRevision,
+                        current.presetLook,
+                        nextActiveQuickEffects
+                    )
                 }
                 if (_uiState.value.revision == nextRevision) {
-                    val adoptedOriginal = renderedOriginal!!
                     val adoptedPreview = renderedPreview!!
                     updateUiStateAndRecycleReplaced {
                         it.copy(
-                            originalPreviewBitmap = adoptedOriginal,
                             previewBitmap = adoptedPreview,
-                            baseBitmapDirty = true,
+                            activeQuickEffects = nextActiveQuickEffects,
                             isBusy = false,
-                            message = "$title 적용했습니다. 되돌릴 수 있습니다."
+                            message = if (nextActiveQuickEffects.any { active -> active.matches(effect) }) {
+                                "$title 적용했습니다. 다시 누르면 해제할 수 있습니다."
+                            } else {
+                                "$title 적용을 해제했습니다."
+                            }
                         )
                     }
-                    renderedOriginal = null
                     renderedPreview = null
                     forceDraftSaveAsync()
                 } else {
-                    renderedOriginal?.recycle()
                     renderedPreview?.recycle()
-                    renderedOriginal = null
                     renderedPreview = null
                 }
             } catch (ce: CancellationException) {
-                renderedOriginal?.recycle()
                 renderedPreview?.recycle()
                 throw ce
             } catch (t: Throwable) {
-                renderedOriginal?.recycle()
                 renderedPreview?.recycle()
                 Log.e(FLARE_GUARD_AI_TAG, "$title native special effect failed", t)
                 updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = failureMessage) }
@@ -860,7 +865,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 resultBitmap = result.bitmap
                 renderedPreview = withContext(Dispatchers.Default) {
-                    renderEditedPreview(resultBitmap!!, current.params, current.engineSelection(), nextRevision, current.presetLook)
+                    renderEditedPreview(resultBitmap!!, current.params, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adoptedOriginal = resultBitmap!!
@@ -985,7 +990,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         try {
             preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048) }
             val nextRevision = _uiState.value.revision + 1
-            rendered = withContext(Dispatchers.Default) { renderEditedPreview(preview!!, params, engines, nextRevision, presetLook) }
+            val activeQuickEffects = prefs.getString(KEY_DRAFT_QUICK_EFFECTS, null).parseQuickEffects()
+            rendered = withContext(Dispatchers.Default) {
+                renderEditedPreview(preview!!, params, engines, nextRevision, presetLook, activeQuickEffects)
+            }
             if (restoreToken != restoreDraftToken) {
                 preview?.recycle()
                 rendered?.recycle()
@@ -1012,6 +1020,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     baseBitmapDirty = false,
                     originalPreviewBitmap = adoptedPreview,
                     previewBitmap = adoptedRendered,
+                    activeQuickEffects = activeQuickEffects,
                     params = params,
                     presetLook = presetLook,
                     exportFormat = exportFormat,
@@ -1089,6 +1098,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 activeSelectionLayerId = snapshot.activeSelectionLayerId,
                 selectionPaintSettings = snapshot.selectionPaintSettings,
                 showSelectionOverlay = snapshot.showSelectionOverlay,
+                activeQuickEffects = snapshot.activeQuickEffects,
                 flareGuardRuntimeStatus = snapshot.flareGuardRuntimeStatus,
                 isBusy = false,
                 revision = it.revision + 1,
@@ -1139,6 +1149,7 @@ private data class EditorHistorySnapshot(
     val activeSelectionLayerId: String?,
     val selectionPaintSettings: SelectionPaintSettings,
     val showSelectionOverlay: Boolean,
+    val activeQuickEffects: List<ActiveQuickEffect>,
     val flareGuardRuntimeStatus: String?
 )
 
@@ -1169,6 +1180,7 @@ private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
             activeSelectionLayerId = activeSelectionLayerId,
             selectionPaintSettings = selectionPaintSettings,
             showSelectionOverlay = showSelectionOverlay,
+            activeQuickEffects = activeQuickEffects,
             flareGuardRuntimeStatus = flareGuardRuntimeStatus
         )
     } catch (t: Throwable) {
@@ -1196,6 +1208,7 @@ private fun buildHistoryAppliedMessage(
         current.activeSelectionLayerId != target.activeSelectionLayerId ||
         current.selectionPaintSettings != target.selectionPaintSettings ||
         current.showSelectionOverlay != target.showSelectionOverlay ||
+        current.activeQuickEffects != target.activeQuickEffects ||
         current.previewBitmap !== target.previewBitmap ||
         current.originalPreviewBitmap !== target.originalPreviewBitmap
     return if (changedImageState) {
@@ -1575,11 +1588,13 @@ private fun renderEditedPreview(
     params: EditParams,
     engines: EngineSelection,
     revision: Int,
-    look: PresetColorLook? = null
+    look: PresetColorLook? = null,
+    quickEffects: List<ActiveQuickEffect> = emptyList()
 ): Bitmap {
     val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
     return try {
         renderBitmapInNative(copy, params, engines, revision, look)
+        applyActiveQuickEffectsToBitmap(copy, quickEffects, revision)
         applySelectedToneEngine(copy, engines.toneEngine)
         copy
     } catch (t: Throwable) {
@@ -1593,38 +1608,34 @@ private data class NativeSpecialEffectOp(
     val strength: Float
 )
 
-private fun applyNativeSpecialEffectsToCopy(
-    source: Bitmap,
-    operations: List<NativeSpecialEffectOp>,
+internal fun applyActiveQuickEffectsToBitmap(
+    bitmap: Bitmap,
+    quickEffects: List<ActiveQuickEffect>,
     revision: Int
-): Bitmap {
-    val copy = source.copy(Bitmap.Config.ARGB_8888, true)
-    try {
-        operations.forEach { operation ->
+) {
+    quickEffects.forEach { effect ->
+        effect.toNativeOperations().forEach { operation ->
             val result = NativePhotoCore.nativeApplySpecialEffectInPlace(
-                bitmap = copy,
+                bitmap = bitmap,
                 effect = operation.effect,
                 strength = operation.strength.coerceIn(0f, 1f),
                 revision = revision
             )
             if (result < 0) {
-                copy.recycle()
                 throw IllegalStateException("native special effect failed: effect=${operation.effect} code=$result")
             }
         }
-        return copy
-    } catch (t: Throwable) {
-        if (!copy.isRecycled) copy.recycle()
-        throw t
     }
 }
+
 private fun renderEditedExport(
     sourcePath: String,
     params: EditParams,
     resolution: ExportResolution,
     engines: EngineSelection,
     revision: Int,
-    look: PresetColorLook? = null
+    look: PresetColorLook? = null,
+    quickEffects: List<ActiveQuickEffect> = emptyList()
 ): Bitmap {
     // TODO v0.2: replace whole-bitmap export with ROI/tile rendering to reduce peak memory use.
     var decoded: Bitmap? = null
@@ -1633,6 +1644,7 @@ private fun renderEditedExport(
         decoded = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE)
         val working = decoded!!
         renderBitmapInNative(working, params, engines, revision, look)
+        applyActiveQuickEffectsToBitmap(working, quickEffects, revision)
         applySelectedToneEngine(working, engines.toneEngine)
         scaled = scaleBitmapForExport(working, resolution)
         if (scaled !== working) {
@@ -1655,7 +1667,8 @@ private fun renderEditedExportFromBitmap(
     resolution: ExportResolution,
     engines: EngineSelection,
     revision: Int,
-    look: PresetColorLook? = null
+    look: PresetColorLook? = null,
+    quickEffects: List<ActiveQuickEffect> = emptyList()
 ): Bitmap {
     var decoded: Bitmap? = null
     var scaled: Bitmap? = null
@@ -1663,6 +1676,7 @@ private fun renderEditedExportFromBitmap(
         decoded = baseBitmap.copy(Bitmap.Config.ARGB_8888, true)
         val working = decoded!!
         renderBitmapInNative(working, params, engines, revision, look)
+        applyActiveQuickEffectsToBitmap(working, quickEffects, revision)
         applySelectedToneEngine(working, engines.toneEngine)
         scaled = scaleBitmapForExport(working, resolution)
         if (scaled !== working) {
@@ -1966,6 +1980,12 @@ private data class DraftSourceResult(
     val changed: Boolean
 )
 
+private enum class QuickEffectGroup {
+    Remove,
+    Optics,
+    Blur
+}
+
 private fun saveDraftSnapshotSafely(context: Context, state: EditorUiState): DraftSaveResult? =
     try {
         saveDraftSnapshot(context, state)
@@ -2005,6 +2025,7 @@ private fun saveDraftSnapshot(context: Context, state: EditorUiState): DraftSave
         .putString(KEY_DRAFT_FORMAT, state.exportFormat.name)
         .putString(KEY_DRAFT_RESOLUTION, state.exportResolution.name)
         .putString(KEY_DRAFT_LOOK, presetColorLookToJson(state.presetLook)?.toString())
+        .putString(KEY_DRAFT_QUICK_EFFECTS, state.activeQuickEffects.toDraftString())
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
         .apply()
     return DraftSaveResult(draftSource.file.absolutePath, savedAt)
@@ -2035,9 +2056,69 @@ private fun clearDraftPrefs(context: Context) {
         .remove(KEY_DRAFT_FORMAT)
         .remove(KEY_DRAFT_RESOLUTION)
         .remove(KEY_DRAFT_LOOK)
+        .remove(KEY_DRAFT_QUICK_EFFECTS)
         .remove(KEY_DRAFT_SAVED_AT)
         .apply()
 }
+
+private fun List<ActiveQuickEffect>.toggle(effect: ActiveQuickEffect): List<ActiveQuickEffect> {
+    val group = effect.kind.group()
+    val current = firstOrNull { it.kind.group() == group }
+    return if (current != null && current.matches(effect)) {
+        filterNot { it.kind.group() == group }
+    } else {
+        filterNot { it.kind.group() == group } + effect
+    }
+}
+
+private fun ActiveQuickEffect.matches(other: ActiveQuickEffect): Boolean =
+    kind == other.kind && strength == other.strength
+
+private fun QuickEffectKind.group(): QuickEffectGroup = when (this) {
+    QuickEffectKind.SpotCleanup -> QuickEffectGroup.Remove
+    QuickEffectKind.ChromaticAberrationReduction,
+    QuickEffectKind.VignetteCorrection,
+    QuickEffectKind.OpticsCorrection -> QuickEffectGroup.Optics
+    QuickEffectKind.SoftBlur -> QuickEffectGroup.Blur
+}
+
+private fun ActiveQuickEffect.toNativeOperations(): List<NativeSpecialEffectOp> = when (kind) {
+    QuickEffectKind.SpotCleanup -> listOf(NativeSpecialEffectOp(effect = 0, strength = 0.58f))
+    QuickEffectKind.ChromaticAberrationReduction -> listOf(NativeSpecialEffectOp(effect = 1, strength = 0.62f))
+    QuickEffectKind.VignetteCorrection -> listOf(NativeSpecialEffectOp(effect = 2, strength = 0.45f))
+    QuickEffectKind.OpticsCorrection -> listOf(
+        NativeSpecialEffectOp(effect = 1, strength = 0.62f),
+        NativeSpecialEffectOp(effect = 2, strength = 0.45f)
+    )
+    QuickEffectKind.SoftBlur -> listOf(
+        NativeSpecialEffectOp(effect = 3, strength = when (strength) {
+            QuickEffectStrength.Weak -> 0.22f
+            QuickEffectStrength.Medium -> 0.38f
+            QuickEffectStrength.Strong -> 0.58f
+        })
+    )
+}
+
+private fun Float.toQuickEffectStrength(): QuickEffectStrength = when {
+    this < 0.30f -> QuickEffectStrength.Weak
+    this < 0.48f -> QuickEffectStrength.Medium
+    else -> QuickEffectStrength.Strong
+}
+
+private fun List<ActiveQuickEffect>.toDraftString(): String =
+    joinToString("|") { "${it.kind.name}:${it.strength.name}" }
+
+private fun String?.parseQuickEffects(): List<ActiveQuickEffect> =
+    this
+        ?.split('|')
+        ?.mapNotNull { token ->
+            val parts = token.split(':')
+            if (parts.size != 2) return@mapNotNull null
+            val kind = runCatching { enumValueOf<QuickEffectKind>(parts[0]) }.getOrNull() ?: return@mapNotNull null
+            val strength = runCatching { enumValueOf<QuickEffectStrength>(parts[1]) }.getOrDefault(QuickEffectStrength.Medium)
+            ActiveQuickEffect(kind = kind, strength = strength)
+        }
+        .orEmpty()
 
 private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: String?): Int {
     val now = System.currentTimeMillis()
@@ -2255,6 +2336,7 @@ private const val KEY_DRAFT_NOISE_DETAIL_PROTECTION = "draft_noise_detail_protec
 private const val KEY_DRAFT_FORMAT = "draft_format"
 private const val KEY_DRAFT_RESOLUTION = "draft_resolution"
 private const val KEY_DRAFT_LOOK = "draft_look"
+private const val KEY_DRAFT_QUICK_EFFECTS = "draft_quick_effects"
 private const val KEY_DRAFT_SAVED_AT = "draft_saved_at"
 internal val IMPLEMENTED_NOISE_ENGINES = listOf(
     NoiseEngine.FastEdgeAware,

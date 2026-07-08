@@ -28,6 +28,7 @@ data class EditorUiState(
     val activeSelectionLayerId: String? = null,
     val selectionPaintSettings: SelectionPaintSettings = SelectionPaintSettings(),
     val showSelectionOverlay: Boolean = true,
+    val activeQuickEffects: List<ActiveQuickEffect> = emptyList(),
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val flareGuardRuntimeStatus: String? = null,
@@ -41,4 +42,23 @@ data class RecoveryDebugInfo(
     val draftSourceExists: Boolean,
     val filesDirDraftPath: String,
     val filesDirDraftExists: Boolean
+)
+
+enum class QuickEffectKind {
+    SpotCleanup,
+    ChromaticAberrationReduction,
+    VignetteCorrection,
+    OpticsCorrection,
+    SoftBlur
+}
+
+enum class QuickEffectStrength {
+    Weak,
+    Medium,
+    Strong
+}
+
+data class ActiveQuickEffect(
+    val kind: QuickEffectKind,
+    val strength: QuickEffectStrength = QuickEffectStrength.Medium
 )

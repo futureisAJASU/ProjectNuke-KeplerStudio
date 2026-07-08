@@ -87,5 +87,6 @@ private fun renderSelectionBitmapWithParams(
         out.recycle()
         throw IllegalStateException("native selection render failed: code=$result")
     }
+    applyActiveQuickEffectsToBitmap(out, state.activeQuickEffects, revision)
     return out
 }
