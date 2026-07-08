@@ -11,8 +11,13 @@ fun renderBitmapWithSelectionLayers(
     val enabledLayers = state.selectionLayers.filter { it.enabled }
     val global = renderSelectionBitmapWithParams(base, state.params, state, revision)
     if (enabledLayers.isEmpty()) {
-        applyActiveQuickEffectsToBitmap(global, state.activeQuickEffects, revision)
-        return global
+        try {
+            applyActiveQuickEffectsToBitmap(global, state.activeQuickEffects, revision)
+            return global
+        } catch (t: Throwable) {
+            if (!global.isRecycled) global.recycle()
+            throw t
+        }
     }
 
     try {

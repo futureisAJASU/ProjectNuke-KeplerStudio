@@ -6,7 +6,8 @@ import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
-import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
+import com.projectnuke.keplerstudio.editor.engineSelection
+import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
@@ -51,14 +52,14 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 )
             }
             renderedPreview = withContext(Dispatchers.Default) {
-                val preview = renderedOriginal?.copy(Bitmap.Config.ARGB_8888, true) ?: error("missing mask-aware render")
-                try {
-                    applyActiveQuickEffectsToBitmap(preview, state.activeQuickEffects, nextRevision)
-                    preview
-                } catch (t: Throwable) {
-                    preview.recycle()
-                    throw t
-                }
+                renderEditedPreview(
+                    basePreview = renderedOriginal ?: error("missing mask-aware render"),
+                    params = EditParams(),
+                    engines = state.engineSelection(),
+                    revision = nextRevision,
+                    look = state.presetLook,
+                    quickEffects = state.activeQuickEffects
+                )
             }
             if (uiState.value.revision == nextRevision) {
                 val adoptedOriginal = renderedOriginal ?: error("missing mask-aware original")

@@ -7,7 +7,8 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.SelectionLayer
-import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
+import com.projectnuke.keplerstudio.editor.engineSelection
+import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
 import com.projectnuke.keplerstudio.editor.SelectionPaintMode
 import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
@@ -23,23 +24,26 @@ import kotlin.math.sqrt
 fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val state = uiState.value
     val base = state.originalPreviewBitmap ?: state.previewBitmap
+    val sourcePath = state.sourcePath
+    val sourceRevision = state.revision
+    val busyMessage = "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C\uB97C \uC0DD\uC131\uD558\uB294 \uC911\uC785\uB2C8\uB2E4."
     if (base == null) {
-        updateUiState { it.copy(message = "마스크를 만들 이미지가 없습니다.") }
+        updateUiState { it.copy(message = "\uB9C8\uC2A4\uD06C\uB97C \uB9CC\uB4E4 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.") }
         return
     }
     if (RemasterModelSession.activeModel?.id != "edge_masker" || !RemasterModelSession.isModelLoaded) {
-        updateUiState { it.copy(message = "Edge Masker 모델을 먼저 로드해 주세요.") }
+        updateUiState { it.copy(message = "Edge Masker \uBAA8\uB378\uC744 \uBA3C\uC800 \uB85C\uB4DC\uD574 \uC8FC\uC138\uC694.") }
         return
     }
 
     recordUserEditForUndo(clearRedo = true)
-    updateUiState { it.copy(isBusy = true, message = "피사체 마스크를 생성하는 중입니다.") }
+    updateUiState { it.copy(isBusy = true, message = busyMessage) }
     viewModelScope.launch {
         var pendingLayerBitmap: Bitmap? = null
         try {
             val layer = withContext(Dispatchers.Default) {
                 val mask = RemasterModelSession.createForegroundMask(base)
-                    ?: error("마스크를 생성하지 못했습니다.")
+                    ?: error("\uB9C8\uC2A4\uD06C\uB97C \uC0DD\uC131\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.")
                 val ownedMask = try {
                     mask.copy(Bitmap.Config.ARGB_8888, true)
                 } finally {
@@ -48,18 +52,33 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 pendingLayerBitmap = ownedMask
                 SelectionLayer(
                     id = newSelectionId(),
-                    name = "피사체 마스크",
+                    name = "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C",
                     kind = SelectionLayerKind.Subject,
                     bitmap = ownedMask
                 )
             }
+            var applied = false
             updateUiState { current ->
-                current.copy(
-                    isBusy = false,
-                    selectionLayers = current.selectionLayers + layer,
-                    activeSelectionLayerId = layer.id,
-                    message = "피사체 마스크를 추가했습니다."
-                )
+                if (current.sourcePath != sourcePath || current.revision != sourceRevision) {
+                    current
+                } else {
+                    applied = true
+                    current.copy(
+                        isBusy = false,
+                        selectionLayers = current.selectionLayers + layer,
+                        activeSelectionLayerId = layer.id,
+                        message = "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C\uB97C \uCD94\uAC00\uD588\uC2B5\uB2C8\uB2E4."
+                    )
+                }
+            }
+            if (!applied) {
+                pendingLayerBitmap?.recycle()
+                pendingLayerBitmap = null
+                val current = uiState.value
+                if (current.isBusy && current.message == busyMessage) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+                return@launch
             }
             pendingLayerBitmap = null
             persistDraftSnapshot()
@@ -68,8 +87,11 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             throw ce
         } catch (t: Throwable) {
             pendingLayerBitmap?.recycle()
-            if (uiState.value.originalPreviewBitmap === base || uiState.value.previewBitmap === base) {
-                updateUiState { it.copy(isBusy = false, message = "피사체 마스크 생성에 실패했습니다: ${t.message}") }
+            val current = uiState.value
+            if (current.sourcePath == sourcePath && current.revision == sourceRevision) {
+                updateUiState { it.copy(isBusy = false, message = "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C \uC0DD\uC131\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
+            } else if (current.isBusy && current.message == busyMessage) {
+                updateUiState { it.copy(isBusy = false) }
             }
         }
     }
@@ -136,21 +158,24 @@ fun EditorViewModel.invertActiveSelectionLayer() {
 
 fun EditorViewModel.clearActiveSelectionLayer() {
     val activeId = uiState.value.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
+        updateUiState { it.copy(message = "\uBA3C\uC800 \uB9C8\uC2A4\uD06C\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.") }
         return
     }
     recordUserEditForUndo(clearRedo = true)
     updateUiState { current ->
+        var changed = false
         current.copy(
             selectionLayers = current.selectionLayers.map { layer ->
                 if (layer.id == activeId) {
                     layer.bitmap.eraseColor(0xFF000000.toInt())
+                    changed = true
                     layer
                 } else {
                     layer
                 }
             },
-            message = "마스크를 비웠습니다."
+            revision = current.revision + if (changed) 1 else 0,
+            message = "\uB9C8\uC2A4\uD06C\uB97C \uBE44\uC6E0\uC2B5\uB2C8\uB2E4."
         )
     }
     persistDraftSnapshot()
@@ -216,14 +241,14 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                 renderSelectionLocalEdit(base, state, layer, nextRevision)
             }
             renderedPreview = withContext(Dispatchers.Default) {
-                val preview = renderedOriginal?.copy(Bitmap.Config.ARGB_8888, true) ?: error("missing selection render")
-                try {
-                    applyActiveQuickEffectsToBitmap(preview, state.activeQuickEffects, nextRevision)
-                    preview
-                } catch (t: Throwable) {
-                    preview.recycle()
-                    throw t
-                }
+                renderEditedPreview(
+                    basePreview = renderedOriginal ?: error("missing selection render"),
+                    params = EditParams(),
+                    engines = state.engineSelection(),
+                    revision = nextRevision,
+                    look = state.presetLook,
+                    quickEffects = state.activeQuickEffects
+                )
             }
             if (uiState.value.revision == nextRevision) {
                 val adoptedOriginal = renderedOriginal ?: error("missing selection original")

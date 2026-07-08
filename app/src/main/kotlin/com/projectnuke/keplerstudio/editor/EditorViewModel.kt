@@ -51,6 +51,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private var nativeSession: Long = 0L
     private var renderJob: Job? = null
+    private var exportJob: Job? = null
     internal var selectionLivePreviewJob: Job? = null
     private var draftSaveJob: Job? = null
     private val draftSaveMutex = Mutex()
@@ -145,8 +146,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun persistDraftSnapshotInternal() {
         val context = getApplication<Application>()
+        val draftState = _uiState.value
         val payload = try {
-            createDraftSavePayload(_uiState.value)
+            withContext(Dispatchers.Default) {
+                createDraftSavePayload(draftState)
+            }
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
@@ -211,17 +215,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openImage(uri: Uri) {
         renderJob?.cancel()
+        exportJob?.cancel()
         selectionLivePreviewJob?.cancel()
         closeParamUndoWindow()
         val openToken = restoreDraftToken + 1L
         restoreDraftToken = openToken
         val invalidateRevision = _uiState.value.revision + 1
         clearEditHistory()
-        val openingMessage = "\uc774\ubbf8\uc9c0\ub97c \uc5ec\ub294 \uc911\uc785\ub2c8\ub2e4"
+        val openingMessage = "\uC774\uBBF8\uC9C0\uB97C \uC5EC\uB294 \uC911\uC785\uB2C8\uB2E4"
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = invalidateRevision, message = openingMessage) }
 
         viewModelScope.launch {
             var preview: Bitmap? = null
+            var createdSession = 0L
             try {
                 val context = getApplication<Application>()
                 val sourceFile = withContext(Dispatchers.IO) { copyUriToCache(context, uri) }
@@ -236,17 +242,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val decodedPreview = preview!!
                 Log.i(FLARE_GUARD_AI_TAG, "Opened image with EXIF orientation: ${sourceFile.name} preview=${decodedPreview.width}x${decodedPreview.height}")
 
-                releaseNativeSession()
-                nativeSession = NativePhotoCore.nativeCreateSession(sourceFile.absolutePath)
-                if (openToken != restoreDraftToken) {
+                createdSession = NativePhotoCore.nativeCreateSession(sourceFile.absolutePath)
+                if (openToken != restoreDraftToken || _uiState.value.revision != invalidateRevision) {
                     preview?.recycle()
                     preview = null
-                    releaseNativeSession()
+                    releaseNativeSessionHandle(createdSession)
+                    createdSession = 0L
                     return@launch
                 }
+                val previousSession = nativeSession
+                nativeSession = createdSession
+                createdSession = 0L
+                releaseNativeSessionHandle(previousSession)
 
                 updateUiStateAndRecycleReplaced {
-                    val next = it.copy(
+                    it.copy(
                         isBusy = false,
                         sourcePath = sourceFile.absolutePath,
                         baseBitmapDirty = false,
@@ -261,19 +271,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         recoveryDebugInfo = null,
                         showRecoveryDebugCard = false,
                         revision = invalidateRevision + 1,
-                        message = "원본 캐시가 완료되었습니다: ${decodedPreview.width}x${decodedPreview.height} preview"
+                        message = "\uC6D0\uBCF8 \uCE90\uC2DC\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4: ${decodedPreview.width}x${decodedPreview.height} preview"
                     )
-                    next
                 }
                 preview = null
                 forceDraftSaveAsync()
             } catch (ce: CancellationException) {
                 preview?.recycle()
+                releaseNativeSessionHandle(createdSession)
                 throw ce
             } catch (t: Throwable) {
                 preview?.recycle()
+                releaseNativeSessionHandle(createdSession)
                 if (openToken == restoreDraftToken && _uiState.value.revision == invalidateRevision) {
-                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "이미지를 열지 못했습니다: ${t.message}") }
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC774\uBBF8\uC9C0\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
                 }
             }
         }
@@ -577,13 +588,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun exportPreview() {
         val state = _uiState.value
         val sourcePath = state.sourcePath
+        val exportBusyMessage = "\uC6D0\uBCF8 \uAE30\uC900\uC73C\uB85C \uB0B4\uBCF4\uB0B4\uB294 \uC911\uC785\uB2C8\uB2E4"
         if (sourcePath == null) {
-            updateUiStateAndRecycleReplaced { it.copy(message = "내보낼 원본 이미지가 없습니다") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0BC \uC6D0\uBCF8 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4") }
             return
         }
+        val ownedBaseBitmap = if (state.baseBitmapDirty) {
+            (state.originalPreviewBitmap ?: state.previewBitmap)?.copy(Bitmap.Config.ARGB_8888, true)
+                ?: run {
+                    updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0BC \uC6D0\uBCF8 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4") }
+                    return
+                }
+        } else {
+            null
+        }
 
-        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "원본 기준으로 내보내는 중입니다") }
-        viewModelScope.launch {
+        exportJob?.cancel()
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = exportBusyMessage) }
+        val launchedJob = viewModelScope.launch {
             val exportRevision = state.revision
             val exportSourcePath = sourcePath
             try {
@@ -601,10 +623,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             quickEffects = state.activeQuickEffects
                         )
                     } else {
-                        val baseBitmap = state.originalPreviewBitmap ?: state.previewBitmap
-                            ?: error("export bitmap is missing")
                         renderEditedExportFromBitmap(
-                            baseBitmap = baseBitmap,
+                            baseBitmap = ownedBaseBitmap ?: error("export bitmap is missing"),
                             params = state.params,
                             resolution = state.exportResolution,
                             engines = state.engineSelection(),
@@ -631,13 +651,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val currentState = _uiState.value
                 if (currentState.sourcePath != exportSourcePath || currentState.revision != exportRevision) {
+                    if (currentState.isBusy && currentState.message == exportBusyMessage) {
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
+                    }
                     return@launch
                 }
                 updateUiStateAndRecycleReplaced {
                     it.copy(
                         isBusy = false,
                         savedExports = savedExports,
-                        message = "갤러리에 저장되었습니다: $fileName"
+                        message = "\uAC24\uB7EC\uB9AC\uC5D0 \uC800\uC7A5\uB418\uC5C8\uC2B5\uB2C8\uB2E4: $fileName"
                     )
                 }
             } catch (ce: CancellationException) {
@@ -645,10 +668,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (t: Throwable) {
                 val currentState = _uiState.value
                 if (currentState.sourcePath == exportSourcePath && currentState.revision == exportRevision) {
-                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "내보내기에 실패했습니다: ${t.message}") }
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uB0B4\uBCF4\uB0B4\uAE30\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
+                } else if (currentState.isBusy && currentState.message == exportBusyMessage) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
                 }
+            } finally {
+                ownedBaseBitmap?.takeIf { !it.isRecycled }?.recycle()
+                if (exportJob === kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]) exportJob = null
             }
         }
+        exportJob = launchedJob
     }
 
     fun clearDraft() {
@@ -989,6 +1018,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun restoreDraftIfAvailable(context: Context) {
         val restoreToken = ++restoreDraftToken
+        val restoreStartRevision = _uiState.value.revision
         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
         val storedSourcePath = prefs.getString(KEY_DRAFT_SOURCE, null) ?: return
         val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
@@ -1004,7 +1034,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 updateUiStateAndRecycleReplaced {
                     it.copy(
                         isBusy = false,
-                        message = "임시저장 복구 정보를 확인하지 못했습니다. 편집은 계속할 수 있습니다."
+                        message = "\uC784\uC2DC\uC800\uC7A5 \uBCF5\uAD6C \uC815\uBCF4\uB97C \uD655\uC778\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1\uC740 \uACC4\uC18D\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."
                     )
                 }
             }
@@ -1021,7 +1051,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val sourceFile = recovery.sourceFile
         if (sourceFile == null) {
-            val missingDraftMessage = "\uc784\uc2dc \uc800\uc7a5 \uc6d0\ubcf8\uc744 \ucc3e\uc744 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4. \uae30\uc874 \uc784\uc2dc \uc800\uc7a5 \ud30c\uc77c\uc774 \uc0ad\uc81c\ub418\uc5b4 \ubcf5\uad6c\ud560 \uc218 \uc5c6\uc2b5\ub2c8\ub2e4."
+            val missingDraftMessage = "임시 저장 원본을 찾을 수 없습니다. 기존 임시 저장 파일이 삭제되어 복구할 수 없습니다."
             updateUiStateAndRecycleReplaced { it.copy(message = missingDraftMessage) }
             return
         }
@@ -1060,9 +1090,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
 
-        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다") }
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC624\uB294 \uC911\uC785\uB2C8\uB2E4") }
         var preview: Bitmap? = null
         var rendered: Bitmap? = null
+        var createdSession = 0L
         try {
             preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048) }
             val nextRevision = _uiState.value.revision + 1
@@ -1070,23 +1101,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             rendered = withContext(Dispatchers.Default) {
                 renderEditedPreview(preview!!, params, engines, nextRevision, presetLook, activeQuickEffects)
             }
-            if (restoreToken != restoreDraftToken) {
+            if (restoreToken != restoreDraftToken || _uiState.value.revision != restoreStartRevision) {
                 preview?.recycle()
                 rendered?.recycle()
                 preview = null
                 rendered = null
                 return
             }
-            releaseNativeSession()
-            nativeSession = NativePhotoCore.nativeCreateSession(sourcePath)
-            if (restoreToken != restoreDraftToken) {
+            createdSession = NativePhotoCore.nativeCreateSession(sourcePath)
+            if (restoreToken != restoreDraftToken || _uiState.value.revision != restoreStartRevision) {
                 preview?.recycle()
                 rendered?.recycle()
                 preview = null
                 rendered = null
-                releaseNativeSession()
+                releaseNativeSessionHandle(createdSession)
+                createdSession = 0L
                 return
             }
+            val previousSession = nativeSession
+            nativeSession = createdSession
+            createdSession = 0L
+            releaseNativeSessionHandle(previousSession)
             val adoptedPreview = preview!!
             val adoptedRendered = rendered!!
             updateUiStateAndRecycleReplaced {
@@ -1104,7 +1139,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     draftSavedAtMillis = draftSavedAt,
                     draftSourcePath = sourcePath,
                     revision = nextRevision,
-                    message = "임시저장된 편집을 불러왔습니다"
+                    message = "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4"
                 )
             }
             preview = null
@@ -1112,11 +1147,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         } catch (ce: CancellationException) {
             preview?.recycle()
             rendered?.recycle()
+            releaseNativeSessionHandle(createdSession)
             throw ce
         } catch (t: Throwable) {
             preview?.recycle()
             rendered?.recycle()
-            updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "임시저장을 불러오지 못했습니다: ${t.message}") }
+            releaseNativeSessionHandle(createdSession)
+            updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC784\uC2DC\uC800\uC7A5\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
         }
     }
 
@@ -1195,9 +1232,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateHistoryFlags()
     }
 
+    private fun releaseNativeSessionHandle(session: Long) {
+        if (session != 0L) {
+            runCatching { NativePhotoCore.nativeReleaseSession(session) }
+        }
+    }
+
     private fun releaseNativeSession() {
         if (nativeSession != 0L) {
-            runCatching { NativePhotoCore.nativeReleaseSession(nativeSession) }
+            releaseNativeSessionHandle(nativeSession)
             nativeSession = 0L
         }
     }
@@ -1356,14 +1399,14 @@ private fun EditorHistorySnapshot.recycleBitmaps() {
     selectionLayers.forEach { it.bitmap.recycle() }
 }
 
-private data class EngineSelection(
+internal data class EngineSelection(
     val noiseEngine: NoiseEngine,
     val detailEngine: DetailEngine,
     val toneEngine: ToneEngine,
     val hazeEngine: DehazeEngine
 )
 
-private fun EditorUiState.engineSelection(): EngineSelection = EngineSelection(
+internal fun EditorUiState.engineSelection(): EngineSelection = EngineSelection(
     noiseEngine = noiseEngine,
     detailEngine = detailEngine,
     toneEngine = toneEngine,
@@ -1659,7 +1702,7 @@ private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
     return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
 }
 
-private fun renderEditedPreview(
+internal fun renderEditedPreview(
     basePreview: Bitmap,
     params: EditParams,
     engines: EngineSelection,

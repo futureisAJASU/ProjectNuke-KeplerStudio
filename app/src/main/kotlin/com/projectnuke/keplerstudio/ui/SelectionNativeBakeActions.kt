@@ -4,7 +4,9 @@ import android.graphics.Bitmap
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
+import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -46,11 +48,14 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 renderBitmapWithSelectionLayers(baseOriginal, localOnlyState, nextRevision)
             }
             renderedPreview = withContext(Dispatchers.Default) {
-                val globalOnlyState = current.copy(
-                    selectionLayers = emptyList(),
-                    activeSelectionLayerId = null
+                renderEditedPreview(
+                    basePreview = bakedOriginal ?: error("missing baked original"),
+                    params = current.params,
+                    engines = current.engineSelection(),
+                    revision = nextRevision,
+                    look = current.presetLook,
+                    quickEffects = current.activeQuickEffects
                 )
-                renderBitmapWithSelectionLayers(bakedOriginal ?: error("missing baked original"), globalOnlyState, nextRevision)
             }
             val adoptedOriginal = bakedOriginal ?: error("missing baked original")
             val adoptedPreview = renderedPreview ?: error("missing rendered preview")
