@@ -16,7 +16,7 @@ fun EditorViewModel.exportUniversalBalancerTrainingRow() {
     val sourcePath = state.sourcePath
     val preview = state.originalPreviewBitmap ?: state.previewBitmap
     if (sourcePath == null || preview == null) {
-        updateUiState { it.copy(message = "학습 데이터를 만들 이미지가 없습니다.") }
+        updateUiState { it.copy(message = "\uC0AC\uC6A9 \uC911\uC778 \uD3B8\uC9D1 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.") }
         return
     }
 
@@ -40,6 +40,6 @@ fun EditorViewModel.exportUniversalBalancerTrainingRow() {
             file.appendText(row + "\n")
             file
         }
-        updateUiState { it.copy(message = "Universal Balancer 학습 row를 저장했습니다: ${outFile.name}") }
+        updateUiState { it.copy(message = "Universal Balancer \uD2B8\uB808\uC774\uB2DD row\uB97C \uCD9C\uB825\uD588\uC2B5\uB2C8\uB2E4: ${outFile.name}") }
     }
 }

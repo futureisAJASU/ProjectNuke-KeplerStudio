@@ -49,6 +49,7 @@ object NativePhotoCore {
         revision: Int,
         look: PresetColorLook? = null
     ): Int {
+        // Kotlin keeps highlights signed opposite the native kernel, so pass the negated value here.
         val result = nativeRenderPreviewInPlaceNative(
             bitmap,
             exposure,

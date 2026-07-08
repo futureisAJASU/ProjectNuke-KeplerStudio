@@ -57,6 +57,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     jint hazeEngine,
     jint revision
 ) {
+    // Both JNI names stay exported so the Kotlin wrapper and the legacy direct entrypoint resolve cleanly.
     return Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPlace(
         env,
         thiz,
