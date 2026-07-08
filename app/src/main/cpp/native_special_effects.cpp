@@ -2,14 +2,60 @@
 #include <android/bitmap.h>
 #include <android/log.h>
 #include <algorithm>
+#include <exception>
 #include <cmath>
 #include <cstdint>
+#include <new>
 #include <vector>
 
 #define LOG_TAG "KeplerNativeFx"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
+
+struct LockedBitmap {
+    JNIEnv* env;
+    jobject bitmap;
+    void* pixels = nullptr;
+    bool locked = false;
+
+    LockedBitmap(JNIEnv* env, jobject bitmap) : env(env), bitmap(bitmap) {}
+
+    int lock() {
+        if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || pixels == nullptr) {
+            pixels = nullptr;
+            locked = false;
+            return -1;
+        }
+        locked = true;
+        return 0;
+    }
+
+    ~LockedBitmap() {
+        if (locked) {
+            AndroidBitmap_unlockPixels(env, bitmap);
+        }
+    }
+
+    LockedBitmap(const LockedBitmap&) = delete;
+    LockedBitmap& operator=(const LockedBitmap&) = delete;
+};
+
+template <typename Fn>
+jint runNativeGuarded(const char* functionName, Fn&& fn) {
+    try {
+        return fn();
+    } catch (const std::bad_alloc&) {
+        LOGE("%s failed: bad_alloc", functionName);
+        return -20;
+    } catch (const std::exception& e) {
+        LOGE("%s failed: %s", functionName, e.what());
+        return -21;
+    } catch (...) {
+        LOGE("%s failed: unknown exception", functionName);
+        return -22;
+    }
+}
 
 static inline float clamp01(float v) {
     if (v < 0.0f) return 0.0f;
@@ -194,33 +240,33 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplySpecialEffec
     jfloat strength,
     jint revision
 ) {
-    AndroidBitmapInfo info{};
-    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
-        LOGE("AndroidBitmap_getInfo failed");
-        return -1;
-    }
-    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
-        LOGE("Unsupported bitmap format: %d", info.format);
-        return -2;
-    }
-    void* pixels = nullptr;
-    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || pixels == nullptr) {
-        LOGE("AndroidBitmap_lockPixels failed");
-        return -3;
-    }
-    auto* bytes = static_cast<uint8_t*>(pixels);
-    const int width = static_cast<int>(info.width);
-    const int height = static_cast<int>(info.height);
-    const int stride = static_cast<int>(info.stride);
-    switch (effect) {
-        case 0: apply_small_spot_cleanup(bytes, width, height, stride, strength); break;
-        case 1: apply_chroma_fringe_reduce(bytes, width, height, stride, strength); break;
-        case 2: apply_vignette_correction(bytes, width, height, stride, strength); break;
-        case 3: apply_soft_blur(bytes, width, height, stride, strength); break;
-        default:
-            AndroidBitmap_unlockPixels(env, bitmap);
-            return -10;
-    }
-    AndroidBitmap_unlockPixels(env, bitmap);
-    return revision;
+    return runNativeGuarded("nativeApplySpecialEffectInPlaceNative", [&]() -> jint {
+        AndroidBitmapInfo info{};
+        if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
+            LOGE("AndroidBitmap_getInfo failed");
+            return -1;
+        }
+        if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+            LOGE("Unsupported bitmap format: %d", info.format);
+            return -2;
+        }
+        LockedBitmap locked(env, bitmap);
+        if (locked.lock() != 0) {
+            LOGE("AndroidBitmap_lockPixels failed");
+            return -3;
+        }
+        auto* bytes = static_cast<uint8_t*>(locked.pixels);
+        const int width = static_cast<int>(info.width);
+        const int height = static_cast<int>(info.height);
+        const int stride = static_cast<int>(info.stride);
+        switch (effect) {
+            case 0: apply_small_spot_cleanup(bytes, width, height, stride, strength); break;
+            case 1: apply_chroma_fringe_reduce(bytes, width, height, stride, strength); break;
+            case 2: apply_vignette_correction(bytes, width, height, stride, strength); break;
+            case 3: apply_soft_blur(bytes, width, height, stride, strength); break;
+            default:
+                return -10;
+        }
+        return revision;
+    });
 }

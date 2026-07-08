@@ -2,9 +2,11 @@
 #include <android/bitmap.h>
 #include <android/log.h>
 #include <algorithm>
+#include <exception>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,50 @@ namespace {
 struct Session {
     std::string sourcePath;
 };
+
+struct LockedBitmap {
+    JNIEnv* env;
+    jobject bitmap;
+    void* pixels = nullptr;
+    bool locked = false;
+
+    LockedBitmap(JNIEnv* env, jobject bitmap) : env(env), bitmap(bitmap) {}
+
+    int lock() {
+        if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || pixels == nullptr) {
+            pixels = nullptr;
+            locked = false;
+            return -1;
+        }
+        locked = true;
+        return 0;
+    }
+
+    ~LockedBitmap() {
+        if (locked) {
+            AndroidBitmap_unlockPixels(env, bitmap);
+        }
+    }
+
+    LockedBitmap(const LockedBitmap&) = delete;
+    LockedBitmap& operator=(const LockedBitmap&) = delete;
+};
+
+template <typename Fn>
+jint runNativeGuarded(const char* functionName, Fn&& fn) {
+    try {
+        return fn();
+    } catch (const std::bad_alloc&) {
+        LOGE("%s failed: bad_alloc", functionName);
+        return -20;
+    } catch (const std::exception& e) {
+        LOGE("%s failed: %s", functionName, e.what());
+        return -21;
+    } catch (...) {
+        LOGE("%s failed: unknown exception", functionName);
+        return -22;
+    }
+}
 
 static inline float clamp01(float v) {
     if (v < 0.0f) return 0.0f;
@@ -766,124 +812,125 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     jint hazeEngine,
     jint revision
 ) {
-    (void)detailEngine;
-    (void)toneEngine;
-    (void)hazeEngine;
-    (void)noiseReduction;
+    return runNativeGuarded("nativeRenderPreviewInPlace", [&]() -> jint {
+        (void)detailEngine;
+        (void)toneEngine;
+        (void)hazeEngine;
+        (void)noiseReduction;
 
-    AndroidBitmapInfo info{};
-    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
-        LOGE("AndroidBitmap_getInfo failed");
-        return -1;
-    }
+        AndroidBitmapInfo info{};
+        if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
+            LOGE("AndroidBitmap_getInfo failed");
+            return -1;
+        }
 
-    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
-        LOGE("Unsupported bitmap format: %d", info.format);
-        return -2;
-    }
+        if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+            LOGE("Unsupported bitmap format: %d", info.format);
+            return -2;
+        }
 
-    void* pixels = nullptr;
-    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || pixels == nullptr) {
-        LOGE("AndroidBitmap_lockPixels failed");
-        return -3;
-    }
+        LockedBitmap locked(env, bitmap);
+        if (locked.lock() != 0) {
+            LOGE("AndroidBitmap_lockPixels failed");
+            return -3;
+        }
 
-    auto* bytes = static_cast<uint8_t*>(pixels);
-    const int width = static_cast<int>(info.width);
-    const int height = static_cast<int>(info.height);
-    const int stride = static_cast<int>(info.stride);
-    const auto totalStart = std::chrono::steady_clock::now();
+        auto* bytes = static_cast<uint8_t*>(locked.pixels);
+        const int width = static_cast<int>(info.width);
+        const int height = static_cast<int>(info.height);
+        const int stride = static_cast<int>(info.stride);
+        const auto totalStart = std::chrono::steady_clock::now();
 
-    const auto toneStart = std::chrono::steady_clock::now();
-    apply_adjustment_rgba8888(
-        bytes,
-        width,
-        height,
-        stride,
-        exposure,
-        contrast,
-        shadows,
-        highlights,
-        whites,
-        blacks,
-        temperature,
-        tint,
-        saturation,
-        vibrance,
-        clarity,
-        dehaze,
-        colorNoiseReduction
-    );
-    const auto toneEnd = std::chrono::steady_clock::now();
-
-    const auto denoiseStart = std::chrono::steady_clock::now();
-    if (noiseEngine == 1) {
-        apply_guided_noise_reduction_rgba8888(
+        const auto toneStart = std::chrono::steady_clock::now();
+        apply_adjustment_rgba8888(
             bytes,
             width,
             height,
             stride,
-            luminanceNoiseReduction,
-            colorNoiseReduction,
-            noiseDetailProtection
+            exposure,
+            contrast,
+            shadows,
+            highlights,
+            whites,
+            blacks,
+            temperature,
+            tint,
+            saturation,
+            vibrance,
+            clarity,
+            dehaze,
+            colorNoiseReduction
         );
-    } else if (noiseEngine == 2) {
-        // Kotlin-side NonLocalMeansLite maps to a lightweight approximation here:
-        // edge-aware/guided refinement plus 5x5 speckle and chroma cleanup, not a full NLM search.
-        apply_edge_aware_noise_reduction_rgba8888(
+        const auto toneEnd = std::chrono::steady_clock::now();
+
+        const auto denoiseStart = std::chrono::steady_clock::now();
+        if (noiseEngine == 1) {
+            apply_guided_noise_reduction_rgba8888(
+                bytes,
+                width,
+                height,
+                stride,
+                luminanceNoiseReduction,
+                colorNoiseReduction,
+                noiseDetailProtection
+            );
+        } else if (noiseEngine == 2) {
+            // Kotlin-side NonLocalMeansLite maps to a lightweight approximation here:
+            // edge-aware/guided refinement plus 5x5 speckle and chroma cleanup, not a full NLM search.
+            apply_edge_aware_noise_reduction_rgba8888(
+                bytes,
+                width,
+                height,
+                stride,
+                luminanceNoiseReduction * 0.70f,
+                colorNoiseReduction * 0.80f,
+                noiseDetailProtection
+            );
+            apply_guided_noise_reduction_rgba8888(
+                bytes,
+                width,
+                height,
+                stride,
+                luminanceNoiseReduction * 0.75f,
+                colorNoiseReduction * 0.90f,
+                noiseDetailProtection
+            );
+        } else {
+            apply_edge_aware_noise_reduction_rgba8888(
+                bytes,
+                width,
+                height,
+                stride,
+                luminanceNoiseReduction,
+                colorNoiseReduction,
+                noiseDetailProtection
+            );
+        }
+        const auto denoiseEnd = std::chrono::steady_clock::now();
+
+        const auto sharpenStart = std::chrono::steady_clock::now();
+        apply_sharpness_rgba8888(
             bytes,
             width,
             height,
             stride,
-            luminanceNoiseReduction * 0.70f,
-            colorNoiseReduction * 0.80f,
-            noiseDetailProtection
+            sharpness,
+            luminanceNoiseReduction
         );
-        apply_guided_noise_reduction_rgba8888(
-            bytes,
+        const auto sharpenEnd = std::chrono::steady_clock::now();
+        const auto totalEnd = std::chrono::steady_clock::now();
+
+        LOGD(
+            "render %dx%d engine=%d denoise=%.2fms tone=%.2fms sharpen=%.2fms total=%.2fms",
             width,
             height,
-            stride,
-            luminanceNoiseReduction * 0.75f,
-            colorNoiseReduction * 0.90f,
-            noiseDetailProtection
+            noiseEngine,
+            std::chrono::duration<double, std::milli>(denoiseEnd - denoiseStart).count(),
+            std::chrono::duration<double, std::milli>(toneEnd - toneStart).count(),
+            std::chrono::duration<double, std::milli>(sharpenEnd - sharpenStart).count(),
+            std::chrono::duration<double, std::milli>(totalEnd - totalStart).count()
         );
-    } else {
-        apply_edge_aware_noise_reduction_rgba8888(
-            bytes,
-            width,
-            height,
-            stride,
-            luminanceNoiseReduction,
-            colorNoiseReduction,
-            noiseDetailProtection
-        );
-    }
-    const auto denoiseEnd = std::chrono::steady_clock::now();
 
-    const auto sharpenStart = std::chrono::steady_clock::now();
-    apply_sharpness_rgba8888(
-        bytes,
-        width,
-        height,
-        stride,
-        sharpness,
-        luminanceNoiseReduction
-    );
-    const auto sharpenEnd = std::chrono::steady_clock::now();
-    const auto totalEnd = std::chrono::steady_clock::now();
-
-    LOGD(
-        "render %dx%d engine=%d denoise=%.2fms tone=%.2fms sharpen=%.2fms total=%.2fms",
-        width,
-        height,
-        noiseEngine,
-        std::chrono::duration<double, std::milli>(denoiseEnd - denoiseStart).count(),
-        std::chrono::duration<double, std::milli>(toneEnd - toneStart).count(),
-        std::chrono::duration<double, std::milli>(sharpenEnd - sharpenStart).count(),
-        std::chrono::duration<double, std::milli>(totalEnd - totalStart).count()
-    );
-
-    AndroidBitmap_unlockPixels(env, bitmap);
-    return revision;
+        return revision;
+    });
 }

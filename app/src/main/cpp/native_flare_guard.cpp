@@ -2,10 +2,12 @@
 #include <android/bitmap.h>
 #include <android/log.h>
 #include <algorithm>
+#include <exception>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <new>
 #include <vector>
 
 #define LOG_TAG "KeplerNativeFlare"
@@ -13,6 +15,50 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
+
+struct LockedBitmap {
+    JNIEnv* env;
+    jobject bitmap;
+    void* pixels = nullptr;
+    bool locked = false;
+
+    LockedBitmap(JNIEnv* env, jobject bitmap) : env(env), bitmap(bitmap) {}
+
+    int lock() {
+        if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || pixels == nullptr) {
+            pixels = nullptr;
+            locked = false;
+            return -1;
+        }
+        locked = true;
+        return 0;
+    }
+
+    ~LockedBitmap() {
+        if (locked) {
+            AndroidBitmap_unlockPixels(env, bitmap);
+        }
+    }
+
+    LockedBitmap(const LockedBitmap&) = delete;
+    LockedBitmap& operator=(const LockedBitmap&) = delete;
+};
+
+template <typename Fn>
+jint runNativeGuarded(const char* functionName, Fn&& fn) {
+    try {
+        return fn();
+    } catch (const std::bad_alloc&) {
+        LOGE("%s failed: bad_alloc", functionName);
+        return -20;
+    } catch (const std::exception& e) {
+        LOGE("%s failed: %s", functionName, e.what());
+        return -21;
+    } catch (...) {
+        LOGE("%s failed: unknown exception", functionName);
+        return -22;
+    }
+}
 
 static inline float clamp01(float v) {
     return std::max(0.0f, std::min(1.0f, v));
@@ -280,31 +326,32 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplyFlareGuardIn
     jfloat strength,
     jint revision
 ) {
-    AndroidBitmapInfo info{};
-    if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
-        LOGE("AndroidBitmap_getInfo failed");
-        return -1;
-    }
-    if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
-        LOGE("Unsupported bitmap format: %d", info.format);
-        return -2;
-    }
-    void* pixels = nullptr;
-    if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || pixels == nullptr) {
-        return -3;
-    }
-    auto* bytes = static_cast<uint8_t*>(pixels);
-    const size_t byteCount = static_cast<size_t>(info.stride) * static_cast<size_t>(info.height);
-    std::vector<uint8_t> src(byteCount);
-    std::copy(bytes, bytes + byteCount, src.data());
-    const int width = static_cast<int>(info.width);
-    const int height = static_cast<int>(info.height);
-    const int stride = static_cast<int>(info.stride);
-    if (mode == 1) {
-        apply_day_sun_flare(bytes, src, width, height, stride, strength);
-    } else {
-        apply_night_flare(bytes, src, width, height, stride, strength);
-    }
-    AndroidBitmap_unlockPixels(env, bitmap);
-    return revision;
+    return runNativeGuarded("nativeApplyFlareGuardInPlaceNative", [&]() -> jint {
+        AndroidBitmapInfo info{};
+        if (AndroidBitmap_getInfo(env, bitmap, &info) != ANDROID_BITMAP_RESULT_SUCCESS) {
+            LOGE("AndroidBitmap_getInfo failed");
+            return -1;
+        }
+        if (info.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+            LOGE("Unsupported bitmap format: %d", info.format);
+            return -2;
+        }
+        LockedBitmap locked(env, bitmap);
+        if (locked.lock() != 0) {
+            return -3;
+        }
+        auto* bytes = static_cast<uint8_t*>(locked.pixels);
+        const size_t byteCount = static_cast<size_t>(info.stride) * static_cast<size_t>(info.height);
+        std::vector<uint8_t> src(byteCount);
+        std::copy(bytes, bytes + byteCount, src.data());
+        const int width = static_cast<int>(info.width);
+        const int height = static_cast<int>(info.height);
+        const int stride = static_cast<int>(info.stride);
+        if (mode == 1) {
+            apply_day_sun_flare(bytes, src, width, height, stride, strength);
+        } else {
+            apply_night_flare(bytes, src, width, height, stride, strength);
+        }
+        return revision;
+    });
 }

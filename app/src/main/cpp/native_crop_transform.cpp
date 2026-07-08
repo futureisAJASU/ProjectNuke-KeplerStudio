@@ -2,13 +2,59 @@
 #include <android/bitmap.h>
 #include <android/log.h>
 #include <algorithm>
+#include <exception>
 #include <cmath>
 #include <cstdint>
+#include <new>
 
 #define LOG_TAG "KeplerNativeCrop"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
+
+struct LockedBitmap {
+    JNIEnv* env;
+    jobject bitmap;
+    void* pixels = nullptr;
+    bool locked = false;
+
+    LockedBitmap(JNIEnv* env, jobject bitmap) : env(env), bitmap(bitmap) {}
+
+    int lock() {
+        if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || pixels == nullptr) {
+            pixels = nullptr;
+            locked = false;
+            return -1;
+        }
+        locked = true;
+        return 0;
+    }
+
+    ~LockedBitmap() {
+        if (locked) {
+            AndroidBitmap_unlockPixels(env, bitmap);
+        }
+    }
+
+    LockedBitmap(const LockedBitmap&) = delete;
+    LockedBitmap& operator=(const LockedBitmap&) = delete;
+};
+
+template <typename Fn>
+jint runNativeGuarded(const char* functionName, Fn&& fn) {
+    try {
+        return fn();
+    } catch (const std::bad_alloc&) {
+        LOGE("%s failed: bad_alloc", functionName);
+        return -20;
+    } catch (const std::exception& e) {
+        LOGE("%s failed: %s", functionName, e.what());
+        return -21;
+    } catch (...) {
+        LOGE("%s failed: unknown exception", functionName);
+        return -22;
+    }
+}
 
 struct Bounds {
     float minX;
@@ -117,67 +163,65 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderCropTransfo
     jboolean flipHorizontal,
     jint revision
 ) {
-    AndroidBitmapInfo srcInfo{};
-    AndroidBitmapInfo dstInfo{};
-    if (AndroidBitmap_getInfo(env, sourceBitmap, &srcInfo) != ANDROID_BITMAP_RESULT_SUCCESS ||
-        AndroidBitmap_getInfo(env, destinationBitmap, &dstInfo) != ANDROID_BITMAP_RESULT_SUCCESS) {
-        LOGE("AndroidBitmap_getInfo failed");
-        return -1;
-    }
-    if (srcInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888 || dstInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
-        LOGE("Unsupported bitmap format");
-        return -2;
-    }
-    void* srcPixels = nullptr;
-    void* dstPixels = nullptr;
-    if (AndroidBitmap_lockPixels(env, sourceBitmap, &srcPixels) != ANDROID_BITMAP_RESULT_SUCCESS || srcPixels == nullptr) return -3;
-    if (AndroidBitmap_lockPixels(env, destinationBitmap, &dstPixels) != ANDROID_BITMAP_RESULT_SUCCESS || dstPixels == nullptr) {
-        AndroidBitmap_unlockPixels(env, sourceBitmap);
-        return -4;
-    }
-
-    const int srcW = static_cast<int>(srcInfo.width);
-    const int srcH = static_cast<int>(srcInfo.height);
-    const int dstW = static_cast<int>(dstInfo.width);
-    const int dstH = static_cast<int>(dstInfo.height);
-    const float radians = rotationDegrees * 3.14159265358979323846f / 180.0f;
-    const bool flip = flipHorizontal == JNI_TRUE;
-    const Bounds bounds = compute_bounds(srcW, srcH, radians, flip);
-    const float wholeW = std::max(1.0f, bounds.maxX - bounds.minX);
-    const float wholeH = std::max(1.0f, bounds.maxY - bounds.minY);
-    const float cl = clampf(std::min(cropLeft, cropRight), 0.0f, 1.0f);
-    const float cr = clampf(std::max(cropLeft, cropRight), cl + 0.001f, 1.0f);
-    const float ct = clampf(std::min(cropTop, cropBottom), 0.0f, 1.0f);
-    const float cb = clampf(std::max(cropTop, cropBottom), ct + 0.001f, 1.0f);
-    const float cropX = cl * wholeW;
-    const float cropY = ct * wholeH;
-    const float cropW = (cr - cl) * wholeW;
-    const float cropH = (cb - ct) * wholeH;
-    const float cx = (srcW - 1) * 0.5f;
-    const float cy = (srcH - 1) * 0.5f;
-    const float cosT = std::cos(radians);
-    const float sinT = std::sin(radians);
-
-    auto* src = static_cast<const uint8_t*>(srcPixels);
-    auto* dst = static_cast<uint8_t*>(dstPixels);
-    for (int y = 0; y < dstH; ++y) {
-        auto* outRow = dst + static_cast<size_t>(y) * dstInfo.stride;
-        const float ty = cropY + (static_cast<float>(y) + 0.5f) * cropH / std::max(1, dstH);
-        for (int x = 0; x < dstW; ++x) {
-            const float tx = cropX + (static_cast<float>(x) + 0.5f) * cropW / std::max(1, dstW);
-            float dx = tx + bounds.minX - cx;
-            float dy = ty + bounds.minY - cy;
-            const float rx = cosT * dx + sinT * dy;
-            const float ry = -sinT * dx + cosT * dy;
-            float sx = flip ? -rx : rx;
-            float sy = ry;
-            sx += cx;
-            sy += cy;
-            sample_bilinear(src, srcW, srcH, static_cast<int>(srcInfo.stride), sx, sy, outRow + static_cast<size_t>(x) * 4U);
+    return runNativeGuarded("nativeRenderCropTransformNative", [&]() -> jint {
+        AndroidBitmapInfo srcInfo{};
+        AndroidBitmapInfo dstInfo{};
+        if (AndroidBitmap_getInfo(env, sourceBitmap, &srcInfo) != ANDROID_BITMAP_RESULT_SUCCESS ||
+            AndroidBitmap_getInfo(env, destinationBitmap, &dstInfo) != ANDROID_BITMAP_RESULT_SUCCESS) {
+            LOGE("AndroidBitmap_getInfo failed");
+            return -1;
         }
-    }
+        if (srcInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888 || dstInfo.format != ANDROID_BITMAP_FORMAT_RGBA_8888) {
+            LOGE("Unsupported bitmap format");
+            return -2;
+        }
 
-    AndroidBitmap_unlockPixels(env, destinationBitmap);
-    AndroidBitmap_unlockPixels(env, sourceBitmap);
-    return revision;
+        LockedBitmap srcLock(env, sourceBitmap);
+        if (srcLock.lock() != 0) return -3;
+        LockedBitmap dstLock(env, destinationBitmap);
+        if (dstLock.lock() != 0) return -4;
+
+        const int srcW = static_cast<int>(srcInfo.width);
+        const int srcH = static_cast<int>(srcInfo.height);
+        const int dstW = static_cast<int>(dstInfo.width);
+        const int dstH = static_cast<int>(dstInfo.height);
+        const float radians = rotationDegrees * 3.14159265358979323846f / 180.0f;
+        const bool flip = flipHorizontal == JNI_TRUE;
+        const Bounds bounds = compute_bounds(srcW, srcH, radians, flip);
+        const float wholeW = std::max(1.0f, bounds.maxX - bounds.minX);
+        const float wholeH = std::max(1.0f, bounds.maxY - bounds.minY);
+        const float cl = clampf(std::min(cropLeft, cropRight), 0.0f, 1.0f);
+        const float cr = clampf(std::max(cropLeft, cropRight), cl + 0.001f, 1.0f);
+        const float ct = clampf(std::min(cropTop, cropBottom), 0.0f, 1.0f);
+        const float cb = clampf(std::max(cropTop, cropBottom), ct + 0.001f, 1.0f);
+        const float cropX = cl * wholeW;
+        const float cropY = ct * wholeH;
+        const float cropW = (cr - cl) * wholeW;
+        const float cropH = (cb - ct) * wholeH;
+        const float cx = (srcW - 1) * 0.5f;
+        const float cy = (srcH - 1) * 0.5f;
+        const float cosT = std::cos(radians);
+        const float sinT = std::sin(radians);
+
+        auto* src = static_cast<const uint8_t*>(srcLock.pixels);
+        auto* dst = static_cast<uint8_t*>(dstLock.pixels);
+        for (int y = 0; y < dstH; ++y) {
+            auto* outRow = dst + static_cast<size_t>(y) * dstInfo.stride;
+            const float ty = cropY + (static_cast<float>(y) + 0.5f) * cropH / std::max(1, dstH);
+            for (int x = 0; x < dstW; ++x) {
+                const float tx = cropX + (static_cast<float>(x) + 0.5f) * cropW / std::max(1, dstW);
+                float dx = tx + bounds.minX - cx;
+                float dy = ty + bounds.minY - cy;
+                const float rx = cosT * dx + sinT * dy;
+                const float ry = -sinT * dx + cosT * dy;
+                float sx = flip ? -rx : rx;
+                float sy = ry;
+                sx += cx;
+                sy += cy;
+                sample_bilinear(src, srcW, srcH, static_cast<int>(srcInfo.stride), sx, sy, outRow + static_cast<size_t>(x) * 4U);
+            }
+        }
+
+        return revision;
+    });
 }

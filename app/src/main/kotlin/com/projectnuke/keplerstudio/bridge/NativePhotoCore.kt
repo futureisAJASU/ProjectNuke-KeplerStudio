@@ -74,7 +74,9 @@ object NativePhotoCore {
             hazeEngine,
             revision
         )
-        applyPresetColorLookInPlace(bitmap, look)
+        if (result >= 0) {
+            applyPresetColorLookInPlace(bitmap, look)
+        }
         return result
     }
 
