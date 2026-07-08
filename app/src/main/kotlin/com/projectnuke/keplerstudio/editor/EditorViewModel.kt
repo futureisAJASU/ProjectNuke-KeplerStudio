@@ -2027,7 +2027,11 @@ private fun saveBitmapToGallery(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
+            val updatedRows = resolver.update(uri, values, null, null)
+            if (updatedRows <= 0) {
+                resolver.delete(uri, null, null)
+                error("failed to publish media store row")
+            }
         }
         return uri
     } catch (t: Throwable) {
