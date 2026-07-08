@@ -593,21 +593,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0BC \uC6D0\uBCF8 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4") }
             return
         }
-        val ownedBaseBitmap = if (state.baseBitmapDirty) {
-            (state.originalPreviewBitmap ?: state.previewBitmap)?.copy(Bitmap.Config.ARGB_8888, true)
-                ?: run {
-                    updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0BC \uC6D0\uBCF8 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4") }
-                    return
-                }
-        } else {
-            null
-        }
 
         exportJob?.cancel()
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = exportBusyMessage) }
         val launchedJob = viewModelScope.launch {
             val exportRevision = state.revision
             val exportSourcePath = sourcePath
+            var ownedBaseBitmap: Bitmap? = null
             try {
                 val context = getApplication<Application>()
                 val fileName = "KeplerStudio_${exportTimestamp()}.${state.exportFormat.extension}"
@@ -623,6 +615,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             quickEffects = state.activeQuickEffects
                         )
                     } else {
+                        ownedBaseBitmap = withContext(Dispatchers.Default) {
+                            (state.originalPreviewBitmap ?: state.previewBitmap)?.copy(Bitmap.Config.ARGB_8888, true)
+                        } ?: error("export bitmap is missing")
                         renderEditedExportFromBitmap(
                             baseBitmap = ownedBaseBitmap ?: error("export bitmap is missing"),
                             params = state.params,
@@ -1094,9 +1089,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         var preview: Bitmap? = null
         var rendered: Bitmap? = null
         var createdSession = 0L
+        var expectedRestoreRevision: Int? = null
         try {
             preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048) }
             val nextRevision = _uiState.value.revision + 1
+            expectedRestoreRevision = nextRevision
             val activeQuickEffects = prefs.getString(KEY_DRAFT_QUICK_EFFECTS, null).parseQuickEffects()
             rendered = withContext(Dispatchers.Default) {
                 renderEditedPreview(preview!!, params, engines, nextRevision, presetLook, activeQuickEffects)
@@ -1153,7 +1150,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             preview?.recycle()
             rendered?.recycle()
             releaseNativeSessionHandle(createdSession)
-            updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC784\uC2DC\uC800\uC7A5\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
+            val currentRevision = _uiState.value.revision
+            val isRestoreStillCurrent = restoreToken == restoreDraftToken &&
+                (currentRevision == restoreStartRevision || currentRevision == expectedRestoreRevision)
+            if (isRestoreStillCurrent) {
+                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC784\uC2DC\uC800\uC7A5\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
+            }
         }
     }
 
