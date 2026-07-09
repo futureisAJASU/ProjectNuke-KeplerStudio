@@ -588,7 +588,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun exportPreview() {
         val state = _uiState.value
         val sourcePath = state.sourcePath
-        val exportBusyMessage = "\uC6D0\uBCF8 \uAE30\uC900\uC73C\uB85C \uB0B4\uBCF4\uB0B4\uB294 \uC911\uC785\uB2C8\uB2E4"
+        val exportBusyMessage = "${state.exportFormat.label} 형식, ${state.exportResolution.label} 목표 해상도로 내보내는 중입니다."
         if (sourcePath == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0BC \uC6D0\uBCF8 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4") }
             return
@@ -600,6 +600,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val exportRevision = state.revision
             val exportSourcePath = sourcePath
             var ownedBaseBitmap: Bitmap? = null
+            var exportedResolutionLabel = state.exportResolution.label
             try {
                 val context = getApplication<Application>()
                 val fileName = "KeplerStudio_${exportTimestamp()}.${state.exportFormat.extension}"
@@ -629,6 +630,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                     try {
+                        exportedResolutionLabel = "${exportBitmap.width}x${exportBitmap.height}"
                         saveBitmapToGallery(context, exportBitmap, fileName, state.exportFormat)
                     } finally {
                         exportBitmap.recycle()
@@ -638,7 +640,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     displayName = fileName,
                     uriString = savedUri.toString(),
                     formatLabel = state.exportFormat.label,
-                    resolutionLabel = state.exportResolution.label,
+                    resolutionLabel = exportedResolutionLabel,
                     timestampMillis = System.currentTimeMillis()
                 )
                 val savedExports = withContext(Dispatchers.IO) {
@@ -655,7 +657,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         isBusy = false,
                         savedExports = savedExports,
-                        message = "\uAC24\uB7EC\uB9AC\uC5D0 \uC800\uC7A5\uB418\uC5C8\uC2B5\uB2C8\uB2E4: $fileName"
+                        message = "이미지가 Gallery > Pictures/KeplerStudio에 저장되었고, 앱 내 내보낸 사진 기록에도 추가되었습니다."
                     )
                 }
             } catch (ce: CancellationException) {
