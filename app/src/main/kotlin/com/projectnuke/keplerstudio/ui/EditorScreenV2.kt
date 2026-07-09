@@ -407,7 +407,7 @@ private fun V2CropPreview(
             onCropRectChanged = onCropRectChanged
         )
         Text(
-            text = "誘몃━蹂닿린",
+            text = "자르기",
             color = V2TextPrimary,
             style = MaterialTheme.typography.labelLarge,
             modifier = Modifier

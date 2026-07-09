@@ -23,6 +23,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -174,15 +175,16 @@ fun CropOverlayPreview(
 ) {
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
     var dragMode by remember { mutableStateOf(CropDragMode.None) }
+    val latestCropState = rememberUpdatedState(cropState)
     val imageRect = remember(boxSize, imageWidth, imageHeight) { fittedImageRect(boxSize, imageWidth, imageHeight) }
 
     Box(
         modifier = modifier
             .onSizeChanged { boxSize = it }
-            .pointerInput(cropState, imageRect, imageWidth, imageHeight) {
+            .pointerInput(imageRect, imageWidth, imageHeight) {
                 detectDragGestures(
                     onDragStart = { offset ->
-                        dragMode = hitCropHandle(offset, cropState, imageRect)
+                        dragMode = hitCropHandle(offset, latestCropState.value, imageRect)
                     },
                     onDragEnd = { dragMode = CropDragMode.None },
                     onDragCancel = { dragMode = CropDragMode.None },
@@ -191,7 +193,7 @@ fun CropOverlayPreview(
                         if (imageRect.width <= 0f || imageRect.height <= 0f) return@detectDragGestures
                         val dx = dragAmount.x / imageRect.width
                         val dy = dragAmount.y / imageRect.height
-                        val next = updateCropByDrag(cropState, dragMode, dx, dy, imageWidth, imageHeight)
+                        val next = updateCropByDrag(latestCropState.value, dragMode, dx, dy, imageWidth, imageHeight)
                         onCropRectChanged(next.cropLeft, next.cropTop, next.cropRight, next.cropBottom)
                         change.consume()
                     }

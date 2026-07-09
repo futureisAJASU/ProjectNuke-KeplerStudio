@@ -279,7 +279,6 @@ private fun AutoRecoveryCard(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFF242424))
-            .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier)
             .padding(12.dp)
     ) {
         Text("\uC790\uB3D9\uBCF5\uAD6C", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
@@ -290,17 +289,18 @@ private fun AutoRecoveryCard(
             modifier = Modifier.padding(top = 4.dp)
         )
         if (draftSourceExists && draftSourcePath != null) {
-            Column(
-                modifier = Modifier
-                    .padding(top = 8.dp)
-                    .fillMaxWidth()
-                    .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                DraftSourceThumbnail(
-                    sourcePath = draftSourcePath,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)
-                )
+            Column(modifier = Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier)
+                ) {
+                    DraftSourceThumbnail(
+                        sourcePath = draftSourcePath,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
                 if (canContinueDraft) {
                     Text(
                         text = "\uBBF8\uB9AC\uBCF4\uAE30\uB97C \uD0AD\uD558\uBA74 \uB9C8\uC9C0\uB9C9 \uD3B8\uC9D1\uC744 \uACC4\uC18D\uD569\uB2C8\uB2E4.",
@@ -417,20 +417,20 @@ private fun DraftGalleryContent(
         modifier = Modifier
             .fillMaxWidth()
             .background(Color(0xFF242424))
-            .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier)
             .padding(12.dp)
     ) {
         Text("\uC790\uB3D9\uBCF5\uAD6C \uC784\uC2DC \uC800\uC7A5", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
         Text(draftStatusText(draftSavedAtMillis, draftSourceExists), color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
         if (draftSourceExists && draftSourcePath != null) {
-            Column(
-                modifier = Modifier
-                    .padding(top = 8.dp)
-                    .fillMaxWidth()
-                    .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                DraftSourceThumbnail(sourcePath = draftSourcePath, modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f))
+            Column(modifier = Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(16f / 9f)
+                        .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier)
+                ) {
+                    DraftSourceThumbnail(sourcePath = draftSourcePath, modifier = Modifier.fillMaxSize())
+                }
                 if (canContinueDraft) {
                     Text(
                         text = "\uBBF8\uB9AC\uBCF4\uAE30\uB97C \uD0AD\uD558\uBA74 \uB9C8\uC9C0\uB9C9 \uD3B8\uC9D1\uC744 \uACC4\uC18D\uD569\uB2C8\uB2E4.",
