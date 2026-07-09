@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.DehazeEngine
 import com.projectnuke.keplerstudio.editor.DetailEngine
+import com.projectnuke.keplerstudio.editor.CropState
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExportFormat
@@ -181,9 +182,12 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         V2PreviewArea(
                             bitmap = state.previewBitmap,
                             originalBitmap = state.originalPreviewBitmap,
+                            selectedTool = selectedTool,
+                            cropState = state.cropState,
                             isBusy = state.isBusy,
                             message = state.message,
                             chromeHidden = chromeHidden,
+                            onCropRectChanged = viewModel::updateCropRect,
                             onToggleChrome = {
                                 if (state.previewBitmap != null) chromeHidden = !chromeHidden
                             },
@@ -306,9 +310,12 @@ private fun V2TopBar(
 private fun V2PreviewArea(
     bitmap: Bitmap?,
     originalBitmap: Bitmap?,
+    selectedTool: V2EditorTool,
+    cropState: CropState,
     isBusy: Boolean,
     message: String?,
     chromeHidden: Boolean,
+    onCropRectChanged: (Float, Float, Float, Float) -> Unit,
     onToggleChrome: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -330,7 +337,15 @@ private fun V2PreviewArea(
         if (bitmap == null) {
             Text("사진을 선택해 주세요", color = V2TextPrimary)
         } else {
-            V2ZoomablePreview(bitmap = bitmap, originalBitmap = originalBitmap, onToggleChrome = onToggleChrome)
+            if (selectedTool == V2EditorTool.Crop) {
+                V2CropPreview(
+                    bitmap = bitmap,
+                    cropState = cropState,
+                    onCropRectChanged = onCropRectChanged
+                )
+            } else {
+                V2ZoomablePreview(bitmap = bitmap, originalBitmap = originalBitmap, onToggleChrome = onToggleChrome)
+            }
         }
         if (isBusy) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.TopEnd).padding(16.dp))
@@ -363,7 +378,53 @@ private fun isImportantPreviewMessage(message: String): Boolean {
 }
 
 @Composable
-private fun V2ZoomablePreview(bitmap: Bitmap, originalBitmap: Bitmap?, onToggleChrome: () -> Unit) {
+private fun V2CropPreview(
+    bitmap: Bitmap,
+    cropState: CropState,
+    onCropRectChanged: (Float, Float, Float, Float) -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clipToBounds(),
+        contentAlignment = Alignment.Center
+    ) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "preview",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp)
+        )
+        CropOverlayPreview(
+            cropState = cropState,
+            imageWidth = bitmap.width,
+            imageHeight = bitmap.height,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp),
+            onCropRectChanged = onCropRectChanged
+        )
+        Text(
+            text = "誘몃━蹂닿린",
+            color = V2TextPrimary,
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(12.dp)
+                .background(V2BadgeBackground)
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        )
+    }
+}
+
+@Composable
+private fun V2ZoomablePreview(
+    bitmap: Bitmap,
+    originalBitmap: Bitmap?,
+    onToggleChrome: () -> Unit
+) {
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
     var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
     var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }

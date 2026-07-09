@@ -1,10 +1,13 @@
 package com.projectnuke.keplerstudio
 
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -12,6 +15,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -271,7 +275,13 @@ private fun AutoRecoveryCard(
     onClearDraft: () -> Unit
 ) {
     var showDebugDetails by remember { mutableStateOf(false) }
-    Column(modifier = Modifier.fillMaxWidth().background(Color(0xFF242424)).padding(12.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF242424))
+            .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier)
+            .padding(12.dp)
+    ) {
         Text("\uC790\uB3D9\uBCF5\uAD6C", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
         Text(
             draftStatusText(draftSavedAtMillis, draftSourceExists),
@@ -280,10 +290,25 @@ private fun AutoRecoveryCard(
             modifier = Modifier.padding(top = 4.dp)
         )
         if (draftSourceExists && draftSourcePath != null) {
-            DraftSourceThumbnail(
-                sourcePath = draftSourcePath,
-                modifier = Modifier.padding(top = 8.dp).fillMaxWidth().aspectRatio(16f / 9f)
-            )
+            Column(
+                modifier = Modifier
+                    .padding(top = 8.dp)
+                    .fillMaxWidth()
+                    .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                DraftSourceThumbnail(
+                    sourcePath = draftSourcePath,
+                    modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f)
+                )
+                if (canContinueDraft) {
+                    Text(
+                        text = "\uBBF8\uB9AC\uBCF4\uAE30\uB97C \uD0AD\uD558\uBA74 \uB9C8\uC9C0\uB9C9 \uD3B8\uC9D1\uC744 \uACC4\uC18D\uD569\uB2C8\uB2E4.",
+                        color = Color(0xFF8E8E8E),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onContinueEditing, enabled = canContinueDraft) { Text("\uB9C8\uC9C0\uB9C9 \uD3B8\uC9D1 \uACC4\uC18D\uD558\uAE30") }
@@ -388,11 +413,32 @@ private fun DraftGalleryContent(
         }
         return
     }
-    Column(modifier = Modifier.fillMaxWidth().background(Color(0xFF242424)).padding(12.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF242424))
+            .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier)
+            .padding(12.dp)
+    ) {
         Text("\uC790\uB3D9\uBCF5\uAD6C \uC784\uC2DC \uC800\uC7A5", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
         Text(draftStatusText(draftSavedAtMillis, draftSourceExists), color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
         if (draftSourceExists && draftSourcePath != null) {
-            DraftSourceThumbnail(sourcePath = draftSourcePath, modifier = Modifier.padding(top = 8.dp).fillMaxWidth().aspectRatio(16f / 9f))
+            Column(
+                modifier = Modifier
+                    .padding(top = 8.dp)
+                    .fillMaxWidth()
+                    .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                DraftSourceThumbnail(sourcePath = draftSourcePath, modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f))
+                if (canContinueDraft) {
+                    Text(
+                        text = "\uBBF8\uB9AC\uBCF4\uAE30\uB97C \uD0AD\uD558\uBA74 \uB9C8\uC9C0\uB9C9 \uD3B8\uC9D1\uC744 \uACC4\uC18D\uD569\uB2C8\uB2E4.",
+                        color = Color(0xFF8E8E8E),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton(onClick = onContinueEditing, enabled = canContinueDraft) { Text("\uB9C8\uC9C0\uB9C9 \uD3B8\uC9D1 \uACC4\uC18D\uD558\uAE30") }
@@ -493,7 +539,15 @@ private fun LongPressCacheAction(label: String, enabled: Boolean, onTapHint: () 
 
 @Composable
 private fun SavedExportThumbnailTile(item: SavedExport, onRemoveSavedExport: (String) -> Unit, modifier: Modifier = Modifier) {
-    Column(modifier = modifier.background(Color(0xFF242424)).padding(8.dp)) {
+    val context = LocalContext.current
+    Column(
+        modifier = modifier
+            .background(Color(0xFF242424))
+            .clickable {
+                openSavedExportUri(context, item.uriString)
+            }
+            .padding(8.dp)
+    ) {
         SavedExportThumbnail(uriString = item.uriString, modifier = Modifier.fillMaxWidth().aspectRatio(1f))
         Text(text = item.displayName, color = Color(0xFFF2F2F2), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
         Text(text = "${item.formatLabel} \u00B7 ${item.resolutionLabel}", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.labelSmall, maxLines = 1)
@@ -561,6 +615,23 @@ private fun decodeSavedExportThumbnail(context: Context, uriString: String, maxS
         inPreferredConfig = Bitmap.Config.ARGB_8888
     }
     return runCatching { context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) } }.getOrNull()
+}
+
+private fun openSavedExportUri(context: Context, uriString: String) {
+    val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return
+    val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+        data = uri
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (context !is Activity) {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        setDataAndType(uri, context.contentResolver.getType(uri) ?: "image/*")
+    }
+    runCatching {
+        context.startActivity(viewIntent)
+    }.onFailure {
+        Toast.makeText(context, "\uC0AC\uC9C4\uC744 \uC5F4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", Toast.LENGTH_SHORT).show()
+    }
 }
 
 private fun decodeFileThumbnail(sourcePath: String, maxSide: Int = 512): Bitmap? {
