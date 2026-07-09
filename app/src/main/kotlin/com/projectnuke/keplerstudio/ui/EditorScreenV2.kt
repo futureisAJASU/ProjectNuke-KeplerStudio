@@ -143,6 +143,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     var selectedTab by remember { mutableStateOf(V2MainTab.Editor) }
     var selectedTool by remember { mutableStateOf(V2EditorTool.Light) }
     var showExportDialog by remember { mutableStateOf(false) }
+    var showResetDialog by remember { mutableStateOf(false) }
     var panelCollapsed by remember { mutableStateOf(false) }
     var chromeHidden by remember { mutableStateOf(false) }
     val hideChromeForPreview = selectedTab == V2MainTab.Editor && chromeHidden
@@ -172,7 +173,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         onUndo = viewModel::undoEdit,
                         onRedo = viewModel::redoEdit,
                         onRotate = viewModel::rotatePreview90,
-                        onReset = { viewModel.resetAdjustments() },
+                        onReset = { showResetDialog = true },
                         onSave = { showExportDialog = true }
                     )
                 }
@@ -254,6 +255,32 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
             onSave = {
                 showExportDialog = false
                 viewModel.exportPreview()
+            }
+        )
+    }
+
+    if (showResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDialog = false },
+            title = { Text("\uD3B8\uC9D1\uC744 \uCD08\uAE30\uD654\uD560\uAE4C\uC694?") },
+            text = {
+                Text(
+                    "\uD604\uC7AC \uBCF4\uC815\uAC12\uACFC \uC801\uC6A9\uB41C \uD3B8\uC9D1 \uC0C1\uD0DC\uAC00 \uCD08\uAE30\uD654\uB429\uB2C8\uB2E4. \uB418\uB3CC\uB9AC\uAE30\uB85C \uBCF5\uAD6C\uD560 \uC218 \uC788\uC9C0\uB9CC, \uC2E4\uC218\uB97C \uBC29\uC9C0\uD558\uAE30 \uC704\uD574 \uD655\uC778\uC774 \uD544\uC694\uD569\uB2C8\uB2E4."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showResetDialog = false
+                        viewModel.resetAdjustments()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)
+                ) {
+                    Text("\uCD08\uAE30\uD654")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetDialog = false }) { Text("\uCDE8\uC18C") }
             }
         )
     }

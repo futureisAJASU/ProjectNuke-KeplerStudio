@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -80,6 +81,7 @@ fun CropToolPanel() {
     val state by editorViewModel.uiState.collectAsState()
     val bitmap = state.previewBitmap ?: state.originalPreviewBitmap
     val cropState = state.cropState
+    var showResetDialog by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -160,8 +162,28 @@ fun CropToolPanel() {
                 enabled = bitmap != null,
                 colors = ButtonDefaults.buttonColors(containerColor = CropAccent, contentColor = CropButtonTextDark)
             ) { Text("\uC790\uB974\uAE30 \uC801\uC6A9") }
-            TextButton(onClick = { editorViewModel.resetCropState() }) { Text("\uCD08\uAE30\uD654") }
+            TextButton(onClick = { showResetDialog = true }) { Text("\uCD08\uAE30\uD654") }
         }
+    }
+
+    if (showResetDialog) {
+        AlertDialog(
+            onDismissRequest = { showResetDialog = false },
+            title = { Text("\uC790\uB974\uAE30 \uC601\uC5ED\uC744 \uCD08\uAE30\uD654\uD560\uAE4C\uC694?") },
+            text = { Text("\uD604\uC7AC \uC790\uB974\uAE30 \uC601\uC5ED\uACFC \uD68C\uC804/\uC218\uD3C9 \uC870\uC815\uAC12\uC774 \uCD08\uAE30\uD654\uB429\uB2C8\uB2E4.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showResetDialog = false
+                        editorViewModel.resetCropState()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = CropAccent, contentColor = CropButtonTextDark)
+                ) { Text("\uCD08\uAE30\uD654") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResetDialog = false }) { Text("\uCDE8\uC18C") }
+            }
+        )
     }
 }
 
