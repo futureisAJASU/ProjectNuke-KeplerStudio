@@ -70,6 +70,8 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
             if (uiState.value.revision == nextRevision) {
                 updateUiState {
                     it.copy(
+                        selectionLayers = current.selectionLayers,
+                        revision = current.revision,
                         isBusy = false,
                         message = "선택 마스크 미리보기를 적용하지 못했습니다: ${t.message}"
                     )

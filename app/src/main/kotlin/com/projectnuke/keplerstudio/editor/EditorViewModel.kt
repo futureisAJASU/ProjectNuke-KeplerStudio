@@ -124,9 +124,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         forceDraftSaveAsync()
     }
 
-    suspend fun persistDraftSnapshotNow() {
+    suspend fun persistDraftSnapshotNow(): Boolean {
         draftSaveJob?.cancelAndJoin()
-        persistDraftSnapshotInternal()
+        return persistDraftSnapshotInternal()
     }
 
     private fun scheduleDraftAutosave(delayMs: Long = 2000L) {
@@ -144,7 +144,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun persistDraftSnapshotInternal() {
+    private suspend fun persistDraftSnapshotInternal(): Boolean {
         val context = getApplication<Application>()
         val draftState = _uiState.value
         val payload = try {
@@ -158,7 +158,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             updateUiStateAndRecycleReplaced {
                 it.copy(message = "\uc784\uc2dc \uc800\uc7a5\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. \ud3b8\uc9d1\uc740 \uacc4\uc18d\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.")
             }
-            return
+            return false
         }
         val saved = try {
             withContext(Dispatchers.IO) {
@@ -176,13 +176,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             null
         } finally {
             payload.dirtyBitmapCopy?.takeIf { !it.isRecycled }?.recycle()
-        } ?: return
+        } ?: return false
         updateUiStateAndRecycleReplaced {
             it.copy(
                 draftSavedAtMillis = saved.savedAtMillis,
                 draftSourcePath = saved.sourcePath
             )
         }
+        return true
     }
 
     fun appContext(): Context = getApplication<Application>().applicationContext
@@ -221,16 +222,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val openToken = restoreDraftToken + 1L
         restoreDraftToken = openToken
         val invalidateRevision = _uiState.value.revision + 1
-        clearEditHistory()
         val openingMessage = "\uC774\uBBF8\uC9C0\uB97C \uC5EC\uB294 \uC911\uC785\uB2C8\uB2E4"
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = invalidateRevision, message = openingMessage) }
 
         viewModelScope.launch {
             var preview: Bitmap? = null
             var createdSession = 0L
+            var sourceFile: File? = null
             try {
                 val context = getApplication<Application>()
-                val sourceFile = withContext(Dispatchers.IO) { copyUriToCache(context, uri) }
+                sourceFile = withContext(Dispatchers.IO) { copyUriToCache(context, uri) }
                 preview = withContext(Dispatchers.IO) {
                     decodeSampledMutableBitmapWithExif(sourceFile.absolutePath, maxSide = 2048)
                 }
@@ -254,6 +255,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 nativeSession = createdSession
                 createdSession = 0L
                 releaseNativeSessionHandle(previousSession)
+                clearEditHistory()
 
                 updateUiStateAndRecycleReplaced {
                     it.copy(
@@ -262,6 +264,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         baseBitmapDirty = false,
                         originalPreviewBitmap = decodedPreview,
                         previewBitmap = decodedPreview,
+                        cropState = CropState(),
+                        selectionLayers = emptyList(),
+                        activeSelectionLayerId = null,
+                        selectionPaintSettings = SelectionPaintSettings(),
+                        showSelectionOverlay = true,
+                        viewport = ViewportState(),
                         activeQuickEffects = emptyList(),
                         params = EditParams(),
                         presetLook = null,
@@ -279,10 +287,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (ce: CancellationException) {
                 preview?.recycle()
                 releaseNativeSessionHandle(createdSession)
+                sourceFile?.delete()
                 throw ce
             } catch (t: Throwable) {
                 preview?.recycle()
                 releaseNativeSessionHandle(createdSession)
+                sourceFile?.delete()
                 if (openToken == restoreDraftToken && _uiState.value.revision == invalidateRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC774\uBBF8\uC9C0\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
                 }
@@ -297,8 +307,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (nextParams == current.params) return
         val nextRevision = current.revision + 1
 
-        pushParamUndoSnapshot(clearRedo = true)
-        updateUiStateAndRecycleReplaced { it.copy(params = nextParams, revision = nextRevision, isBusy = true, message = "미리보기를 렌더링하는 중입니다") }
+        // Commit the undo snapshot only after rendering succeeds.
+        updateUiStateAndRecycleReplaced { it.copy(revision = nextRevision, isBusy = true, message = "미리보기를 렌더링하는 중입니다") }
         renderJob?.cancel()
         renderJob = viewModelScope.launch {
             var rendered: Bitmap? = null
@@ -308,8 +318,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
+                    pushParamUndoSnapshot(clearRedo = true)
                     updateUiStateAndRecycleReplaced {
-                        it.copy(previewBitmap = adopted, isBusy = false, message = "미리보기 렌더링이 완료되었습니다")
+                        it.copy(params = nextParams, previewBitmap = adopted, isBusy = false, message = "미리보기 렌더링이 완료되었습니다")
                     }
                     rendered = null
                     scheduleDraftAutosave()
@@ -408,7 +419,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             hazeEngine = hazeEngine ?: current.hazeEngine
         ).coerceImplemented()
         val context = getApplication<Application>()
-        saveEngineSelection(context, nextEngines)
+        
 
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
@@ -426,12 +437,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         val nextRevision = current.revision + 1
         updateUiStateAndRecycleReplaced {
-            it.copy(
-                noiseEngine = nextEngines.noiseEngine,
-                detailEngine = nextEngines.detailEngine,
-                toneEngine = nextEngines.toneEngine,
-                hazeEngine = nextEngines.hazeEngine,
-                revision = nextRevision,
+                it.copy(
+                    revision = nextRevision,
                 isBusy = true,
                 message = "$message. 미리보기를 다시 렌더링하는 중입니다"
             )
@@ -445,6 +452,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
+                    pushUndoSnapshot(clearRedo = true)
+                    saveEngineSelection(context, nextEngines)
+                    updateUiState { it.copy(noiseEngine = nextEngines.noiseEngine, detailEngine = nextEngines.detailEngine, toneEngine = nextEngines.toneEngine, hazeEngine = nextEngines.hazeEngine) }
                     updateUiStateAndRecycleReplaced { it.copy(previewBitmap = adopted, isBusy = false, message = message) }
                     rendered = null
                     scheduleDraftAutosave()
@@ -523,8 +533,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         val nextRevision = current.revision + 1
         renderJob?.cancel()
-        pushUndoSnapshot(clearRedo = true)
-        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, presetLook = look, revision = nextRevision, message = message) }
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = message) }
 
         renderJob = viewModelScope.launch {
             var rendered: Bitmap? = null
@@ -534,6 +543,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
+                    pushUndoSnapshot(clearRedo = true)
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             params = params,
@@ -686,11 +696,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearDraft() {
         val context = getApplication<Application>()
+        val activeSourcePath = _uiState.value.sourcePath
+        val draftSourcePath = _uiState.value.draftSourcePath
+        val preserveActiveSource = activeSourcePath != null && draftSourcePath != null &&
+            File(activeSourcePath).absoluteFile == File(draftSourcePath).absoluteFile
         viewModelScope.launch {
             draftSaveJob?.cancelAndJoin()
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
-                    clearDraftPrefs(context)
+                    clearDraftPrefs(context, preserveSourcePath = if (preserveActiveSource) activeSourcePath else null)
                 }
             }
             updateUiStateAndRecycleReplaced {
@@ -2210,8 +2224,11 @@ private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): Draf
     return DraftSaveResult(draftSource.file.absolutePath, savedAt)
 }
 
-private fun clearDraftPrefs(context: Context) {
-    persistentDraftSourceFile(context).delete()
+private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null) {
+    val draftSource = persistentDraftSourceFile(context)
+    if (preserveSourcePath == null || draftSource.absoluteFile != File(preserveSourcePath).absoluteFile) {
+        draftSource.delete()
+    }
     persistentDraftThumbnailFile(context).delete()
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
         .remove(KEY_DRAFT_SOURCE)

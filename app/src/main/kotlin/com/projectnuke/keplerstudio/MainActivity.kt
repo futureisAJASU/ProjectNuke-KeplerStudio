@@ -96,6 +96,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
+            val context = LocalContext.current
             val vm: EditorViewModel = viewModel()
             val state by vm.uiState.collectAsState()
             val scope = rememberCoroutineScope()
@@ -161,9 +162,13 @@ class MainActivity : ComponentActivity() {
                                 showLeaveDialog = false
                                 showSavingDialog = true
                                 scope.launch {
-                                    vm.persistDraftSnapshotNow()
+                                    val saved = vm.persistDraftSnapshotNow()
                                     showSavingDialog = false
-                                    appMode = AppMode.Home
+                                    if (saved) {
+                                        appMode = AppMode.Home
+                                    } else {
+                                        Toast.makeText(context, "임시 저장에 실패했습니다. 편집 화면을 유지합니다.", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }) { Text("\uC800\uC7A5\uD558\uACE0 \uB098\uAC00\uAE30") }
                         },
