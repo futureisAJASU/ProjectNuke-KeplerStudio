@@ -39,3 +39,4 @@ Thumbs.db
 /test-output/
 /captures/
 /scratch/
+*.bundle

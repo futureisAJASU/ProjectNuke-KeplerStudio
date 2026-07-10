@@ -238,6 +238,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (openToken != restoreDraftToken) {
                     preview?.recycle()
                     preview = null
+                    sourceFile?.delete()
                     return@launch
                 }
                 val decodedPreview = preview!!
@@ -247,6 +248,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (openToken != restoreDraftToken || _uiState.value.revision != invalidateRevision) {
                     preview?.recycle()
                     preview = null
+                    sourceFile?.delete()
                     releaseNativeSessionHandle(createdSession)
                     createdSession = 0L
                     return@launch
@@ -305,6 +307,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
         if (nextParams == current.params) return
+        updateUiState { it.copy(params = nextParams) }
         val nextRevision = current.revision + 1
 
         // Commit the undo snapshot only after rendering succeeds.
@@ -423,6 +426,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
+            saveEngineSelection(context, nextEngines)
             updateUiStateAndRecycleReplaced {
                 it.copy(
                     noiseEngine = nextEngines.noiseEngine,
@@ -1229,6 +1233,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             it.copy(
                 params = snapshot.params,
+                noiseEngine = snapshot.noiseEngine,
+                detailEngine = snapshot.detailEngine,
+                toneEngine = snapshot.toneEngine,
+                hazeEngine = snapshot.hazeEngine,
                 baseBitmapDirty = snapshot.baseBitmapDirty,
                 previewBitmap = snapshot.previewBitmap,
                 originalPreviewBitmap = snapshot.originalPreviewBitmap,
@@ -1245,6 +1253,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 message = message
             )
         }
+        saveEngineSelection(getApplication<Application>(), EngineSelection(snapshot.noiseEngine, snapshot.detailEngine, snapshot.toneEngine, snapshot.hazeEngine))
     }
 
     private fun updateHistoryFlags() {
@@ -1286,6 +1295,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
 private data class EditorHistorySnapshot(
     val params: EditParams,
+    val noiseEngine: NoiseEngine,
+    val detailEngine: DetailEngine,
+    val toneEngine: ToneEngine,
+    val hazeEngine: DehazeEngine,
     val baseBitmapDirty: Boolean,
     val previewBitmap: Bitmap?,
     val originalPreviewBitmap: Bitmap?,
@@ -1317,6 +1330,10 @@ private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
         }
         return EditorHistorySnapshot(
             params = params,
+            noiseEngine = noiseEngine,
+            detailEngine = detailEngine,
+            toneEngine = toneEngine,
+            hazeEngine = hazeEngine,
             baseBitmapDirty = baseBitmapDirty,
             previewBitmap = previewCopy,
             originalPreviewBitmap = originalCopy,
@@ -1349,6 +1366,10 @@ private fun buildHistoryAppliedMessage(
         return "$prefix: ${changedParams.take(3).joinToString(", ")}"
     }
     val changedImageState = current.presetLook != target.presetLook ||
+        current.noiseEngine != target.noiseEngine ||
+        current.detailEngine != target.detailEngine ||
+        current.toneEngine != target.toneEngine ||
+        current.hazeEngine != target.hazeEngine ||
         current.cropState != target.cropState ||
         current.selectionLayers != target.selectionLayers ||
         current.activeSelectionLayerId != target.activeSelectionLayerId ||
@@ -2033,10 +2054,8 @@ private fun saveBitmapToGallery(
     val values = ContentValues().apply {
         put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
         put(MediaStore.Images.Media.MIME_TYPE, format.mimeType)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/KeplerStudio")
-            put(MediaStore.Images.Media.IS_PENDING, 1)
-        }
+        put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/KeplerStudio")
+        put(MediaStore.Images.Media.IS_PENDING, 1)
     }
 
     val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
@@ -2049,14 +2068,12 @@ private fun saveBitmapToGallery(
             writeCompressedBitmapToUri(context, uri, bitmap, format)
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            values.clear()
-            values.put(MediaStore.Images.Media.IS_PENDING, 0)
-            val updatedRows = resolver.update(uri, values, null, null)
-            if (updatedRows <= 0) {
-                resolver.delete(uri, null, null)
-                error("failed to publish media store row")
-            }
+        values.clear()
+        values.put(MediaStore.Images.Media.IS_PENDING, 0)
+        val updatedRows = resolver.update(uri, values, null, null)
+        if (updatedRows <= 0) {
+            resolver.delete(uri, null, null)
+            error("failed to publish media store row")
         }
         return uri
     } catch (t: Throwable) {
@@ -2196,7 +2213,7 @@ private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): Draf
     } ?: return null
     if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
     val savedAt = System.currentTimeMillis()
-    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+    val committed = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
         .putString(KEY_DRAFT_SOURCE, draftSource.file.absolutePath)
         .putFloat(KEY_DRAFT_EXPOSURE, payload.params.exposure)
         .putFloat(KEY_DRAFT_CONTRAST, payload.params.contrast)
@@ -2220,7 +2237,8 @@ private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): Draf
         .putString(KEY_DRAFT_LOOK, presetColorLookToJson(payload.presetLook)?.toString())
         .putString(KEY_DRAFT_QUICK_EFFECTS, payload.activeQuickEffects.toDraftString())
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
-        .apply()
+        .commit()
+    if (!committed) return null
     return DraftSaveResult(draftSource.file.absolutePath, savedAt)
 }
 
@@ -2384,7 +2402,7 @@ private fun rebuildSavedExportsFromMediaStore(context: Context): List<SavedExpor
         add(MediaStore.Images.Media.WIDTH)
         add(MediaStore.Images.Media.HEIGHT)
         add(MediaStore.Images.Media.DATE_ADDED)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(MediaStore.Images.Media.RELATIVE_PATH)
+        add(MediaStore.Images.Media.RELATIVE_PATH)
     }.toTypedArray()
     val items = mutableListOf<SavedExport>()
     context.contentResolver.query(
@@ -2404,11 +2422,8 @@ private fun rebuildSavedExportsFromMediaStore(context: Context): List<SavedExpor
         if (idIndex < 0 || nameIndex < 0 || mimeIndex < 0 || dateAddedIndex < 0) return@use
         while (cursor.moveToNext() && items.size < 60) {
             val displayName = cursor.getString(nameIndex).orEmpty()
-            val inKeplerStudio = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && relativePathIndex >= 0) {
+            val inKeplerStudio = relativePathIndex >= 0 &&
                 cursor.getString(relativePathIndex).orEmpty().startsWith("${Environment.DIRECTORY_PICTURES}/KeplerStudio")
-            } else {
-                displayName.startsWith("KeplerStudio_", ignoreCase = true)
-            }
             if (!inKeplerStudio) continue
             val id = cursor.getLong(idIndex)
             val safeDisplayName = displayName.ifBlank { "KeplerStudio_$id" }
