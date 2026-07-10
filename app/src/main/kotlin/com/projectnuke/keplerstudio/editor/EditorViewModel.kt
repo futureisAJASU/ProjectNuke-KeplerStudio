@@ -469,6 +469,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val path = current.sourcePath ?: return
         val nextRevision = current.revision + 1
         renderJob?.cancel()
+        exportJob?.cancel()
         pushUndoSnapshot(clearRedo = true)
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "초기화하는 중입니다") }
         renderJob = viewModelScope.launch {
@@ -484,6 +485,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             baseBitmapDirty = false,
                             params = EditParams(),
                             presetLook = null,
+                            activeQuickEffects = emptyList(),
+                            cropState = CropState(),
+                            selectionLayers = emptyList(),
+                            activeSelectionLayerId = null,
+                            showSelectionOverlay = true,
+                            flareGuardRuntimeStatus = null,
                             isBusy = false,
                             message = "초기화가 완료되었습니다"
                         )
@@ -749,6 +756,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         renderJob?.cancel()
+        exportJob?.cancel()
         val redoSnapshot = try {
             _uiState.value.toHistorySnapshot()
         } catch (t: Throwable) {
@@ -773,6 +781,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         renderJob?.cancel()
+        exportJob?.cancel()
         val undoSnapshot = try {
             _uiState.value.toHistorySnapshot()
         } catch (t: Throwable) {
@@ -2351,15 +2360,15 @@ private fun loadSavedExportsFromPrefs(context: Context): List<SavedExport> {
 }
 
 private fun rebuildSavedExportsFromMediaStore(context: Context): List<SavedExport> {
-    val projection = arrayOf(
-        MediaStore.Images.Media._ID,
-        MediaStore.Images.Media.DISPLAY_NAME,
-        MediaStore.Images.Media.MIME_TYPE,
-        MediaStore.Images.Media.WIDTH,
-        MediaStore.Images.Media.HEIGHT,
-        MediaStore.Images.Media.DATE_ADDED,
-        MediaStore.Images.Media.RELATIVE_PATH
-    )
+    val projection = buildList {
+        add(MediaStore.Images.Media._ID)
+        add(MediaStore.Images.Media.DISPLAY_NAME)
+        add(MediaStore.Images.Media.MIME_TYPE)
+        add(MediaStore.Images.Media.WIDTH)
+        add(MediaStore.Images.Media.HEIGHT)
+        add(MediaStore.Images.Media.DATE_ADDED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) add(MediaStore.Images.Media.RELATIVE_PATH)
+    }.toTypedArray()
     val items = mutableListOf<SavedExport>()
     context.contentResolver.query(
         MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
@@ -2368,26 +2377,32 @@ private fun rebuildSavedExportsFromMediaStore(context: Context): List<SavedExpor
         null,
         "${MediaStore.Images.Media.DATE_ADDED} DESC"
     )?.use { cursor ->
-        val idIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-        val nameIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-        val mimeIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE)
-        val widthIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.WIDTH)
-        val heightIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.HEIGHT)
-        val dateAddedIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
-        val relativePathIndex = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.RELATIVE_PATH)
+        val idIndex = cursor.getColumnIndex(MediaStore.Images.Media._ID)
+        val nameIndex = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+        val mimeIndex = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
+        val widthIndex = cursor.getColumnIndex(MediaStore.Images.Media.WIDTH)
+        val heightIndex = cursor.getColumnIndex(MediaStore.Images.Media.HEIGHT)
+        val dateAddedIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
+        val relativePathIndex = cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+        if (idIndex < 0 || nameIndex < 0 || mimeIndex < 0 || dateAddedIndex < 0) return@use
         while (cursor.moveToNext() && items.size < 60) {
-            val relativePath = cursor.getString(relativePathIndex).orEmpty()
-            if (!relativePath.startsWith("${Environment.DIRECTORY_PICTURES}/KeplerStudio")) continue
+            val displayName = cursor.getString(nameIndex).orEmpty()
+            val inKeplerStudio = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && relativePathIndex >= 0) {
+                cursor.getString(relativePathIndex).orEmpty().startsWith("${Environment.DIRECTORY_PICTURES}/KeplerStudio")
+            } else {
+                displayName.startsWith("KeplerStudio_", ignoreCase = true)
+            }
+            if (!inKeplerStudio) continue
             val id = cursor.getLong(idIndex)
-            val displayName = cursor.getString(nameIndex).orEmpty().ifBlank { "KeplerStudio_$id" }
+            val safeDisplayName = displayName.ifBlank { "KeplerStudio_$id" }
             val mimeType = cursor.getString(mimeIndex).orEmpty()
-            val width = cursor.getInt(widthIndex)
-            val height = cursor.getInt(heightIndex)
+            val width = if (widthIndex >= 0) cursor.getInt(widthIndex) else 0
+            val height = if (heightIndex >= 0) cursor.getInt(heightIndex) else 0
             val dateAddedSeconds = cursor.getLong(dateAddedIndex)
             items += SavedExport(
-                displayName = displayName,
+                displayName = safeDisplayName,
                 uriString = Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString()).toString(),
-                formatLabel = mimeTypeToExportLabel(mimeType, displayName),
+                formatLabel = mimeTypeToExportLabel(mimeType, safeDisplayName),
                 resolutionLabel = if (width > 0 && height > 0) "${width}x${height}" else "원본",
                 timestampMillis = if (dateAddedSeconds > 0L) dateAddedSeconds * 1000L else System.currentTimeMillis()
             )

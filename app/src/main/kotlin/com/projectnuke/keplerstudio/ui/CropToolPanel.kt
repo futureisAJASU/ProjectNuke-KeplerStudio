@@ -159,7 +159,7 @@ fun CropToolPanel() {
         ) {
             Button(
                 onClick = { editorViewModel.applyCropTransform() },
-                enabled = bitmap != null,
+                enabled = bitmap != null && !state.isBusy,
                 colors = ButtonDefaults.buttonColors(containerColor = CropAccent, contentColor = CropButtonTextDark)
             ) { Text("\uC790\uB974\uAE30 \uC801\uC6A9") }
             TextButton(onClick = { showResetDialog = true }) { Text("\uCD08\uAE30\uD654") }

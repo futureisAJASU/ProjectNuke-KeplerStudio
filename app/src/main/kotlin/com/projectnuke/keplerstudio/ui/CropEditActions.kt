@@ -102,6 +102,7 @@ fun EditorViewModel.resetCropState() {
 
 fun EditorViewModel.applyCropTransform() {
     val state = uiState.value
+    if (state.isBusy) return
     val preview = state.previewBitmap
     val original = state.originalPreviewBitmap
     val crop = state.cropState.normalized()
