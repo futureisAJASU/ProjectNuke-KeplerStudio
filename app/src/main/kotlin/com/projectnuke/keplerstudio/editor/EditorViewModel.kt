@@ -57,6 +57,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val draftSaveMutex = Mutex()
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
+    private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
+    private var paramUndoSnapshotCommitted: Boolean = false
+    private var lastSuccessfullyRenderedParams: EditParams = EditParams()
     private var restoreDraftToken: Long = 0L
     private val undoHistory = ArrayDeque<EditorHistorySnapshot>()
     private val redoHistory = ArrayDeque<EditorHistorySnapshot>()
@@ -257,6 +260,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 nativeSession = createdSession
                 createdSession = 0L
                 releaseNativeSessionHandle(previousSession)
+                lastSuccessfullyRenderedParams = EditParams()
                 clearEditHistory()
 
                 updateUiStateAndRecycleReplaced {
@@ -307,6 +311,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
         if (nextParams == current.params) return
+        beginParamUndoWindow()
         updateUiState { it.copy(params = nextParams) }
         val nextRevision = current.revision + 1
 
@@ -321,7 +326,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
-                    pushParamUndoSnapshot(clearRedo = true)
+                    commitPendingParamUndoSnapshot()
+                    lastSuccessfullyRenderedParams = nextParams
                     updateUiStateAndRecycleReplaced {
                         it.copy(params = nextParams, previewBitmap = adopted, isBusy = false, message = "미리보기 렌더링이 완료되었습니다")
                     }
@@ -337,6 +343,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (t: Throwable) {
                 rendered?.recycle()
                 if (_uiState.value.revision == nextRevision) {
+                    discardPendingParamUndoSnapshot()
+                    updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = nextRevision + 1) }
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
                 }
             }
@@ -365,6 +373,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
+                    lastSuccessfullyRenderedParams = nextParams
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             params = nextParams,
@@ -492,6 +501,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(path, maxSide = 2048) }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = preview!!
+                    lastSuccessfullyRenderedParams = EditParams()
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             originalPreviewBitmap = adopted,
@@ -547,6 +557,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
+                    lastSuccessfullyRenderedParams = params
                     pushUndoSnapshot(clearRedo = true)
                     updateUiStateAndRecycleReplaced {
                         it.copy(
@@ -1150,6 +1161,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             releaseNativeSessionHandle(previousSession)
             val adoptedPreview = preview!!
             val adoptedRendered = rendered!!
+            lastSuccessfullyRenderedParams = params
             updateUiStateAndRecycleReplaced {
                 it.copy(
                     isBusy = false,
@@ -1188,16 +1200,40 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun pushParamUndoSnapshot(clearRedo: Boolean) {
+    private fun beginParamUndoWindow() {
         if (!paramUndoWindowOpen) {
-            pushUndoSnapshot(clearRedo = clearRedo)
+            pendingParamUndoSnapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
+            paramUndoSnapshotCommitted = false
             paramUndoWindowOpen = true
         }
         paramUndoWindowJob?.cancel()
         paramUndoWindowJob = viewModelScope.launch {
             delay(900L)
+            if (!paramUndoSnapshotCommitted) {
+                pendingParamUndoSnapshot?.recycleBitmaps()
+                pendingParamUndoSnapshot = null
+            }
             paramUndoWindowOpen = false
         }
+    }
+
+    private fun commitPendingParamUndoSnapshot() {
+        val snapshot = pendingParamUndoSnapshot ?: return
+        if (!paramUndoSnapshotCommitted) {
+            undoHistory.addLast(snapshot)
+            trimHistory(undoHistory)
+            recycleHistory(redoHistory)
+            redoHistory.clear()
+            updateHistoryFlags()
+            paramUndoSnapshotCommitted = true
+        }
+        pendingParamUndoSnapshot = null
+    }
+
+    private fun discardPendingParamUndoSnapshot() {
+        if (!paramUndoSnapshotCommitted) pendingParamUndoSnapshot?.recycleBitmaps()
+        pendingParamUndoSnapshot = null
+        closeParamUndoWindow()
     }
 
     private fun closeParamUndoWindow() {
@@ -1230,6 +1266,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun applyHistorySnapshot(snapshot: EditorHistorySnapshot, message: String) {
+        lastSuccessfullyRenderedParams = snapshot.params
         updateUiStateAndRecycleReplaced {
             it.copy(
                 params = snapshot.params,
@@ -1261,6 +1298,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun clearEditHistory() {
+        discardPendingParamUndoSnapshot()
         recycleHistory(undoHistory)
         recycleHistory(redoHistory)
         undoHistory.clear()
