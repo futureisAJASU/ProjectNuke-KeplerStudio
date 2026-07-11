@@ -60,6 +60,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
     private var paramUndoSnapshotCommitted: Boolean = false
     private var lastSuccessfullyRenderedParams: EditParams = EditParams()
+    private var activeParamRenderRevision: Int? = null
     private var restoreDraftToken: Long = 0L
     private val undoHistory = ArrayDeque<EditorHistorySnapshot>()
     private val redoHistory = ArrayDeque<EditorHistorySnapshot>()
@@ -312,6 +313,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateParams(transform: (EditParams) -> EditParams) {
+        resolveOrAbortPreviousParamGroupIfNeeded()
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
@@ -323,6 +325,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // Commit the undo snapshot only after rendering succeeds.
         updateUiStateAndRecycleReplaced { it.copy(revision = nextRevision, isBusy = true, message = "미리보기를 렌더링하는 중입니다") }
         renderJob?.cancel()
+        activeParamRenderRevision = nextRevision
         renderJob = viewModelScope.launch {
             var rendered: Bitmap? = null
             try {
@@ -333,6 +336,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val adopted = rendered!!
                     commitPendingParamUndoSnapshot()
                     lastSuccessfullyRenderedParams = nextParams
+                    if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     updateUiStateAndRecycleReplaced {
                         it.copy(params = nextParams, previewBitmap = adopted, isBusy = false, message = "미리보기 렌더링이 완료되었습니다")
                     }
@@ -344,10 +348,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (ce: CancellationException) {
                 rendered?.recycle()
+                if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 throw ce
             } catch (t: Throwable) {
                 rendered?.recycle()
                 if (_uiState.value.revision == nextRevision) {
+                    if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     discardPendingParamUndoSnapshot()
                     updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = nextRevision + 1) }
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
@@ -438,7 +444,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             hazeEngine = hazeEngine ?: current.hazeEngine
         ).coerceImplemented()
         val context = getApplication<Application>()
-        
 
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
@@ -915,7 +920,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         failureMessage: String,
         effect: ActiveQuickEffect
     ) {
-        val current = _uiState.value
+        val current = prepareForExternalEdit()
         val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
         if (baseOriginal == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "적용할 이미지가 없습니다.") }
@@ -981,7 +986,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
-        val current = _uiState.value
+        val current = prepareForExternalEdit()
         val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
         if (baseOriginal == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화를 적용할 이미지가 없습니다.") }
@@ -1230,6 +1235,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun resolveOrAbortPreviousParamGroupIfNeeded() {
+        if (!paramUndoWindowOpen && (activeParamRenderRevision != null || pendingParamUndoSnapshot != null)) {
+            abortPendingParameterEdit()
+        }
+    }
+
     private fun commitPendingParamUndoSnapshot() {
         val snapshot = pendingParamUndoSnapshot ?: return
         if (!paramUndoSnapshotCommitted) {
@@ -1250,10 +1261,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun abortPendingParameterEdit() {
-        if (pendingParamUndoSnapshot == null && !paramUndoWindowOpen) return
+        val unresolved = activeParamRenderRevision != null ||
+            _uiState.value.params != lastSuccessfullyRenderedParams ||
+            pendingParamUndoSnapshot != null || paramUndoWindowOpen
+        if (!unresolved) return
         renderJob?.cancel()
+        activeParamRenderRevision = null
         updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = it.revision + 1, isBusy = false) }
         discardPendingParamUndoSnapshot()
+    }
+
+    internal fun prepareForExternalEdit(): EditorUiState {
+        abortPendingParameterEdit()
+        return uiState.value
     }
 
     private fun closeParamUndoWindow() {
@@ -1263,6 +1283,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun pushUndoSnapshot(clearRedo: Boolean) {
+        if (activeParamRenderRevision != null || _uiState.value.params != lastSuccessfullyRenderedParams) {
+            abortPendingParameterEdit()
+        }
         closeParamUndoWindow()
         val state = _uiState.value
         if (state.previewBitmap == null && state.originalPreviewBitmap == null) return
