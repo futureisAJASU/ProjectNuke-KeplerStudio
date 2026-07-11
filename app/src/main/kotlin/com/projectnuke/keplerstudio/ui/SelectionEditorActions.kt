@@ -223,6 +223,7 @@ fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditP
 }
 
 fun EditorViewModel.applyActiveSelectionLocalEdit() {
+    abortPendingParameterEdit()
     val state = uiState.value
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val layer = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId }
@@ -264,6 +265,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                         message = "선택한 마스크 보정을 적용했습니다."
                     )
                 }
+                markParamsSuccessfullyRendered(EditParams())
                 renderedOriginal = null
                 renderedPreview = null
                 persistDraftSnapshot()

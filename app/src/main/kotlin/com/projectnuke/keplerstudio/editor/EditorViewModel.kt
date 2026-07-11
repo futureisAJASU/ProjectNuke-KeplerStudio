@@ -189,6 +189,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    internal fun markParamsSuccessfullyRendered(params: EditParams) {
+        lastSuccessfullyRenderedParams = params
+    }
+
     fun appContext(): Context = getApplication<Application>().applicationContext
 
     fun appApplication(): Application = getApplication()
@@ -218,6 +222,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openImage(uri: Uri) {
+        abortPendingParameterEdit()
         renderJob?.cancel()
         exportJob?.cancel()
         selectionLivePreviewJob?.cancel()
@@ -352,6 +357,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun applyAutoEnhance() {
+        abortPendingParameterEdit()
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
@@ -423,6 +429,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         hazeEngine: DehazeEngine? = null,
         message: String
     ) {
+        abortPendingParameterEdit()
         val current = _uiState.value
         val nextEngines = EngineSelection(
             noiseEngine = noiseEngine ?: current.noiseEngine,
@@ -488,6 +495,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun resetAdjustments() {
+        abortPendingParameterEdit()
         val current = _uiState.value
         val path = current.sourcePath ?: return
         val nextRevision = current.revision + 1
@@ -538,6 +546,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String) {
+        abortPendingParameterEdit()
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
@@ -780,6 +789,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun undoEdit() {
+        abortPendingParameterEdit()
         if (undoHistory.isEmpty()) {
             updateUiStateAndRecycleReplaced { it.copy(message = "되돌릴 편집 기록이 없습니다.") }
             return
@@ -805,6 +815,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun redoEdit() {
+        abortPendingParameterEdit()
         if (redoHistory.isEmpty()) {
             updateUiStateAndRecycleReplaced { it.copy(message = "다시 실행할 편집 기록이 없습니다.") }
             return
@@ -831,6 +842,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun rotatePreview90() {
+        abortPendingParameterEdit()
         val current = _uiState.value
         val preview = current.previewBitmap
         if (preview == null) {
@@ -1202,6 +1214,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun beginParamUndoWindow() {
         if (!paramUndoWindowOpen) {
+            if (pendingParamUndoSnapshot != null) {
+                pendingParamUndoSnapshot?.recycleBitmaps()
+                pendingParamUndoSnapshot = null
+                updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = it.revision + 1, isBusy = false) }
+            }
             pendingParamUndoSnapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
             paramUndoSnapshotCommitted = false
             paramUndoWindowOpen = true
@@ -1209,10 +1226,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         paramUndoWindowJob?.cancel()
         paramUndoWindowJob = viewModelScope.launch {
             delay(900L)
-            if (!paramUndoSnapshotCommitted) {
-                pendingParamUndoSnapshot?.recycleBitmaps()
-                pendingParamUndoSnapshot = null
-            }
             paramUndoWindowOpen = false
         }
     }
@@ -1234,6 +1247,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (!paramUndoSnapshotCommitted) pendingParamUndoSnapshot?.recycleBitmaps()
         pendingParamUndoSnapshot = null
         closeParamUndoWindow()
+    }
+
+    internal fun abortPendingParameterEdit() {
+        if (pendingParamUndoSnapshot == null && !paramUndoWindowOpen) return
+        renderJob?.cancel()
+        updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = it.revision + 1, isBusy = false) }
+        discardPendingParamUndoSnapshot()
     }
 
     private fun closeParamUndoWindow() {

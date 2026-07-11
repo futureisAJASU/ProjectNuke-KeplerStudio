@@ -162,6 +162,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         nativeVersion = state.nativeVersion,
                         selectedTab = selectedTab,
                         hasImage = state.previewBitmap != null,
+                        isBusy = state.isBusy,
                         canExport = state.previewBitmap != null && !state.isBusy,
                         canUndo = state.canUndo,
                         canRedo = state.canRedo,
@@ -291,6 +292,7 @@ private fun V2TopBar(
     nativeVersion: String,
     selectedTab: V2MainTab,
     hasImage: Boolean,
+    isBusy: Boolean,
     canExport: Boolean,
     canUndo: Boolean,
     canRedo: Boolean,
@@ -310,11 +312,11 @@ private fun V2TopBar(
                 Text("Kepler Studio", color = V2TextPrimary, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                 Text(nativeVersion, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall, maxLines = 1)
             }
-            TextButton(onClick = onUndo, enabled = canUndo) { Text("Undo") }
-            TextButton(onClick = onRedo, enabled = canRedo) { Text("Redo") }
-            TextButton(onClick = onRotate, enabled = hasImage) { Text("회전") }
-            TextButton(onClick = onReset, enabled = hasImage) { Text("초기화") }
-            TextButton(onClick = onSave, enabled = canExport) { Text("저장") }
+            TextButton(onClick = onUndo, enabled = canUndo && !isBusy) { Text("Undo") }
+            TextButton(onClick = onRedo, enabled = canRedo && !isBusy) { Text("Redo") }
+            TextButton(onClick = onRotate, enabled = hasImage && !isBusy) { Text("회전") }
+            TextButton(onClick = onReset, enabled = hasImage && !isBusy) { Text("초기화") }
+            TextButton(onClick = onSave, enabled = canExport && !isBusy) { Text("저장") }
             Button(onClick = onOpen, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
                 Text("사진")
             }

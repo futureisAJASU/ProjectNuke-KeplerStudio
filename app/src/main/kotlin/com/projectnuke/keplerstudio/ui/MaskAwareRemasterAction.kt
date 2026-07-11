@@ -16,6 +16,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyMaskAwareRemaster() {
+    abortPendingParameterEdit()
     val state = uiState.value
     val basePreview = state.originalPreviewBitmap ?: state.previewBitmap
     if (basePreview == null) {
@@ -75,6 +76,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                         message = "Edge Masker 기반 마스크 보정을 적용했습니다."
                     )
                 }
+                markParamsSuccessfullyRendered(EditParams())
                 renderedOriginal = null
                 renderedPreview = null
                 persistDraftSnapshot()
