@@ -13,7 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
-    val current = uiState.value
+    val current = prepareForExternalEdit()
     val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
     if (baseOriginal == null) {
         updateUiState { it.copy(message = "적용할 이미지가 없습니다.") }

@@ -88,9 +88,10 @@ fun EditorViewModel.autoStraightenCrop() {
 }
 
 fun EditorViewModel.resetCropState() {
+    val current = prepareForExternalEdit()
     recordUserEditForUndo(clearRedo = true)
     updateUiState { state ->
-        val bitmap = state.previewBitmap ?: state.originalPreviewBitmap
+        val bitmap = current.previewBitmap ?: current.originalPreviewBitmap
         val next = if (bitmap != null) {
             centeredCropForAspect(bitmap.width, bitmap.height, CropAspectRatio.Original)
         } else {
@@ -101,7 +102,7 @@ fun EditorViewModel.resetCropState() {
 }
 
 fun EditorViewModel.applyCropTransform() {
-    val state = uiState.value
+    val state = prepareForExternalEdit()
     if (state.isBusy) return
     val preview = state.previewBitmap
     val original = state.originalPreviewBitmap

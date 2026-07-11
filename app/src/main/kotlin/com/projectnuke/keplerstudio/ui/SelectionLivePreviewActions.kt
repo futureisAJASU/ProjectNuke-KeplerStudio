@@ -13,7 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> EditParams) {
-    val current = uiState.value
+    val current = prepareForExternalEdit()
     val activeId = current.activeSelectionLayerId
     val base = current.originalPreviewBitmap ?: current.previewBitmap
     if (activeId == null || base == null) {

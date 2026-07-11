@@ -343,6 +343,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     rendered = null
                     scheduleDraftAutosave()
                 } else {
+                    if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     rendered?.recycle()
                     rendered = null
                 }
@@ -352,8 +353,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 throw ce
             } catch (t: Throwable) {
                 rendered?.recycle()
+                if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 if (_uiState.value.revision == nextRevision) {
-                    if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     discardPendingParamUndoSnapshot()
                     updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = nextRevision + 1) }
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
@@ -363,8 +364,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun applyAutoEnhance() {
-        abortPendingParameterEdit()
-        val current = _uiState.value
+        val current = prepareForExternalEdit()
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정을 적용할 이미지가 없습니다") }
@@ -435,8 +435,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         hazeEngine: DehazeEngine? = null,
         message: String
     ) {
-        abortPendingParameterEdit()
-        val current = _uiState.value
+        val current = prepareForExternalEdit()
         val nextEngines = EngineSelection(
             noiseEngine = noiseEngine ?: current.noiseEngine,
             detailEngine = detailEngine ?: current.detailEngine,
@@ -500,8 +499,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun resetAdjustments() {
-        abortPendingParameterEdit()
-        val current = _uiState.value
+        val current = prepareForExternalEdit()
         val path = current.sourcePath ?: return
         val nextRevision = current.revision + 1
         renderJob?.cancel()
@@ -551,8 +549,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String) {
-        abortPendingParameterEdit()
-        val current = _uiState.value
+        val current = prepareForExternalEdit()
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "적용할 이미지가 없습니다.") }

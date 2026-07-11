@@ -16,7 +16,8 @@ fun EditorViewModel.toggleSelectionOverlay() {
 }
 
 fun EditorViewModel.duplicateActiveSelectionLayer() {
-    val active = uiState.value.selectionLayers.firstOrNull { it.id == uiState.value.activeSelectionLayerId } ?: run {
+    val state = prepareForExternalEdit()
+    val active = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId } ?: run {
         updateUiState { it.copy(message = "복제할 마스크를 선택해 주세요") }
         return
     }
@@ -37,7 +38,8 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
 }
 
 fun EditorViewModel.createBackgroundSelectionFromActive() {
-    val active = uiState.value.selectionLayers.firstOrNull { it.id == uiState.value.activeSelectionLayerId } ?: run {
+    val state = prepareForExternalEdit()
+    val active = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId } ?: run {
         updateUiState { it.copy(message = "배경으로 변환할 마스크를 선택해 주세요") }
         return
     }

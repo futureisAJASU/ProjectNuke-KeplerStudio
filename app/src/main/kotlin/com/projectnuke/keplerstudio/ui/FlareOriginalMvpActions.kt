@@ -21,7 +21,7 @@ fun EditorViewModel.applySunFlareOriginalMvp() {
 }
 
 private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode, title: String, strength: Float) {
-    val current = uiState.value
+    val current = prepareForExternalEdit()
     val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
     if (baseOriginal == null) {
         updateUiState { it.copy(message = "$title 적용할 이미지가 없습니다.") }
