@@ -36,7 +36,11 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         return
     }
 
-    recordUserEditForUndo(clearRedo = true)
+    val undoSnapshot = state.captureCurrentHistorySnapshot()
+    if (undoSnapshot == null) {
+        updateUiState { it.copy(message = "?섎룎由ш린 湲곕줉????ν븯吏 紐삵뻽?듬땲?? ?몄쭛? 怨꾩냽?????덉뒿?덈떎.") }
+        return
+    }
     updateUiState { it.copy(isBusy = true, message = busyMessage) }
     viewModelScope.launch {
         var pendingLayerBitmap: Bitmap? = null
@@ -74,19 +78,23 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             if (!applied) {
                 pendingLayerBitmap?.recycle()
                 pendingLayerBitmap = null
+                recycleHistorySnapshot(undoSnapshot)
                 val current = uiState.value
                 if (current.isBusy && current.message == busyMessage) {
                     updateUiState { it.copy(isBusy = false) }
                 }
                 return@launch
             }
+            commitUndoSnapshot(undoSnapshot, clearRedo = true)
             pendingLayerBitmap = null
             persistDraftSnapshot()
         } catch (ce: CancellationException) {
             pendingLayerBitmap?.recycle()
+            recycleHistorySnapshot(undoSnapshot)
             throw ce
         } catch (t: Throwable) {
             pendingLayerBitmap?.recycle()
+            recycleHistorySnapshot(undoSnapshot)
             val current = uiState.value
             if (current.sourcePath == sourcePath && current.revision == sourceRevision) {
                 updateUiState { it.copy(isBusy = false, message = "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C \uC0DD\uC131\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
