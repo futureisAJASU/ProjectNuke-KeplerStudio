@@ -36,9 +36,9 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         return
     }
 
-    val undoSnapshot = state.captureCurrentHistorySnapshot()
+    val undoSnapshot = captureCurrentHistorySnapshot()
     if (undoSnapshot == null) {
-        updateUiState { it.copy(message = "?섎룎由ш린 湲곕줉????ν븯吏 紐삵뻽?듬땲?? ?몄쭛? 怨꾩냽?????덉뒿?덈떎.") }
+        updateUiState { it.copy(message = "편집 기록을 저장하지 못했습니다. 편집 화면을 유지합니다.") }
         return
     }
     updateUiState { it.copy(isBusy = true, message = busyMessage) }
