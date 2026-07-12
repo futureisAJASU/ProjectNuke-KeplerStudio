@@ -573,7 +573,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
-        val undoSnapshot = captureCurrentHistorySnapshot()
+        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
         if (undoSnapshot == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "편집 기록을 저장하지 못했습니다.") }
             return
@@ -590,7 +590,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
-                    commitUndoSnapshot(undoSnapshot, clearRedo = true)
+                    val committedUndoSnapshot = checkNotNull(undoSnapshot)
+                    commitUndoSnapshot(committedUndoSnapshot, clearRedo = true)
+                    undoSnapshot = null
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             params = params,
@@ -606,15 +608,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 } else {
                     rendered?.recycle()
                     rendered = null
-                    recycleHistorySnapshot(undoSnapshot)
+                    undoSnapshot?.let(::recycleHistorySnapshot)
+                    undoSnapshot = null
                 }
             } catch (ce: CancellationException) {
                 rendered?.recycle()
-                recycleHistorySnapshot(undoSnapshot)
+                undoSnapshot?.let(::recycleHistorySnapshot)
+                undoSnapshot = null
                 throw ce
             } catch (t: Throwable) {
                 rendered?.recycle()
-                recycleHistorySnapshot(undoSnapshot)
+                undoSnapshot?.let(::recycleHistorySnapshot)
+                undoSnapshot = null
                 if (_uiState.value.revision == nextRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.") }
                 }

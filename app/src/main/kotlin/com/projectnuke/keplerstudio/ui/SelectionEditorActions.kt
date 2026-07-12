@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditParams
+import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.SelectionLayer
@@ -36,9 +37,9 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         return
     }
 
-    val undoSnapshot = captureCurrentHistorySnapshot()
+    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
     if (undoSnapshot == null) {
-        updateUiState { it.copy(message = "편집 기록을 저장하지 못했습니다. 편집 화면을 유지합니다.") }
+        updateUiState { it.copy(message = "\uD3C9\uC9D1 \uAE30\uB85D\uC744 \uC800\uC7A5\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1 \uD654\uBA74\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4.") }
         return
     }
     updateUiState { it.copy(isBusy = true, message = busyMessage) }
@@ -53,6 +54,10 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 } finally {
                     mask.recycle()
                 }
+                if (!ownedMask.hasForegroundPixel()) {
+                    ownedMask.recycle()
+                    return@withContext null
+                }
                 pendingLayerBitmap = ownedMask
                 SelectionLayer(
                     id = newSelectionId(),
@@ -60,6 +65,18 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                     kind = SelectionLayerKind.Subject,
                     bitmap = ownedMask
                 )
+            } ?: run {
+                pendingLayerBitmap?.recycle()
+                pendingLayerBitmap = null
+                undoSnapshot?.let(::recycleHistorySnapshot)
+                undoSnapshot = null
+                val current = uiState.value
+                if (current.sourcePath == sourcePath && current.revision == sourceRevision) {
+                    updateUiState { it.copy(isBusy = false, message = "\uD53C\uC0AC\uCCB4\uB97C \uAC10\uC9C0\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.") }
+                } else if (current.isBusy && current.message == busyMessage) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+                return@launch
             }
             var applied = false
             updateUiState { current ->
@@ -78,23 +95,27 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             if (!applied) {
                 pendingLayerBitmap?.recycle()
                 pendingLayerBitmap = null
-                recycleHistorySnapshot(undoSnapshot)
+                undoSnapshot?.let(::recycleHistorySnapshot)
+                undoSnapshot = null
                 val current = uiState.value
                 if (current.isBusy && current.message == busyMessage) {
                     updateUiState { it.copy(isBusy = false) }
                 }
                 return@launch
             }
-            commitUndoSnapshot(undoSnapshot, clearRedo = true)
+            commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+            undoSnapshot = null
             pendingLayerBitmap = null
             persistDraftSnapshot()
         } catch (ce: CancellationException) {
             pendingLayerBitmap?.recycle()
-            recycleHistorySnapshot(undoSnapshot)
+            undoSnapshot?.let(::recycleHistorySnapshot)
+            undoSnapshot = null
             throw ce
         } catch (t: Throwable) {
             pendingLayerBitmap?.recycle()
-            recycleHistorySnapshot(undoSnapshot)
+            undoSnapshot?.let(::recycleHistorySnapshot)
+            undoSnapshot = null
             val current = uiState.value
             if (current.sourcePath == sourcePath && current.revision == sourceRevision) {
                 updateUiState { it.copy(isBusy = false, message = "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C \uC0DD\uC131\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
@@ -440,6 +461,17 @@ private fun blendArgb(foreground: Int, background: Int, alpha: Float): Int {
     val g = (((foreground ushr 8) and 0xff) * alpha + ((background ushr 8) and 0xff) * inv).roundToInt().coerceIn(0, 255)
     val b = ((foreground and 0xff) * alpha + (background and 0xff) * inv).roundToInt().coerceIn(0, 255)
     return (a shl 24) or (r shl 16) or (g shl 8) or b
+}
+
+private fun Bitmap.hasForegroundPixel(): Boolean {
+    val row = IntArray(width)
+    for (y in 0 until height) {
+        getPixels(row, 0, width, 0, y, width, 1)
+        for (pixel in row) {
+            if (pixel != 0) return true
+        }
+    }
+    return false
 }
 
 private fun newSelectionId(): String = "sel_" + UUID.randomUUID().toString().take(8)
