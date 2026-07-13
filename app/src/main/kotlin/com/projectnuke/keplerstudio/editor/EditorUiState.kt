@@ -22,6 +22,7 @@ data class EditorUiState(
     val savedExports: List<SavedExport> = emptyList(),
     val draftSavedAtMillis: Long? = null,
     val draftSourcePath: String? = null,
+    val draftBaseContentToken: String? = null,
     val recoveryDebugInfo: RecoveryDebugInfo? = null,
     val showRecoveryDebugCard: Boolean = false,
     val viewport: ViewportState = ViewportState(),

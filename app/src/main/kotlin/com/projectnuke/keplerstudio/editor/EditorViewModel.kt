@@ -206,8 +206,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             if (it.baseContentToken == saved.baseContentToken) {
                 it.copy(
-                    draftSavedAtMillis = saved.savedAtMillis,
-                    draftSourcePath = saved.sourcePath
+                draftSavedAtMillis = saved.savedAtMillis,
+                draftSourcePath = saved.sourcePath,
+                draftBaseContentToken = saved.baseContentToken
                 )
             } else it
         }
@@ -301,6 +302,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         baseContentToken = newBaseContentToken(),
                         draftSavedAtMillis = null,
                         draftSourcePath = null,
+                        draftBaseContentToken = null,
                         originalPreviewBitmap = decodedPreview,
                         previewBitmap = decodedPreview,
                         cropState = CropState(),
@@ -763,25 +765,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearDraft() {
         val context = getApplication<Application>()
-        val activeSourcePath = _uiState.value.sourcePath
-        val draftSourcePath = _uiState.value.draftSourcePath
-        val preserveActiveSource = activeSourcePath != null && draftSourcePath != null &&
-            File(activeSourcePath).absoluteFile == File(draftSourcePath).absoluteFile
         viewModelScope.launch {
             draftSaveJob?.cancelAndJoin()
-            val clearSucceeded = withContext(Dispatchers.IO) {
+            val clearResult = withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
-                    clearDraftPrefs(context, preserveSourcePath = if (preserveActiveSource) activeSourcePath else null)
+                    clearDraftPrefs(context, preserveSourcePath = _uiState.value.sourcePath)
                 }
             }
-            if (!clearSucceeded) {
+            if (clearResult == null) {
                 updateUiStateAndRecycleReplaced { it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") }
                 return@launch
             }
+            if (!sameCanonicalPath(_uiState.value.draftSourcePath, clearResult.sourcePath) ||
+                _uiState.value.draftBaseContentToken != clearResult.baseContentToken) return@launch
             updateUiStateAndRecycleReplaced {
                 it.copy(
                     draftSavedAtMillis = null,
                     draftSourcePath = null,
+                    draftBaseContentToken = null,
                     recoveryDebugInfo = null,
                     showRecoveryDebugCard = false,
                     message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다"
@@ -1241,6 +1242,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     exportResolution = exportResolution,
                     draftSavedAtMillis = draftSavedAt,
                     draftSourcePath = sourcePath,
+                    draftBaseContentToken = prefs.getString(KEY_DRAFT_BASE_TOKEN, null),
                     revision = nextRevision,
                     message = "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4"
                 )
@@ -2343,6 +2345,11 @@ private data class DraftSaveResult(
     val baseContentToken: String
 )
 
+private data class DraftClearResult(
+    val sourcePath: String?,
+    val baseContentToken: String?
+)
+
 private data class DraftSavePayload(
     val sourcePath: String?,
     val draftSourcePath: String?,
@@ -2460,15 +2467,17 @@ private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): Draf
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
         .commit()
     } catch (t: Throwable) {
-        if (restoreDraftPreferences(preferences, previousDraftPreferences) && draftSource.changed) {
+        if (restoreDraftPreferencesOrThrow(preferences, previousDraftPreferences, t) && draftSource.changed) {
             draftSource.file.delete()
         }
         throw t
     }
     if (!commitSucceeded) {
-        if (restoreDraftPreferences(preferences, previousDraftPreferences) && draftSource.changed) {
+        val failure = IllegalStateException("failed to commit draft preferences")
+        if (restoreDraftPreferencesOrThrow(preferences, previousDraftPreferences, failure) && draftSource.changed) {
             draftSource.file.delete()
         }
+        logDraftSaveFailure(failure)
         return null
     }
     if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
@@ -2499,9 +2508,12 @@ private fun restoreDraftPreferences(
     return editor.commit()
 }
 
-private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null): Boolean {
+private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null): DraftClearResult? {
     val preserve = preserveSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() }
     val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+    val previous = snapshotDraftPreferences(preferences)
+    val previousSource = preferences.getString(KEY_DRAFT_SOURCE, null)
+    val previousToken = preferences.getString(KEY_DRAFT_BASE_TOKEN, null)
     val removed = try {
         preferences.edit()
             .remove(KEY_DRAFT_SOURCE)
@@ -2527,12 +2539,18 @@ private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null
             .remove(KEY_DRAFT_LOOK)
             .remove(KEY_DRAFT_QUICK_EFFECTS)
             .remove(KEY_DRAFT_BASE_TOKEN)
+            .remove(KEY_DRAFT_BASE_VERSION_LEGACY)
             .remove(KEY_DRAFT_SAVED_AT)
             .commit()
-    } catch (_: Throwable) {
-        false
+    } catch (failure: Throwable) {
+        restoreDraftPreferencesOrThrow(preferences, previous, failure)
+        throw failure
     }
-    if (!removed) return false
+    if (!removed) {
+        val failure = IllegalStateException("failed to clear draft preferences")
+        restoreDraftPreferencesOrThrow(preferences, previous, failure)
+        return null
+    }
     persistentDraftDirectory(context).listFiles()?.forEach { file ->
         val ownedGeneration = file.name.startsWith("source_") && file.extension == "img"
         val legacySource = file.name == DRAFT_SOURCE_FILE_NAME
@@ -2542,7 +2560,21 @@ private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null
         }
     }
     persistentDraftThumbnailFile(context).delete()
-    return true
+    return DraftClearResult(previousSource, previousToken)
+}
+
+private fun restoreDraftPreferencesOrThrow(
+    preferences: android.content.SharedPreferences,
+    snapshot: Map<String, Any?>,
+    original: Throwable
+): Boolean {
+    try {
+        check(restoreDraftPreferences(preferences, snapshot)) { "failed to restore draft preferences" }
+        return true
+    } catch (rollbackFailure: Throwable) {
+        original.addSuppressed(rollbackFailure)
+        return false
+    }
 }
 
 private fun List<ActiveQuickEffect>.toggle(effect: ActiveQuickEffect): List<ActiveQuickEffect> {
@@ -2826,6 +2858,7 @@ private const val KEY_DRAFT_LOOK = "draft_look"
 private const val KEY_DRAFT_QUICK_EFFECTS = "draft_quick_effects"
 private const val KEY_DRAFT_SAVED_AT = "draft_saved_at"
 private const val KEY_DRAFT_BASE_TOKEN = "draft_base_token"
+private const val KEY_DRAFT_BASE_VERSION_LEGACY = "draft_base_version"
 internal val IMPLEMENTED_NOISE_ENGINES = listOf(
     NoiseEngine.FastEdgeAware,
     NoiseEngine.GuidedFilter,
