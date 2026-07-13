@@ -72,7 +72,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                         originalPreviewBitmap = adoptedOriginal,
                         previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
-                        baseContentVersion = it.baseContentVersion + 1L,
+                        baseContentToken = java.util.UUID.randomUUID().toString(),
                         isBusy = false,
                         message = "Edge Masker 기반 마스크 보정을 적용했습니다."
                     )

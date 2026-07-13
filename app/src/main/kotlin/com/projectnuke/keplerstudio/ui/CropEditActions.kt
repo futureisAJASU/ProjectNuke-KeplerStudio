@@ -128,7 +128,7 @@ fun EditorViewModel.applyCropTransform() {
                         originalPreviewBitmap = renderedOriginal ?: renderedPreview,
                         previewBitmap = renderedPreview ?: renderedOriginal,
                         baseBitmapDirty = true,
-                        baseContentVersion = it.baseContentVersion + 1L,
+                        baseContentToken = java.util.UUID.randomUUID().toString(),
                         cropState = CropState(),
                         isBusy = false,
                         message = "변경사항을 적용했습니다."

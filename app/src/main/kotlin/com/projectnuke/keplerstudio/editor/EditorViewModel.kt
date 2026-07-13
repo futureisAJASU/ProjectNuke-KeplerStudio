@@ -204,10 +204,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             payload.dirtyBitmapCopy?.takeIf { !it.isRecycled }?.recycle()
         } ?: return false
         updateUiStateAndRecycleReplaced {
-            it.copy(
-                draftSavedAtMillis = saved.savedAtMillis,
-                draftSourcePath = saved.sourcePath
-            )
+            if (it.baseContentToken == saved.baseContentToken) {
+                it.copy(
+                    draftSavedAtMillis = saved.savedAtMillis,
+                    draftSourcePath = saved.sourcePath
+                )
+            } else it
         }
         return true
     }
@@ -296,7 +298,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         isBusy = false,
                         sourcePath = sourceFile.absolutePath,
                         baseBitmapDirty = false,
-                        baseContentVersion = it.baseContentVersion + 1L,
+                        baseContentToken = newBaseContentToken(),
                         draftSavedAtMillis = null,
                         draftSourcePath = null,
                         originalPreviewBitmap = decodedPreview,
@@ -543,7 +545,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             originalPreviewBitmap = adopted,
                             previewBitmap = adopted,
                             baseBitmapDirty = false,
-                            baseContentVersion = it.baseContentVersion + 1L,
+                            baseContentToken = newBaseContentToken(),
                             params = EditParams(),
                             presetLook = null,
                             activeQuickEffects = emptyList(),
@@ -767,10 +769,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             File(activeSourcePath).absoluteFile == File(draftSourcePath).absoluteFile
         viewModelScope.launch {
             draftSaveJob?.cancelAndJoin()
-            withContext(Dispatchers.IO) {
+            val clearSucceeded = withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
                     clearDraftPrefs(context, preserveSourcePath = if (preserveActiveSource) activeSourcePath else null)
                 }
+            }
+            if (!clearSucceeded) {
+                updateUiStateAndRecycleReplaced { it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") }
+                return@launch
             }
             updateUiStateAndRecycleReplaced {
                 it.copy(
@@ -900,7 +906,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 previewBitmap = rotatedPreview,
                 originalPreviewBitmap = rotatedOriginal,
                 baseBitmapDirty = true,
-                baseContentVersion = current.baseContentVersion + 1L,
+                baseContentToken = newBaseContentToken(),
                 revision = it.revision + 1,
                 message = "미리보기를 90도 회전했습니다."
             )
@@ -1067,7 +1073,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             originalPreviewBitmap = adoptedOriginal,
                             previewBitmap = adoptedPreview,
                             baseBitmapDirty = true,
-                            baseContentVersion = it.baseContentVersion + 1L,
+                            baseContentToken = newBaseContentToken(),
                             isBusy = false,
                             message = result.status.uiText,
                             flareGuardRuntimeStatus = result.status.uiText
@@ -1225,7 +1231,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     isBusy = false,
                     sourcePath = sourcePath,
                     baseBitmapDirty = false,
-                    baseContentVersion = prefs.getLong(KEY_DRAFT_BASE_VERSION, 0L),
+                    baseContentToken = prefs.getString(KEY_DRAFT_BASE_TOKEN, null) ?: newBaseContentToken(),
                     originalPreviewBitmap = adoptedPreview,
                     previewBitmap = adoptedRendered,
                     activeQuickEffects = activeQuickEffects,
@@ -1360,7 +1366,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 toneEngine = snapshot.toneEngine,
                 hazeEngine = snapshot.hazeEngine,
                 baseBitmapDirty = snapshot.baseBitmapDirty,
-                baseContentVersion = snapshot.baseContentVersion,
+                baseContentToken = snapshot.baseContentToken,
                 previewBitmap = snapshot.previewBitmap,
                 originalPreviewBitmap = snapshot.originalPreviewBitmap,
                 presetLook = snapshot.presetLook,
@@ -1424,7 +1430,7 @@ internal data class EditorHistorySnapshot(
     val toneEngine: ToneEngine,
     val hazeEngine: DehazeEngine,
     val baseBitmapDirty: Boolean,
-    val baseContentVersion: Long,
+    val baseContentToken: String,
     val previewBitmap: Bitmap?,
     val originalPreviewBitmap: Bitmap?,
     val presetLook: PresetColorLook?,
@@ -1460,7 +1466,7 @@ private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
             toneEngine = toneEngine,
             hazeEngine = hazeEngine,
             baseBitmapDirty = baseBitmapDirty,
-            baseContentVersion = baseContentVersion,
+            baseContentToken = baseContentToken,
             previewBitmap = previewCopy,
             originalPreviewBitmap = originalCopy,
             presetLook = presetLook,
@@ -1701,13 +1707,21 @@ private fun migrateDraftSourceIfNeeded(context: Context, storedSourcePath: Strin
     if (isOwnedDraftSource(context, storedSource)) return storedSource
     val draftSource = persistDraftSourceFile(context, storedSource.absolutePath) ?: return null
     if (draftSource.absolutePath != storedSource.absolutePath) {
-        val migrated = runCatching {
-            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
-                .putString(KEY_DRAFT_SOURCE, draftSource.absolutePath)
-                .commit()
-        }.getOrDefault(false)
-        if (!migrated) {
-            draftSource.delete()
+        val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        val previousPointer = preferences.getString(KEY_DRAFT_SOURCE, null)
+        try {
+            check(preferences.edit().putString(KEY_DRAFT_SOURCE, draftSource.absolutePath).commit())
+        } catch (failure: Throwable) {
+            val restored = try {
+                preferences.edit().remove(KEY_DRAFT_SOURCE).apply {
+                    if (previousPointer != null) putString(KEY_DRAFT_SOURCE, previousPointer)
+                }.commit()
+            } catch (rollbackFailure: Throwable) {
+                failure.addSuppressed(rollbackFailure)
+                false
+            }
+            if (restored) draftSource.delete()
+            Log.w(FLARE_GUARD_AI_TAG, "Draft source migration failed", failure)
             return storedSource
         }
         saveDraftThumbnailFile(context, draftSource)
@@ -1762,6 +1776,8 @@ private fun persistDraftSourceFile(context: Context, sourcePath: String): File? 
     return generation
 }
 
+private fun newBaseContentToken(): String = UUID.randomUUID().toString()
+
 private fun persistDraftSourceFileIfNeeded(context: Context, sourcePath: String): DraftSourceResult? {
     val source = File(sourcePath).takeIf { it.isFile } ?: return null
     if (isOwnedDraftSource(context, source)) return DraftSourceResult(source, changed = false)
@@ -1812,11 +1828,19 @@ private fun isReusableCommittedDraftSource(context: Context, state: EditorUiStat
     val path = state.draftSourcePath ?: return false
     val source = File(path)
     if (!source.isFile) return false
-    val supported = isOwnedDraftSource(context, source) || source.name == DRAFT_SOURCE_FILE_NAME
-    if (!supported) return false
-    return context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        .getLong(KEY_DRAFT_BASE_VERSION, Long.MIN_VALUE) == state.baseContentVersion
+    if (!isSupportedDraftSource(context, source)) return false
+    val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+    return sameCanonicalPath(preferences.getString(KEY_DRAFT_SOURCE, null), path) &&
+        preferences.getString(KEY_DRAFT_BASE_TOKEN, null) == state.baseContentToken
 }
+
+private fun isSupportedDraftSource(context: Context, source: File): Boolean =
+    source.isFile && (isOwnedDraftSource(context, source) || source.name == DRAFT_SOURCE_FILE_NAME)
+
+private fun sameCanonicalPath(first: String?, second: String?): Boolean =
+    first != null && second != null && runCatching {
+        File(first).canonicalFile == File(second).canonicalFile
+    }.getOrDefault(false)
 
 private fun deleteObsoleteDraftSources(context: Context, keep: File, preservePath: String?) {
     val directory = persistentDraftDirectory(context)
@@ -2306,6 +2330,7 @@ private fun writeHeifToUri(context: Context, uri: Uri, bitmap: Bitmap) {
 
 private fun EditorUiState.withSavedDraft(context: Context): EditorUiState {
     val saved = saveDraftSnapshotSafely(context, this) ?: return this
+    if (baseContentToken != saved.baseContentToken) return this
     return copy(
         draftSavedAtMillis = saved.savedAtMillis,
         draftSourcePath = saved.sourcePath
@@ -2314,13 +2339,14 @@ private fun EditorUiState.withSavedDraft(context: Context): EditorUiState {
 
 private data class DraftSaveResult(
     val sourcePath: String,
-    val savedAtMillis: Long
+    val savedAtMillis: Long,
+    val baseContentToken: String
 )
 
 private data class DraftSavePayload(
     val sourcePath: String?,
     val draftSourcePath: String?,
-    val baseContentVersion: Long,
+    val baseContentToken: String,
     val baseBitmapDirty: Boolean,
     val dirtyBitmapCopy: Bitmap?,
     val params: EditParams,
@@ -2375,7 +2401,7 @@ private fun createDraftSavePayload(context: Context, state: EditorUiState): Draf
     return DraftSavePayload(
         sourcePath = state.sourcePath,
         draftSourcePath = state.draftSourcePath,
-        baseContentVersion = state.baseContentVersion,
+        baseContentToken = state.baseContentToken,
         baseBitmapDirty = state.baseBitmapDirty,
         dirtyBitmapCopy = dirtyBitmapCopy,
         params = state.params,
@@ -2389,8 +2415,13 @@ private fun createDraftSavePayload(context: Context, state: EditorUiState): Draf
 private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): DraftSaveResult? {
     val draftSource = when {
         payload.draftSourcePath?.let(::File)?.isFile == true &&
-            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                .getLong(KEY_DRAFT_BASE_VERSION, Long.MIN_VALUE) == payload.baseContentVersion ->
+            sameCanonicalPath(
+                context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                    .getString(KEY_DRAFT_SOURCE, null),
+                payload.draftSourcePath
+            ) && context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_DRAFT_BASE_TOKEN, null) == payload.baseContentToken &&
+            isSupportedDraftSource(context, File(payload.draftSourcePath)) ->
             DraftSourceResult(File(payload.draftSourcePath), changed = false)
         !payload.baseBitmapDirty && payload.sourcePath != null ->
             persistDraftSourceFileIfNeeded(context, payload.sourcePath)
@@ -2425,7 +2456,7 @@ private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): Draf
         .putString(KEY_DRAFT_RESOLUTION, payload.exportResolution.name)
         .putString(KEY_DRAFT_LOOK, presetColorLookToJson(payload.presetLook)?.toString())
         .putString(KEY_DRAFT_QUICK_EFFECTS, payload.activeQuickEffects.toDraftString())
-        .putLong(KEY_DRAFT_BASE_VERSION, payload.baseContentVersion)
+        .putString(KEY_DRAFT_BASE_TOKEN, payload.baseContentToken)
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
         .commit()
     } catch (t: Throwable) {
@@ -2442,7 +2473,7 @@ private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): Draf
     }
     if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
     if (sourceIsOwned) deleteObsoleteDraftSources(context, draftSource.file, payload.sourcePath)
-    return DraftSaveResult(draftSource.file.absolutePath, savedAt)
+    return DraftSaveResult(draftSource.file.absolutePath, savedAt, payload.baseContentToken)
 }
 
 private fun snapshotDraftPreferences(preferences: android.content.SharedPreferences): Map<String, Any?> =
@@ -2468,8 +2499,40 @@ private fun restoreDraftPreferences(
     return editor.commit()
 }
 
-private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null) {
+private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null): Boolean {
     val preserve = preserveSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() }
+    val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+    val removed = try {
+        preferences.edit()
+            .remove(KEY_DRAFT_SOURCE)
+            .remove(KEY_DRAFT_EXPOSURE)
+            .remove(KEY_DRAFT_CONTRAST)
+            .remove(KEY_DRAFT_SHADOWS)
+            .remove(KEY_DRAFT_HIGHLIGHTS)
+            .remove(KEY_DRAFT_WHITES)
+            .remove(KEY_DRAFT_BLACKS)
+            .remove(KEY_DRAFT_TEMPERATURE)
+            .remove(KEY_DRAFT_TINT)
+            .remove(KEY_DRAFT_SATURATION)
+            .remove(KEY_DRAFT_VIBRANCE)
+            .remove(KEY_DRAFT_CLARITY)
+            .remove(KEY_DRAFT_DEHAZE)
+            .remove(KEY_DRAFT_SHARPNESS)
+            .remove(KEY_DRAFT_NOISE_REDUCTION)
+            .remove(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION)
+            .remove(KEY_DRAFT_COLOR_NOISE_REDUCTION)
+            .remove(KEY_DRAFT_NOISE_DETAIL_PROTECTION)
+            .remove(KEY_DRAFT_FORMAT)
+            .remove(KEY_DRAFT_RESOLUTION)
+            .remove(KEY_DRAFT_LOOK)
+            .remove(KEY_DRAFT_QUICK_EFFECTS)
+            .remove(KEY_DRAFT_BASE_TOKEN)
+            .remove(KEY_DRAFT_SAVED_AT)
+            .commit()
+    } catch (_: Throwable) {
+        false
+    }
+    if (!removed) return false
     persistentDraftDirectory(context).listFiles()?.forEach { file ->
         val ownedGeneration = file.name.startsWith("source_") && file.extension == "img"
         val legacySource = file.name == DRAFT_SOURCE_FILE_NAME
@@ -2479,32 +2542,7 @@ private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null
         }
     }
     persistentDraftThumbnailFile(context).delete()
-    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
-        .remove(KEY_DRAFT_SOURCE)
-        .remove(KEY_DRAFT_EXPOSURE)
-        .remove(KEY_DRAFT_CONTRAST)
-        .remove(KEY_DRAFT_SHADOWS)
-        .remove(KEY_DRAFT_HIGHLIGHTS)
-        .remove(KEY_DRAFT_WHITES)
-        .remove(KEY_DRAFT_BLACKS)
-        .remove(KEY_DRAFT_TEMPERATURE)
-        .remove(KEY_DRAFT_TINT)
-        .remove(KEY_DRAFT_SATURATION)
-        .remove(KEY_DRAFT_VIBRANCE)
-        .remove(KEY_DRAFT_CLARITY)
-        .remove(KEY_DRAFT_DEHAZE)
-        .remove(KEY_DRAFT_SHARPNESS)
-        .remove(KEY_DRAFT_NOISE_REDUCTION)
-        .remove(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION)
-        .remove(KEY_DRAFT_COLOR_NOISE_REDUCTION)
-        .remove(KEY_DRAFT_NOISE_DETAIL_PROTECTION)
-        .remove(KEY_DRAFT_FORMAT)
-        .remove(KEY_DRAFT_RESOLUTION)
-        .remove(KEY_DRAFT_LOOK)
-        .remove(KEY_DRAFT_QUICK_EFFECTS)
-        .remove(KEY_DRAFT_BASE_VERSION)
-        .remove(KEY_DRAFT_SAVED_AT)
-        .apply()
+    return true
 }
 
 private fun List<ActiveQuickEffect>.toggle(effect: ActiveQuickEffect): List<ActiveQuickEffect> {
@@ -2787,7 +2825,7 @@ private const val KEY_DRAFT_RESOLUTION = "draft_resolution"
 private const val KEY_DRAFT_LOOK = "draft_look"
 private const val KEY_DRAFT_QUICK_EFFECTS = "draft_quick_effects"
 private const val KEY_DRAFT_SAVED_AT = "draft_saved_at"
-private const val KEY_DRAFT_BASE_VERSION = "draft_base_version"
+private const val KEY_DRAFT_BASE_TOKEN = "draft_base_token"
 internal val IMPLEMENTED_NOISE_ENGINES = listOf(
     NoiseEngine.FastEdgeAware,
     NoiseEngine.GuidedFilter,
