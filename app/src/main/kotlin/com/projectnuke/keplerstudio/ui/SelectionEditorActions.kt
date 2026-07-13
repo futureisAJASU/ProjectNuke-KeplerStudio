@@ -294,6 +294,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                         originalPreviewBitmap = adoptedOriginal,
                         previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
+                        baseContentVersion = it.baseContentVersion + 1L,
                         isBusy = false,
                         message = "선택한 마스크 보정을 적용했습니다."
                     )

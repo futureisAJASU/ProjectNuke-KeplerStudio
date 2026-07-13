@@ -6,6 +6,7 @@ data class EditorUiState(
     val isBusy: Boolean = false,
     val sourcePath: String? = null,
     val baseBitmapDirty: Boolean = false,
+    val baseContentVersion: Long = 0L,
     val originalPreviewBitmap: Bitmap? = null,
     val previewBitmap: Bitmap? = null,
     val params: EditParams = EditParams(),

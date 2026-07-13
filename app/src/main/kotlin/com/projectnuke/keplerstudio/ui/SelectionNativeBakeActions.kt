@@ -65,6 +65,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                         originalPreviewBitmap = adoptedOriginal,
                         previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
+                        baseContentVersion = it.baseContentVersion + 1L,
                         selectionLayers = emptyList(),
                         activeSelectionLayerId = null,
                         isBusy = false,
