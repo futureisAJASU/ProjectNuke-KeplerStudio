@@ -107,6 +107,7 @@ object RemasterModelSession {
     private fun createForegroundMaskFromSegmenter(segmenter: Any, bitmap: Bitmap): Bitmap {
         val imageBuilderClass = Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
         val inputCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+            ?: error("입력 이미지를 복사하지 못했습니다.")
         var mpImage: Any? = null
         try {
             val imageBuilder = imageBuilderClass.getConstructor(Bitmap::class.java).newInstance(inputCopy)
