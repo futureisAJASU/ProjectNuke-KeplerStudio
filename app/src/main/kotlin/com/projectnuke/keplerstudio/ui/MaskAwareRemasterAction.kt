@@ -6,6 +6,7 @@ import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import kotlin.math.max
@@ -28,7 +29,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         return
     }
 
-    recordUserEditForUndo(clearRedo = true)
+    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
     val nextRevision = state.revision + 1
     updateUiState {
         it.copy(
@@ -38,7 +39,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         )
     }
 
-    viewModelScope.launch {
+    launchManagedEdit { operationToken ->
         var renderedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
         try {
@@ -62,7 +63,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     quickEffects = state.activeQuickEffects
                 )
             }
-            if (uiState.value.revision == nextRevision) {
+            if (isManagedEditCurrent(operationToken, nextRevision)) {
                 val adoptedOriginal = renderedOriginal ?: error("missing mask-aware original")
                 val adoptedPreview = renderedPreview ?: error("missing mask-aware preview")
                 updateUiState {
@@ -77,6 +78,8 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                         message = "Edge Masker 기반 마스크 보정을 적용했습니다."
                     )
                 }
+                commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                undoSnapshot = null
                 markParamsSuccessfullyRendered(EditParams())
                 renderedOriginal = null
                 renderedPreview = null
@@ -94,12 +97,14 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         } catch (t: Throwable) {
             renderedOriginal?.recycle()
             renderedPreview?.recycle()
-            if (uiState.value.revision == nextRevision) updateUiState {
+            if (isManagedEditCurrent(operationToken, nextRevision)) updateUiState {
                 it.copy(
                     isBusy = false,
                     message = "Edge Masker 기반 마스크 보정 적용에 실패했습니다: ${t.message}"
                 )
             }
+        } finally {
+            undoSnapshot?.let(::recycleHistorySnapshot)
         }
     }
 }
@@ -155,7 +160,7 @@ private fun renderWithState(
     state: EditorUiState,
     revision: Int
 ): Bitmap {
-    val out = basePreview.copy(Bitmap.Config.ARGB_8888, true)
+    val out = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     val result = NativePhotoCore.nativeRenderPreviewInPlace(
         out,
         params.exposure,

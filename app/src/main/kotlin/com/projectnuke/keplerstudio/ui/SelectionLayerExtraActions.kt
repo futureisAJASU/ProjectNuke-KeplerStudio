@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
 import java.util.UUID
@@ -26,7 +27,7 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
         val copy = active.copy(
             id = newExtraSelectionId(),
             name = "${active.name} 복사본",
-            bitmap = active.bitmap.copy(Bitmap.Config.ARGB_8888, true)
+            bitmap = active.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
         )
         current.copy(
             selectionLayers = current.selectionLayers + copy,
@@ -49,7 +50,7 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
             id = newExtraSelectionId(),
             name = "배경 마스크",
             kind = SelectionLayerKind.Background,
-            bitmap = active.bitmap.copy(Bitmap.Config.ARGB_8888, true),
+            bitmap = active.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true),
             enabled = active.enabled,
             inverted = !active.inverted,
             opacity = active.opacity,

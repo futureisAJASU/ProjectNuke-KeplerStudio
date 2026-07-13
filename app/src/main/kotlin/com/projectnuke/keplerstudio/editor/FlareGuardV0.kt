@@ -22,7 +22,7 @@ fun createFlareMaskV0(bitmap: Bitmap, threshold: Float = 0.90f): Bitmap {
 }
 
 fun applyFlareGuardV0(source: Bitmap, strength: Float = 0.28f): Bitmap {
-    val output = source.copy(Bitmap.Config.ARGB_8888, true)
+    val output = source.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
         bitmap = output,
         mode = FlareGuardMode.NightLight.ordinal,
@@ -37,7 +37,7 @@ fun applyFlareGuardV0(source: Bitmap, strength: Float = 0.28f): Bitmap {
 }
 
 fun applyDaySunFlareGuardV0(source: Bitmap, strength: Float = 0.24f): Bitmap {
-    val output = source.copy(Bitmap.Config.ARGB_8888, true)
+    val output = source.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
         bitmap = output,
         mode = FlareGuardMode.DaySun.ordinal,

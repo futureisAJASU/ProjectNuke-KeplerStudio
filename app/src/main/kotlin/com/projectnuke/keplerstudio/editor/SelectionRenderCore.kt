@@ -71,7 +71,7 @@ private fun renderSelectionBitmapWithParams(
     state: EditorUiState,
     revision: Int
 ): Bitmap {
-    val out = base.copy(Bitmap.Config.ARGB_8888, true)
+    val out = base.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     val result = NativePhotoCore.nativeRenderPreviewInPlace(
         out,
         params.exposure,

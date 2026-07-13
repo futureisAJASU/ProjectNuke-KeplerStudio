@@ -67,7 +67,7 @@ fun applyFlareGuardModelOrRuleResultV0(
         } catch (t: Throwable) {
             Log.e(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model path failed", t)
             if (!allowRuleFallback) {
-                return FlareGuardApplyResult(source.copy(Bitmap.Config.ARGB_8888, true), FlareGuardRuntimeStatus.Unavailable)
+                return FlareGuardApplyResult(source.copyOrThrow(Bitmap.Config.ARGB_8888, true), FlareGuardRuntimeStatus.Unavailable)
             }
             val fallback = applyFlareGuardRuleFallback(source, mode, strength)
             Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_failed")
@@ -80,7 +80,7 @@ fun applyFlareGuardModelOrRuleResultV0(
     }
 
     if (!allowRuleFallback) {
-        return FlareGuardApplyResult(source.copy(Bitmap.Config.ARGB_8888, true), FlareGuardRuntimeStatus.Unavailable)
+        return FlareGuardApplyResult(source.copyOrThrow(Bitmap.Config.ARGB_8888, true), FlareGuardRuntimeStatus.Unavailable)
     }
     val fallback = applyFlareGuardRuleFallback(source, mode, strength)
     Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_unavailable")
@@ -99,7 +99,7 @@ fun applyFlareGuardMaskBlendV0(
     mode: FlareGuardMode,
     strength: Float
 ): Bitmap {
-    val output = source.copy(Bitmap.Config.ARGB_8888, true)
+    val output = source.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     val ruleMask = createFlareMaskV0(source, if (mode == FlareGuardMode.DaySun) 0.88f else 0.92f)
     val scaledMask = if (modelMask.width == source.width && modelMask.height == source.height) {
         modelMask

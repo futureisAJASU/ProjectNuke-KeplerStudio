@@ -28,6 +28,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -468,12 +472,14 @@ private fun ExportGalleryContent(savedExports: List<SavedExport>, onRemoveSavedE
             Text("\uD3B8\uC9D1 \uD654\uBA74\uC5D0\uC11C \uB0B4\uBCF4\uB0B4\uAE30\uD558\uBA74 \uC774\uACF3\uC5D0 \uAE30\uB85D\uC774 \uD45C\uC2DC\uB429\uB2C8\uB2E4.", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
         }
     } else {
-        savedExports.chunked(3).forEach { rowItems ->
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                rowItems.forEach { item ->
-                    SavedExportThumbnailTile(item = item, onRemoveSavedExport = onRemoveSavedExport, modifier = Modifier.weight(1f))
-                }
-                repeat(3 - rowItems.size) { Box(modifier = Modifier.weight(1f)) }
+        LazyHorizontalGrid(
+            rows = GridCells.Fixed(3),
+            modifier = Modifier.fillMaxWidth().height(720.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            items(savedExports, key = { it.uriString }) { item ->
+                SavedExportThumbnailTile(item = item, onRemoveSavedExport = onRemoveSavedExport)
             }
         }
     }

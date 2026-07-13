@@ -25,7 +25,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         return
     }
 
-    recordUserEditForUndo(clearRedo = true)
+    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
     val nextRevision = current.revision + 1
     updateUiState {
         it.copy(
@@ -35,7 +35,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         )
     }
 
-    viewModelScope.launch {
+    launchManagedEdit { operationToken ->
         var bakedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
         try {
@@ -59,7 +59,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
             }
             val adoptedOriginal = bakedOriginal ?: error("missing baked original")
             val adoptedPreview = renderedPreview ?: error("missing rendered preview")
-            if (uiState.value.revision == nextRevision) {
+            if (isManagedEditCurrent(operationToken, nextRevision)) {
                 updateUiState {
                     it.copy(
                         originalPreviewBitmap = adoptedOriginal,
@@ -72,6 +72,8 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                         message = "선택 마스크 보정을 원본에 적용했습니다. 저장 결과에도 반영됩니다."
                     )
                 }
+                commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                undoSnapshot = null
                 bakedOriginal = null
                 renderedPreview = null
                 persistDraftSnapshot()
@@ -88,12 +90,14 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         } catch (_: Throwable) {
             bakedOriginal?.recycle()
             renderedPreview?.recycle()
-            if (uiState.value.revision == nextRevision) updateUiState {
+            if (isManagedEditCurrent(operationToken, nextRevision)) updateUiState {
                 it.copy(
                     isBusy = false,
                     message = "선택 마스크 보정 적용에 실패했습니다."
                 )
             }
+        } finally {
+            undoSnapshot?.let(::recycleHistorySnapshot)
         }
     }
 }

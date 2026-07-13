@@ -176,13 +176,14 @@ private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorV
                 .height(180.dp)
                 .background(Color(0xFF111111))
                 .onSizeChanged { boxSize = it }
-                .pointerInput(activeLayer?.id, boxSize) {
+                .pointerInput(activeLayer?.id, activeLayer?.bitmap, boxSize) {
                     detectDragGestures(
                         onDragStart = { offset ->
-                            paintAtOffset(editorViewModel, activeLayer, offset.x, offset.y, boxSize)
+                            paintAtOffset(editorViewModel, activeLayer?.id, offset.x, offset.y, boxSize)
                         },
                         onDrag = { change, _ ->
-                            paintAtOffset(editorViewModel, activeLayer, change.position.x, change.position.y, boxSize)
+                            paintAtOffset(editorViewModel, activeLayer?.id, change.position.x, change.position.y, boxSize)
+                            change.consume()
                         }
                     )
                 },
@@ -202,8 +203,8 @@ private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorV
     }
 }
 
-private fun paintAtOffset(editorViewModel: EditorViewModel, activeLayer: SelectionLayer?, x: Float, y: Float, boxSize: IntSize) {
-    val layer = activeLayer ?: return
+private fun paintAtOffset(editorViewModel: EditorViewModel, activeLayerId: String?, x: Float, y: Float, boxSize: IntSize) {
+    val layer = editorViewModel.uiState.value.selectionLayers.firstOrNull { it.id == activeLayerId } ?: return
     if (boxSize.width <= 0 || boxSize.height <= 0) return
     val maskX = (x / boxSize.width.toFloat()).coerceIn(0f, 1f) * layer.bitmap.width
     val maskY = (y / boxSize.height.toFloat()).coerceIn(0f, 1f) * layer.bitmap.height

@@ -6,6 +6,7 @@ import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -28,7 +29,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         return
     }
 
-    recordUserEditForUndo(clearRedo = true)
+    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
     val nextRevision = current.revision + 1
     updateUiState {
         it.copy(
@@ -39,12 +40,12 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         )
     }
 
-    viewModelScope.launch {
+    launchManagedEdit { operationToken ->
         var nextOriginal: Bitmap? = null
         var nextPreview: Bitmap? = null
         try {
             nextOriginal = withContext(Dispatchers.Default) {
-                val copy = baseOriginal.copy(Bitmap.Config.ARGB_8888, true)
+                val copy = baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true)
                 val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
                     copy,
                     mode.ordinal,
@@ -62,7 +63,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
             }
             val adoptedOriginal = nextOriginal ?: error("missing flare original")
             val adoptedPreview = nextPreview ?: error("missing flare preview")
-            if (uiState.value.revision == nextRevision) {
+            if (isManagedEditCurrent(operationToken, nextRevision)) {
                 updateUiState {
                     it.copy(
                         originalPreviewBitmap = adoptedOriginal,
@@ -74,6 +75,8 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                         flareGuardRuntimeStatus = "규칙 기반 보정으로 번짐을 완화했습니다."
                     )
                 }
+                commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                undoSnapshot = null
                 nextOriginal = null
                 nextPreview = null
                 persistDraftSnapshot()
@@ -90,19 +93,21 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         } catch (_: Throwable) {
             nextOriginal?.recycle()
             nextPreview?.recycle()
-            if (uiState.value.revision == nextRevision) updateUiState {
+            if (isManagedEditCurrent(operationToken, nextRevision)) updateUiState {
                 it.copy(
                     isBusy = false,
                     message = "번짐 완화에 실패했습니다.",
                     flareGuardRuntimeStatus = "번짐 완화에 실패했습니다."
                 )
             }
+        } finally {
+            undoSnapshot?.let(::recycleHistorySnapshot)
         }
     }
 }
 
 private fun renderPreviewFromState(base: Bitmap, state: EditorUiState, revision: Int): Bitmap {
-    val copy = base.copy(Bitmap.Config.ARGB_8888, true)
+    val copy = base.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     val params = state.params
     val result = NativePhotoCore.nativeRenderPreviewInPlace(
         copy,

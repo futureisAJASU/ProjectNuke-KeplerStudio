@@ -8,10 +8,17 @@ import androidx.compose.runtime.setValue
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
+import com.projectnuke.keplerstudio.editor.copyOrThrow
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.max
 import org.tensorflow.lite.Interpreter
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 object RemasterModelSession {
     var activeModel by mutableStateOf<RemasterModelCandidate?>(null)
@@ -24,8 +31,45 @@ object RemasterModelSession {
         private set
 
     private var closeableModel: AutoCloseable? = null
+    private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val modelMutex = Mutex()
+    var isModelLoading by mutableStateOf(false)
+        private set
+    var isInferring by mutableStateOf(false)
+        private set
 
     fun load(context: Context, candidate: RemasterModelCandidate) {
+        isModelLoading = true
+        isModelLoaded = false
+        modelScope.launch {
+            modelMutex.withLock {
+                runCatching { closeableModel?.close() }
+                closeableModel = null
+                activeModel = candidate
+                if (!hasModelAsset(context, candidate.assetPath)) {
+                    isModelLoading = false
+                    statusText = "${candidate.title}: 모델 파일 없음"
+                    return@withLock
+                }
+                runCatching {
+                    closeableModel = when (candidate.id) {
+                        "edge_masker" -> createImageSegmenter(context, candidate.assetPath)
+                        "universal_balancer", "flare_masker" -> TfliteModelHandle(createTfliteInterpreter(context, candidate.assetPath))
+                        else -> null
+                    }
+                }.onSuccess {
+                    isModelLoaded = closeableModel != null
+                    isModelLoading = false
+                    statusText = if (closeableModel != null) "${candidate.title}: 사용 가능" else "${candidate.title}: 실행 경로를 준비하는 중입니다."
+                }.onFailure {
+                    closeableModel = null
+                    isModelLoaded = false
+                    isModelLoading = false
+                    statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
+                }
+            }
+        }
+        return
         unload()
         activeModel = candidate
         if (!hasModelAsset(context, candidate.assetPath)) {
@@ -54,13 +98,30 @@ object RemasterModelSession {
         }
     }
 
-    fun createForegroundMask(bitmap: Bitmap): Bitmap? {
-        if (activeModel?.id != "edge_masker" || !isModelLoaded) return null
-        val model = closeableModel ?: return null
-        return runCatching { createForegroundMaskFromSegmenter(model, bitmap) }.getOrNull()
+    suspend fun createForegroundMask(bitmap: Bitmap): Bitmap? = modelMutex.withLock {
+        if (activeModel?.id != "edge_masker" || !isModelLoaded) return@withLock null
+        val model = closeableModel ?: return@withLock null
+        isInferring = true
+        try {
+            runCatching { createForegroundMaskFromSegmenter(model, bitmap) }.getOrNull()
+        } finally {
+            isInferring = false
+        }
     }
 
     fun unload() {
+        isModelLoading = true
+        modelScope.launch {
+            modelMutex.withLock {
+                runCatching { closeableModel?.close() }
+                closeableModel = null
+                activeModel = null
+                isModelLoaded = false
+                isModelLoading = false
+                statusText = "로드된 모델이 없습니다."
+            }
+        }
+        return
         runCatching { closeableModel?.close() }
         closeableModel = null
         activeModel = null
@@ -106,7 +167,7 @@ object RemasterModelSession {
 
     private fun createForegroundMaskFromSegmenter(segmenter: Any, bitmap: Bitmap): Bitmap {
         val imageBuilderClass = Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
-        val inputCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        val inputCopy = bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, false)
             ?: error("입력 이미지를 복사하지 못했습니다.")
         var mpImage: Any? = null
         try {

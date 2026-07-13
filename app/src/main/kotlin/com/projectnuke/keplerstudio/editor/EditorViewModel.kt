@@ -60,6 +60,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var draftOperationEpoch: Long = 0L
     private var managedEditJob: Job? = null
     private var managedEditToken: Long = 0L
+    private var cropOperationToken: Long = 0L
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
     private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
@@ -69,6 +70,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var restoreDraftToken: Long = 0L
     private val undoHistory = ArrayDeque<EditorHistorySnapshot>()
     private val redoHistory = ArrayDeque<EditorHistorySnapshot>()
+    private var retainedHistoryBytes: Long = 0L
+    private val retiredBitmaps = identityBitmapSet()
+    private val stateOwnedHistoryBitmaps = identityBitmapSet()
+    private val inFlightBitmapLeases = IdentityHashMap<Bitmap, Int>()
 
     fun updateUiState(transform: (EditorUiState) -> EditorUiState) {
         updateUiStateAndRecycleReplaced(transform)
@@ -99,14 +104,49 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         candidates
             .filterNot { it in retained }
-            .forEach { recycleBitmapSoon(it) }
+            .forEach(retiredBitmaps::add)
+        drainRetiredBitmaps()
     }
 
-    private fun recycleBitmapSoon(bitmap: Bitmap) {
-        if (bitmap.isRecycled) return
-        viewModelScope.launch {
-            delay(150L)
-            if (!bitmap.isRecycled && !isBitmapRetainedByCurrentState(bitmap)) bitmap.recycle()
+    private fun drainRetiredBitmaps() {
+        if (hasActiveBitmapReaders()) return
+        val retained = identityBitmapSet()
+        val state = _uiState.value
+        state.previewBitmap?.let(retained::add)
+        state.originalPreviewBitmap?.let(retained::add)
+        state.selectionLayers.forEach { retained.add(it.bitmap) }
+        undoHistory.forEach { snapshot ->
+            snapshot.previewBitmap?.let(retained::add)
+            snapshot.originalPreviewBitmap?.let(retained::add)
+            snapshot.selectionLayers.forEach { retained.add(it.bitmap) }
+        }
+        retiredBitmaps.removeIf { bitmap ->
+            val leased = (inFlightBitmapLeases[bitmap] ?: 0) > 0
+            if (!leased && bitmap !in retained) {
+                if (stateOwnedHistoryBitmaps.remove(bitmap)) HistoryBitmapRegistry.release(bitmap)
+                if (HistoryBitmapRegistry.isHeld(bitmap)) return@removeIf false
+                if (!bitmap.isRecycled) bitmap.recycle()
+                true
+            } else false
+        }
+    }
+
+    private fun hasActiveBitmapReaders(): Boolean =
+        renderJob?.isActive == true || exportJob?.isActive == true ||
+            selectionLivePreviewJob?.isActive == true || draftSaveJob?.isActive == true ||
+            managedEditJob?.isActive == true
+
+    internal fun acquireBitmapLease(bitmap: Bitmap): AutoCloseable {
+        check(!bitmap.isRecycled) { "cannot lease recycled bitmap" }
+        inFlightBitmapLeases[bitmap] = (inFlightBitmapLeases[bitmap] ?: 0) + 1
+        var released = false
+        return AutoCloseable {
+            check(!released) { "bitmap lease released twice" }
+            released = true
+            val count = (inFlightBitmapLeases[bitmap] ?: 0) - 1
+            check(count >= 0) { "bitmap lease underflow" }
+            if (count == 0) inFlightBitmapLeases.remove(bitmap) else inFlightBitmapLeases[bitmap] = count
+            drainRetiredBitmaps()
         }
     }
 
@@ -126,6 +166,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun isManagedEditCurrent(token: Long, revision: Int): Boolean =
         managedEditToken == token && _uiState.value.revision == revision
 
+    internal fun beginCropOperation(): Long = ++cropOperationToken
+
+    internal fun invalidateCropOperation() {
+        cropOperationToken += 1L
+    }
+
+    internal fun isCropOperationCurrent(token: Long): Boolean = cropOperationToken == token
+
     private fun invalidateManagedEdits() {
         managedEditToken += 1L
         managedEditJob?.cancel()
@@ -144,6 +192,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             payload.baseContentToken == current.baseContentToken &&
             sameCanonicalPath(payload.sourcePath, current.sourcePath) &&
             sameCanonicalPath(payload.draftSourcePath, current.draftSourcePath)
+    }
+
+    private fun isDraftResultCurrent(result: DraftSaveResult): Boolean {
+        val current = _uiState.value
+        return result.epoch == draftOperationEpoch &&
+            result.baseContentToken == current.baseContentToken &&
+            sameCanonicalPath(result.originalSourcePath, current.sourcePath) &&
+            sameCanonicalPath(result.previousDraftPath, current.draftSourcePath)
     }
 
     private fun isBitmapRetainedByCurrentState(bitmap: Bitmap): Boolean {
@@ -170,16 +226,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean) {
         undoHistory.addLast(snapshot)
-        trimHistory(undoHistory)
+        accountHistorySnapshot(snapshot)
+        trimUndoHistory()
         if (clearRedo) {
-            recycleHistory(redoHistory)
+            redoHistory.forEach(::recycleHistorySnapshot)
             redoHistory.clear()
         }
         updateHistoryFlags()
     }
 
     internal fun recycleHistorySnapshot(snapshot: EditorHistorySnapshot) {
+        if (snapshot.countedInHistory) {
+            retainedHistoryBytes = (retainedHistoryBytes - snapshot.estimatedBytes()).coerceAtLeast(0L)
+            snapshot.countedInHistory = false
+        }
         snapshot.recycleBitmaps()
+        drainRetiredBitmaps()
     }
 
     fun persistDraftSnapshot() {
@@ -209,7 +271,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun persistDraftSnapshotInternal(): Boolean {
         val context = getApplication<Application>()
         val draftState = _uiState.value
-        val draftEpoch = draftOperationEpoch
+        val draftEpoch = draftOperationEpoch + 1L
+        draftOperationEpoch = draftEpoch
         val payload = try {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
@@ -245,7 +308,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             payload.dirtyBitmapCopy?.takeIf { !it.isRecycled }?.recycle()
         } ?: return false
         updateUiStateAndRecycleReplaced {
-            if (it.baseContentToken == saved.baseContentToken) {
+            if (isDraftResultCurrent(saved)) {
                 it.copy(
                 draftSavedAtMillis = saved.savedAtMillis,
                 draftSourcePath = saved.sourcePath,
@@ -290,6 +353,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openImage(uri: Uri) {
         abortPendingParameterEdit()
+        invalidateCropOperation()
         invalidateManagedEdits()
         invalidateDraftOperations()
         renderJob?.cancel()
@@ -443,17 +507,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
+        var undoSnapshot = captureCurrentHistorySnapshot() ?: return
+        val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+            recycleHistorySnapshot(undoSnapshot)
+            updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정 준비에 실패했습니다.") }
+            return
+        }
         val nextRevision = current.revision + 1
         renderJob?.cancel()
-        pushUndoSnapshot(clearRedo = true)
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다") }
 
-        renderJob = viewModelScope.launch {
+        launchManagedEdit { operationToken ->
             var rendered: Bitmap? = null
             try {
-                val nextParams = withContext(Dispatchers.Default) { computeAutoEnhanceParams(basePreview) }
+                val nextParams = withContext(Dispatchers.Default) { computeAutoEnhanceParams(ownedBase) }
                 rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
+                    renderEditedPreview(ownedBase, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
@@ -480,6 +549,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (_uiState.value.revision == nextRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}") }
                 }
+            } finally {
+                ownedBase.recycle()
+                undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
     }
@@ -646,9 +718,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
-                    val committedUndoSnapshot = checkNotNull(undoSnapshot)
-                    commitUndoSnapshot(committedUndoSnapshot, clearRedo = true)
-                    undoSnapshot = null
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             params = params,
@@ -660,6 +729,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     lastSuccessfullyRenderedParams = params
                     rendered = null
+                    commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                    undoSnapshot = null
                     scheduleDraftAutosave()
                 } else {
                     rendered?.recycle()
@@ -746,7 +817,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     } else {
                         ownedBaseBitmap = withContext(Dispatchers.Default) {
-                            (state.originalPreviewBitmap ?: state.previewBitmap)?.copy(Bitmap.Config.ARGB_8888, true)
+                            (state.originalPreviewBitmap ?: state.previewBitmap)?.copyOrThrow(Bitmap.Config.ARGB_8888, true)
                         } ?: error("export bitmap is missing")
                         renderEditedExportFromBitmap(
                             baseBitmap = ownedBaseBitmap ?: error("export bitmap is missing"),
@@ -811,7 +882,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 invalidateDraftOperations()
-                invalidateManagedEdits()
                 draftSaveJob?.cancelAndJoin()
                 val clearResult = withContext(Dispatchers.IO) {
                     draftSaveMutex.withLock {
@@ -893,6 +963,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun undoEdit() {
         abortPendingParameterEdit()
+        invalidateCropOperation()
         if (undoHistory.isEmpty()) {
             updateUiStateAndRecycleReplaced { it.copy(message = "되돌릴 편집 기록이 없습니다.") }
             return
@@ -908,8 +979,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
+        accountHistorySnapshot(redoSnapshot)
         redoHistory.addLast(redoSnapshot)
         val snapshot = undoHistory.removeLast()
+        detachHistoryAccounting(snapshot)
         val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "이전 편집 상태를 적용했습니다")
         applyHistorySnapshot(snapshot, message)
         scheduleDraftAutosave()
@@ -919,6 +992,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun redoEdit() {
         abortPendingParameterEdit()
+        invalidateCropOperation()
         if (redoHistory.isEmpty()) {
             updateUiStateAndRecycleReplaced { it.copy(message = "다시 실행할 편집 기록이 없습니다.") }
             return
@@ -934,9 +1008,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
+        accountHistorySnapshot(undoSnapshot)
         undoHistory.addLast(undoSnapshot)
-        trimHistory(undoHistory)
+        trimUndoHistory()
         val snapshot = redoHistory.removeLast()
+        detachHistoryAccounting(snapshot)
         val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "다음 편집 상태를 적용했습니다")
         applyHistorySnapshot(snapshot, message)
         scheduleDraftAutosave()
@@ -1171,14 +1247,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun restoreDraftIfAvailable(context: Context) {
         val restoreToken = ++restoreDraftToken
         val restoreStartRevision = _uiState.value.revision
-        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val storedSourcePath = prefs.getString(KEY_DRAFT_SOURCE, null) ?: return
-        val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
-        val recovery = try {
+        val restoreSnapshot = try {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
+                    val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                    val storedSourcePath = prefs.getString(KEY_DRAFT_SOURCE, null) ?: return@withLock null
+                    val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
                     cleanupDraftTemporaryFiles(context)
-                    resolveDraftRecovery(context, storedSourcePath)
+                    DraftRestoreSnapshot(
+                        preferences = DraftPreferencesSnapshot(prefs.all.toMap()),
+                        savedAtMillis = draftSavedAt,
+                        recovery = resolveDraftRecovery(context, storedSourcePath)
+                    )
                 }
             }
         } catch (ce: CancellationException) {
@@ -1195,6 +1275,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
+        if (restoreSnapshot == null) return
+        val draftPrefs = restoreSnapshot.preferences
+        val draftSavedAt = restoreSnapshot.savedAtMillis
+        val recovery = restoreSnapshot.recovery
         if (restoreToken != restoreDraftToken) return
         updateUiStateAndRecycleReplaced {
             it.copy(
@@ -1212,30 +1296,30 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val sourcePath = sourceFile.absolutePath
 
-        val legacyNoiseReduction = prefs.getFloat(KEY_DRAFT_NOISE_REDUCTION, 0f)
+        val legacyNoiseReduction = draftPrefs.getFloat(KEY_DRAFT_NOISE_REDUCTION, 0f)
         val params = EditParams(
-            exposure = prefs.getFloat(KEY_DRAFT_EXPOSURE, 0f),
-            contrast = prefs.getFloat(KEY_DRAFT_CONTRAST, 0f),
-            shadows = prefs.getFloat(KEY_DRAFT_SHADOWS, 0f),
-            highlights = prefs.getFloat(KEY_DRAFT_HIGHLIGHTS, 0f),
-            whites = prefs.getFloat(KEY_DRAFT_WHITES, 0f),
-            blacks = prefs.getFloat(KEY_DRAFT_BLACKS, 0f),
-            temperature = prefs.getFloat(KEY_DRAFT_TEMPERATURE, 0f),
-            tint = prefs.getFloat(KEY_DRAFT_TINT, 0f),
-            saturation = prefs.getFloat(KEY_DRAFT_SATURATION, 0f),
-            vibrance = prefs.getFloat(KEY_DRAFT_VIBRANCE, 0f),
-            clarity = prefs.getFloat(KEY_DRAFT_CLARITY, 0f),
-            dehaze = prefs.getFloat(KEY_DRAFT_DEHAZE, 0f),
-            sharpness = prefs.getFloat(KEY_DRAFT_SHARPNESS, 0f),
+            exposure = draftPrefs.getFloat(KEY_DRAFT_EXPOSURE, 0f),
+            contrast = draftPrefs.getFloat(KEY_DRAFT_CONTRAST, 0f),
+            shadows = draftPrefs.getFloat(KEY_DRAFT_SHADOWS, 0f),
+            highlights = draftPrefs.getFloat(KEY_DRAFT_HIGHLIGHTS, 0f),
+            whites = draftPrefs.getFloat(KEY_DRAFT_WHITES, 0f),
+            blacks = draftPrefs.getFloat(KEY_DRAFT_BLACKS, 0f),
+            temperature = draftPrefs.getFloat(KEY_DRAFT_TEMPERATURE, 0f),
+            tint = draftPrefs.getFloat(KEY_DRAFT_TINT, 0f),
+            saturation = draftPrefs.getFloat(KEY_DRAFT_SATURATION, 0f),
+            vibrance = draftPrefs.getFloat(KEY_DRAFT_VIBRANCE, 0f),
+            clarity = draftPrefs.getFloat(KEY_DRAFT_CLARITY, 0f),
+            dehaze = draftPrefs.getFloat(KEY_DRAFT_DEHAZE, 0f),
+            sharpness = draftPrefs.getFloat(KEY_DRAFT_SHARPNESS, 0f),
             noiseReduction = legacyNoiseReduction,
-            luminanceNoiseReduction = prefs.getFloat(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION, legacyNoiseReduction),
-            colorNoiseReduction = prefs.getFloat(KEY_DRAFT_COLOR_NOISE_REDUCTION, legacyNoiseReduction),
-            noiseDetailProtection = prefs.getFloat(KEY_DRAFT_NOISE_DETAIL_PROTECTION, 0.50f)
+            luminanceNoiseReduction = draftPrefs.getFloat(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION, legacyNoiseReduction),
+            colorNoiseReduction = draftPrefs.getFloat(KEY_DRAFT_COLOR_NOISE_REDUCTION, legacyNoiseReduction),
+            noiseDetailProtection = draftPrefs.getFloat(KEY_DRAFT_NOISE_DETAIL_PROTECTION, 0.50f)
         )
-        val exportFormat = enumValueOrDefault(prefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
-        val exportResolution = enumValueOrDefault(prefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Full)
+        val exportFormat = enumValueOrDefault(draftPrefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
+        val exportResolution = enumValueOrDefault(draftPrefs.getString(KEY_DRAFT_RESOLUTION, null), ExportResolution.Full)
         val presetLook = runCatching {
-            presetColorLookFromJson(prefs.getString(KEY_DRAFT_LOOK, null)?.let(::JSONObject))
+            presetColorLookFromJson(draftPrefs.getString(KEY_DRAFT_LOOK, null)?.let(::JSONObject))
         }.getOrNull()
         val engines = _uiState.value.engineSelection()
         updateUiStateAndRecycleReplaced {
@@ -1254,7 +1338,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048) }
             val nextRevision = _uiState.value.revision + 1
             expectedRestoreRevision = nextRevision
-            val activeQuickEffects = prefs.getString(KEY_DRAFT_QUICK_EFFECTS, null).parseQuickEffects()
+            val activeQuickEffects = draftPrefs.getString(KEY_DRAFT_QUICK_EFFECTS, null).parseQuickEffects()
             rendered = withContext(Dispatchers.Default) {
                 renderEditedPreview(preview!!, params, engines, nextRevision, presetLook, activeQuickEffects)
             }
@@ -1287,7 +1371,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     isBusy = false,
                     sourcePath = sourcePath,
                     baseBitmapDirty = false,
-                    baseContentToken = prefs.getString(KEY_DRAFT_BASE_TOKEN, null) ?: newBaseContentToken(),
+                    baseContentToken = draftPrefs.getString(KEY_DRAFT_BASE_TOKEN, null) ?: newBaseContentToken(),
                     originalPreviewBitmap = adoptedPreview,
                     previewBitmap = adoptedRendered,
                     activeQuickEffects = activeQuickEffects,
@@ -1297,7 +1381,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     exportResolution = exportResolution,
                     draftSavedAtMillis = draftSavedAt,
                     draftSourcePath = sourcePath,
-                    draftBaseContentToken = prefs.getString(KEY_DRAFT_BASE_TOKEN, null),
+                    draftBaseContentToken = draftPrefs.getString(KEY_DRAFT_BASE_TOKEN, null),
                     revision = nextRevision,
                     message = "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4"
                 )
@@ -1326,10 +1410,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (!paramUndoWindowOpen) {
             if (pendingParamUndoSnapshot != null) {
                 pendingParamUndoSnapshot?.recycleBitmaps()
+                drainRetiredBitmaps()
                 pendingParamUndoSnapshot = null
                 updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = it.revision + 1, isBusy = false) }
             }
-            pendingParamUndoSnapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
+            pendingParamUndoSnapshot = runCatching { _uiState.value.toHistorySnapshot(undoHistory.lastOrNull()) }.getOrNull()
             paramUndoSnapshotCommitted = false
             paramUndoWindowOpen = true
         }
@@ -1350,8 +1435,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val snapshot = pendingParamUndoSnapshot ?: return
         if (!paramUndoSnapshotCommitted) {
             undoHistory.addLast(snapshot)
-            trimHistory(undoHistory)
-            recycleHistory(redoHistory)
+            accountHistorySnapshot(snapshot)
+            trimUndoHistory()
+            redoHistory.forEach(::recycleHistorySnapshot)
             redoHistory.clear()
             updateHistoryFlags()
             paramUndoSnapshotCommitted = true
@@ -1361,6 +1447,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun discardPendingParamUndoSnapshot() {
         if (!paramUndoSnapshotCommitted) pendingParamUndoSnapshot?.recycleBitmaps()
+        drainRetiredBitmaps()
         pendingParamUndoSnapshot = null
         closeParamUndoWindow()
     }
@@ -1404,9 +1491,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         undoHistory.addLast(snapshot)
-        trimHistory(undoHistory)
+        accountHistorySnapshot(snapshot)
+        trimUndoHistory()
         if (clearRedo) {
-            recycleHistory(redoHistory)
+            redoHistory.forEach(::recycleHistorySnapshot)
             redoHistory.clear()
         }
         updateHistoryFlags()
@@ -1446,12 +1534,41 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced { it.copy(canUndo = undoHistory.isNotEmpty(), canRedo = redoHistory.isNotEmpty()) }
     }
 
+    private fun trimUndoHistory() {
+        while (undoHistory.size > EDITOR_HISTORY_MAX) {
+            if (undoHistory.isEmpty()) break
+            val evicted = undoHistory.removeFirst()
+            recycleHistorySnapshot(evicted)
+            Log.d(FLARE_GUARD_AI_TAG, "Evicted history resources: bytes=$retainedHistoryBytes")
+        }
+        while (retainedHistoryBytes > EDITOR_HISTORY_MAX_BYTES) {
+            if (undoHistory.isEmpty() && redoHistory.isEmpty()) break
+            val evicted = if (undoHistory.isNotEmpty()) undoHistory.removeFirst() else redoHistory.removeFirst()
+            recycleHistorySnapshot(evicted)
+            Log.d(FLARE_GUARD_AI_TAG, "Evicted history resources: bytes=$retainedHistoryBytes")
+        }
+    }
+
+    private fun accountHistorySnapshot(snapshot: EditorHistorySnapshot) {
+        if (snapshot.countedInHistory) return
+        snapshot.countedInHistory = true
+        retainedHistoryBytes += snapshot.estimatedBytes()
+    }
+
+    private fun detachHistoryAccounting(snapshot: EditorHistorySnapshot) {
+        if (!snapshot.countedInHistory) return
+        snapshot.countedInHistory = false
+        retainedHistoryBytes = (retainedHistoryBytes - snapshot.estimatedBytes()).coerceAtLeast(0L)
+        snapshot.ownedHistoryBitmaps.forEach(stateOwnedHistoryBitmaps::add)
+    }
+
     private fun clearEditHistory() {
         discardPendingParamUndoSnapshot()
-        recycleHistory(undoHistory)
-        recycleHistory(redoHistory)
+        undoHistory.forEach(::recycleHistorySnapshot)
+        redoHistory.forEach(::recycleHistorySnapshot)
         undoHistory.clear()
         redoHistory.clear()
+        retainedHistoryBytes = 0L
         updateHistoryFlags()
     }
 
@@ -1474,8 +1591,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         draftSaveJob?.cancel()
         paramUndoWindowJob?.cancel()
         releaseNativeSession()
-        recycleLiveStateBitmapsNow(_uiState.value)
+        val state = _uiState.value
+        state.previewBitmap?.let(retiredBitmaps::add)
+        state.originalPreviewBitmap?.let(retiredBitmaps::add)
+        state.selectionLayers.forEach { retiredBitmaps.add(it.bitmap) }
         clearEditHistory()
+        drainRetiredBitmaps()
         super.onCleared()
     }
 }
@@ -1497,25 +1618,44 @@ internal data class EditorHistorySnapshot(
     val selectionPaintSettings: SelectionPaintSettings,
     val showSelectionOverlay: Boolean,
     val activeQuickEffects: List<ActiveQuickEffect>,
-    val flareGuardRuntimeStatus: String?
+    val flareGuardRuntimeStatus: String?,
+    var countedInHistory: Boolean = false,
+    var resourcesReleased: Boolean = false,
+    val ownedHistoryBitmaps: List<Bitmap> = emptyList(),
+    val sourcePreviewIdentity: Bitmap? = null,
+    val sourceOriginalIdentity: Bitmap? = null,
+    val sourceSelectionIdentities: Map<String, Bitmap> = emptyMap()
 )
 
-private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
+private fun EditorUiState.toHistorySnapshot(previous: EditorHistorySnapshot? = null): EditorHistorySnapshot {
     var previewCopy: Bitmap? = null
     var originalCopy: Bitmap? = null
     val selectionCopies = ArrayList<SelectionLayer>(selectionLayers.size)
+    val acquired = identityBitmapSet()
+    var registered = false
     try {
-        previewCopy = previewBitmap?.copy(Bitmap.Config.ARGB_8888, true)
+        previewCopy = if (previewBitmap != null && previewBitmap === previous?.sourcePreviewIdentity) {
+            previous.previewBitmap
+        } else previewBitmap?.copyOrThrow(Bitmap.Config.ARGB_8888, true)
         originalCopy = if (originalPreviewBitmap == null) {
             null
         } else if (originalPreviewBitmap === previewBitmap) {
             previewCopy
+        } else if (originalPreviewBitmap === previous?.sourceOriginalIdentity) {
+            previous.originalPreviewBitmap
         } else {
-            originalPreviewBitmap.copy(Bitmap.Config.ARGB_8888, true)
+            originalPreviewBitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
         }
         selectionLayers.forEach { layer ->
-            selectionCopies.add(layer.copy(bitmap = layer.bitmap.copy(Bitmap.Config.ARGB_8888, true)))
+            val shared = previous?.sourceSelectionIdentities?.get(layer.id)
+                ?.takeIf { it === layer.bitmap }
+                ?.let { previous.selectionLayers.firstOrNull { prior -> prior.id == layer.id }?.bitmap }
+            selectionCopies.add(layer.copy(bitmap = shared ?: layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)))
         }
+        listOfNotNull(previewCopy, originalCopy).forEach { acquired.add(it) }
+        selectionCopies.forEach { acquired.add(it.bitmap) }
+        acquired.forEach(HistoryBitmapRegistry::acquire)
+        registered = true
         return EditorHistorySnapshot(
             params = params,
             noiseEngine = noiseEngine,
@@ -1533,14 +1673,23 @@ private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
             selectionPaintSettings = selectionPaintSettings,
             showSelectionOverlay = showSelectionOverlay,
             activeQuickEffects = activeQuickEffects,
-            flareGuardRuntimeStatus = flareGuardRuntimeStatus
+            flareGuardRuntimeStatus = flareGuardRuntimeStatus,
+            ownedHistoryBitmaps = acquired.toList(),
+            sourcePreviewIdentity = previewBitmap,
+            sourceOriginalIdentity = originalPreviewBitmap,
+            sourceSelectionIdentities = selectionLayers.associate { it.id to it.bitmap }
         )
     } catch (t: Throwable) {
-        previewCopy?.recycle()
-        if (originalCopy != null && originalCopy !== previewCopy) {
-            originalCopy.recycle()
+        if (registered) {
+            acquired.forEach(HistoryBitmapRegistry::release)
+        } else {
+            if (previewCopy != null && previewCopy !== previous?.previewBitmap) previewCopy.recycle()
+            if (originalCopy != null && originalCopy !== previewCopy && originalCopy !== previous?.originalPreviewBitmap) originalCopy.recycle()
+            selectionCopies.forEach { layer ->
+                val previousLayer = previous?.selectionLayers?.firstOrNull { it.id == layer.id }
+                if (layer.bitmap !== previewCopy && layer.bitmap !== originalCopy && layer.bitmap !== previousLayer?.bitmap) layer.bitmap.recycle()
+            }
         }
-        selectionCopies.forEach { it.bitmap.recycle() }
         throw t
     }
 }
@@ -1620,23 +1769,54 @@ private fun historySignedValue(value: Float): String =
 private fun identityBitmapSet(): MutableSet<Bitmap> =
     Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
 
+private object HistoryBitmapRegistry {
+    private val references = IdentityHashMap<Bitmap, Int>()
+
+    @Synchronized
+    fun acquire(bitmap: Bitmap) {
+        check(!bitmap.isRecycled) { "history acquired a recycled bitmap" }
+        references[bitmap] = (references[bitmap] ?: 0) + 1
+    }
+
+    @Synchronized
+    fun release(bitmap: Bitmap) {
+        val next = (references[bitmap] ?: 0) - 1
+        check(next >= 0) { "history bitmap reference underflow" }
+        if (next == 0) {
+            references.remove(bitmap)
+            if (!bitmap.isRecycled) bitmap.recycle()
+        } else references[bitmap] = next
+    }
+
+    @Synchronized
+    fun isHeld(bitmap: Bitmap): Boolean = (references[bitmap] ?: 0) > 0
+}
+
 internal fun Bitmap.copyOrThrow(config: Bitmap.Config = Bitmap.Config.ARGB_8888, mutable: Boolean = true): Bitmap =
     copy(config, mutable) ?: throw IllegalStateException("bitmap copy failed")
 
-private fun trimHistory(stack: ArrayDeque<EditorHistorySnapshot>) {
-    while (stack.size > EDITOR_HISTORY_MAX) {
-        stack.removeFirst().recycleBitmaps()
-    }
-}
+private const val EDITOR_HISTORY_MAX_BYTES = 96L * 1024L * 1024L
 
-private fun recycleHistory(stack: ArrayDeque<EditorHistorySnapshot>) {
-    stack.forEach { it.recycleBitmaps() }
+private fun EditorHistorySnapshot.estimatedBytes(): Long {
+    val seen = identityBitmapSet()
+    var bytes = 0L
+    listOf(previewBitmap, originalPreviewBitmap).forEach { bitmap ->
+        if (bitmap != null && seen.add(bitmap)) bytes += bitmap.allocationByteCount.toLong()
+    }
+
+    selectionLayers.forEach { layer ->
+        if (seen.add(layer.bitmap)) bytes += layer.bitmap.allocationByteCount.toLong()
+    }
+    return bytes
 }
 
 private fun EditorHistorySnapshot.recycleBitmaps() {
-    previewBitmap?.recycle()
-    if (originalPreviewBitmap !== previewBitmap) originalPreviewBitmap?.recycle()
-    selectionLayers.forEach { it.bitmap.recycle() }
+    if (resourcesReleased) {
+        Log.w(FLARE_GUARD_AI_TAG, "History bitmap release underflow: snapshot already released")
+        return
+    }
+    resourcesReleased = true
+    ownedHistoryBitmaps.forEach(HistoryBitmapRegistry::release)
 }
 
 internal data class EngineSelection(
@@ -1960,7 +2140,7 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
     }
     val decoded = requireNotNull(BitmapFactory.decodeFile(path, options)) { "미리보기 디코딩에 실패했습니다" }
     if (decoded.config == Bitmap.Config.ARGB_8888 && decoded.isMutable) return decoded
-    val mutable = decoded.copy(Bitmap.Config.ARGB_8888, true)
+    val mutable = decoded.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     decoded.recycle()
     return mutable
 }
@@ -1998,7 +2178,7 @@ private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
 
     val transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     if (transformed !== bitmap) bitmap.recycle()
-    val mutable = transformed.copy(Bitmap.Config.ARGB_8888, true)
+    val mutable = transformed.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     if (mutable !== transformed) transformed.recycle()
     Log.i(FLARE_GUARD_AI_TAG, "Applied EXIF orientation=$orientation -> ${mutable.width}x${mutable.height}")
     return mutable
@@ -2017,7 +2197,7 @@ internal fun renderEditedPreview(
     look: PresetColorLook? = null,
     quickEffects: List<ActiveQuickEffect> = emptyList()
 ): Bitmap {
-    val copy = basePreview.copy(Bitmap.Config.ARGB_8888, true)
+    val copy = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     return try {
         renderBitmapInNative(copy, params, engines, revision, look)
         applyActiveQuickEffectsToBitmap(copy, quickEffects, revision)
@@ -2099,7 +2279,7 @@ private fun renderEditedExportFromBitmap(
     var decoded: Bitmap? = null
     var scaled: Bitmap? = null
     try {
-        decoded = baseBitmap.copy(Bitmap.Config.ARGB_8888, true)
+        decoded = baseBitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
         val working = decoded!!
         renderBitmapInNative(working, params, engines, revision, look)
         applyActiveQuickEffectsToBitmap(working, quickEffects, revision)
@@ -2400,7 +2580,21 @@ private fun EditorUiState.withSavedDraft(context: Context): EditorUiState {
 private data class DraftSaveResult(
     val sourcePath: String,
     val savedAtMillis: Long,
-    val baseContentToken: String
+    val baseContentToken: String,
+    val epoch: Long = Long.MIN_VALUE,
+    val previousDraftPath: String? = null,
+    val originalSourcePath: String? = null
+)
+
+private class DraftPreferencesSnapshot(private val values: Map<String, *>) {
+    fun getString(key: String, default: String?): String? = values[key] as? String ?: default
+    fun getFloat(key: String, default: Float): Float = (values[key] as? Number)?.toFloat() ?: default
+}
+
+private data class DraftRestoreSnapshot(
+    val preferences: DraftPreferencesSnapshot,
+    val savedAtMillis: Long?,
+    val recovery: DraftRecoveryResolution
 )
 
 private data class DraftClearResult(
@@ -2554,7 +2748,14 @@ private fun saveDraftSnapshot(
     }
     if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
     if (sourceIsOwned) deleteObsoleteDraftSources(context, draftSource.file, payload.sourcePath)
-    return DraftSaveResult(draftSource.file.absolutePath, savedAt, payload.baseContentToken)
+    return DraftSaveResult(
+        sourcePath = draftSource.file.absolutePath,
+        savedAtMillis = savedAt,
+        baseContentToken = payload.baseContentToken,
+        epoch = payload.epoch,
+        previousDraftPath = payload.draftSourcePath,
+        originalSourcePath = payload.sourcePath
+    )
 }
 
 private fun snapshotDraftPreferences(preferences: android.content.SharedPreferences): Map<String, Any?> =

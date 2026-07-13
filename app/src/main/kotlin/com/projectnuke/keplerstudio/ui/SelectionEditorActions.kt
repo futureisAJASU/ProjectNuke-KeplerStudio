@@ -81,8 +81,6 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 val current = uiState.value
                 if (isManagedEditCurrent(operationToken, sourceRevision) && current.sourcePath == sourcePath && current.revision == sourceRevision) {
                     updateUiState { it.copy(isBusy = false, message = "\uD53C\uC0AC\uCCB4\uB97C \uAC10\uC9C0\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.") }
-                } else if (current.isBusy && current.message == busyMessage) {
-                    updateUiState { it.copy(isBusy = false) }
                 }
                 return@launchManagedEdit
             }
@@ -106,9 +104,6 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 undoSnapshot?.let(::recycleHistorySnapshot)
                 undoSnapshot = null
                 val current = uiState.value
-                if (current.isBusy && current.message == busyMessage) {
-                    updateUiState { it.copy(isBusy = false) }
-                }
                 return@launchManagedEdit
             }
             commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
@@ -127,8 +122,6 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             val current = uiState.value
             if (isManagedEditCurrent(operationToken, sourceRevision) && current.sourcePath == sourcePath && current.revision == sourceRevision) {
                 updateUiState { it.copy(isBusy = false, message = "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C \uC0DD\uC131\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
-            } else if (current.isBusy && current.message == busyMessage) {
-                updateUiState { it.copy(isBusy = false) }
             }
         } finally {
             ownedBase.recycle()
@@ -143,7 +136,6 @@ fun EditorViewModel.createBrushSelection() {
         updateUiState { it.copy(message = "브러시 마스크를 만들 이미지가 없습니다.") }
         return
     }
-    recordUserEditForUndo(clearRedo = true)
     val layer = SelectionLayer(
         id = newSelectionId(),
         name = "브러시 마스크 ${state.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
@@ -274,10 +266,10 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         updateUiState { it.copy(message = "적용할 마스크 또는 이미지가 없습니다.") }
         return
     }
-    recordUserEditForUndo(clearRedo = true)
+    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
     val nextRevision = state.revision + 1
     updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "마스크 보정을 적용하는 중입니다.") }
-    viewModelScope.launch {
+    launchManagedEdit { operationToken ->
         var renderedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
         try {
@@ -294,7 +286,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                     quickEffects = state.activeQuickEffects
                 )
             }
-            if (uiState.value.revision == nextRevision) {
+            if (isManagedEditCurrent(operationToken, nextRevision)) {
                 val adoptedOriginal = renderedOriginal ?: error("missing selection original")
                 val adoptedPreview = renderedPreview ?: error("missing selection preview")
                 updateUiState {
@@ -309,6 +301,8 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                         message = "선택한 마스크 보정을 적용했습니다."
                     )
                 }
+                commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                undoSnapshot = null
                 markParamsSuccessfullyRendered(EditParams())
                 renderedOriginal = null
                 renderedPreview = null
@@ -326,9 +320,11 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         } catch (t: Throwable) {
             renderedOriginal?.recycle()
             renderedPreview?.recycle()
-            if (uiState.value.revision == nextRevision) {
+            if (isManagedEditCurrent(operationToken, nextRevision)) {
                 updateUiState { it.copy(isBusy = false, message = "마스크 보정 적용에 실패했습니다: ${t.message}") }
             }
+        } finally {
+            undoSnapshot?.let(::recycleHistorySnapshot)
         }
     }
 }
@@ -402,7 +398,7 @@ private fun mergeParams(base: EditParams, local: EditParams): EditParams = EditP
 )
 
 private fun renderWithParams(base: Bitmap, params: EditParams, state: EditorUiState, revision: Int): Bitmap {
-    val out = base.copy(Bitmap.Config.ARGB_8888, true)
+    val out = base.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     val result = NativePhotoCore.nativeRenderPreviewInPlace(
         out,
         params.exposure,

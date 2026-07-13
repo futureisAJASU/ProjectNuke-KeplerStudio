@@ -161,20 +161,20 @@ fun RemasterToolPanel(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 TextButton(
                     onClick = { RemasterModelSession.load(context, edgeMasker) },
-                    enabled = edgeAssetAvailable
+                    enabled = edgeAssetAvailable && !RemasterModelSession.isModelLoading && !RemasterModelSession.isInferring
                 ) {
                     Text(if (edgeLoaded) "다시 로드" else "Edge Masker 로드")
                 }
                 TextButton(
                     onClick = { RemasterModelSession.unload() },
-                    enabled = activeModel != null
+                    enabled = activeModel != null && !RemasterModelSession.isModelLoading && !RemasterModelSession.isInferring
                 ) {
                     Text("모델 해제")
                 }
             }
             Button(
                 onClick = { editorViewModel.applyMaskAwareRemaster() },
-                enabled = hasImage && edgeLoaded,
+                enabled = hasImage && edgeLoaded && !RemasterModelSession.isModelLoading && !RemasterModelSession.isInferring,
                 colors = ButtonDefaults.buttonColors(containerColor = RemasterAccent, contentColor = RemasterButtonTextDark),
                 modifier = Modifier.padding(top = 6.dp)
             ) {
