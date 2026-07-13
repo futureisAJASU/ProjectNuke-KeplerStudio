@@ -21,6 +21,7 @@ import java.util.Collections
 import java.io.File
 import java.io.FileOutputStream
 import java.util.IdentityHashMap
+import java.util.UUID
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1103,7 +1104,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
         val recovery = try {
             withContext(Dispatchers.IO) {
-                resolveDraftRecovery(context, storedSourcePath)
+                draftSaveMutex.withLock {
+                    cleanupDraftTemporaryFiles(context)
+                    resolveDraftRecovery(context, storedSourcePath)
+                }
             }
         } catch (ce: CancellationException) {
             throw ce
@@ -1680,12 +1684,17 @@ private fun copyUriToCache(context: Context, uri: Uri): File {
 private fun migrateDraftSourceIfNeeded(context: Context, storedSourcePath: String): File? {
     val storedSource = File(storedSourcePath)
     if (!storedSource.isFile) return null
+    if (isOwnedDraftSource(context, storedSource)) return storedSource
     val draftSource = persistDraftSourceFile(context, storedSource.absolutePath) ?: return null
-    saveDraftThumbnailFile(context, draftSource)
     if (draftSource.absolutePath != storedSource.absolutePath) {
-        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+        val migrated = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
             .putString(KEY_DRAFT_SOURCE, draftSource.absolutePath)
-            .apply()
+            .commit()
+        if (!migrated) {
+            draftSource.delete()
+            return storedSource
+        }
+        saveDraftThumbnailFile(context, draftSource)
     }
     return draftSource
 }
@@ -1703,12 +1712,13 @@ private fun resolveDraftRecovery(context: Context, storedSourcePath: String): Dr
     val persistentExists = persistentSource.isFile
     val storedInCache = storedSource.absolutePath.startsWith(context.cacheDir.absolutePath)
     val sourceFile = when {
+        storedExists && isOwnedDraftSource(context, storedSource) -> storedSource
         storedExists -> migrateDraftSourceIfNeeded(context, storedSource.absolutePath)
         storedInCache && persistentExists -> {
-            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+            val migrated = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
                 .putString(KEY_DRAFT_SOURCE, persistentSource.absolutePath)
-                .apply()
-            persistentSource
+                .commit()
+            if (!migrated) storedSource else persistentSource
         }
         storedSource.absolutePath == persistentSource.absolutePath && persistentExists -> persistentSource
         else -> null
@@ -1727,44 +1737,73 @@ private fun resolveDraftRecovery(context: Context, storedSourcePath: String): Dr
 
 private fun persistDraftSourceFile(context: Context, sourcePath: String): File? {
     val source = File(sourcePath).takeIf { it.isFile } ?: return null
-    val draftSource = persistentDraftSourceFile(context)
-    if (source.absolutePath == draftSource.absolutePath) return draftSource
-
-    draftSource.parentFile?.mkdirs()
-    val temp = File(draftSource.parentFile, "${draftSource.name}.tmp")
-    source.inputStream().use { input ->
-        FileOutputStream(temp).use { output -> input.copyTo(output) }
-    }
-    if (draftSource.exists()) draftSource.delete()
-    check(temp.renameTo(draftSource)) { "failed to persist draft source" }
-    return draftSource
+    val draftDirectory = persistentDraftDirectory(context)
+    if (isOwnedDraftSource(context, source)) return source
+    val generation = File(draftDirectory, "source_${UUID.randomUUID()}.img")
+    copyFileAtomically(source, generation)
+    return generation
 }
 
 private fun persistDraftSourceFileIfNeeded(context: Context, sourcePath: String): DraftSourceResult? {
     val source = File(sourcePath).takeIf { it.isFile } ?: return null
-    val draftSource = persistentDraftSourceFile(context)
-    if (source.absolutePath == draftSource.absolutePath) {
-        return DraftSourceResult(draftSource, changed = false)
-    }
-    val currentDraftIsFresh = draftSource.isFile &&
-        draftSource.length() == source.length() &&
-        draftSource.lastModified() >= source.lastModified()
-    if (currentDraftIsFresh) {
-        return DraftSourceResult(draftSource, changed = false)
-    }
+    if (isOwnedDraftSource(context, source)) return DraftSourceResult(source, changed = false)
     return persistDraftSourceFile(context, source.absolutePath)?.let { DraftSourceResult(it, changed = true) }
 }
 
 private fun persistDraftBitmapFile(context: Context, bitmap: Bitmap): File? {
-    val draftSource = persistentDraftSourceFile(context)
-    draftSource.parentFile?.mkdirs()
+    val draftSource = File(persistentDraftDirectory(context), "source_${UUID.randomUUID()}.img")
     val temp = File(draftSource.parentFile, "${draftSource.name}.tmp")
-    FileOutputStream(temp).use { output ->
-        check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "failed to encode draft bitmap" }
+    try {
+        FileOutputStream(temp).use { output ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "failed to encode draft bitmap" }
+            output.fd.sync()
+        }
+        check(temp.renameTo(draftSource)) { "failed to persist draft bitmap" }
+        return draftSource
+    } catch (t: Throwable) {
+        temp.delete()
+        draftSource.delete()
+        throw t
     }
-    if (draftSource.exists()) draftSource.delete()
-    check(temp.renameTo(draftSource)) { "failed to persist draft bitmap" }
-    return draftSource
+}
+
+private fun copyFileAtomically(source: File, destination: File) {
+    val temp = File(destination.parentFile, "${destination.name}.${UUID.randomUUID()}.tmp")
+    try {
+        source.inputStream().use { input ->
+            FileOutputStream(temp).use { output ->
+                input.copyTo(output)
+                output.fd.sync()
+            }
+        }
+        check(temp.renameTo(destination)) { "failed to persist draft source" }
+    } catch (t: Throwable) {
+        temp.delete()
+        destination.delete()
+        throw t
+    }
+}
+
+private fun isOwnedDraftSource(context: Context, file: File): Boolean {
+    val directory = persistentDraftDirectory(context).canonicalFile
+    val candidate = runCatching { file.canonicalFile }.getOrNull() ?: return false
+    return candidate.parentFile == directory && candidate.name.startsWith("source_") && candidate.extension == "img" && candidate.isFile
+}
+
+private fun deleteObsoleteDraftSources(context: Context, keep: File, preservePath: String?) {
+    val directory = persistentDraftDirectory(context)
+    val preserve = preservePath?.let { runCatching { File(it).canonicalFile }.getOrNull() }
+    directory.listFiles()?.forEach { file ->
+        val owned = file.name.startsWith("source_") && file.extension == "img"
+        if (owned && file.canonicalFile != keep.canonicalFile && file.canonicalFile != preserve) file.delete()
+        if (file.name.endsWith(".tmp")) file.delete()
+    }
+}
+
+private fun cleanupDraftTemporaryFiles(context: Context) {
+    persistentDraftDirectory(context).listFiles()?.forEach { file ->
+        if (file.name.endsWith(".tmp")) file.delete()
+    }
 }
 
 private fun saveDraftThumbnailFile(context: Context, source: File) {
@@ -2252,6 +2291,7 @@ private data class DraftSaveResult(
 
 private data class DraftSavePayload(
     val sourcePath: String?,
+    val draftSourcePath: String?,
     val baseBitmapDirty: Boolean,
     val dirtyBitmapCopy: Bitmap?,
     val params: EditParams,
@@ -2303,6 +2343,7 @@ private fun createDraftSavePayload(state: EditorUiState): DraftSavePayload {
     }
     return DraftSavePayload(
         sourcePath = state.sourcePath,
+        draftSourcePath = state.draftSourcePath,
         baseBitmapDirty = state.baseBitmapDirty,
         dirtyBitmapCopy = dirtyBitmapCopy,
         params = state.params,
@@ -2315,13 +2356,17 @@ private fun createDraftSavePayload(state: EditorUiState): DraftSavePayload {
 
 private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): DraftSaveResult? {
     val draftSource = when {
-        !payload.baseBitmapDirty && payload.sourcePath != null -> persistDraftSourceFileIfNeeded(context, payload.sourcePath)
+        !payload.baseBitmapDirty && payload.draftSourcePath?.let(::File)?.isFile == true ->
+            DraftSourceResult(File(payload.draftSourcePath), changed = false)
+        !payload.baseBitmapDirty && payload.sourcePath != null ->
+            persistDraftSourceFileIfNeeded(context, payload.sourcePath)
         payload.dirtyBitmapCopy != null -> persistDraftBitmapFile(context, payload.dirtyBitmapCopy)?.let { DraftSourceResult(it, changed = true) }
         else -> null
     } ?: return null
-    if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
+    val sourceIsOwned = isOwnedDraftSource(context, draftSource.file)
     val savedAt = System.currentTimeMillis()
-    val committed = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+    val commitSucceeded = try {
+        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
         .putString(KEY_DRAFT_SOURCE, draftSource.file.absolutePath)
         .putFloat(KEY_DRAFT_EXPOSURE, payload.params.exposure)
         .putFloat(KEY_DRAFT_CONTRAST, payload.params.contrast)
@@ -2346,14 +2391,28 @@ private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): Draf
         .putString(KEY_DRAFT_QUICK_EFFECTS, payload.activeQuickEffects.toDraftString())
         .putLong(KEY_DRAFT_SAVED_AT, savedAt)
         .commit()
-    if (!committed) return null
+    } catch (t: Throwable) {
+        if (draftSource.changed) draftSource.file.delete()
+        throw t
+    }
+    if (!commitSucceeded) {
+        if (draftSource.changed) draftSource.file.delete()
+        return null
+    }
+    if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
+    if (sourceIsOwned) deleteObsoleteDraftSources(context, draftSource.file, payload.sourcePath)
     return DraftSaveResult(draftSource.file.absolutePath, savedAt)
 }
 
 private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null) {
-    val draftSource = persistentDraftSourceFile(context)
-    if (preserveSourcePath == null || draftSource.absoluteFile != File(preserveSourcePath).absoluteFile) {
-        draftSource.delete()
+    val preserve = preserveSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() }
+    persistentDraftDirectory(context).listFiles()?.forEach { file ->
+        val ownedGeneration = file.name.startsWith("source_") && file.extension == "img"
+        val legacySource = file.name == DRAFT_SOURCE_FILE_NAME
+        val temporary = file.name.endsWith(".tmp")
+        if ((ownedGeneration || legacySource || temporary) && file.canonicalFile != preserve) {
+            file.delete()
+        }
     }
     persistentDraftThumbnailFile(context).delete()
     context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
