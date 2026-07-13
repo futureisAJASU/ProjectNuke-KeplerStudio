@@ -766,27 +766,37 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun clearDraft() {
         val context = getApplication<Application>()
         viewModelScope.launch {
-            draftSaveJob?.cancelAndJoin()
-            val clearResult = withContext(Dispatchers.IO) {
-                draftSaveMutex.withLock {
-                    clearDraftPrefs(context, preserveSourcePath = _uiState.value.sourcePath)
+            try {
+                draftSaveJob?.cancelAndJoin()
+                val clearResult = withContext(Dispatchers.IO) {
+                    draftSaveMutex.withLock {
+                        clearDraftPrefs(context, preserveSourcePath = _uiState.value.sourcePath)
+                    }
                 }
-            }
-            if (clearResult == null) {
-                updateUiStateAndRecycleReplaced { it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") }
+                if (clearResult == null) {
+                    updateUiStateAndRecycleReplaced { it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") }
+                    return@launch
+                }
+                if (!sameCanonicalPath(_uiState.value.draftSourcePath, clearResult.sourcePath) ||
+                    _uiState.value.draftBaseContentToken != clearResult.baseContentToken) return@launch
+                updateUiStateAndRecycleReplaced {
+                    it.copy(
+                        draftSavedAtMillis = null,
+                        draftSourcePath = null,
+                        draftBaseContentToken = null,
+                        recoveryDebugInfo = null,
+                        showRecoveryDebugCard = false,
+                        message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다"
+                    )
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                logDraftSaveFailure(t)
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.")
+                }
                 return@launch
-            }
-            if (!sameCanonicalPath(_uiState.value.draftSourcePath, clearResult.sourcePath) ||
-                _uiState.value.draftBaseContentToken != clearResult.baseContentToken) return@launch
-            updateUiStateAndRecycleReplaced {
-                it.copy(
-                    draftSavedAtMillis = null,
-                    draftSourcePath = null,
-                    draftBaseContentToken = null,
-                    recoveryDebugInfo = null,
-                    showRecoveryDebugCard = false,
-                    message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다"
-                )
             }
         }
     }
