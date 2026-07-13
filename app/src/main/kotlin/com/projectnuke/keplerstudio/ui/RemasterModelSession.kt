@@ -106,8 +106,15 @@ object RemasterModelSession {
 
     private fun createForegroundMaskFromSegmenter(segmenter: Any, bitmap: Bitmap): Bitmap {
         val imageBuilderClass = Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
-        val imageBuilder = imageBuilderClass.getConstructor(Bitmap::class.java).newInstance(bitmap)
-        val mpImage = imageBuilderClass.getMethod("build").invoke(imageBuilder)
+        val inputCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        var mpImage: Any? = null
+        try {
+            val imageBuilder = imageBuilderClass.getConstructor(Bitmap::class.java).newInstance(inputCopy)
+            mpImage = imageBuilderClass.getMethod("build").invoke(imageBuilder)
+        } catch (t: Throwable) {
+            if (mpImage == null) inputCopy.recycle()
+            throw t
+        }
         var categoryMaskImage: Any? = null
         var foregroundMask: Bitmap? = null
         var primaryFailure: Throwable? = null
@@ -115,7 +122,7 @@ object RemasterModelSession {
             val segmentMethod = segmenter.javaClass.methods.firstOrNull { method ->
                 method.name == "segment" &&
                     method.parameterTypes.size == 1 &&
-                    method.parameterTypes[0].isAssignableFrom(mpImage.javaClass)
+                    method.parameterTypes[0].isAssignableFrom(mpImage!!.javaClass)
             } ?: error("segment 메서드를 찾을 수 없습니다.")
             val result = segmentMethod.invoke(segmenter, mpImage)
             val categoryMaskOptional = result.javaClass.methods.firstOrNull { method ->
@@ -200,7 +207,6 @@ object RemasterModelSession {
             return out
         } catch (t: Throwable) {
             primaryFailure = t
-            out?.recycle()
             throw t
         } finally {
             val cleanupFailures = mutableListOf<Throwable>()
@@ -213,9 +219,6 @@ object RemasterModelSession {
             }
             recycleAndCollect {
                 if (scaledMask != null && scaledMask !== rawMask) scaledMask.recycle()
-            }
-            recycleAndCollect {
-                rawMask.recycle()
             }
             if (cleanupFailures.isNotEmpty()) {
                 if (primaryFailure != null) {
