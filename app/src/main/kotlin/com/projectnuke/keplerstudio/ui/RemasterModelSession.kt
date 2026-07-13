@@ -108,27 +108,56 @@ object RemasterModelSession {
         val imageBuilderClass = Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
         val imageBuilder = imageBuilderClass.getConstructor(Bitmap::class.java).newInstance(bitmap)
         val mpImage = imageBuilderClass.getMethod("build").invoke(imageBuilder)
+        var categoryMaskImage: Any? = null
+        var foregroundMask: Bitmap? = null
+        var primaryFailure: Throwable? = null
         try {
             val segmentMethod = segmenter.javaClass.methods.firstOrNull { method ->
                 method.name == "segment" &&
                     method.parameterTypes.size == 1 &&
                     method.parameterTypes[0].isAssignableFrom(mpImage.javaClass)
-            } ?: error("segment 硫붿꽌?쒕? 李얠쓣 ???놁뒿?덈떎.")
+            } ?: error("segment 메서드를 찾을 수 없습니다.")
             val result = segmentMethod.invoke(segmenter, mpImage)
             val categoryMaskOptional = result.javaClass.methods.firstOrNull { method ->
                 method.name == "categoryMask" && method.parameterTypes.isEmpty()
-            }?.invoke(result) ?: error("category mask 寃곌낵媛 ?놁뒿?덈떎.")
+            }?.invoke(result) ?: error("category mask 결과가 없습니다.")
             val isPresent = categoryMaskOptional.javaClass.getMethod("isPresent").invoke(categoryMaskOptional) as Boolean
-            if (!isPresent) error("category mask媛 鍮꾩뼱 ?덉뒿?덈떎.")
-            val maskImage = categoryMaskOptional.javaClass.getMethod("get").invoke(categoryMaskOptional)
-            try {
-                val rawMask = extractBitmapFromMpImage(maskImage as Any)
-                return categoryBitmapToForegroundMask(rawMask, bitmap.width, bitmap.height)
-            } finally {
-                closeMpImage(maskImage)
-            }
+            if (!isPresent) error("category mask가 비어 있습니다.")
+            categoryMaskImage = categoryMaskOptional.javaClass.getMethod("get").invoke(categoryMaskOptional)
+            val rawMask = extractBitmapFromMpImage(categoryMaskImage as Any)
+            foregroundMask = categoryBitmapToForegroundMask(rawMask, bitmap.width, bitmap.height)
+            return foregroundMask
+        } catch (t: Throwable) {
+            primaryFailure = t
+            throw t
         } finally {
-            closeMpImage(mpImage)
+            val cleanupFailures = mutableListOf<Throwable>()
+            fun closeAndCollect(action: () -> Unit) {
+                try {
+                    action()
+                } catch (cleanup: Throwable) {
+                    cleanupFailures += cleanup
+                }
+            }
+            closeAndCollect {
+                if (categoryMaskImage != null) closeMpImage(categoryMaskImage)
+            }
+            closeAndCollect {
+                closeMpImage(mpImage)
+            }
+            if (cleanupFailures.isNotEmpty()) {
+                if (primaryFailure != null) {
+                    cleanupFailures.forEach(primaryFailure::addSuppressed)
+                    foregroundMask?.recycle()
+                } else {
+                    foregroundMask?.recycle()
+                    val cleanupFailure = cleanupFailures.first()
+                    cleanupFailures.drop(1).forEach(cleanupFailure::addSuppressed)
+                    throw cleanupFailure
+                }
+            } else if (primaryFailure != null) {
+                foregroundMask?.recycle()
+            }
         }
     }
 
@@ -141,13 +170,15 @@ object RemasterModelSession {
     }
 
     private fun categoryBitmapToForegroundMask(rawMask: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
-        val scaledMask = if (rawMask.width == targetWidth && rawMask.height == targetHeight) {
-            rawMask
-        } else {
-            Bitmap.createScaledBitmap(rawMask, targetWidth, targetHeight, false)
-        }
+        var scaledMask: Bitmap? = null
         var out: Bitmap? = null
+        var primaryFailure: Throwable? = null
         try {
+            scaledMask = if (rawMask.width == targetWidth && rawMask.height == targetHeight) {
+                rawMask
+            } else {
+                Bitmap.createScaledBitmap(rawMask, targetWidth, targetHeight, false)
+            }
             out = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
             val inRow = IntArray(targetWidth)
             val outRow = IntArray(targetWidth)
@@ -168,11 +199,37 @@ object RemasterModelSession {
             }
             return out
         } catch (t: Throwable) {
+            primaryFailure = t
             out?.recycle()
             throw t
         } finally {
-            if (scaledMask !== rawMask) scaledMask.recycle()
-            rawMask.recycle()
+            val cleanupFailures = mutableListOf<Throwable>()
+            fun recycleAndCollect(action: () -> Unit) {
+                try {
+                    action()
+                } catch (cleanup: Throwable) {
+                    cleanupFailures += cleanup
+                }
+            }
+            recycleAndCollect {
+                if (scaledMask != null && scaledMask !== rawMask) scaledMask.recycle()
+            }
+            recycleAndCollect {
+                rawMask.recycle()
+            }
+            if (cleanupFailures.isNotEmpty()) {
+                if (primaryFailure != null) {
+                    cleanupFailures.forEach(primaryFailure::addSuppressed)
+                    out?.recycle()
+                } else {
+                    out?.recycle()
+                    val cleanupFailure = cleanupFailures.first()
+                    cleanupFailures.drop(1).forEach(cleanupFailure::addSuppressed)
+                    throw cleanupFailure
+                }
+            } else if (primaryFailure != null) {
+                out?.recycle()
+            }
         }
     }
 
@@ -185,6 +242,7 @@ object RemasterModelSession {
             }?.invoke(image)
         }
     }
+
 }
 
 private class TfliteModelHandle(
