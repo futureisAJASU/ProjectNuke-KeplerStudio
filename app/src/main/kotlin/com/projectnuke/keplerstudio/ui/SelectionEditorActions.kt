@@ -464,11 +464,13 @@ private fun blendArgb(foreground: Int, background: Int, alpha: Float): Int {
 }
 
 private fun Bitmap.hasForegroundPixel(): Boolean {
+    val threshold = 8
     val row = IntArray(width)
     for (y in 0 until height) {
         getPixels(row, 0, width, 0, y, width, 1)
         for (pixel in row) {
-            if (pixel != 0) return true
+            val red = (pixel ushr 16) and 0xff
+            if (red > threshold) return true
         }
     }
     return false
