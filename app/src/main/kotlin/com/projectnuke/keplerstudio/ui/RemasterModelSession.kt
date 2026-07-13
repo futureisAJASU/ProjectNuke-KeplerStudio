@@ -108,20 +108,28 @@ object RemasterModelSession {
         val imageBuilderClass = Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
         val imageBuilder = imageBuilderClass.getConstructor(Bitmap::class.java).newInstance(bitmap)
         val mpImage = imageBuilderClass.getMethod("build").invoke(imageBuilder)
-        val segmentMethod = segmenter.javaClass.methods.firstOrNull { method ->
-            method.name == "segment" &&
-                method.parameterTypes.size == 1 &&
-                method.parameterTypes[0].isAssignableFrom(mpImage.javaClass)
-        } ?: error("segment 메서드를 찾을 수 없습니다.")
-        val result = segmentMethod.invoke(segmenter, mpImage)
-        val categoryMaskOptional = result.javaClass.methods.firstOrNull { method ->
-            method.name == "categoryMask" && method.parameterTypes.isEmpty()
-        }?.invoke(result) ?: error("category mask 결과가 없습니다.")
-        val isPresent = categoryMaskOptional.javaClass.getMethod("isPresent").invoke(categoryMaskOptional) as Boolean
-        if (!isPresent) error("category mask가 비어 있습니다.")
-        val maskImage = categoryMaskOptional.javaClass.getMethod("get").invoke(categoryMaskOptional)
-        val rawMask = extractBitmapFromMpImage(maskImage as Any)
-        return categoryBitmapToForegroundMask(rawMask, bitmap.width, bitmap.height)
+        try {
+            val segmentMethod = segmenter.javaClass.methods.firstOrNull { method ->
+                method.name == "segment" &&
+                    method.parameterTypes.size == 1 &&
+                    method.parameterTypes[0].isAssignableFrom(mpImage.javaClass)
+            } ?: error("segment 硫붿꽌?쒕? 李얠쓣 ???놁뒿?덈떎.")
+            val result = segmentMethod.invoke(segmenter, mpImage)
+            val categoryMaskOptional = result.javaClass.methods.firstOrNull { method ->
+                method.name == "categoryMask" && method.parameterTypes.isEmpty()
+            }?.invoke(result) ?: error("category mask 寃곌낵媛 ?놁뒿?덈떎.")
+            val isPresent = categoryMaskOptional.javaClass.getMethod("isPresent").invoke(categoryMaskOptional) as Boolean
+            if (!isPresent) error("category mask媛 鍮꾩뼱 ?덉뒿?덈떎.")
+            val maskImage = categoryMaskOptional.javaClass.getMethod("get").invoke(categoryMaskOptional)
+            try {
+                val rawMask = extractBitmapFromMpImage(maskImage as Any)
+                return categoryBitmapToForegroundMask(rawMask, bitmap.width, bitmap.height)
+            } finally {
+                closeMpImage(maskImage)
+            }
+        } finally {
+            closeMpImage(mpImage)
+        }
     }
 
     private fun extractBitmapFromMpImage(maskImage: Any): Bitmap {
@@ -138,26 +146,44 @@ object RemasterModelSession {
         } else {
             Bitmap.createScaledBitmap(rawMask, targetWidth, targetHeight, false)
         }
-        val out = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-        val inRow = IntArray(targetWidth)
-        val outRow = IntArray(targetWidth)
-        for (y in 0 until targetHeight) {
-            scaledMask.getPixels(inRow, 0, targetWidth, 0, y, targetWidth, 1)
-            for (x in 0 until targetWidth) {
-                val pixel = inRow[x]
-                val alpha = (pixel ushr 24) and 0xff
-                val r = (pixel ushr 16) and 0xff
-                val g = (pixel ushr 8) and 0xff
-                val b = pixel and 0xff
-                val rgbMax = max(r, max(g, b))
-                val category = if (rgbMax > 0) rgbMax else if (alpha in 1..249) alpha else 0
-                val mask = if (category > 0) 255 else 0
-                outRow[x] = -0x1000000 or (mask shl 16) or (mask shl 8) or mask
+        var out: Bitmap? = null
+        try {
+            out = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+            val inRow = IntArray(targetWidth)
+            val outRow = IntArray(targetWidth)
+            for (y in 0 until targetHeight) {
+                scaledMask.getPixels(inRow, 0, targetWidth, 0, y, targetWidth, 1)
+                for (x in 0 until targetWidth) {
+                    val pixel = inRow[x]
+                    val alpha = (pixel ushr 24) and 0xff
+                    val r = (pixel ushr 16) and 0xff
+                    val g = (pixel ushr 8) and 0xff
+                    val b = pixel and 0xff
+                    val rgbMax = max(r, max(g, b))
+                    val category = if (rgbMax > 0) rgbMax else if (alpha in 1..249) alpha else 0
+                    val mask = if (category > 0) 255 else 0
+                    outRow[x] = -0x1000000 or (mask shl 16) or (mask shl 8) or mask
+                }
+                out.setPixels(outRow, 0, targetWidth, 0, y, targetWidth, 1)
             }
-            out.setPixels(outRow, 0, targetWidth, 0, y, targetWidth, 1)
+            return out
+        } catch (t: Throwable) {
+            out?.recycle()
+            throw t
+        } finally {
+            if (scaledMask !== rawMask) scaledMask.recycle()
+            rawMask.recycle()
         }
-        if (scaledMask !== rawMask) scaledMask.recycle()
-        return out
+    }
+
+    private fun closeMpImage(image: Any?) {
+        when (image) {
+            null -> Unit
+            is AutoCloseable -> image.close()
+            else -> image.javaClass.methods.firstOrNull { method ->
+                method.name == "close" && method.parameterTypes.isEmpty()
+            }?.invoke(image)
+        }
     }
 }
 
