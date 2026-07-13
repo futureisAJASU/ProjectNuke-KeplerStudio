@@ -78,12 +78,19 @@ fun EditorViewModel.applyCropTransform() {
     var undo: EditorHistorySnapshot? = null
     var previewInput: android.graphics.Bitmap? = null
     var originalInput: android.graphics.Bitmap? = null
-    var masks: List<SelectionLayer> = emptyList()
+    val masks = ArrayList<SelectionLayer>(state.selectionLayers.size)
     try {
         undo = captureCurrentHistorySnapshot() ?: return
         previewInput = preview?.copyOrThrow()
         originalInput = if (original == null || original === preview) previewInput else original.copyOrThrow()
-        masks = state.selectionLayers.map { it.copy(bitmap = it.bitmap.copyOrThrow()) }
+        state.selectionLayers.forEach { layer ->
+            try {
+                masks += layer.copy(bitmap = layer.bitmap.copyOrThrow())
+            } catch (t: Throwable) {
+                masks.forEach { created -> created.bitmap.takeIf { !it.isRecycled }?.recycle() }
+                throw t
+            }
+        }
     } catch (t: Throwable) {
         previewInput?.takeIf { !it.isRecycled }?.recycle()
         if (originalInput !== previewInput) originalInput?.takeIf { !it.isRecycled }?.recycle()
@@ -103,7 +110,18 @@ fun EditorViewModel.applyCropTransform() {
         try {
             renderedOriginal = withContext(Dispatchers.Default) { originalInput?.let { renderCropTransform(it, crop) } }
             renderedPreview = if (previewInput === originalInput) renderedOriginal else withContext(Dispatchers.Default) { previewInput?.let { renderCropTransform(it, crop) } }
-            renderedMasks = withContext(Dispatchers.Default) { masks.map { it.copy(bitmap = renderCropTransform(it.bitmap, crop)) } }
+            renderedMasks = withContext(Dispatchers.Default) {
+                val transformed = ArrayList<SelectionLayer>(masks.size)
+                try {
+                    masks.forEach { layer ->
+                        transformed += layer.copy(bitmap = renderCropTransform(layer.bitmap, crop))
+                    }
+                    transformed
+                } catch (t: Throwable) {
+                    transformed.forEach { created -> created.bitmap.takeIf { !it.isRecycled }?.recycle() }
+                    throw t
+                }
+            }
             if (!isManagedEditCurrent(token, nextRevision) || !isCropOperationCurrent(cropToken)) return@launchManagedEdit
             updateUiState { it.copy(originalPreviewBitmap = renderedOriginal ?: renderedPreview, previewBitmap = renderedPreview ?: renderedOriginal, baseBitmapDirty = true, baseContentToken = java.util.UUID.randomUUID().toString(), cropState = CropState(), selectionLayers = checkNotNull(renderedMasks), isBusy = false, message = "변경사항을 적용했습니다.") }
             renderedOriginal = null

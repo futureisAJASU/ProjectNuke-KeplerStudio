@@ -33,16 +33,19 @@ object RemasterModelSession {
     private var closeableModel: AutoCloseable? = null
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
+    private var commandGeneration: Long = 0L
     var isModelLoading by mutableStateOf(false)
         private set
     var isInferring by mutableStateOf(false)
         private set
 
     fun load(context: Context, candidate: RemasterModelCandidate) {
+        val generation = ++commandGeneration
         isModelLoading = true
         isModelLoaded = false
         modelScope.launch {
             modelMutex.withLock {
+                if (generation != commandGeneration) return@withLock
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 activeModel = candidate
@@ -110,9 +113,11 @@ object RemasterModelSession {
     }
 
     fun unload() {
+        val generation = ++commandGeneration
         isModelLoading = true
         modelScope.launch {
             modelMutex.withLock {
+                if (generation != commandGeneration) return@withLock
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 activeModel = null
