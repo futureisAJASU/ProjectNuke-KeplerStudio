@@ -329,7 +329,7 @@ private fun savePresets(context: Context, presets: List<StoredPreset>) {
 
 private fun mergePresets(current: List<StoredPreset>, incoming: List<StoredPreset>): List<StoredPreset> {
     val merged = LinkedHashMap<String, StoredPreset>()
-    (incoming + current).forEach { preset ->
+    (current + incoming).forEach { preset ->
         merged[preset.name.lowercase(Locale.ROOT)] = preset
     }
     return merged.values.sortedByDescending { it.timestampMillis }

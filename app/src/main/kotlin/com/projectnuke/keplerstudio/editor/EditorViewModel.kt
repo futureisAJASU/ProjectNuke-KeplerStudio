@@ -56,6 +56,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal var selectionLivePreviewJob: Job? = null
     private var draftSaveJob: Job? = null
     private val draftSaveMutex = Mutex()
+    /** Invalidates every queued draft save/restore when the document changes. */
+    private var draftOperationEpoch: Long = 0L
+    private var managedEditJob: Job? = null
+    private var managedEditToken: Long = 0L
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
     private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
@@ -104,6 +108,42 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             delay(150L)
             if (!bitmap.isRecycled && !isBitmapRetainedByCurrentState(bitmap)) bitmap.recycle()
         }
+    }
+
+    /** Starts a superseding bitmap/model edit. Callers must gate adoption with [isManagedEditCurrent]. */
+    internal fun launchManagedEdit(block: suspend (Long) -> Unit): Job {
+        managedEditJob?.cancel()
+        val token = ++managedEditToken
+        return viewModelScope.launch {
+            try {
+                block(token)
+            } finally {
+                if (managedEditToken == token) managedEditJob = null
+            }
+        }.also { managedEditJob = it }
+    }
+
+    internal fun isManagedEditCurrent(token: Long, revision: Int): Boolean =
+        managedEditToken == token && _uiState.value.revision == revision
+
+    private fun invalidateManagedEdits() {
+        managedEditToken += 1L
+        managedEditJob?.cancel()
+        managedEditJob = null
+    }
+
+    private fun invalidateDraftOperations() {
+        draftOperationEpoch += 1L
+        restoreDraftToken += 1L
+        draftSaveJob?.cancel()
+    }
+
+    private fun isDraftPayloadCurrent(payload: DraftSavePayload): Boolean {
+        val current = _uiState.value
+        return payload.epoch == draftOperationEpoch &&
+            payload.baseContentToken == current.baseContentToken &&
+            sameCanonicalPath(payload.sourcePath, current.sourcePath) &&
+            sameCanonicalPath(payload.draftSourcePath, current.draftSourcePath)
     }
 
     private fun isBitmapRetainedByCurrentState(bitmap: Bitmap): Boolean {
@@ -169,11 +209,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun persistDraftSnapshotInternal(): Boolean {
         val context = getApplication<Application>()
         val draftState = _uiState.value
+        val draftEpoch = draftOperationEpoch
         val payload = try {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
                     withContext(Dispatchers.Default) {
-                        createDraftSavePayload(context, draftState)
+                        createDraftSavePayload(context, draftState, draftEpoch)
                     }
                 }
             }
@@ -189,7 +230,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val saved = try {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
-                    saveDraftSnapshot(context, payload)
+                    saveDraftSnapshot(context, payload) { isDraftPayloadCurrent(payload) }
                 }
             }
         } catch (ce: CancellationException) {
@@ -249,6 +290,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openImage(uri: Uri) {
         abortPendingParameterEdit()
+        invalidateManagedEdits()
+        invalidateDraftOperations()
         renderJob?.cancel()
         exportJob?.cancel()
         selectionLivePreviewJob?.cancel()
@@ -767,6 +810,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val context = getApplication<Application>()
         viewModelScope.launch {
             try {
+                invalidateDraftOperations()
+                invalidateManagedEdits()
                 draftSaveJob?.cancelAndJoin()
                 val clearResult = withContext(Dispatchers.IO) {
                     draftSaveMutex.withLock {
@@ -1575,6 +1620,9 @@ private fun historySignedValue(value: Float): String =
 private fun identityBitmapSet(): MutableSet<Bitmap> =
     Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
 
+internal fun Bitmap.copyOrThrow(config: Bitmap.Config = Bitmap.Config.ARGB_8888, mutable: Boolean = true): Bitmap =
+    copy(config, mutable) ?: throw IllegalStateException("bitmap copy failed")
+
 private fun trimHistory(stack: ArrayDeque<EditorHistorySnapshot>) {
     while (stack.size > EDITOR_HISTORY_MAX) {
         stack.removeFirst().recycleBitmaps()
@@ -2361,6 +2409,7 @@ private data class DraftClearResult(
 )
 
 private data class DraftSavePayload(
+    val epoch: Long = Long.MIN_VALUE,
     val sourcePath: String?,
     val draftSourcePath: String?,
     val baseContentToken: String,
@@ -2405,17 +2454,18 @@ private fun saveDraftSnapshotSafely(context: Context, state: EditorUiState): Dra
     }
 }
 
-private fun createDraftSavePayload(context: Context, state: EditorUiState): DraftSavePayload {
+private fun createDraftSavePayload(context: Context, state: EditorUiState, epoch: Long = Long.MIN_VALUE): DraftSavePayload {
     val reusableSource = isReusableCommittedDraftSource(context, state)
     val dirtyBitmapCopy = when {
         reusableSource -> null
         !state.baseBitmapDirty && state.sourcePath != null -> null
-        else -> (state.originalPreviewBitmap ?: state.previewBitmap)?.copy(Bitmap.Config.ARGB_8888, true)
+        else -> (state.originalPreviewBitmap ?: state.previewBitmap)?.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     }
     if (state.baseBitmapDirty && dirtyBitmapCopy == null) {
         error("draft save bitmap is missing")
     }
     return DraftSavePayload(
+        epoch = epoch,
         sourcePath = state.sourcePath,
         draftSourcePath = state.draftSourcePath,
         baseContentToken = state.baseContentToken,
@@ -2429,7 +2479,11 @@ private fun createDraftSavePayload(context: Context, state: EditorUiState): Draf
     )
 }
 
-private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): DraftSaveResult? {
+private fun saveDraftSnapshot(
+    context: Context,
+    payload: DraftSavePayload,
+    isCurrent: () -> Boolean = { true }
+): DraftSaveResult? {
     val draftSource = when {
         payload.draftSourcePath?.let(::File)?.isFile == true &&
             sameCanonicalPath(
@@ -2445,11 +2499,19 @@ private fun saveDraftSnapshot(context: Context, payload: DraftSavePayload): Draf
         payload.dirtyBitmapCopy != null -> persistDraftBitmapFile(context, payload.dirtyBitmapCopy)?.let { DraftSourceResult(it, changed = true) }
         else -> null
     } ?: return null
+    if (!isCurrent()) {
+        if (draftSource.changed) draftSource.file.delete()
+        return null
+    }
     val sourceIsOwned = isOwnedDraftSource(context, draftSource.file)
     val savedAt = System.currentTimeMillis()
     val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
     val previousDraftPreferences = snapshotDraftPreferences(preferences)
     val commitSucceeded = try {
+        if (!isCurrent()) {
+            if (draftSource.changed) draftSource.file.delete()
+            return null
+        }
         preferences.edit()
         .putString(KEY_DRAFT_SOURCE, draftSource.file.absolutePath)
         .putFloat(KEY_DRAFT_EXPOSURE, payload.params.exposure)
