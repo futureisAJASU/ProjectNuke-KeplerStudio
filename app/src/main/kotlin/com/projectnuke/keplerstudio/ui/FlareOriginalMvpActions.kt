@@ -8,6 +8,7 @@ import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
+import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -64,12 +65,12 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
             val adoptedOriginal = nextOriginal ?: error("missing flare original")
             val adoptedPreview = nextPreview ?: error("missing flare preview")
             if (isManagedEditCurrent(operationToken, nextRevision)) {
-                updateUiState {
+                updateUiStateAndRecycleReplaced {
                     it.copy(
                         originalPreviewBitmap = adoptedOriginal,
                         previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
-                        baseContentToken = java.util.UUID.randomUUID().toString(),
+                        baseContentToken = newBaseContentToken(),
                         isBusy = false,
                         message = "규칙 기반 보정으로 번짐을 완화했습니다.",
                         flareGuardRuntimeStatus = "규칙 기반 보정으로 번짐을 완화했습니다."

@@ -77,33 +77,6 @@ object RemasterModelSession {
                 }
             }
         }
-        return
-        unload()
-        activeModel = candidate
-        if (!hasModelAsset(context, candidate.assetPath)) {
-            isModelLoaded = false
-            statusText = "${candidate.title}: 모델 파일 없음"
-            return
-        }
-
-        runCatching {
-            closeableModel = when (candidate.id) {
-                "edge_masker" -> createImageSegmenter(context, candidate.assetPath)
-                "universal_balancer", "flare_masker" -> TfliteModelHandle(createTfliteInterpreter(context, candidate.assetPath))
-                else -> null
-            }
-        }.onSuccess {
-            isModelLoaded = closeableModel != null
-            statusText = if (closeableModel != null) {
-                "${candidate.title}: 사용 가능"
-            } else {
-                "${candidate.title}: 모델 파일은 있지만 실행 경로는 준비 중입니다."
-            }
-        }.onFailure {
-            closeableModel = null
-            isModelLoaded = false
-            statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
-        }
     }
 
     suspend fun createForegroundMask(bitmap: Bitmap): Bitmap? = modelMutex.withLock {
@@ -131,12 +104,6 @@ object RemasterModelSession {
                 statusText = "로드된 모델이 없습니다."
             }
         }
-        return
-        runCatching { closeableModel?.close() }
-        closeableModel = null
-        activeModel = null
-        isModelLoaded = false
-        statusText = "로드된 모델이 없습니다."
     }
 
     fun hasModelAsset(context: Context, assetPath: String): Boolean {

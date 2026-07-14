@@ -8,6 +8,7 @@ import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
+import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -72,14 +73,14 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             if (isManagedEditCurrent(operationToken, nextRevision)) {
                 val adoptedOriginal = renderedOriginal ?: error("missing mask-aware original")
                 val adoptedPreview = renderedPreview ?: error("missing mask-aware preview")
-                updateUiState {
+                updateUiStateAndRecycleReplaced {
                     it.copy(
                         // The mask-aware composite is now baked into the base bitmap; neutral params avoid export double-application.
                         params = EditParams(),
                         originalPreviewBitmap = adoptedOriginal,
                         previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
-                        baseContentToken = java.util.UUID.randomUUID().toString(),
+                        baseContentToken = newBaseContentToken(),
                         isBusy = false,
                         message = "Edge Masker 기반 마스크 보정을 적용했습니다."
                     )

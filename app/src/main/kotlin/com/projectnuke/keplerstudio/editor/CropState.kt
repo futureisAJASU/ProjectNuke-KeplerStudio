@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import kotlin.math.max
 import kotlin.math.min
+import org.json.JSONObject
 
 enum class CropAspectRatio(val label: String, val ratio: Float?) {
     Free("자유", null),
@@ -26,6 +27,32 @@ data class CropState(
     val cropWidth: Float get() = (cropRight - cropLeft).coerceIn(0f, 1f)
     val cropHeight: Float get() = (cropBottom - cropTop).coerceIn(0f, 1f)
 }
+
+internal fun CropState.toJsonObject(): JSONObject = JSONObject().apply {
+    put("aspectRatio", aspectRatio.name)
+    put("cropLeft", cropLeft)
+    put("cropTop", cropTop)
+    put("cropRight", cropRight)
+    put("cropBottom", cropBottom)
+    put("rotationDegrees", rotationDegrees)
+    put("straightenDegrees", straightenDegrees)
+    put("flipHorizontal", flipHorizontal)
+}
+
+internal fun parseCropStateFromJson(json: JSONObject): CropState? = runCatching {
+    val aspectName = json.optString("aspectRatio", CropAspectRatio.Original.name)
+    val aspect = runCatching { CropAspectRatio.valueOf(aspectName) }.getOrDefault(CropAspectRatio.Original)
+    CropState(
+        aspectRatio = aspect,
+        cropLeft = json.optDouble("cropLeft", 0.0).toFloat(),
+        cropTop = json.optDouble("cropTop", 0.0).toFloat(),
+        cropRight = json.optDouble("cropRight", 1.0).toFloat(),
+        cropBottom = json.optDouble("cropBottom", 1.0).toFloat(),
+        rotationDegrees = json.optInt("rotationDegrees", 0),
+        straightenDegrees = json.optDouble("straightenDegrees", 0.0).toFloat(),
+        flipHorizontal = json.optBoolean("flipHorizontal", false)
+    )
+}.getOrNull()
 
 private fun normalizeRange(a: Float, b: Float, minSize: Float): Pair<Float, Float> {
     val safeMinSize = minSize.coerceIn(0f, 1f)

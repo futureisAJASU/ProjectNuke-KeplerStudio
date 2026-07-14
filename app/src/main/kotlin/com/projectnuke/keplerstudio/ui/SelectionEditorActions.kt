@@ -8,6 +8,7 @@ import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
@@ -290,14 +291,14 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
             if (isManagedEditCurrent(operationToken, nextRevision)) {
                 val adoptedOriginal = renderedOriginal ?: error("missing selection original")
                 val adoptedPreview = renderedPreview ?: error("missing selection preview")
-                updateUiState {
+                updateUiStateAndRecycleReplaced {
                     it.copy(
                         // The selection composite is baked into the base bitmap; neutral params avoid export double-application.
                         params = EditParams(),
                         originalPreviewBitmap = adoptedOriginal,
                         previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
-                        baseContentToken = java.util.UUID.randomUUID().toString(),
+                        baseContentToken = newBaseContentToken(),
                         isBusy = false,
                         message = "선택한 마스크 보정을 적용했습니다."
                     )

@@ -9,6 +9,7 @@ import com.projectnuke.keplerstudio.editor.centeredCropForAspect
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.estimateAutoStraightenDegreesV0
 import com.projectnuke.keplerstudio.editor.normalized
+import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.renderCropTransform
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
@@ -126,7 +127,7 @@ fun EditorViewModel.applyCropTransform() {
                 }
             }
             if (!isManagedEditCurrent(token, nextRevision) || !isCropOperationCurrent(cropToken)) return@launchManagedEdit
-            updateUiState { it.copy(originalPreviewBitmap = renderedOriginal ?: renderedPreview, previewBitmap = renderedPreview ?: renderedOriginal, baseBitmapDirty = true, baseContentToken = java.util.UUID.randomUUID().toString(), cropState = CropState(), selectionLayers = checkNotNull(renderedMasks), isBusy = false, message = "변경사항을 적용했습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(originalPreviewBitmap = renderedOriginal ?: renderedPreview, previewBitmap = renderedPreview ?: renderedOriginal, baseBitmapDirty = true, baseContentToken = newBaseContentToken(), cropState = CropState(), selectionLayers = checkNotNull(renderedMasks), isBusy = false, message = "변경사항을 적용했습니다.") }
             renderedOriginal = null
             renderedPreview = null
             renderedMasks = null

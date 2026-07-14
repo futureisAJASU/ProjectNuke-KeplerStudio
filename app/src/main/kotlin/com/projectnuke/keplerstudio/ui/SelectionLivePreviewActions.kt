@@ -15,20 +15,20 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> EditParams) {
-    var current = prepareForExternalEdit()
-    var activeId = current.activeSelectionLayerId
-    var base = current.originalPreviewBitmap ?: current.previewBitmap
+    val initial = prepareForExternalEdit()
+    var activeId = initial.activeSelectionLayerId
+    var base = initial.originalPreviewBitmap ?: initial.previewBitmap
     if (activeId == null || base == null) {
         updateUiState { it.copy(message = "보정할 선택 마스크가 없습니다.") }
         return
     }
 
-    if (!beginSelectionParamGesture()) {
+    if (!startSelectionParamGesture()) {
         updateUiState { it.copy(message = "선택 마스크 편집 기록을 준비하지 못했습니다.") }
         return
     }
     val transaction = currentSelectionParamTransaction() ?: return
-    current = prepareForExternalEdit()
+    val current = uiState.value
     activeId = current.activeSelectionLayerId
     base = current.originalPreviewBitmap ?: current.previewBitmap
     if (activeId == null || base == null || transaction.activeSelectionLayerId != activeId) return
@@ -84,7 +84,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
                     )
                 }
                 preview = null
-                markSelectionPreviewSucceeded(transaction, previewToken)
+                markSelectionPreviewSucceeded(transaction, previewToken, nextRevision, baseToken, activeId)
             } else {
                 preview?.recycle()
                 preview = null

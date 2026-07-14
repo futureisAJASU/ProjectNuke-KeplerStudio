@@ -91,13 +91,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced(transform)
     }
 
-    private fun updateUiStateAndRecycleReplaced(transform: (EditorUiState) -> EditorUiState) {
+    /** Atomically update UI state; recycles displaced Bitmaps retained only by the previous state. */
+    internal fun updateUiStateAndRecycleReplaced(transform: (EditorUiState) -> EditorUiState) {
         var previousState: EditorUiState? = null
         var nextState: EditorUiState? = null
         _uiState.update { current ->
             previousState = current
             transform(current).also { nextState = it }
         }
+        val prev = previousState ?: return
+        val next = nextState ?: return
+        releaseOrphanedBitmaps(prev, next)
+    }
+
+    private fun releaseOrphanedBitmaps(previous: EditorUiState, next: EditorUiState) {
+        val stillRetained = identityBitmapSet()
+        next.previewBitmap?.let(stillRetained::add)
+        next.originalPreviewBitmap?.let(stillRetained::add)
+        next.selectionLayers.forEach { stillRetained.add(it.bitmap) }
+        val toRelease = ArrayList<Bitmap>(8)
+        previous.previewBitmap?.takeIf { it !in stillRetained && !it.isRecycled }?.let(toRelease::add)
+        previous.originalPreviewBitmap?.takeIf { it !in stillRetained && !it.isRecycled }?.let(toRelease::add)
+        previous.selectionLayers.forEach { layer ->
+            if (layer.bitmap !in stillRetained && !layer.bitmap.isRecycled) toRelease.add(layer.bitmap)
+        }
+        toRelease.forEach { it.recycle() }
     }
 
     /** Starts a superseding bitmap/model edit. Callers must gate adoption with [isManagedEditCurrent]. */
@@ -131,6 +149,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val token = ++selectionPreviewCounter
         transaction.latestPreviewToken = token
         transaction.finalPreviewToken = null
+        transaction.finalPreviewRevision = null
+        transaction.finalPreviewBaseToken = null
+        transaction.finalPreviewLayerId = null
+        transaction.succeeded = false
         transaction.previewJob?.cancel()
         return token
     }
@@ -171,10 +193,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return beginSelectionParamGesture()
     }
 
-    internal fun markSelectionPreviewSucceeded(transaction: SelectionParamTransaction, token: Long) {
+    internal fun markSelectionPreviewSucceeded(
+        transaction: SelectionParamTransaction,
+        token: Long,
+        revision: Int,
+        baseToken: String,
+        activeId: String?
+    ) {
         if (selectionParamTransaction !== transaction) return
         if (transaction.latestPreviewToken != token) return
         transaction.finalPreviewToken = token
+        transaction.finalPreviewRevision = revision
+        transaction.finalPreviewBaseToken = baseToken
+        transaction.finalPreviewLayerId = activeId
         transaction.succeeded = true
     }
 
@@ -214,30 +245,55 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun settleSelectionParamTransaction(transaction: SelectionParamTransaction) {
         if (selectionParamTransaction !== transaction) return
+        if (transaction.settled) return
+        transaction.settled = true
         val state = _uiState.value
-        val previewOwned = transaction.succeeded &&
-            transaction.finalPreviewToken != null &&
-            transaction.latestPreviewToken == transaction.finalPreviewToken &&
+        val finalToken = transaction.finalPreviewToken
+        val finalRevision = transaction.finalPreviewRevision
+        val finalBaseToken = transaction.finalPreviewBaseToken
+        val finalLayerId = transaction.finalPreviewLayerId
+        val previewValid = transaction.succeeded &&
+            finalToken != null &&
+            transaction.latestPreviewToken == finalToken &&
+            finalRevision != null &&
+            finalBaseToken != null &&
+            finalLayerId != null &&
             transaction.previewJob?.isActive != true
         val stillCurrent = !shuttingDown &&
             state.baseContentToken == transaction.baseContentToken &&
             state.activeSelectionLayerId == transaction.activeSelectionLayerId
-        if (previewOwned && stillCurrent) {
-            commitUndoSnapshot(transaction.snapshot, clearRedo = true)
+        if (previewValid && stillCurrent &&
+            state.revision == finalRevision &&
+            state.baseContentToken == finalBaseToken &&
+            state.activeSelectionLayerId == finalLayerId) {
+            if (!transaction.committed) {
+                transaction.committed = true
+                commitUndoSnapshot(transaction.snapshot, clearRedo = true)
+            }
             forceDraftSaveAsync()
             clearSelectionParamTransaction(transaction)
         } else if (stillCurrent && !transaction.hasOptimisticLiveParams(state)) {
             recycleHistorySnapshot(transaction.snapshot)
             clearSelectionParamTransaction(transaction)
         } else {
+            transaction.settled = false
             restoreSelectionParamTransaction(transaction)
         }
     }
 
     private fun restoreSelectionParamTransaction(transaction: SelectionParamTransaction) {
         if (selectionParamTransaction !== transaction) return
-        if (!transaction.committed) recycleHistorySnapshot(transaction.snapshot)
+        if (transaction.committed) {
+            clearSelectionParamTransaction(transaction)
+            return
+        }
+        if (shuttingDown) {
+            recycleHistorySnapshot(transaction.snapshot)
+            clearSelectionParamTransaction(transaction)
+            return
+        }
         restoreSnapshotWithoutHistory(transaction.snapshot)
+        recycleHistorySnapshot(transaction.snapshot)
         clearSelectionParamTransaction(transaction)
     }
 
@@ -256,12 +312,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         clearSelectionParamTransaction(selectionParamTransaction ?: return)
     }
 
+    internal fun negateBrushStrokeDuringShutdownIfPresent() {
+        val snapshot = brushingSnapshot
+        if (snapshot == null) return
+        brushingSnapshot = null
+        brushLayerId = null
+        brushBaseToken = null
+        brushChanged = false
+        recycleHistorySnapshot(snapshot)
+    }
+
     internal fun invalidateSelectionPreview() {
         settleSelectionParamTransactionForSupersession()
         cancelBrushStroke()
     }
 
     internal fun beginBrushStroke(): Boolean {
+        if (shuttingDown) return false
         abortPendingParameterEdit()
         settleSelectionParamTransactionForSupersession()
         if (brushingSnapshot != null) return true
@@ -311,6 +378,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun finishBrushStroke() {
         val snapshot = brushingSnapshot ?: return
+        if (shuttingDown) {
+            brushingSnapshot = null
+            brushLayerId = null
+            brushBaseToken = null
+            brushChanged = false
+            recycleHistorySnapshot(snapshot)
+            return
+        }
         if (!isBrushStrokeCurrent(brushLayerId)) {
             cancelBrushStroke()
             return
@@ -335,6 +410,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         brushLayerId = null
         brushBaseToken = null
         brushChanged = false
+        if (shuttingDown) {
+            recycleHistorySnapshot(snapshot)
+            return
+        }
         restoreSnapshotWithoutHistory(snapshot)
     }
 
@@ -1820,10 +1899,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         exportJob?.cancel()
         invalidateSelectionPreview()
+        abortPendingParameterEdit()
         paramUndoWindowJob?.cancel()
         cropJob?.cancel()
+        transactionFinishJob?.cancel()
         releaseNativeSession()
-        val state = _uiState.value
         clearEditHistory()
         super.onCleared()
     }
@@ -1863,22 +1943,25 @@ internal class SelectionParamTransaction(
 ) {
     var latestPreviewToken: Long = 0L
     var finalPreviewToken: Long? = null
+    var finalPreviewRevision: Int? = null
+    var finalPreviewBaseToken: String? = null
+    var finalPreviewLayerId: String? = null
     var previewJob: Job? = null
     var succeeded: Boolean = false
     var committed: Boolean = false
+    var settled: Boolean = false
     @Volatile var finished: Boolean = false
     @Volatile var finishJobRef: Job? = null
 
     fun hasOptimisticLiveParams(state: EditorUiState): Boolean {
-        val layer = state.selectionLayers.firstOrNull { it.id == activeSelectionLayerId } ?: return false
-        return layer.localParams != snapshot.params
+        if (activeSelectionLayerId == null) return false
+        val liveLayer = state.selectionLayers.firstOrNull { it.id == activeSelectionLayerId } ?: return true
+        val snapshotLayer = snapshot.selectionLayers.firstOrNull { it.id == activeSelectionLayerId } ?: return true
+        return liveLayer.localParams != snapshotLayer.localParams
     }
 }
 
 private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
-    var previewCopy: Bitmap? = null
-    var originalCopy: Bitmap? = null
-    val selectionCopies = ArrayList<SelectionLayer>(selectionLayers.size)
     var previewCopy: Bitmap? = null
     var originalCopy: Bitmap? = null
     val selectionCopies = ArrayList<SelectionLayer>(selectionLayers.size)
@@ -2209,7 +2292,7 @@ private fun persistDraftSourceFile(context: Context, sourcePath: String): File? 
     return generation
 }
 
-private fun newBaseContentToken(): String = UUID.randomUUID().toString()
+internal fun newBaseContentToken(): String = UUID.randomUUID().toString()
 
 private fun persistDraftSourceFileIfNeeded(context: Context, sourcePath: String): DraftSourceResult? {
     val source = File(sourcePath).takeIf { it.isFile } ?: return null
@@ -2814,7 +2897,18 @@ private data class DraftSavePayload(
     val exportFormat: ExportFormat,
     val exportResolution: ExportResolution,
     val presetLook: PresetColorLook?,
-    val activeQuickEffects: List<ActiveQuickEffect>
+    val activeQuickEffects: List<ActiveQuickEffect>,
+    val cropState: CropState = CropState(),
+    val selectionLayers: List<SelectionLayer> = emptyList(),
+    val activeSelectionLayerId: String? = null,
+    val selectionPaintSettings: SelectionPaintSettings = SelectionPaintSettings(),
+    val showSelectionOverlay: Boolean = true,
+    val noiseEngine: NoiseEngine = NoiseEngine.FastEdgeAware,
+    val detailEngine: DetailEngine = DetailEngine.MaskedUnsharp,
+    val toneEngine: ToneEngine = ToneEngine.HistogramAuto,
+    val hazeEngine: DehazeEngine = DehazeEngine.FastContrast,
+    val flareGuardRuntimeStatus: String? = null,
+    val originalSourcePath: String? = null
 )
 
 private data class DraftSourceResult(
@@ -2870,7 +2964,18 @@ private fun createDraftSavePayload(context: Context, state: EditorUiState, epoch
         exportFormat = state.exportFormat,
         exportResolution = state.exportResolution,
         presetLook = state.presetLook,
-        activeQuickEffects = state.activeQuickEffects
+        activeQuickEffects = state.activeQuickEffects,
+        cropState = state.cropState,
+        selectionLayers = state.selectionLayers,
+        activeSelectionLayerId = state.activeSelectionLayerId,
+        selectionPaintSettings = state.selectionPaintSettings,
+        showSelectionOverlay = state.showSelectionOverlay,
+        noiseEngine = state.noiseEngine,
+        detailEngine = state.detailEngine,
+        toneEngine = state.toneEngine,
+        hazeEngine = state.hazeEngine,
+        flareGuardRuntimeStatus = state.flareGuardRuntimeStatus,
+        originalSourcePath = state.sourcePath
     )
 }
 
@@ -2949,6 +3054,16 @@ private fun saveDraftSnapshot(
     }
     if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
     if (sourceIsOwned) deleteObsoleteDraftSources(context, draftSource.file, payload.sourcePath)
+    runCatching {
+        val genBitmap = if (payload.baseBitmapDirty) payload.dirtyBitmapCopy else null
+        persistDraftGenerationInternal(
+            context = context,
+            payload = payload,
+            draftSourceFile = draftSource.file,
+            savedAt = savedAt,
+            dirtyBitmapCopy = genBitmap
+        )
+    }
     return DraftSaveResult(
         sourcePath = draftSource.file.absolutePath,
         savedAtMillis = savedAt,
@@ -2957,6 +3072,85 @@ private fun saveDraftSnapshot(
         previousDraftPath = payload.draftSourcePath,
         originalSourcePath = payload.sourcePath
     )
+}
+
+private fun persistDraftGenerationInternal(
+    context: Context,
+    payload: DraftSavePayload,
+    draftSourceFile: File,
+    savedAt: Long,
+    dirtyBitmapCopy: Bitmap?
+) {
+    val genId = UUID.randomUUID().toString()
+    val genDir = newDraftGenerationDirectory(context)
+    try {
+        val maskEntries = ArrayList<Pair<SelectionLayer, DraftSelectionLayerEntry>>(payload.selectionLayers.size)
+        payload.selectionLayers.forEachIndexed { _, layer ->
+            val fileName = "mask_${layer.id}.png"
+            val entry = DraftSelectionLayerEntry(
+                id = layer.id,
+                name = layer.name,
+                kind = layer.kind.name,
+                enabled = layer.enabled,
+                inverted = layer.inverted,
+                opacity = layer.opacity,
+                localParams = layer.localParams,
+                maskFileName = fileName,
+                maskWidth = layer.bitmap.width,
+                maskHeight = layer.bitmap.height,
+                sourceIdentity = draftSourceFile.absolutePath
+            )
+            maskEntries += layer to entry
+        }
+        val sourceIdentity = draftSourceFile.absolutePath
+        val manifest = DraftGenerationManifest(
+            formatVersion = DRAFT_FORMAT_VERSION,
+            generationId = genId,
+            savedAtMillis = savedAt,
+            originalSourcePath = payload.originalSourcePath,
+            sourceIdentity = sourceIdentity,
+            baseContentToken = payload.baseContentToken,
+            baseBitmapDirty = payload.baseBitmapDirty,
+            sourceFileName = draftSourceFile.name,
+            sourceWidth = 0,
+            sourceHeight = 0,
+            thumbnailFileName = "thumbnail.jpg",
+            params = payload.params,
+            noiseEngine = payload.noiseEngine.name,
+            detailEngine = payload.detailEngine.name,
+            toneEngine = payload.toneEngine.name,
+            hazeEngine = payload.hazeEngine.name,
+            presetLook = payload.presetLook,
+            activeQuickEffects = payload.activeQuickEffects,
+            exportFormat = payload.exportFormat.name,
+            exportResolution = payload.exportResolution.name,
+            cropState = payload.cropState,
+            selectionLayers = maskEntries.map { it.second },
+            activeSelectionLayerId = payload.activeSelectionLayerId,
+            selectionPaintSettings = payload.selectionPaintSettings,
+            showSelectionOverlay = payload.showSelectionOverlay
+        )
+        if (!writeDraftGeneration(
+                context = context,
+                genDir = genDir,
+                manifest = manifest,
+                baseBitmapDirty = payload.baseBitmapDirty,
+                reusableSourceFile = draftSourceFile.takeIf { !payload.baseBitmapDirty },
+                dirtyBitmapCopy = dirtyBitmapCopy ?: payload.dirtyBitmapCopy,
+                maskEntries = maskEntries
+            )) {
+            cleanupIncompleteDraftGeneration(genDir.root)
+            return
+        }
+        if (!publishDraftGeneration(context, genDir.root.absolutePath)) {
+            cleanupIncompleteDraftGeneration(genDir.root)
+            return
+        }
+        deleteAllDraftGenerationsExcept(context, genDir.root)
+    } catch (t: Throwable) {
+        cleanupIncompleteDraftGeneration(genDir.root)
+        Log.w(FLARE_GUARD_AI_TAG, "Draft generation save failed", t)
+    }
 }
 
 private fun snapshotDraftPreferences(preferences: android.content.SharedPreferences): Map<String, Any?> =
@@ -3333,6 +3527,11 @@ private const val KEY_DRAFT_QUICK_EFFECTS = "draft_quick_effects"
 private const val KEY_DRAFT_SAVED_AT = "draft_saved_at"
 private const val KEY_DRAFT_BASE_TOKEN = "draft_base_token"
 private const val KEY_DRAFT_BASE_VERSION_LEGACY = "draft_base_version"
+internal const val KEY_DRAFT_GENERATION_ID = "draft_generation_id"
+internal const val DRAFT_MANIFEST_FILE_NAME = "manifest.json"
+internal const val DRAFT_GENERATION_DIR_PREFIX = "gen_"
+internal const val PREF_NAME_DRAFT = "kepler_studio_editor"
+internal const val DRAFT_FORMAT_VERSION = 1
 internal val IMPLEMENTED_NOISE_ENGINES = listOf(
     NoiseEngine.FastEdgeAware,
     NoiseEngine.GuidedFilter,

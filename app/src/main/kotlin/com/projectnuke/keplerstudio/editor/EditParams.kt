@@ -1,6 +1,7 @@
 package com.projectnuke.keplerstudio.editor
 
 import kotlin.math.roundToInt
+import org.json.JSONObject
 
 data class EditParams(
     val exposure: Float = 0f,        // -1.0 .. +1.0 EV
@@ -43,3 +44,47 @@ data class EditParams(
         ).fold(17) { acc, v -> acc * 31 + (v * 1000f).roundToInt() }
     }
 }
+
+internal fun EditParams.toJsonObject(): JSONObject = JSONObject().apply {
+    put("exposure", exposure)
+    put("contrast", contrast)
+    put("shadows", shadows)
+    put("highlights", highlights)
+    put("whites", whites)
+    put("blacks", blacks)
+    put("temperature", temperature)
+    put("tint", tint)
+    put("saturation", saturation)
+    put("vibrance", vibrance)
+    put("clarity", clarity)
+    put("dehaze", dehaze)
+    put("sharpness", sharpness)
+    put("noiseReduction", noiseReduction)
+    put("luminanceNoiseReduction", luminanceNoiseReduction)
+    put("colorNoiseReduction", colorNoiseReduction)
+    put("noiseDetailProtection", noiseDetailProtection)
+}
+
+internal fun parseEditParamsFromJson(json: JSONObject?): EditParams? {
+    if (json == null) return null
+    return EditParams(
+        exposure = json.optDouble("exposure", 0.0).toFloat(),
+        contrast = json.optDouble("contrast", 0.0).toFloat(),
+        shadows = json.optDouble("shadows", 0.0).toFloat(),
+        highlights = json.optDouble("highlights", 0.0).toFloat(),
+        whites = json.optDouble("whites", 0.0).toFloat(),
+        blacks = json.optDouble("blacks", 0.0).toFloat(),
+        temperature = json.optDouble("temperature", 0.0).toFloat(),
+        tint = json.optDouble("tint", 0.0).toFloat(),
+        saturation = json.optDouble("saturation", 0.0).toFloat(),
+        vibrance = json.optDouble("vibrance", 0.0).toFloat(),
+        clarity = json.optDouble("clarity", 0.0).toFloat(),
+        dehaze = json.optDouble("dehaze", 0.0).toFloat(),
+        sharpness = json.optDouble("sharpness", 0.0).toFloat(),
+        noiseReduction = json.optDouble("noiseReduction", 0.0).toFloat(),
+        luminanceNoiseReduction = json.optDouble("luminanceNoiseReduction", json.optDouble("noiseReduction", 0.0)).toFloat(),
+        colorNoiseReduction = json.optDouble("colorNoiseReduction", json.optDouble("noiseReduction", 0.0)).toFloat(),
+        noiseDetailProtection = json.optDouble("noiseDetailProtection", 0.50).toFloat()
+    )
+}
+

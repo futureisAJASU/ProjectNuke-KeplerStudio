@@ -9,6 +9,7 @@ import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
+import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -76,12 +77,12 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
             val adoptedOriginal = bakedOriginal ?: error("missing baked original")
             val adoptedPreview = renderedPreview ?: error("missing rendered preview")
             if (isManagedEditCurrent(operationToken, nextRevision)) {
-                updateUiState {
+                updateUiStateAndRecycleReplaced {
                     it.copy(
                         originalPreviewBitmap = adoptedOriginal,
                         previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
-                        baseContentToken = java.util.UUID.randomUUID().toString(),
+                        baseContentToken = newBaseContentToken(),
                         selectionLayers = emptyList(),
                         activeSelectionLayerId = null,
                         isBusy = false,
