@@ -66,6 +66,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var selectionPreviewToken: Long = 0L
     private var pendingSelectionParamUndo: EditorHistorySnapshot? = null
     private var selectionPreviewSuccessToken: Long? = null
+    private var selectionGestureId: Long = 0L
+    private var pendingSelectionGestureId: Long = 0L
+    private var selectionFinishJob: Job? = null
+    private var finishingSelectionSnapshot: EditorHistorySnapshot? = null
+    private var brushUndoSnapshot: EditorHistorySnapshot? = null
+    private var brushLayerId: String? = null
+    private var brushChanged: Boolean = false
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
     private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
@@ -122,10 +129,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         !shuttingDown && selectionPreviewToken == token && _uiState.value.revision == revision &&
             _uiState.value.baseContentToken == baseToken && _uiState.value.activeSelectionLayerId == activeId
 
-    internal fun beginSelectionParamGesture() {
+    internal fun beginSelectionParamGesture(): Boolean {
         if (pendingSelectionParamUndo == null) {
-            pendingSelectionParamUndo = captureCurrentHistorySnapshot()
+            pendingSelectionGestureId = ++selectionGestureId
+            pendingSelectionParamUndo = captureCurrentHistorySnapshot() ?: return false
         }
+        return true
     }
 
     internal fun markSelectionPreviewSucceeded(token: Long) {
@@ -134,28 +143,127 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun finishSelectionParamGesture() {
         val snapshot = pendingSelectionParamUndo ?: return
+        if (selectionFinishJob?.isActive == true) return
+        val gestureId = pendingSelectionGestureId
         val job = selectionLivePreviewJob
-        viewModelScope.launch {
-            job?.join()
-            if (!shuttingDown && selectionPreviewSuccessToken != null && selectionPreviewToken == selectionPreviewSuccessToken) {
-                commitUndoSnapshot(snapshot, clearRedo = true)
-                pendingSelectionParamUndo = null
-                selectionPreviewSuccessToken = null
-                forceDraftSaveAsync()
-            } else {
-                recycleHistorySnapshot(snapshot)
-                pendingSelectionParamUndo = null
-                selectionPreviewSuccessToken = null
+        pendingSelectionParamUndo = null
+        finishingSelectionSnapshot = snapshot
+        selectionFinishJob = viewModelScope.launch {
+            var settled = false
+            try {
+                job?.join()
+                if (!shuttingDown && gestureId == pendingSelectionGestureId && selectionPreviewSuccessToken != null && selectionPreviewToken == selectionPreviewSuccessToken) {
+                    commitUndoSnapshot(snapshot, clearRedo = true)
+                    selectionPreviewSuccessToken = null
+                    forceDraftSaveAsync()
+                } else {
+                    recycleHistorySnapshot(snapshot)
+                    selectionPreviewSuccessToken = null
+                }
+                settled = true
+            } finally {
+                if (!settled && finishingSelectionSnapshot === snapshot) {
+                    if (shuttingDown) recycleHistorySnapshot(snapshot) else restoreSnapshotWithoutHistory(snapshot)
+                }
+                if (finishingSelectionSnapshot === snapshot) finishingSelectionSnapshot = null
+                selectionFinishJob = null
             }
         }
     }
 
     internal fun invalidateSelectionPreview() {
+        selectionFinishJob?.cancel()
+        selectionFinishJob = null
+        cancelBrushStroke()
         selectionLivePreviewJob?.cancel()
         selectionPreviewToken += 1L
         selectionPreviewSuccessToken = null
-        pendingSelectionParamUndo?.let(::recycleHistorySnapshot)
+        pendingSelectionParamUndo?.let { snapshot ->
+            val finalPreviewIsCurrent = !shuttingDown && selectionPreviewSuccessToken != null &&
+                selectionPreviewToken == selectionPreviewSuccessToken
+            if (finalPreviewIsCurrent) {
+                commitUndoSnapshot(snapshot, clearRedo = true)
+                forceDraftSaveAsync()
+            } else if (shuttingDown) {
+                recycleHistorySnapshot(snapshot)
+            } else {
+                restoreSnapshotWithoutHistory(snapshot)
+            }
+        }
         pendingSelectionParamUndo = null
+    }
+
+    internal fun beginBrushStroke(): Boolean {
+        if (brushUndoSnapshot != null) return true
+        val state = _uiState.value
+        val layerId = state.activeSelectionLayerId ?: return false
+        val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
+        val snapshot = captureCurrentHistorySnapshot() ?: return false
+        val ownedMask = runCatching { layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
+            recycleHistorySnapshot(snapshot)
+            return false
+        }
+        brushUndoSnapshot = snapshot
+        brushLayerId = layerId
+        brushChanged = false
+        updateUiState { current ->
+            current.copy(selectionLayers = current.selectionLayers.map { item ->
+                if (item.id == layerId) item.copy(bitmap = ownedMask) else item
+            })
+        }
+        return true
+    }
+
+    internal fun markBrushChanged(changed: Boolean) {
+        brushChanged = brushChanged || changed
+    }
+
+    internal fun finishBrushStroke() {
+        val snapshot = brushUndoSnapshot ?: return
+        brushUndoSnapshot = null
+        brushLayerId = null
+        val changed = brushChanged
+        brushChanged = false
+        if (changed) {
+            commitUndoSnapshot(snapshot, clearRedo = true)
+            forceDraftSaveAsync()
+        } else {
+            restoreSnapshotWithoutHistory(snapshot)
+        }
+    }
+
+    internal fun cancelBrushStroke() {
+        val snapshot = brushUndoSnapshot ?: return
+        brushUndoSnapshot = null
+        brushLayerId = null
+        brushChanged = false
+        restoreSnapshotWithoutHistory(snapshot)
+    }
+
+    private fun restoreSnapshotWithoutHistory(snapshot: EditorHistorySnapshot) {
+        updateUiState { current ->
+            current.copy(
+                params = snapshot.params,
+                noiseEngine = snapshot.noiseEngine,
+                detailEngine = snapshot.detailEngine,
+                toneEngine = snapshot.toneEngine,
+                hazeEngine = snapshot.hazeEngine,
+                baseBitmapDirty = snapshot.baseBitmapDirty,
+                baseContentToken = snapshot.baseContentToken,
+                previewBitmap = snapshot.previewBitmap,
+                originalPreviewBitmap = snapshot.originalPreviewBitmap,
+                presetLook = snapshot.presetLook,
+                cropState = snapshot.cropState,
+                selectionLayers = snapshot.selectionLayers,
+                activeSelectionLayerId = snapshot.activeSelectionLayerId,
+                selectionPaintSettings = snapshot.selectionPaintSettings,
+                showSelectionOverlay = snapshot.showSelectionOverlay,
+                activeQuickEffects = snapshot.activeQuickEffects,
+                flareGuardRuntimeStatus = snapshot.flareGuardRuntimeStatus,
+                isBusy = false,
+                revision = current.revision + 1
+            )
+        }
     }
 
     private fun invalidateManagedEdits() {
@@ -322,6 +430,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openImage(uri: Uri) {
+        if (shuttingDown) return
         abortPendingParameterEdit()
         invalidateSelectionPreview()
         invalidateCropOperation()
@@ -333,7 +442,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         cropJob?.cancel()
         pendingSelectionParamUndo?.let(::recycleHistorySnapshot)
         pendingSelectionParamUndo = null
-        releaseNativeSession()
         closeParamUndoWindow()
         val openToken = restoreDraftToken + 1L
         restoreDraftToken = openToken
@@ -351,7 +459,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 preview = withContext(Dispatchers.IO) {
                     decodeSampledMutableBitmapWithExif(sourceFile.absolutePath, maxSide = 2048)
                 }
-                if (openToken != restoreDraftToken) {
+                if (shuttingDown || openToken != restoreDraftToken) {
                     preview?.recycle()
                     preview = null
                     sourceFile?.delete()
@@ -416,7 +524,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 preview?.recycle()
                 releaseNativeSessionHandle(createdSession)
                 sourceFile?.delete()
-                if (openToken == restoreDraftToken && _uiState.value.revision == invalidateRevision) {
+                if (!shuttingDown && openToken == restoreDraftToken && _uiState.value.revision == invalidateRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC774\uBBF8\uC9C0\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
                 }
             }
@@ -1011,6 +1119,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun rotatePreview90() {
         abortPendingParameterEdit()
         invalidateSelectionPreview()
+        invalidateManagedEdits()
+        renderJob?.cancel()
         val current = _uiState.value
         val preview = current.previewBitmap
         if (preview == null) {
@@ -1036,7 +1146,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 cropRight = 1f - crop.cropTop,
                 cropBottom = crop.cropRight,
                 aspectRatio = crop.aspectRatio.rotatedForQuarterTurn(),
-                rotationDegrees = 0
+                rotationDegrees = crop.rotationDegrees
             ).normalized()
             val adoptedPreview = checkNotNull(rotatedPreview)
             val adoptedOriginal = rotatedOriginal
@@ -1286,6 +1396,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
 
     private suspend fun restoreDraftIfAvailable(context: Context) {
+        if (shuttingDown) return
         val restoreToken = ++restoreDraftToken
         val restoreStartRevision = _uiState.value.revision
         val restoreSnapshot = try {
@@ -1610,8 +1721,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         invalidateDraftOperations()
         renderJob?.cancel()
         exportJob?.cancel()
-        selectionLivePreviewJob?.cancel()
+        invalidateSelectionPreview()
         paramUndoWindowJob?.cancel()
+        cropJob?.cancel()
+        releaseNativeSession()
         val state = _uiState.value
         clearEditHistory()
         super.onCleared()

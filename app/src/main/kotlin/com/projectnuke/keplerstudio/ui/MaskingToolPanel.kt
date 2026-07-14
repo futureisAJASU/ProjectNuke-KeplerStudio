@@ -179,12 +179,15 @@ private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorV
                 .pointerInput(activeLayer?.id, activeLayer?.bitmap, boxSize) {
                     detectDragGestures(
                         onDragStart = { offset ->
+                            if (!editorViewModel.beginBrushStroke()) return@detectDragGestures
                             paintAtOffset(editorViewModel, activeLayer?.id, offset.x, offset.y, boxSize)
                         },
                         onDrag = { change, _ ->
                             paintAtOffset(editorViewModel, activeLayer?.id, change.position.x, change.position.y, boxSize)
                             change.consume()
-                        }
+                        },
+                        onDragEnd = { editorViewModel.finishBrushStroke() },
+                        onDragCancel = { editorViewModel.cancelBrushStroke() }
                     )
                 },
             contentAlignment = Alignment.Center

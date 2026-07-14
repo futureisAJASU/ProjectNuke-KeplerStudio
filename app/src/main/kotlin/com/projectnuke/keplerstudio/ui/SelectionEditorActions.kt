@@ -226,7 +226,7 @@ fun EditorViewModel.updateSelectionPaintSettings(transform: (SelectionPaintSetti
 }
 
 fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
-    invalidateSelectionPreview()
+    if (!beginBrushStroke()) return
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: run {
         updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
@@ -236,8 +236,7 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
         var changed = false
         val nextLayers = current.selectionLayers.map { layer ->
             if (layer.id == activeId) {
-                applyPaintStroke(layer.bitmap, maskX, maskY, current.selectionPaintSettings)
-                changed = true
+                changed = applyPaintStroke(layer.bitmap, maskX, maskY, current.selectionPaintSettings) || changed
             }
             layer
         }
@@ -338,18 +337,19 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
     }
 }
 
-private fun applyPaintStroke(bitmap: Bitmap, cx: Float, cy: Float, settings: SelectionPaintSettings) {
+private fun applyPaintStroke(bitmap: Bitmap, cx: Float, cy: Float, settings: SelectionPaintSettings): Boolean {
     val radius = settings.sizePx.coerceAtLeast(1f) * 0.5f
     val left = (cx - radius).toInt().coerceIn(0, bitmap.width - 1)
     val top = (cy - radius).toInt().coerceIn(0, bitmap.height - 1)
     val right = (cx + radius).toInt().coerceIn(0, bitmap.width - 1)
     val bottom = (cy + radius).toInt().coerceIn(0, bitmap.height - 1)
     val width = right - left + 1
-    if (width <= 0 || bottom < top) return
+    if (width <= 0 || bottom < top) return false
 
     val feather = settings.feather.coerceIn(0f, 0.98f)
     val hardRadius = radius * (1f - feather)
     val row = IntArray(width)
+    var changed = false
     for (y in top..bottom) {
         bitmap.getPixels(row, 0, width, left, y, width, 1)
         for (i in 0 until width) {
@@ -366,10 +366,12 @@ private fun applyPaintStroke(bitmap: Bitmap, cx: Float, cy: Float, settings: Sel
                 SelectionPaintMode.Add -> (old + delta).coerceIn(0, 255)
                 SelectionPaintMode.Remove -> (old - delta).coerceIn(0, 255)
             }
+            if (next != old) changed = true
             row[i] = -0x1000000 or (next shl 16) or (next shl 8) or next
         }
         bitmap.setPixels(row, 0, width, left, y, width, 1)
     }
+    return changed
 }
 
 private fun renderSelectionLocalEdit(base: Bitmap, state: EditorUiState, layer: SelectionLayer, revision: Int): Bitmap {

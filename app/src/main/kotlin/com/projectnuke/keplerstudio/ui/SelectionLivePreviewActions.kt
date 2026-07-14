@@ -32,7 +32,10 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         }
     }
     if (nextLayers == current.selectionLayers) return
-    beginSelectionParamGesture()
+    if (!beginSelectionParamGesture()) {
+        updateUiState { it.copy(message = "선택 마스크 편집 기록을 준비하지 못했습니다.") }
+        return
+    }
 
     val ownedBase = runCatching { base.copyOrThrow() }.getOrElse {
         updateUiState { it.copy(message = "선택 마스크 미리보기용 이미지를 준비하지 못했습니다.") }
