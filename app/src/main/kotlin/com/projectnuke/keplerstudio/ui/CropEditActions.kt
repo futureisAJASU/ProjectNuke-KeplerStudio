@@ -71,6 +71,7 @@ fun EditorViewModel.resetCropState() {
 }
 
 fun EditorViewModel.applyCropTransform() {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     if (state.isBusy) return
     val preview = state.previewBitmap

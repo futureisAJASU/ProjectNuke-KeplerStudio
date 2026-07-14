@@ -24,6 +24,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val sourcePath = state.sourcePath
@@ -130,6 +131,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
 }
 
 fun EditorViewModel.createBrushSelection() {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     if (base == null) {
@@ -153,10 +155,12 @@ fun EditorViewModel.createBrushSelection() {
 }
 
 fun EditorViewModel.selectSelectionLayer(id: String) {
+    invalidateSelectionPreview()
     updateUiState { it.copy(activeSelectionLayerId = id, message = "마스크를 선택했습니다.") }
 }
 
 fun EditorViewModel.deleteActiveSelectionLayer() {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: return
     recordUserEditForUndo(clearRedo = true)
@@ -172,6 +176,7 @@ fun EditorViewModel.deleteActiveSelectionLayer() {
 }
 
 fun EditorViewModel.invertActiveSelectionLayer() {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: run {
         updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
@@ -190,6 +195,7 @@ fun EditorViewModel.invertActiveSelectionLayer() {
 }
 
 fun EditorViewModel.clearActiveSelectionLayer() {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: run {
         updateUiState { it.copy(message = "\uBA3C\uC800 \uB9C8\uC2A4\uD06C\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.") }
@@ -220,6 +226,7 @@ fun EditorViewModel.updateSelectionPaintSettings(transform: (SelectionPaintSetti
 }
 
 fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: run {
         updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
@@ -243,6 +250,7 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
 }
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: run {
         updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
@@ -259,6 +267,7 @@ fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditP
 }
 
 fun EditorViewModel.applyActiveSelectionLocalEdit() {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val layer = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId }

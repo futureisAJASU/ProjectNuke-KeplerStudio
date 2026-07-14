@@ -7,6 +7,7 @@ import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -31,13 +32,14 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         }
     }
     if (nextLayers == current.selectionLayers) return
+    beginSelectionParamGesture()
 
     val ownedBase = runCatching { base.copyOrThrow() }.getOrElse {
         updateUiState { it.copy(message = "선택 마스크 미리보기용 이미지를 준비하지 못했습니다.") }
         return
     }
     val ownedLayers = runCatching {
-        nextLayers.map { it.copy(bitmap = it.bitmap.copyOrThrow()) }
+        nextLayers.copyBitmapsOwned()
     }.getOrElse {
         ownedBase.recycle()
         updateUiState { it.copy(message = "선택 마스크 미리보기를 준비하지 못했습니다.") }
@@ -62,7 +64,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
             preview = withContext(Dispatchers.Default) {
                 renderLiveSelectionPreview(ownedBase, nextState.copy(selectionLayers = ownedLayers), nextRevision)
             }
-            if (isSelectionPreviewCurrent(previewToken, nextRevision)) {
+            if (isSelectionPreviewCurrent(previewToken, nextRevision, current.baseContentToken, activeId)) {
                 val adopted = preview ?: error("missing selection live preview")
                 updateUiState {
                     it.copy(
@@ -72,6 +74,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
                     )
                 }
                 preview = null
+                markSelectionPreviewSucceeded(previewToken)
             } else {
                 preview?.recycle()
                 preview = null
@@ -81,7 +84,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
             throw ce
         } catch (t: Throwable) {
             preview?.recycle()
-            if (isSelectionPreviewCurrent(previewToken, nextRevision)) {
+            if (isSelectionPreviewCurrent(previewToken, nextRevision, current.baseContentToken, activeId)) {
                 updateUiState {
                     it.copy(
                         selectionLayers = current.selectionLayers,
@@ -96,6 +99,10 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
             ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
         }
     }
+}
+
+fun EditorViewModel.finishActiveSelectionParamsGesture() {
+    finishSelectionParamGesture()
 }
 
 private fun renderLiveSelectionPreview(base: Bitmap, state: EditorUiState, revision: Int): Bitmap =

@@ -8,12 +8,14 @@ import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
+    invalidateSelectionPreview()
     val current = prepareForExternalEdit()
     val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
     if (baseOriginal == null) {
@@ -33,7 +35,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         return
     }
     val ownedLayers = runCatching {
-        enabledLayers.map { it.copy(bitmap = it.bitmap.copyOrThrow()) }
+        enabledLayers.copyBitmapsOwned()
     }.getOrElse {
         ownedBase.recycle()
         recycleHistorySnapshot(checkNotNull(undoSnapshot))

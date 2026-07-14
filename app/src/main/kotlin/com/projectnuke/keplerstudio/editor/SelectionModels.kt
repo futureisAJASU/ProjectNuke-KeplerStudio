@@ -31,3 +31,14 @@ data class SelectionLayer(
     val opacity: Float = 1f,
     val localParams: EditParams = EditParams()
 )
+
+internal fun List<SelectionLayer>.copyBitmapsOwned(): List<SelectionLayer> {
+    val copies = ArrayList<SelectionLayer>(size)
+    try {
+        for (layer in this) copies += layer.copy(bitmap = layer.bitmap.copyOrThrow())
+        return copies
+    } catch (t: Throwable) {
+        copies.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+        throw t
+    }
+}

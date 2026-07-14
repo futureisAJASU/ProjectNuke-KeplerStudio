@@ -61,9 +61,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var draftOperationEpoch: Long = 0L
     private var managedEditJob: Job? = null
     private var managedEditToken: Long = 0L
-    private var shuttingDown: Boolean = false
+    @Volatile private var shuttingDown: Boolean = false
     private var cropOperationToken: Long = 0L
     private var selectionPreviewToken: Long = 0L
+    private var pendingSelectionParamUndo: EditorHistorySnapshot? = null
+    private var selectionPreviewSuccessToken: Long? = null
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
     private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
@@ -116,8 +118,45 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun beginSelectionPreview(): Long = ++selectionPreviewToken
 
-    internal fun isSelectionPreviewCurrent(token: Long, revision: Int): Boolean =
-        !shuttingDown && selectionPreviewToken == token && _uiState.value.revision == revision
+    internal fun isSelectionPreviewCurrent(token: Long, revision: Int, baseToken: String, activeId: String?): Boolean =
+        !shuttingDown && selectionPreviewToken == token && _uiState.value.revision == revision &&
+            _uiState.value.baseContentToken == baseToken && _uiState.value.activeSelectionLayerId == activeId
+
+    internal fun beginSelectionParamGesture() {
+        if (pendingSelectionParamUndo == null) {
+            pendingSelectionParamUndo = captureCurrentHistorySnapshot()
+        }
+    }
+
+    internal fun markSelectionPreviewSucceeded(token: Long) {
+        selectionPreviewSuccessToken = token
+    }
+
+    internal fun finishSelectionParamGesture() {
+        val snapshot = pendingSelectionParamUndo ?: return
+        val job = selectionLivePreviewJob
+        viewModelScope.launch {
+            job?.join()
+            if (!shuttingDown && selectionPreviewSuccessToken != null && selectionPreviewToken == selectionPreviewSuccessToken) {
+                commitUndoSnapshot(snapshot, clearRedo = true)
+                pendingSelectionParamUndo = null
+                selectionPreviewSuccessToken = null
+                forceDraftSaveAsync()
+            } else {
+                recycleHistorySnapshot(snapshot)
+                pendingSelectionParamUndo = null
+                selectionPreviewSuccessToken = null
+            }
+        }
+    }
+
+    internal fun invalidateSelectionPreview() {
+        selectionLivePreviewJob?.cancel()
+        selectionPreviewToken += 1L
+        selectionPreviewSuccessToken = null
+        pendingSelectionParamUndo?.let(::recycleHistorySnapshot)
+        pendingSelectionParamUndo = null
+    }
 
     private fun invalidateManagedEdits() {
         managedEditToken += 1L
@@ -284,14 +323,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openImage(uri: Uri) {
         abortPendingParameterEdit()
+        invalidateSelectionPreview()
         invalidateCropOperation()
         invalidateManagedEdits()
         invalidateDraftOperations()
         renderJob?.cancel()
         exportJob?.cancel()
-        selectionLivePreviewJob?.cancel()
-        selectionPreviewToken += 1L
+        invalidateSelectionPreview()
         cropJob?.cancel()
+        pendingSelectionParamUndo?.let(::recycleHistorySnapshot)
+        pendingSelectionParamUndo = null
+        releaseNativeSession()
         closeParamUndoWindow()
         val openToken = restoreDraftToken + 1L
         restoreDraftToken = openToken
@@ -319,7 +361,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 Log.i(FLARE_GUARD_AI_TAG, "Opened image with EXIF orientation: ${sourceFile.name} preview=${decodedPreview.width}x${decodedPreview.height}")
 
                 createdSession = NativePhotoCore.nativeCreateSession(sourceFile.absolutePath)
-                if (openToken != restoreDraftToken || _uiState.value.revision != invalidateRevision) {
+                if (shuttingDown || openToken != restoreDraftToken || _uiState.value.revision != invalidateRevision) {
                     preview?.recycle()
                     preview = null
                     sourceFile?.delete()
@@ -387,6 +429,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
         if (nextParams == current.params) return
+        val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+            updateUiStateAndRecycleReplaced { it.copy(message = "미리보기 입력 이미지를 준비하지 못했습니다.") }
+            return
+        }
         beginParamUndoWindow()
         updateUiState { it.copy(params = nextParams) }
         val nextRevision = current.revision + 1
@@ -399,7 +445,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var rendered: Bitmap? = null
             try {
                 rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
+                    renderEditedPreview(ownedBase, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
                 }
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
                     val adopted = rendered!!
@@ -423,11 +469,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (t: Throwable) {
                 rendered?.recycle()
                 if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
-                if (_uiState.value.revision == nextRevision) {
+                if (isManagedEditCurrent(operationToken, nextRevision)) {
                     discardPendingParamUndoSnapshot()
                     updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = nextRevision + 1) }
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
                 }
+            } finally {
+                ownedBase.recycle()
             }
         }
     }
@@ -584,6 +632,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun resetAdjustments() {
+        invalidateSelectionPreview()
         val current = prepareForExternalEdit()
         val path = current.sourcePath ?: return
         val nextRevision = current.revision + 1
@@ -904,6 +953,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun undoEdit() {
+        invalidateSelectionPreview()
         abortPendingParameterEdit()
         invalidateCropOperation()
         if (undoHistory.isEmpty()) {
@@ -931,6 +981,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun redoEdit() {
+        invalidateSelectionPreview()
         abortPendingParameterEdit()
         invalidateCropOperation()
         if (redoHistory.isEmpty()) {
@@ -959,6 +1010,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun rotatePreview90() {
         abortPendingParameterEdit()
+        invalidateSelectionPreview()
         val current = _uiState.value
         val preview = current.previewBitmap
         if (preview == null) {
@@ -984,8 +1036,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 cropRight = 1f - crop.cropTop,
                 cropBottom = crop.cropRight,
                 aspectRatio = crop.aspectRatio.rotatedForQuarterTurn(),
-                rotationDegrees = 0,
-                straightenDegrees = 0f
+                rotationDegrees = 0
             ).normalized()
             val adoptedPreview = checkNotNull(rotatedPreview)
             val adoptedOriginal = rotatedOriginal
@@ -1332,7 +1383,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             rendered = withContext(Dispatchers.Default) {
                 renderEditedPreview(preview!!, params, engines, nextRevision, presetLook, activeQuickEffects)
             }
-            if (restoreToken != restoreDraftToken || _uiState.value.revision != restoreStartRevision) {
+            if (shuttingDown || restoreToken != restoreDraftToken || _uiState.value.revision != restoreStartRevision) {
                 preview?.recycle()
                 rendered?.recycle()
                 preview = null
@@ -1340,7 +1391,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 return
             }
             createdSession = NativePhotoCore.nativeCreateSession(sourcePath)
-            if (restoreToken != restoreDraftToken || _uiState.value.revision != restoreStartRevision) {
+            if (shuttingDown || restoreToken != restoreDraftToken || _uiState.value.revision != restoreStartRevision) {
                 preview?.recycle()
                 rendered?.recycle()
                 preview = null
@@ -1388,7 +1439,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             rendered?.recycle()
             releaseNativeSessionHandle(createdSession)
             val currentRevision = _uiState.value.revision
-            val isRestoreStillCurrent = restoreToken == restoreDraftToken &&
+            val isRestoreStillCurrent = !shuttingDown && restoreToken == restoreDraftToken &&
                 (currentRevision == restoreStartRevision || currentRevision == expectedRestoreRevision)
             if (isRestoreStillCurrent) {
                 updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC784\uC2DC\uC800\uC7A5\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
@@ -1488,6 +1539,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun applyHistorySnapshot(snapshot: EditorHistorySnapshot, message: String) {
+        invalidateSelectionPreview()
         lastSuccessfullyRenderedParams = snapshot.params
         updateUiStateAndRecycleReplaced {
             it.copy(

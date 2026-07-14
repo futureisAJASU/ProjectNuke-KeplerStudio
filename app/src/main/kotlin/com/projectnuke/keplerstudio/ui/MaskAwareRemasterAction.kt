@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyMaskAwareRemaster() {
+    invalidateSelectionPreview()
     abortPendingParameterEdit()
     val state = uiState.value
     val basePreview = state.originalPreviewBitmap ?: state.previewBitmap

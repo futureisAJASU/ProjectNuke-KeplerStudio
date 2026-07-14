@@ -17,18 +17,24 @@ fun EditorViewModel.toggleSelectionOverlay() {
 }
 
 fun EditorViewModel.duplicateActiveSelectionLayer() {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val active = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId } ?: run {
         updateUiState { it.copy(message = "복제할 마스크를 선택해 주세요") }
         return
     }
-    recordUserEditForUndo(clearRedo = true)
-    updateUiState { current ->
-        val copy = active.copy(
+    val copy = try {
+        active.copy(
             id = newExtraSelectionId(),
             name = "${active.name} 복사본",
             bitmap = active.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
         )
+    } catch (t: Throwable) {
+        updateUiState { it.copy(message = "마스크 복제에 실패했습니다.") }
+        return
+    }
+    recordUserEditForUndo(clearRedo = true)
+    updateUiState { current ->
         current.copy(
             selectionLayers = current.selectionLayers + copy,
             activeSelectionLayerId = copy.id,
@@ -39,14 +45,14 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
 }
 
 fun EditorViewModel.createBackgroundSelectionFromActive() {
+    invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val active = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId } ?: run {
         updateUiState { it.copy(message = "배경으로 변환할 마스크를 선택해 주세요") }
         return
     }
-    recordUserEditForUndo(clearRedo = true)
-    updateUiState { current ->
-        val layer = SelectionLayer(
+    val layer = try {
+        SelectionLayer(
             id = newExtraSelectionId(),
             name = "배경 마스크",
             kind = SelectionLayerKind.Background,
@@ -56,6 +62,12 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
             opacity = active.opacity,
             localParams = active.localParams
         )
+    } catch (t: Throwable) {
+        updateUiState { it.copy(message = "배경 마스크 생성에 실패했습니다.") }
+        return
+    }
+    recordUserEditForUndo(clearRedo = true)
+    updateUiState { current ->
         current.copy(
             selectionLayers = current.selectionLayers + layer,
             activeSelectionLayerId = layer.id,
