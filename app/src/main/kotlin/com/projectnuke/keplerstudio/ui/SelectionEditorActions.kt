@@ -226,33 +226,19 @@ fun EditorViewModel.updateSelectionPaintSettings(transform: (SelectionPaintSetti
 }
 
 fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
-    if (!beginBrushStroke()) return
-    val state = prepareForExternalEdit()
-    val activeId = state.activeSelectionLayerId ?: run {
-        updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
-        return
-    }
-    if (!isBrushStrokeCurrent(activeId)) {
+    if (!hasActiveBrushStroke()) return
+    val state = uiState.value
+    val activeId = state.activeSelectionLayerId
+    val layer = state.selectionLayers.firstOrNull { it.id == activeId }
+    if (activeId == null || layer == null || !isBrushStrokeCurrent(activeId)) {
         cancelBrushStroke()
         return
     }
-    var strokeChanged = false
-    updateUiState { current ->
-        var changed = false
-        val nextLayers = current.selectionLayers.map { layer ->
-            if (layer.id == activeId) {
-                changed = applyPaintStroke(layer.bitmap, maskX, maskY, current.selectionPaintSettings) || changed
-            }
-            layer
-        }
-        current.copy(
-            selectionLayers = nextLayers,
-            revision = current.revision,
-            message = if (changed) "마스크를 수정했습니다." else current.message
-        )
-            .also { strokeChanged = changed }
+    val painted = applyPaintStroke(layer.bitmap, maskX, maskY, state.selectionPaintSettings)
+    if (painted) {
+        markBrushChanged(true)
+        nextBrushPreviewEpoch()
     }
-    markBrushChanged(strokeChanged)
 }
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {

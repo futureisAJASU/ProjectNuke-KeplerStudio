@@ -155,6 +155,7 @@ fun MaskingToolPanel() {
 
 @Composable
 private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorViewModel) {
+    val epoch by editorViewModel.brushPreviewEpoch.collectAsState()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -195,12 +196,14 @@ private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorV
             if (activeLayer == null) {
                 Text("선택된 마스크가 없습니다", color = MaskTextMuted, style = MaterialTheme.typography.bodySmall)
             } else {
-                Image(
-                    bitmap = activeLayer.bitmap.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = ContentScale.FillBounds,
-                    modifier = Modifier.fillMaxWidth().height(180.dp)
-                )
+                androidx.compose.runtime.key(epoch) {
+                    Image(
+                        bitmap = activeLayer.bitmap.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.FillBounds,
+                        modifier = Modifier.fillMaxWidth().height(180.dp)
+                    )
+                }
             }
         }
     }

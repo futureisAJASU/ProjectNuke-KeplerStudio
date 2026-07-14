@@ -27,10 +27,11 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         updateUiState { it.copy(message = "선택 마스크 편집 기록을 준비하지 못했습니다.") }
         return
     }
+    val transaction = currentSelectionParamTransaction() ?: return
     current = prepareForExternalEdit()
     activeId = current.activeSelectionLayerId
     base = current.originalPreviewBitmap ?: current.previewBitmap
-    if (activeId == null || base == null) return
+    if (activeId == null || base == null || transaction.activeSelectionLayerId != activeId) return
 
     val nextLayers = current.selectionLayers.map { layer ->
         if (layer.id == activeId) {
@@ -55,6 +56,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         return
     }
 
+    val baseToken = current.baseContentToken
     val nextRevision = current.revision + 1
     val nextState = current.copy(
         selectionLayers = nextLayers,
@@ -64,16 +66,15 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
     )
     updateUiState { nextState }
 
-    selectionLivePreviewJob?.cancel()
-    val previewToken = beginSelectionPreview()
-    selectionLivePreviewJob = viewModelScope.launch {
+    val previewToken = beginSelectionPreview(transaction)
+    val previewJob = viewModelScope.launch {
         var preview: Bitmap? = null
         try {
             delay(120L)
             preview = withContext(Dispatchers.Default) {
                 renderLiveSelectionPreview(ownedBase, nextState.copy(selectionLayers = ownedLayers), nextRevision)
             }
-            if (isSelectionPreviewCurrent(previewToken, nextRevision, current.baseContentToken, activeId)) {
+            if (isSelectionPreviewCurrent(transaction, previewToken, nextRevision, baseToken, activeId)) {
                 val adopted = preview ?: error("missing selection live preview")
                 updateUiState {
                     it.copy(
@@ -83,7 +84,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
                     )
                 }
                 preview = null
-                markSelectionPreviewSucceeded(previewToken)
+                markSelectionPreviewSucceeded(transaction, previewToken)
             } else {
                 preview?.recycle()
                 preview = null
@@ -93,7 +94,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
             throw ce
         } catch (t: Throwable) {
             preview?.recycle()
-            if (isSelectionPreviewCurrent(previewToken, nextRevision, current.baseContentToken, activeId)) {
+            if (isSelectionPreviewCurrent(transaction, previewToken, nextRevision, baseToken, activeId)) {
                 invalidateSelectionPreview()
                 updateUiState {
                     it.copy(
@@ -107,6 +108,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
             ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
         }
     }
+    bindSelectionPreviewJob(transaction, previewJob)
 }
 
 fun EditorViewModel.finishActiveSelectionParamsGesture() {

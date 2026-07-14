@@ -25,6 +25,7 @@ import java.util.UUID
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -50,6 +51,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     )
     val uiState: StateFlow<EditorUiState> = _uiState.asStateFlow()
 
+    private val _brushPreviewEpoch = MutableStateFlow(0L)
+    val brushPreviewEpoch: StateFlow<Long> = _brushPreviewEpoch.asStateFlow()
+
     private var nativeSession: Long = 0L
     private var renderJob: Job? = null
     private var exportJob: Job? = null
@@ -63,18 +67,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var managedEditToken: Long = 0L
     @Volatile private var shuttingDown: Boolean = false
     private var cropOperationToken: Long = 0L
-    private var selectionPreviewToken: Long = 0L
-    private var pendingSelectionParamUndo: EditorHistorySnapshot? = null
-    private var selectionPreviewSuccessToken: Long? = null
-    private var selectionGestureId: Long = 0L
-    private var pendingSelectionGestureId: Long = 0L
-    private var selectionFinishJob: Job? = null
-    private var finishingSelectionSnapshot: EditorHistorySnapshot? = null
-    private var brushUndoSnapshot: EditorHistorySnapshot? = null
+    internal var selectionParamTransaction: SelectionParamTransaction? = null
+    private var selectionGestureCounter: Long = 0L
+    private var selectionPreviewCounter: Long = 0L
+    private var transactionFinishJob: Job? = null
+    private var brushingSnapshot: EditorHistorySnapshot? = null
     private var brushLayerId: String? = null
     private var brushBaseToken: String? = null
     private var brushRevision: Int = 0
     private var brushChanged: Boolean = false
+    private var brushEpochCounter: Long = 0L
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
     private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
@@ -125,85 +127,144 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun isCropResultCurrent(token: Long, revision: Int): Boolean =
         !shuttingDown && isCropOperationCurrent(token) && _uiState.value.revision == revision
 
-    internal fun beginSelectionPreview(): Long = ++selectionPreviewToken
+    internal fun beginSelectionPreview(transaction: SelectionParamTransaction): Long {
+        val token = ++selectionPreviewCounter
+        transaction.latestPreviewToken = token
+        transaction.finalPreviewToken = null
+        transaction.previewJob?.cancel()
+        return token
+    }
 
-    internal fun isSelectionPreviewCurrent(token: Long, revision: Int, baseToken: String, activeId: String?): Boolean =
-        !shuttingDown && selectionPreviewToken == token && _uiState.value.revision == revision &&
-            _uiState.value.baseContentToken == baseToken && _uiState.value.activeSelectionLayerId == activeId
+    internal fun isSelectionPreviewCurrent(
+        transaction: SelectionParamTransaction,
+        token: Long,
+        revision: Int,
+        baseToken: String,
+        activeId: String?
+    ): Boolean {
+        if (shuttingDown) return false
+        if (selectionParamTransaction !== transaction) return false
+        if (transaction.latestPreviewToken != token) return false
+        val state = _uiState.value
+        return state.revision == revision &&
+            state.baseContentToken == baseToken &&
+            state.activeSelectionLayerId == activeId
+    }
 
     internal fun beginSelectionParamGesture(): Boolean {
-        if (pendingSelectionParamUndo == null) {
-            pendingSelectionGestureId = ++selectionGestureId
-            pendingSelectionParamUndo = captureCurrentHistorySnapshot() ?: return false
-        }
+        if (selectionParamTransaction != null) return true
+        val snapshot = captureCurrentHistorySnapshot() ?: return false
+        val state = _uiState.value
+        selectionParamTransaction = SelectionParamTransaction(
+            gestureId = ++selectionGestureCounter,
+            snapshot = snapshot,
+            startRevision = state.revision,
+            baseContentToken = state.baseContentToken,
+            activeSelectionLayerId = state.activeSelectionLayerId
+        )
         return true
     }
 
     internal fun startSelectionParamGesture(): Boolean {
-        invalidateSelectionPreview()
+        abortPendingParameterEdit()
+        settleSelectionParamTransactionForSupersession()
         return beginSelectionParamGesture()
     }
 
-    internal fun markSelectionPreviewSucceeded(token: Long) {
-        selectionPreviewSuccessToken = token
+    internal fun markSelectionPreviewSucceeded(transaction: SelectionParamTransaction, token: Long) {
+        if (selectionParamTransaction !== transaction) return
+        if (transaction.latestPreviewToken != token) return
+        transaction.finalPreviewToken = token
+        transaction.succeeded = true
+    }
+
+    internal fun currentSelectionParamTransaction(): SelectionParamTransaction? =
+        selectionParamTransaction
+
+    internal fun bindSelectionPreviewJob(transaction: SelectionParamTransaction, job: Job) {
+        transaction.previewJob?.cancel()
+        transaction.previewJob = job
+        selectionLivePreviewJob = job
     }
 
     internal fun finishSelectionParamGesture() {
-        val snapshot = pendingSelectionParamUndo ?: return
-        if (selectionFinishJob?.isActive == true) return
-        val gestureId = pendingSelectionGestureId
-        val job = selectionLivePreviewJob
-        pendingSelectionParamUndo = null
-        finishingSelectionSnapshot = snapshot
-        selectionFinishJob = viewModelScope.launch {
+        val transaction = selectionParamTransaction ?: return
+        if (transactionFinishJob?.isActive == true && transaction.finished != true) return
+        val job = viewModelScope.launch {
             var settled = false
             try {
-                job?.join()
-                if (!shuttingDown && gestureId == pendingSelectionGestureId && selectionPreviewSuccessToken != null && selectionPreviewToken == selectionPreviewSuccessToken) {
-                    commitUndoSnapshot(snapshot, clearRedo = true)
-                    selectionPreviewSuccessToken = null
-                    forceDraftSaveAsync()
-                } else {
-                    recycleHistorySnapshot(snapshot)
-                    selectionPreviewSuccessToken = null
-                }
+                transaction.previewJob?.join()
+                settleSelectionParamTransaction(transaction)
                 settled = true
+                transaction.finished = true
             } finally {
-                if (!settled && finishingSelectionSnapshot === snapshot) {
-                    if (shuttingDown) recycleHistorySnapshot(snapshot) else restoreSnapshotWithoutHistory(snapshot)
+                // A late finally may only rollback while this job still owns the active slot.
+                if (!settled && selectionParamTransaction === transaction && transaction.finishJobRef === coroutineContext[Job]) {
+                    restoreSelectionParamTransaction(transaction)
                 }
-                if (finishingSelectionSnapshot === snapshot) finishingSelectionSnapshot = null
-                selectionFinishJob = null
             }
         }
+        transactionFinishJob = job
+        transaction.finishJobRef = job
+    }
+
+    /**
+     * Settle the active transaction: commit on success + current + token match, otherwise restore.
+     * No-op when [transaction] is no longer the active one. Clears the active slot itself.
+     */
+    private fun settleSelectionParamTransaction(transaction: SelectionParamTransaction) {
+        if (selectionParamTransaction !== transaction) return
+        val state = _uiState.value
+        val previewOwned = transaction.succeeded &&
+            transaction.finalPreviewToken != null &&
+            transaction.latestPreviewToken == transaction.finalPreviewToken &&
+            transaction.previewJob?.isActive != true
+        val stillCurrent = !shuttingDown &&
+            state.baseContentToken == transaction.baseContentToken &&
+            state.activeSelectionLayerId == transaction.activeSelectionLayerId
+        if (previewOwned && stillCurrent) {
+            commitUndoSnapshot(transaction.snapshot, clearRedo = true)
+            forceDraftSaveAsync()
+            clearSelectionParamTransaction(transaction)
+        } else if (stillCurrent && !transaction.hasOptimisticLiveParams(state)) {
+            recycleHistorySnapshot(transaction.snapshot)
+            clearSelectionParamTransaction(transaction)
+        } else {
+            restoreSelectionParamTransaction(transaction)
+        }
+    }
+
+    private fun restoreSelectionParamTransaction(transaction: SelectionParamTransaction) {
+        if (selectionParamTransaction !== transaction) return
+        if (!transaction.committed) recycleHistorySnapshot(transaction.snapshot)
+        restoreSnapshotWithoutHistory(transaction.snapshot)
+        clearSelectionParamTransaction(transaction)
+    }
+
+    private fun clearSelectionParamTransaction(transaction: SelectionParamTransaction) {
+        if (selectionParamTransaction !== transaction) return
+        selectionParamTransaction = null
+        transaction.previewJob = null
+        if (transactionFinishJob === transaction.finishJobRef) transactionFinishJob = null
+        transaction.finishJobRef = null
+    }
+
+    private fun settleSelectionParamTransactionForSupersession() {
+        selectionParamTransaction?.let { settleSelectionParamTransaction(it) }
+        selectionLivePreviewJob?.cancel()
+        selectionPreviewCounter += 1L
+        clearSelectionParamTransaction(selectionParamTransaction ?: return)
     }
 
     internal fun invalidateSelectionPreview() {
-        val successToken = selectionPreviewSuccessToken
-        val successIsCurrent = !shuttingDown && successToken != null && selectionPreviewToken == successToken
-        val pending = pendingSelectionParamUndo
-        val finishing = finishingSelectionSnapshot
-        selectionFinishJob?.cancel()
-        selectionFinishJob = null
+        settleSelectionParamTransactionForSupersession()
         cancelBrushStroke()
-        selectionLivePreviewJob?.cancel()
-        selectionPreviewToken += 1L
-        selectionPreviewSuccessToken = null
-        pendingSelectionParamUndo = null
-        finishingSelectionSnapshot = null
-        val transaction = finishing ?: pending
-        transaction?.let { snapshot ->
-            if (successIsCurrent) {
-                commitUndoSnapshot(snapshot, clearRedo = true)
-                forceDraftSaveAsync()
-            } else if (shuttingDown) recycleHistorySnapshot(snapshot)
-            else restoreSnapshotWithoutHistory(snapshot)
-        }
     }
 
     internal fun beginBrushStroke(): Boolean {
-        if (brushUndoSnapshot != null) return true
-        invalidateSelectionPreview()
+        abortPendingParameterEdit()
+        settleSelectionParamTransactionForSupersession()
+        if (brushingSnapshot != null) return true
         val state = _uiState.value
         val layerId = state.activeSelectionLayerId ?: return false
         val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
@@ -212,11 +273,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             recycleHistorySnapshot(snapshot)
             return false
         }
-        brushUndoSnapshot = snapshot
+        brushingSnapshot = snapshot
         brushLayerId = layerId
         brushBaseToken = state.baseContentToken
         brushRevision = state.revision
         brushChanged = false
+        brushEpochCounter = 0L
+        _brushPreviewEpoch.value = 0L
         updateUiState { current ->
             current.copy(selectionLayers = current.selectionLayers.map { item ->
                 if (item.id == layerId) item.copy(bitmap = ownedMask) else item
@@ -230,19 +293,29 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun isBrushStrokeCurrent(layerId: String?): Boolean {
+        if (brushingSnapshot == null) return false
         val state = _uiState.value
-        return brushUndoSnapshot != null && layerId == brushLayerId &&
-            state.activeSelectionLayerId == brushLayerId && state.baseContentToken == brushBaseToken &&
+        return layerId == brushLayerId &&
+            state.activeSelectionLayerId == brushLayerId &&
+            state.baseContentToken == brushBaseToken &&
             state.revision == brushRevision
     }
 
+    internal fun hasActiveBrushStroke(): Boolean = brushingSnapshot != null
+
+    internal fun nextBrushPreviewEpoch(): Long {
+        val epoch = ++brushEpochCounter
+        _brushPreviewEpoch.value = epoch
+        return epoch
+    }
+
     internal fun finishBrushStroke() {
-        val snapshot = brushUndoSnapshot ?: return
+        val snapshot = brushingSnapshot ?: return
         if (!isBrushStrokeCurrent(brushLayerId)) {
             cancelBrushStroke()
             return
         }
-        brushUndoSnapshot = null
+        brushingSnapshot = null
         brushLayerId = null
         brushBaseToken = null
         val changed = brushChanged
@@ -257,8 +330,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun cancelBrushStroke() {
-        val snapshot = brushUndoSnapshot ?: return
-        brushUndoSnapshot = null
+        val snapshot = brushingSnapshot ?: return
+        brushingSnapshot = null
         brushLayerId = null
         brushBaseToken = null
         brushChanged = false
@@ -465,8 +538,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         exportJob?.cancel()
         invalidateSelectionPreview()
         cropJob?.cancel()
-        pendingSelectionParamUndo?.let(::recycleHistorySnapshot)
-        pendingSelectionParamUndo = null
         closeParamUndoWindow()
         val openToken = restoreDraftToken + 1L
         restoreDraftToken = openToken
@@ -558,6 +629,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun updateParams(transform: (EditParams) -> EditParams) {
         resolveOrAbortPreviousParamGroupIfNeeded()
+        settleSelectionParamTransactionForSupersession()
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
@@ -1185,6 +1257,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     baseBitmapDirty = true,
                     baseContentToken = newBaseContentToken(),
                     revision = state.revision + 1,
+                    isBusy = false,
                     message = "미리보기를 90도 회전했습니다."
                 )
             }
@@ -1200,7 +1273,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             rotatedMasks.forEach(cleanup::add)
             cleanup.forEach { if (!it.isRecycled) it.recycle() }
             recycleHistorySnapshot(undoSnapshot)
-            updateUiStateAndRecycleReplaced { it.copy(message = "미리보기 회전에 실패했습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 회전에 실패했습니다.") }
         }
     }
 
@@ -1777,7 +1850,35 @@ internal data class EditorHistorySnapshot(
     var resourcesReleased: Boolean = false
 )
 
+/**
+ * One instance per gesture. Old preview/finish jobs must re-confirm they still own this
+ * transaction (by identity) and its finish job before mutating state.
+ */
+internal class SelectionParamTransaction(
+    val gestureId: Long,
+    val snapshot: EditorHistorySnapshot,
+    val startRevision: Int,
+    val baseContentToken: String,
+    val activeSelectionLayerId: String?
+) {
+    var latestPreviewToken: Long = 0L
+    var finalPreviewToken: Long? = null
+    var previewJob: Job? = null
+    var succeeded: Boolean = false
+    var committed: Boolean = false
+    @Volatile var finished: Boolean = false
+    @Volatile var finishJobRef: Job? = null
+
+    fun hasOptimisticLiveParams(state: EditorUiState): Boolean {
+        val layer = state.selectionLayers.firstOrNull { it.id == activeSelectionLayerId } ?: return false
+        return layer.localParams != snapshot.params
+    }
+}
+
 private fun EditorUiState.toHistorySnapshot(): EditorHistorySnapshot {
+    var previewCopy: Bitmap? = null
+    var originalCopy: Bitmap? = null
+    val selectionCopies = ArrayList<SelectionLayer>(selectionLayers.size)
     var previewCopy: Bitmap? = null
     var originalCopy: Bitmap? = null
     val selectionCopies = ArrayList<SelectionLayer>(selectionLayers.size)
