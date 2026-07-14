@@ -143,14 +143,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return state.selectionLayers.any { it.bitmap === bitmap }
     }
 
-    private fun recycleLiveStateBitmapsNow(state: EditorUiState) {
-        val bitmaps = identityBitmapSet()
-        state.previewBitmap?.let(bitmaps::add)
-        state.originalPreviewBitmap?.let(bitmaps::add)
-        state.selectionLayers.forEach { bitmaps.add(it.bitmap) }
-        bitmaps.forEach { if (!it.isRecycled) it.recycle() }
-    }
-
     fun recordUserEditForUndo(clearRedo: Boolean = true) {
         pushUndoSnapshot(clearRedo = clearRedo)
     }
@@ -441,6 +433,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정 준비에 실패했습니다.") }
             return
         }
+
         val nextRevision = current.revision + 1
         renderJob?.cancel()
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다") }
@@ -479,9 +472,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}") }
                 }
-            } finally {
-                ownedBase.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
     }
@@ -533,6 +523,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
+        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
+        val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            return
+        }
+
         val nextRevision = current.revision + 1
         updateUiStateAndRecycleReplaced {
                 it.copy(
@@ -546,15 +542,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var rendered: Bitmap? = null
             try {
                 rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(basePreview, current.params, nextEngines, nextRevision, current.presetLook, current.activeQuickEffects)
+                    renderEditedPreview(ownedBase, current.params, nextEngines, nextRevision, current.presetLook, current.activeQuickEffects)
                 }
                 if (_uiState.value.revision == nextRevision) {
                     val adopted = rendered!!
-                    pushUndoSnapshot(clearRedo = true)
                     saveEngineSelection(context, nextEngines)
                     updateUiState { it.copy(noiseEngine = nextEngines.noiseEngine, detailEngine = nextEngines.detailEngine, toneEngine = nextEngines.toneEngine, hazeEngine = nextEngines.hazeEngine) }
                     updateUiStateAndRecycleReplaced { it.copy(previewBitmap = adopted, isBusy = false, message = message) }
                     rendered = null
+                    commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                    undoSnapshot = null
                     scheduleDraftAutosave()
                 } else {
                     rendered?.recycle()
@@ -568,6 +565,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (_uiState.value.revision == nextRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
                 }
+            } finally {
+                ownedBase.recycle()
+                undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
     }
@@ -578,7 +578,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val nextRevision = current.revision + 1
         renderJob?.cancel()
         exportJob?.cancel()
-        pushUndoSnapshot(clearRedo = true)
+        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "초기화하는 중입니다") }
         renderJob = viewModelScope.launch {
             var preview: Bitmap? = null
@@ -606,6 +606,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                     preview = null
+                    commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                    undoSnapshot = null
                     forceDraftSaveAsync()
                 } else {
                     preview?.recycle()
@@ -619,6 +621,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (_uiState.value.revision == nextRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "초기화에 실패했습니다: ${t.message}") }
                 }
+            } finally {
+                undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
     }
@@ -680,6 +684,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (_uiState.value.revision == nextRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.") }
                 }
+            } finally {
+                undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
     }
@@ -1503,7 +1509,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         releaseNativeSession()
         val state = _uiState.value
         clearEditHistory()
-        recycleLiveStateBitmapsNow(state)
         super.onCleared()
     }
 }

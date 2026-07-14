@@ -474,7 +474,7 @@ private fun ExportGalleryContent(savedExports: List<SavedExport>, onRemoveSavedE
     } else {
         LazyHorizontalGrid(
             rows = GridCells.Fixed(3),
-            modifier = Modifier.fillMaxWidth().height(240.dp),
+            modifier = Modifier.fillMaxWidth().height(400.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
