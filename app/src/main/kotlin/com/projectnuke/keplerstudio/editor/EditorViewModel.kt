@@ -82,25 +82,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             previousState = current
             transform(current).also { nextState = it }
         }
-        val previous = previousState ?: return
-        val next = nextState ?: return
-        recycleReplacedLiveBitmaps(previous, next)
-    }
-
-    private fun recycleReplacedLiveBitmaps(previous: EditorUiState, next: EditorUiState) {
-        val retained = identityBitmapSet()
-        next.previewBitmap?.let(retained::add)
-        next.originalPreviewBitmap?.let(retained::add)
-        next.selectionLayers.forEach { retained.add(it.bitmap) }
-
-        val candidates = identityBitmapSet()
-        previous.previewBitmap?.let(candidates::add)
-        previous.originalPreviewBitmap?.let(candidates::add)
-        previous.selectionLayers.forEach { candidates.add(it.bitmap) }
-
-        candidates.filterNot { it in retained }.forEach { bitmap ->
-            if (!bitmap.isRecycled) bitmap.recycle()
-        }
     }
 
     /** Starts a superseding bitmap/model edit. Callers must gate adoption with [isManagedEditCurrent]. */
@@ -1513,9 +1494,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        invalidateManagedEdits()
+        invalidateDraftOperations()
         renderJob?.cancel()
+        exportJob?.cancel()
         selectionLivePreviewJob?.cancel()
-        draftSaveJob?.cancel()
         paramUndoWindowJob?.cancel()
         releaseNativeSession()
         val state = _uiState.value
