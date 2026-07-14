@@ -54,6 +54,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var renderJob: Job? = null
     private var exportJob: Job? = null
     internal var selectionLivePreviewJob: Job? = null
+    internal var cropJob: Job? = null
     private var draftSaveJob: Job? = null
     private val draftSaveMutex = Mutex()
     /** Invalidates every queued draft save/restore when the document changes. */
@@ -62,6 +63,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var managedEditToken: Long = 0L
     private var shuttingDown: Boolean = false
     private var cropOperationToken: Long = 0L
+    private var selectionPreviewToken: Long = 0L
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
     private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
@@ -108,6 +110,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun isCropOperationCurrent(token: Long): Boolean = cropOperationToken == token
+
+    internal fun isCropResultCurrent(token: Long, revision: Int): Boolean =
+        !shuttingDown && isCropOperationCurrent(token) && _uiState.value.revision == revision
+
+    internal fun beginSelectionPreview(): Long = ++selectionPreviewToken
+
+    internal fun isSelectionPreviewCurrent(token: Long, revision: Int): Boolean =
+        !shuttingDown && selectionPreviewToken == token && _uiState.value.revision == revision
 
     private fun invalidateManagedEdits() {
         managedEditToken += 1L
@@ -280,6 +290,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         exportJob?.cancel()
         selectionLivePreviewJob?.cancel()
+        selectionPreviewToken += 1L
+        cropJob?.cancel()
         closeParamUndoWindow()
         val openToken = restoreDraftToken + 1L
         restoreDraftToken = openToken
@@ -389,7 +401,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 rendered = withContext(Dispatchers.Default) {
                     renderEditedPreview(basePreview, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
                 }
-                if (_uiState.value.revision == nextRevision) {
+                if (isManagedEditCurrent(operationToken, nextRevision)) {
                     val adopted = rendered!!
                     commitPendingParamUndoSnapshot()
                     lastSuccessfullyRenderedParams = nextParams
@@ -579,11 +591,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         exportJob?.cancel()
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "초기화하는 중입니다") }
-        renderJob = viewModelScope.launch {
+        renderJob = launchManagedEdit { operationToken ->
             var preview: Bitmap? = null
             try {
                 preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(path, maxSide = 2048) }
-                if (_uiState.value.revision == nextRevision) {
+                if (isManagedEditCurrent(operationToken, nextRevision)) {
                     val adopted = preview!!
                     lastSuccessfullyRenderedParams = EditParams()
                     updateUiStateAndRecycleReplaced {
@@ -613,14 +625,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     preview = null
                 }
             } catch (ce: CancellationException) {
-                preview?.recycle()
                 throw ce
             } catch (t: Throwable) {
-                preview?.recycle()
-                if (_uiState.value.revision == nextRevision) {
+                if (isManagedEditCurrent(operationToken, nextRevision)) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "초기화에 실패했습니다: ${t.message}") }
                 }
             } finally {
+                preview?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
@@ -639,17 +650,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             updateUiStateAndRecycleReplaced { it.copy(message = "편집 기록을 저장하지 못했습니다.") }
             return
         }
+        val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            updateUiStateAndRecycleReplaced { it.copy(message = "프리셋 적용 준비에 실패했습니다.") }
+            return
+        }
         val nextRevision = current.revision + 1
         renderJob?.cancel()
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = message) }
 
-        renderJob = viewModelScope.launch {
+        renderJob = launchManagedEdit { operationToken ->
             var rendered: Bitmap? = null
             try {
                 rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(basePreview, params, current.engineSelection(), nextRevision, look, current.activeQuickEffects)
+                    renderEditedPreview(ownedBase, params, current.engineSelection(), nextRevision, look, current.activeQuickEffects)
                 }
-                if (_uiState.value.revision == nextRevision) {
+                if (isManagedEditCurrent(operationToken, nextRevision)) {
                     val adopted = rendered!!
                     updateUiStateAndRecycleReplaced {
                         it.copy(
@@ -665,25 +681,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
                     undoSnapshot = null
                     scheduleDraftAutosave()
-                } else {
-                    rendered?.recycle()
-                    rendered = null
-                    undoSnapshot?.let(::recycleHistorySnapshot)
-                    undoSnapshot = null
                 }
             } catch (ce: CancellationException) {
-                rendered?.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                undoSnapshot = null
                 throw ce
             } catch (t: Throwable) {
-                rendered?.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                undoSnapshot = null
-                if (_uiState.value.revision == nextRevision) {
+                if (isManagedEditCurrent(operationToken, nextRevision)) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.") }
                 }
             } finally {
+                rendered?.recycle()
+                ownedBase.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
@@ -976,7 +983,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 cropTop = crop.cropLeft,
                 cropRight = 1f - crop.cropTop,
                 cropBottom = crop.cropRight,
-                rotationDegrees = (crop.rotationDegrees + 90) % 360
+                aspectRatio = crop.aspectRatio.rotatedForQuarterTurn(),
+                rotationDegrees = 0,
+                straightenDegrees = 0f
             ).normalized()
             val adoptedPreview = checkNotNull(rotatedPreview)
             val adoptedOriginal = rotatedOriginal
@@ -1000,9 +1009,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             forceDraftSaveAsync()
             Log.i(FLARE_GUARD_AI_TAG, "Rotated preview manually: ${preview.width}x${preview.height} -> ${adoptedPreview.width}x${adoptedPreview.height}")
         } catch (t: Throwable) {
-            rotatedPreview?.takeIf { it !== rotatedOriginal }?.recycle()
-            rotatedOriginal?.takeIf { it !== rotatedPreview }?.recycle()
-            rotatedMasks.forEach { it.recycle() }
+            val cleanup = java.util.Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
+            listOf(rotatedPreview, rotatedOriginal).forEach { it?.let(cleanup::add) }
+            rotatedMasks.forEach(cleanup::add)
+            cleanup.forEach { if (!it.isRecycled) it.recycle() }
             recycleHistorySnapshot(undoSnapshot)
             updateUiStateAndRecycleReplaced { it.copy(message = "미리보기 회전에 실패했습니다.") }
         }
@@ -1120,7 +1130,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 throw ce
             } catch (t: Throwable) {
                 Log.e(FLARE_GUARD_AI_TAG, "$title native special effect failed", t)
-                if (_uiState.value.revision == nextRevision) {
+                if (isManagedEditCurrent(operationToken, nextRevision)) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = failureMessage) }
                 }
             } finally {
@@ -2079,6 +2089,14 @@ private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
 private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
     val matrix = Matrix().apply { postRotate(90f) }
     return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+}
+
+private fun CropAspectRatio.rotatedForQuarterTurn(): CropAspectRatio = when (this) {
+    CropAspectRatio.FourThree -> CropAspectRatio.ThreeFour
+    CropAspectRatio.ThreeFour -> CropAspectRatio.FourThree
+    CropAspectRatio.SixteenNine -> CropAspectRatio.NineSixteen
+    CropAspectRatio.NineSixteen -> CropAspectRatio.SixteenNine
+    else -> this
 }
 
 internal fun renderEditedPreview(

@@ -30,6 +30,11 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     }
 
     var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
+    val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+        recycleHistorySnapshot(checkNotNull(undoSnapshot))
+        updateUiState { it.copy(message = "모델 마스크 보조 준비에 실패했습니다.") }
+        return
+    }
     val nextRevision = state.revision + 1
     updateUiState {
         it.copy(
@@ -44,10 +49,10 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         var renderedPreview: Bitmap? = null
         try {
             renderedOriginal = withContext(Dispatchers.Default) {
-                val mask = RemasterModelSession.createForegroundMask(basePreview)
+                val mask = RemasterModelSession.createForegroundMask(ownedBase)
                     ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
                 renderMaskAwareRemaster(
-                    basePreview = basePreview,
+                    basePreview = ownedBase,
                     mask = mask,
                     state = state,
                     revision = nextRevision
@@ -104,6 +109,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 )
             }
         } finally {
+            ownedBase.recycle()
             undoSnapshot?.let(::recycleHistorySnapshot)
         }
     }

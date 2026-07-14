@@ -13,6 +13,7 @@ import com.projectnuke.keplerstudio.editor.renderCropTransform
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.setCropAspectRatio(aspectRatio: CropAspectRatio) {
@@ -42,16 +43,17 @@ fun EditorViewModel.autoStraightenCrop() {
         updateUiState { it.copy(message = "기울기 보정용 이미지를 준비하지 못했습니다.") }
         return
     }
-    launchManagedEdit { token ->
+    cropJob?.cancel()
+    cropJob = viewModelScope.launch {
         try {
             val angle = withContext(Dispatchers.Default) { estimateAutoStraightenDegreesV0(input) }
-            if (isManagedEditCurrent(token, state.revision) && isCropOperationCurrent(cropToken)) {
+            if (isCropResultCurrent(cropToken, state.revision)) {
                 updateUiState { current -> current.copy(cropState = current.cropState.copy(straightenDegrees = angle), message = "기울기 보정값을 적용했습니다: ${String.format(Locale.US, "%.1f", angle)}°") }
             }
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
-            if (isManagedEditCurrent(token, state.revision) && isCropOperationCurrent(cropToken)) updateUiState { it.copy(message = "기울기 보정에 실패했습니다: ${t.message}") }
+            if (isCropResultCurrent(cropToken, state.revision)) updateUiState { it.copy(message = "기울기 보정에 실패했습니다: ${t.message}") }
         } finally {
             input.recycle()
         }

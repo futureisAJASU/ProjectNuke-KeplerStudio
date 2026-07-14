@@ -7,6 +7,7 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
+import com.projectnuke.keplerstudio.editor.copyOrThrow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -26,6 +27,19 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     }
 
     var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
+    val ownedBase = runCatching { baseOriginal.copyOrThrow() }.getOrElse {
+        recycleHistorySnapshot(checkNotNull(undoSnapshot))
+        updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
+        return
+    }
+    val ownedLayers = runCatching {
+        enabledLayers.map { it.copy(bitmap = it.bitmap.copyOrThrow()) }
+    }.getOrElse {
+        ownedBase.recycle()
+        recycleHistorySnapshot(checkNotNull(undoSnapshot))
+        updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
+        return
+    }
     val nextRevision = current.revision + 1
     updateUiState {
         it.copy(
@@ -45,7 +59,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                     params = EditParams(),
                     activeQuickEffects = emptyList()
                 )
-                renderBitmapWithSelectionLayers(baseOriginal, localOnlyState, nextRevision)
+                renderBitmapWithSelectionLayers(ownedBase, localOnlyState.copy(selectionLayers = ownedLayers), nextRevision)
             }
             renderedPreview = withContext(Dispatchers.Default) {
                 renderEditedPreview(
@@ -97,6 +111,8 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 )
             }
         } finally {
+            ownedBase.recycle()
+            ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
             undoSnapshot?.let(::recycleHistorySnapshot)
         }
     }
