@@ -232,6 +232,11 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
         updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
         return
     }
+    if (!isBrushStrokeCurrent(activeId)) {
+        cancelBrushStroke()
+        return
+    }
+    var strokeChanged = false
     updateUiState { current ->
         var changed = false
         val nextLayers = current.selectionLayers.map { layer ->
@@ -242,10 +247,12 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
         }
         current.copy(
             selectionLayers = nextLayers,
-            revision = current.revision + if (changed) 1 else 0,
+            revision = current.revision,
             message = if (changed) "마스크를 수정했습니다." else current.message
         )
+            .also { strokeChanged = changed }
     }
+    markBrushChanged(strokeChanged)
 }
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {

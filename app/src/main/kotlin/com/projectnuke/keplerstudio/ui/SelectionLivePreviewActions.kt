@@ -15,13 +15,22 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> EditParams) {
-    val current = prepareForExternalEdit()
-    val activeId = current.activeSelectionLayerId
-    val base = current.originalPreviewBitmap ?: current.previewBitmap
+    var current = prepareForExternalEdit()
+    var activeId = current.activeSelectionLayerId
+    var base = current.originalPreviewBitmap ?: current.previewBitmap
     if (activeId == null || base == null) {
         updateUiState { it.copy(message = "보정할 선택 마스크가 없습니다.") }
         return
     }
+
+    if (!beginSelectionParamGesture()) {
+        updateUiState { it.copy(message = "선택 마스크 편집 기록을 준비하지 못했습니다.") }
+        return
+    }
+    current = prepareForExternalEdit()
+    activeId = current.activeSelectionLayerId
+    base = current.originalPreviewBitmap ?: current.previewBitmap
+    if (activeId == null || base == null) return
 
     val nextLayers = current.selectionLayers.map { layer ->
         if (layer.id == activeId) {
@@ -32,12 +41,8 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         }
     }
     if (nextLayers == current.selectionLayers) return
-    if (!beginSelectionParamGesture()) {
-        updateUiState { it.copy(message = "선택 마스크 편집 기록을 준비하지 못했습니다.") }
-        return
-    }
-
     val ownedBase = runCatching { base.copyOrThrow() }.getOrElse {
+        invalidateSelectionPreview()
         updateUiState { it.copy(message = "선택 마스크 미리보기용 이미지를 준비하지 못했습니다.") }
         return
     }
@@ -45,6 +50,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         nextLayers.copyBitmapsOwned()
     }.getOrElse {
         ownedBase.recycle()
+        invalidateSelectionPreview()
         updateUiState { it.copy(message = "선택 마스크 미리보기를 준비하지 못했습니다.") }
         return
     }
@@ -88,10 +94,9 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         } catch (t: Throwable) {
             preview?.recycle()
             if (isSelectionPreviewCurrent(previewToken, nextRevision, current.baseContentToken, activeId)) {
+                invalidateSelectionPreview()
                 updateUiState {
                     it.copy(
-                        selectionLayers = current.selectionLayers,
-                        revision = nextRevision + 1,
                         isBusy = false,
                         message = "선택 마스크 미리보기를 적용하지 못했습니다: ${t.message}"
                     )

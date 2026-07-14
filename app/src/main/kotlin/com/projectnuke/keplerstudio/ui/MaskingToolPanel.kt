@@ -176,7 +176,7 @@ private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorV
                 .height(180.dp)
                 .background(Color(0xFF111111))
                 .onSizeChanged { boxSize = it }
-                .pointerInput(activeLayer?.id, activeLayer?.bitmap, boxSize) {
+                .pointerInput(activeLayer?.id, boxSize) {
                     detectDragGestures(
                         onDragStart = { offset ->
                             if (!editorViewModel.beginBrushStroke()) return@detectDragGestures
@@ -231,19 +231,19 @@ private fun LocalMaskEditCard(activeLayer: SelectionLayer?, editorViewModel: Edi
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
         )
-        LocalParamSlider("노출", params.exposure, -0.8f, 0.8f, activeLayer != null, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("노출", params.exposure, -0.8f, 0.8f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(exposure = value) }
         }
-        LocalParamSlider("대비", params.contrast, -0.6f, 0.6f, activeLayer != null, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("대비", params.contrast, -0.6f, 0.6f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(contrast = value) }
         }
-        LocalParamSlider("채도", params.saturation, -0.6f, 0.6f, activeLayer != null, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("채도", params.saturation, -0.6f, 0.6f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(saturation = value) }
         }
-        LocalParamSlider("명료도", params.clarity, -0.6f, 0.6f, activeLayer != null, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("명료도", params.clarity, -0.6f, 0.6f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(clarity = value) }
         }
-        LocalParamSlider("디헤이즈", params.dehaze, -0.6f, 0.6f, activeLayer != null, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("디헤이즈", params.dehaze, -0.6f, 0.6f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(dehaze = value) }
         }
         Button(
@@ -269,13 +269,20 @@ private fun MaskSliderRow(label: String, value: Float, min: Float, max: Float, o
 }
 
 @Composable
-private fun LocalParamSlider(label: String, value: Float, min: Float, max: Float, enabled: Boolean, onValueChangeFinished: () -> Unit, onValueChange: (Float) -> Unit) {
+private fun LocalParamSlider(label: String, value: Float, min: Float, max: Float, enabled: Boolean, onValueChangeStarted: () -> Boolean, onValueChangeFinished: () -> Unit, onValueChange: (Float) -> Unit) {
     Column(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(label, color = if (enabled) MaskTextSecondary else MaskTextMuted, style = MaterialTheme.typography.bodySmall)
             Text(value.formatSliderValue(), color = MaskTextMuted, style = MaterialTheme.typography.bodySmall)
         }
-        Slider(value = value.coerceIn(min, max), onValueChange = onValueChange, onValueChangeFinished = onValueChangeFinished, valueRange = min..max, enabled = enabled)
+        var gestureStarted by remember { mutableStateOf(false) }
+        Slider(value = value.coerceIn(min, max), onValueChange = { next ->
+            if (!gestureStarted) gestureStarted = onValueChangeStarted()
+            if (gestureStarted) onValueChange(next)
+        }, onValueChangeFinished = {
+            if (gestureStarted) onValueChangeFinished()
+            gestureStarted = false
+        }, valueRange = min..max, enabled = enabled)
     }
 }
 

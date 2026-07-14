@@ -72,6 +72,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var finishingSelectionSnapshot: EditorHistorySnapshot? = null
     private var brushUndoSnapshot: EditorHistorySnapshot? = null
     private var brushLayerId: String? = null
+    private var brushBaseToken: String? = null
+    private var brushRevision: Int = 0
     private var brushChanged: Boolean = false
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
@@ -137,6 +139,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    internal fun startSelectionParamGesture(): Boolean {
+        invalidateSelectionPreview()
+        return beginSelectionParamGesture()
+    }
+
     internal fun markSelectionPreviewSucceeded(token: Long) {
         selectionPreviewSuccessToken = token
     }
@@ -172,29 +179,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun invalidateSelectionPreview() {
+        val successToken = selectionPreviewSuccessToken
+        val successIsCurrent = !shuttingDown && successToken != null && selectionPreviewToken == successToken
+        val pending = pendingSelectionParamUndo
+        val finishing = finishingSelectionSnapshot
         selectionFinishJob?.cancel()
         selectionFinishJob = null
         cancelBrushStroke()
         selectionLivePreviewJob?.cancel()
         selectionPreviewToken += 1L
         selectionPreviewSuccessToken = null
-        pendingSelectionParamUndo?.let { snapshot ->
-            val finalPreviewIsCurrent = !shuttingDown && selectionPreviewSuccessToken != null &&
-                selectionPreviewToken == selectionPreviewSuccessToken
-            if (finalPreviewIsCurrent) {
+        pendingSelectionParamUndo = null
+        finishingSelectionSnapshot = null
+        val transaction = finishing ?: pending
+        transaction?.let { snapshot ->
+            if (successIsCurrent) {
                 commitUndoSnapshot(snapshot, clearRedo = true)
                 forceDraftSaveAsync()
-            } else if (shuttingDown) {
-                recycleHistorySnapshot(snapshot)
-            } else {
-                restoreSnapshotWithoutHistory(snapshot)
-            }
+            } else if (shuttingDown) recycleHistorySnapshot(snapshot)
+            else restoreSnapshotWithoutHistory(snapshot)
         }
-        pendingSelectionParamUndo = null
     }
 
     internal fun beginBrushStroke(): Boolean {
         if (brushUndoSnapshot != null) return true
+        invalidateSelectionPreview()
         val state = _uiState.value
         val layerId = state.activeSelectionLayerId ?: return false
         val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
@@ -205,6 +214,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         brushUndoSnapshot = snapshot
         brushLayerId = layerId
+        brushBaseToken = state.baseContentToken
+        brushRevision = state.revision
         brushChanged = false
         updateUiState { current ->
             current.copy(selectionLayers = current.selectionLayers.map { item ->
@@ -218,13 +229,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         brushChanged = brushChanged || changed
     }
 
+    internal fun isBrushStrokeCurrent(layerId: String?): Boolean {
+        val state = _uiState.value
+        return brushUndoSnapshot != null && layerId == brushLayerId &&
+            state.activeSelectionLayerId == brushLayerId && state.baseContentToken == brushBaseToken &&
+            state.revision == brushRevision
+    }
+
     internal fun finishBrushStroke() {
         val snapshot = brushUndoSnapshot ?: return
+        if (!isBrushStrokeCurrent(brushLayerId)) {
+            cancelBrushStroke()
+            return
+        }
         brushUndoSnapshot = null
         brushLayerId = null
+        brushBaseToken = null
         val changed = brushChanged
         brushChanged = false
         if (changed) {
+            updateUiState { it.copy(revision = it.revision + 1, isBusy = false) }
             commitUndoSnapshot(snapshot, clearRedo = true)
             forceDraftSaveAsync()
         } else {
@@ -236,6 +260,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val snapshot = brushUndoSnapshot ?: return
         brushUndoSnapshot = null
         brushLayerId = null
+        brushBaseToken = null
         brushChanged = false
         restoreSnapshotWithoutHistory(snapshot)
     }
