@@ -55,11 +55,16 @@ object RemasterModelSession {
                     return@withLock
                 }
                 runCatching {
-                    closeableModel = when (candidate.id) {
+                    val created = when (candidate.id) {
                         "edge_masker" -> createImageSegmenter(context, candidate.assetPath)
                         "universal_balancer", "flare_masker" -> TfliteModelHandle(createTfliteInterpreter(context, candidate.assetPath))
                         else -> null
                     }
+                    if (generation != commandGeneration) {
+                        runCatching { created?.close() }
+                        return@withLock
+                    }
+                    closeableModel = created
                 }.onSuccess {
                     isModelLoaded = closeableModel != null
                     isModelLoading = false
