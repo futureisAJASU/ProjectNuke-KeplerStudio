@@ -10,7 +10,6 @@ import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyFlareOriginalMvp() {
@@ -32,7 +31,11 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         return
     }
 
-    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
+    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+    if (undoSnapshot == null) {
+        updateUiState { it.copy(message = "번짐 보정 준비에 실패했습니다.") }
+        return
+    }
     var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
         recycleHistorySnapshot(checkNotNull(undoSnapshot))
         undoSnapshot = null

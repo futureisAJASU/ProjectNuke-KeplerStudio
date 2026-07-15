@@ -22,20 +22,22 @@ fun renderBitmapWithSelectionLayers(
 
     try {
         for (layer in enabledLayers) {
-            val local = renderSelectionBitmapWithParams(base, mergeSelectionParams(state.params, layer.localParams), state, revision)
-            val result = NativePhotoCore.nativeBlendSelectionLayerInPlace(
-                target = global,
-                local = local,
-                mask = layer.bitmap,
-                inverted = layer.inverted,
-                opacity = layer.opacity.coerceIn(0f, 1f)
-            )
-            if (result < 0) {
-                local.recycle()
-                global.recycle()
-                throw IllegalStateException("native selection blend failed: code=$result")
+            var local: Bitmap? = null
+            try {
+                local = renderSelectionBitmapWithParams(base, mergeSelectionParams(state.params, layer.localParams), state, revision)
+                val result = NativePhotoCore.nativeBlendSelectionLayerInPlace(
+                    target = global,
+                    local = local,
+                    mask = layer.bitmap,
+                    inverted = layer.inverted,
+                    opacity = layer.opacity.coerceIn(0f, 1f)
+                )
+                if (result < 0) {
+                    throw IllegalStateException("native selection blend failed: code=$result")
+                }
+            } finally {
+                local?.takeIf { !it.isRecycled }?.recycle()
             }
-            local.recycle()
         }
         applyActiveQuickEffectsToBitmap(global, state.activeQuickEffects, revision)
         return global
@@ -72,7 +74,8 @@ private fun renderSelectionBitmapWithParams(
     revision: Int
 ): Bitmap {
     val out = base.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-    val result = NativePhotoCore.nativeRenderPreviewInPlace(
+    try {
+        val result = NativePhotoCore.nativeRenderPreviewInPlace(
         out,
         params.exposure,
         params.contrast,
@@ -96,10 +99,13 @@ private fun renderSelectionBitmapWithParams(
         state.toneEngine.nativeId,
         state.hazeEngine.nativeId,
         revision
-    )
-    if (result < 0) {
-        out.recycle()
-        throw IllegalStateException("native selection render failed: code=$result")
+        )
+        if (result < 0) {
+            throw IllegalStateException("native selection render failed: code=$result")
+        }
+    } catch (t: Throwable) {
+        if (!out.isRecycled) out.recycle()
+        throw t
     }
     return out
 }

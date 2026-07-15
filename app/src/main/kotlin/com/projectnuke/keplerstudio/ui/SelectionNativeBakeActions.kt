@@ -16,30 +16,42 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
-    invalidateSelectionPreview()
+    if (isShuttingDown()) return
+    if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
     val current = prepareForExternalEdit()
     val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
     if (baseOriginal == null) {
         updateUiState { it.copy(message = "적용할 이미지가 없습니다.") }
         return
     }
-    val enabledLayers = current.selectionLayers.filter { it.enabled }
+    val capturedSelectionLayers = current.selectionLayers
+    val capturedActiveSelectionLayerId = current.activeSelectionLayerId
+    val enabledLayers = capturedSelectionLayers.filter { it.enabled }
     if (enabledLayers.isEmpty()) {
         updateUiState { it.copy(message = "적용할 선택 마스크가 없습니다.") }
         return
     }
+    val params = current.params
+    val engines = current.engineSelection()
+    val presetLook = current.presetLook
+    val quickEffects = current.activeQuickEffects
+    val sourcePath = current.sourcePath
+    val baseContentToken = current.baseContentToken
 
     var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
-    val ownedBase = runCatching { baseOriginal.copyOrThrow() }.getOrElse {
+    var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse {
         recycleHistorySnapshot(checkNotNull(undoSnapshot))
+        undoSnapshot = null
         updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
         return
     }
-    val ownedLayers = runCatching {
+    var ownedLayers: List<com.projectnuke.keplerstudio.editor.SelectionLayer> = runCatching {
         enabledLayers.copyBitmapsOwned()
     }.getOrElse {
-        ownedBase.recycle()
+        ownedBase?.takeIf { !it.isRecycled }?.recycle()
+        ownedBase = null
         recycleHistorySnapshot(checkNotNull(undoSnapshot))
+        undoSnapshot = null
         updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
         return
     }
@@ -56,27 +68,33 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         var bakedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
         try {
-            bakedOriginal = withContext(Dispatchers.Default) {
-                // Keep the adopted original free of non-destructive quick effects.
+            withContext(Dispatchers.Default) {
                 val localOnlyState = current.copy(
                     params = EditParams(),
                     activeQuickEffects = emptyList()
                 )
-                renderBitmapWithSelectionLayers(ownedBase, localOnlyState.copy(selectionLayers = ownedLayers), nextRevision)
+                val result = renderBitmapWithSelectionLayers(checkNotNull(ownedBase), localOnlyState.copy(selectionLayers = ownedLayers), nextRevision)
+                bakedOriginal = result
             }
-            renderedPreview = withContext(Dispatchers.Default) {
-                renderEditedPreview(
-                    basePreview = bakedOriginal ?: error("missing baked original"),
-                    params = current.params,
-                    engines = current.engineSelection(),
+            withContext(Dispatchers.Default) {
+                val result = renderEditedPreview(
+                    basePreview = checkNotNull(bakedOriginal),
+                    params = params,
+                    engines = engines,
                     revision = nextRevision,
-                    look = current.presetLook,
-                    quickEffects = current.activeQuickEffects
+                    look = presetLook,
+                    quickEffects = quickEffects
                 )
+                renderedPreview = result
             }
             val adoptedOriginal = bakedOriginal ?: error("missing baked original")
             val adoptedPreview = renderedPreview ?: error("missing rendered preview")
-            if (isManagedEditCurrent(operationToken, nextRevision)) {
+            if (isManagedEditCurrent(operationToken, nextRevision) &&
+                uiState.value.sourcePath == sourcePath &&
+                uiState.value.baseContentToken == baseContentToken &&
+                uiState.value.selectionLayers == capturedSelectionLayers &&
+                uiState.value.activeSelectionLayerId == capturedActiveSelectionLayerId &&
+                !isShuttingDown()) {
                 updateUiStateAndRecycleReplaced {
                     it.copy(
                         originalPreviewBitmap = adoptedOriginal,
@@ -89,33 +107,30 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                         message = "선택 마스크 보정을 원본에 적용했습니다. 저장 결과에도 반영됩니다."
                     )
                 }
+                bakedOriginal = null
+                renderedPreview = null
                 commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
                 undoSnapshot = null
-                bakedOriginal = null
-                renderedPreview = null
                 persistDraftSnapshot()
-            } else {
-                bakedOriginal?.recycle()
-                bakedOriginal = null
-                renderedPreview?.recycle()
-                renderedPreview = null
             }
         } catch (ce: CancellationException) {
-            bakedOriginal?.recycle()
-            renderedPreview?.recycle()
             throw ce
         } catch (_: Throwable) {
-            bakedOriginal?.recycle()
-            renderedPreview?.recycle()
-            if (isManagedEditCurrent(operationToken, nextRevision)) updateUiState {
+            if (isManagedEditCurrent(operationToken, nextRevision) &&
+                uiState.value.sourcePath == sourcePath &&
+                uiState.value.baseContentToken == baseContentToken &&
+                uiState.value.selectionLayers == capturedSelectionLayers &&
+                uiState.value.activeSelectionLayerId == capturedActiveSelectionLayerId) updateUiState {
                 it.copy(
                     isBusy = false,
                     message = "선택 마스크 보정 적용에 실패했습니다."
                 )
             }
         } finally {
-            ownedBase.recycle()
-            ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+            ownedBase?.takeIf { !it.isRecycled }?.recycle()
+            ownedLayers.forEach { it.bitmap.takeIf { bitmap -> !bitmap.isRecycled }?.recycle() }
+            bakedOriginal?.takeIf { !it.isRecycled }?.recycle()
+            renderedPreview?.takeIf { !it.isRecycled }?.recycle()
             undoSnapshot?.let(::recycleHistorySnapshot)
         }
     }
