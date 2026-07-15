@@ -188,6 +188,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun startSelectionParamGesture(): Boolean {
+        if (shuttingDown) return false
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
         prepareForMaskInteraction()
         if (uiState.value.isBusy) return false
         return beginSelectionParamGesture()
@@ -310,9 +312,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         clearSelectionParamTransaction(selectionParamTransaction ?: return)
     }
 
-    private fun settleBrushBeforeSelection() {
-        cancelBrushStroke()
-        settleSelectionParamTransactionForSupersession()
+    private fun isBusyOwnedByMaskSupersedable(): Boolean {
+        val state = _uiState.value
+        if (activeParamRenderRevision != null) return true
+        val transaction = selectionParamTransaction
+        if (transaction != null && transaction.previewJob?.isActive == true) return true
+        return false
     }
 
     internal fun negateBrushStrokeDuringShutdownIfPresent() {
@@ -331,6 +336,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun beginBrushStroke(): Boolean {
         if (shuttingDown) return false
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
         prepareForMaskInteraction()
         if (uiState.value.isBusy) return false
         if (brushingSnapshot != null) return true
