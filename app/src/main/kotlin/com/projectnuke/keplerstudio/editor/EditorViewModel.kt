@@ -933,6 +933,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         hazeEngine: DehazeEngine? = null,
         message: String
     ) {
+        if (isShuttingDown()) return
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val current = prepareForExternalEdit()
         val nextEngines = EngineSelection(
             noiseEngine = noiseEngine ?: current.noiseEngine,
@@ -940,6 +942,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             toneEngine = toneEngine ?: current.toneEngine,
             hazeEngine = hazeEngine ?: current.hazeEngine
         ).coerceImplemented()
+        if (nextEngines == current.engineSelection()) return
         val context = getApplication<Application>()
 
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
@@ -957,13 +960,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
-        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
-        val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+        if (undoSnapshot == null) {
+            updateUiStateAndRecycleReplaced { it.copy(message = "처리 엔진 변경 준비에 실패했습니다.") }
+            return
+        }
+        var ownedBase: Bitmap? = runCatching { basePreview.copyOrThrow() }.getOrElse {
             recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            undoSnapshot = null
+            updateUiStateAndRecycleReplaced { it.copy(message = "처리 엔진 변경 준비에 실패했습니다.") }
             return
         }
 
-        val nextRevision = current.revision + 1
+        val sourcePath = current.sourcePath
+        val baseContentToken = current.baseContentToken
+        val params = current.params
+        val presetLook = current.presetLook
+        val quickEffects = current.activeQuickEffects
+        val startRevision = current.revision
+        val nextRevision = startRevision + 1
         updateUiStateAndRecycleReplaced {
                 it.copy(
                     revision = nextRevision,
@@ -975,28 +990,46 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob = launchManagedEdit { operationToken ->
             var rendered: Bitmap? = null
             try {
-                rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(ownedBase, current.params, nextEngines, nextRevision, current.presetLook, current.activeQuickEffects)
+                withContext(Dispatchers.Default) {
+                    val result = renderEditedPreview(checkNotNull(ownedBase), params, nextEngines, nextRevision, presetLook, quickEffects)
+                    rendered = result
                 }
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                val identityUnchanged = uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken
+                if (isManagedEditCurrent(operationToken, nextRevision) && identityUnchanged) {
                     val adopted = rendered!!
                     saveEngineSelection(context, nextEngines)
-                    updateUiState { it.copy(noiseEngine = nextEngines.noiseEngine, detailEngine = nextEngines.detailEngine, toneEngine = nextEngines.toneEngine, hazeEngine = nextEngines.hazeEngine) }
-                    updateUiStateAndRecycleReplaced { it.copy(previewBitmap = adopted, isBusy = false, message = message) }
+                    updateUiStateAndRecycleReplaced {
+                        it.copy(
+                            noiseEngine = nextEngines.noiseEngine,
+                            detailEngine = nextEngines.detailEngine,
+                            toneEngine = nextEngines.toneEngine,
+                            hazeEngine = nextEngines.hazeEngine,
+                            previewBitmap = adopted,
+                            isBusy = false,
+                            message = message
+                        )
+                    }
                     rendered = null
                     commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
                     undoSnapshot = null
                     scheduleDraftAutosave()
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                val failureIdentityUnchanged = uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken
+                if (isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } finally {
-                rendered?.recycle()
-                ownedBase.recycle()
+                rendered?.takeIf { !it.isRecycled }?.recycle()
+                ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
