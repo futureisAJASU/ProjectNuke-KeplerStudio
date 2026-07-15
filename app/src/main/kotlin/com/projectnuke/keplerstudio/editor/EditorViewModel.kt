@@ -1111,6 +1111,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String) {
+        if (isShuttingDown()) return
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val current = prepareForExternalEdit()
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
@@ -1118,27 +1120,38 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
+        if (params == current.params && look == current.presetLook) return
+
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
         if (undoSnapshot == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "편집 기록을 저장하지 못했습니다.") }
             return
         }
-        val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+        var ownedBase: Bitmap? = runCatching { basePreview.copyOrThrow() }.getOrElse {
             recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = "프리셋 적용 준비에 실패했습니다.") }
             return
         }
-        val nextRevision = current.revision + 1
+        val sourcePath = current.sourcePath
+        val baseContentToken = current.baseContentToken
+        val engines = current.engineSelection()
+        val quickEffects = current.activeQuickEffects
+        val startRevision = current.revision
+        val nextRevision = startRevision + 1
         renderJob?.cancel()
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = message) }
 
         renderJob = launchManagedEdit { operationToken ->
             var rendered: Bitmap? = null
             try {
-                rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(ownedBase, params, current.engineSelection(), nextRevision, look, current.activeQuickEffects)
+                withContext(Dispatchers.Default) {
+                    val result = renderEditedPreview(checkNotNull(ownedBase), params, engines, nextRevision, look, quickEffects)
+                    rendered = result
                 }
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                val identityUnchanged = uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken
+                if (isManagedEditCurrent(operationToken, nextRevision) && identityUnchanged) {
                     val adopted = rendered!!
                     updateUiStateAndRecycleReplaced {
                         it.copy(
@@ -1154,16 +1167,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
                     undoSnapshot = null
                     scheduleDraftAutosave()
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                val failureIdentityUnchanged = uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken
+                if (isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.") }
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } finally {
-                rendered?.recycle()
-                ownedBase.recycle()
+                rendered?.takeIf { !it.isRecycled }?.recycle()
+                ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
