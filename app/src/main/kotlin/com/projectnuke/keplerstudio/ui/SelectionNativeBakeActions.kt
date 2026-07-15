@@ -38,7 +38,11 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     val sourcePath = current.sourcePath
     val baseContentToken = current.baseContentToken
 
-    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
+    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: run {
+        updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
+        return
+    }
+
     var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse {
         recycleHistorySnapshot(checkNotNull(undoSnapshot))
         undoSnapshot = null
@@ -112,7 +116,10 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
                 undoSnapshot = null
                 persistDraftSnapshot()
+            } else if (isManagedEditTokenCurrent(operationToken)) {
+                updateUiState { it.copy(isBusy = false) }
             }
+
         } catch (ce: CancellationException) {
             throw ce
         } catch (_: Throwable) {
@@ -120,13 +127,18 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 uiState.value.sourcePath == sourcePath &&
                 uiState.value.baseContentToken == baseContentToken &&
                 uiState.value.selectionLayers == capturedSelectionLayers &&
-                uiState.value.activeSelectionLayerId == capturedActiveSelectionLayerId) updateUiState {
-                it.copy(
-                    isBusy = false,
-                    message = "선택 마스크 보정 적용에 실패했습니다."
-                )
+                uiState.value.activeSelectionLayerId == capturedActiveSelectionLayerId) {
+                updateUiState {
+                    it.copy(
+                        isBusy = false,
+                        message = "선택 마스크 보정 적용에 실패했습니다."
+                    )
+                }
+            } else if (isManagedEditTokenCurrent(operationToken)) {
+                updateUiState { it.copy(isBusy = false) }
             }
         } finally {
+
             ownedBase?.takeIf { !it.isRecycled }?.recycle()
             ownedLayers.forEach { it.bitmap.takeIf { bitmap -> !bitmap.isRecycled }?.recycle() }
             bakedOriginal?.takeIf { !it.isRecycled }?.recycle()

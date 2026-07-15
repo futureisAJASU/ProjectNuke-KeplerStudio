@@ -134,6 +134,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun isManagedEditCurrent(token: Long, revision: Int): Boolean =
         !shuttingDown && managedEditToken == token && _uiState.value.revision == revision
 
+    internal fun isManagedEditTokenCurrent(token: Long): Boolean =
+        !shuttingDown && managedEditToken == token
+
+
     internal fun isShuttingDown(): Boolean = shuttingDown
 
     internal fun beginCropOperation(): Long = ++cropOperationToken

@@ -32,7 +32,7 @@ data class SelectionLayer(
     val localParams: EditParams = EditParams()
 )
 
-internal fun List<SelectionLayer>.copyBitmapsOwned(): List<SelectionLayer> {
+fun List<SelectionLayer>.copyBitmapsOwned(): List<SelectionLayer> {
     val copies = ArrayList<SelectionLayer>(size)
     try {
         for (layer in this) copies += layer.copy(bitmap = layer.bitmap.copyOrThrow())
