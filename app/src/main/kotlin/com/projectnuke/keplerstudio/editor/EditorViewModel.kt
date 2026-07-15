@@ -313,8 +313,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun isBusyOwnedByMaskSupersedable(): Boolean {
-        val state = _uiState.value
-        if (activeParamRenderRevision != null) return true
+        if (activeParamRenderRevision != null && renderJob?.isActive == true) return true
         val transaction = selectionParamTransaction
         if (transaction != null && transaction.previewJob?.isActive == true) return true
         return false
@@ -716,6 +715,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateParams(transform: (EditParams) -> EditParams) {
+        if (shuttingDown) return
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         resolveOrAbortPreviousParamGroupIfNeeded()
         prepareForMaskInteraction()
         val current = _uiState.value
