@@ -763,7 +763,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         if (!windowWasOpen) {
-            pendingParamUndoSnapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
+            val snapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
+            if (snapshot == null) {
+                ownedBase.recycle()
+                return
+            }
+            pendingParamUndoSnapshot = snapshot
             paramUndoSnapshotCommitted = false
             paramUndoWindowOpen = true
         }
@@ -811,8 +816,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = nextRevision + 1) }
                         updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
                     } else {
-                        val snapshot = pendingParamUndoSnapshot
-                        discardPendingParamUndoSnapshot()
+                        val snapshot = takePendingParamUndoSnapshotForRollback()
                         snapshot?.let { restoreSnapshotWithoutHistory(it) }
                         updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
                     }
@@ -1811,6 +1815,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (!paramUndoSnapshotCommitted) pendingParamUndoSnapshot?.recycleBitmaps()
         pendingParamUndoSnapshot = null
         closeParamUndoWindow()
+    }
+
+    private fun takePendingParamUndoSnapshotForRollback(): EditorHistorySnapshot? {
+        val snapshot = pendingParamUndoSnapshot
+        pendingParamUndoSnapshot = null
+        closeParamUndoWindow()
+        return snapshot
     }
 
     internal fun abortPendingParameterEdit() {
