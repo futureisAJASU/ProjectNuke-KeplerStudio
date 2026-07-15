@@ -46,7 +46,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
-    internal val _uiState = MutableStateFlow(
+    private val _uiState = MutableStateFlow(
         EditorUiState(nativeVersion = runCatching { NativePhotoCore.nativeVersion() }.getOrElse { "native load failed: ${it.message}" })
     )
     val uiState: StateFlow<EditorUiState> = _uiState.asStateFlow()
@@ -65,7 +65,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var draftOperationEpoch: Long = 0L
     private var managedEditJob: Job? = null
     private var managedEditToken: Long = 0L
-    @Volatile internal var shuttingDown: Boolean = false
+    @Volatile private var shuttingDown: Boolean = false
     private var cropOperationToken: Long = 0L
     internal var selectionParamTransaction: SelectionParamTransaction? = null
     private var selectionGestureCounter: Long = 0L
@@ -133,6 +133,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun isManagedEditCurrent(token: Long, revision: Int): Boolean =
         !shuttingDown && managedEditToken == token && _uiState.value.revision == revision
+
+    internal fun isShuttingDown(): Boolean = shuttingDown
 
     internal fun beginCropOperation(): Long = ++cropOperationToken
 
@@ -765,6 +767,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val snapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
             if (snapshot == null) {
                 ownedBase.recycle()
+                updateUiState { it.copy(message = "편집을 준비하지 못했습니다.") }
                 return
             }
             pendingParamUndoSnapshot = snapshot

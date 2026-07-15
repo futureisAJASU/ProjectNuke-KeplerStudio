@@ -1,9 +1,7 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
-import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
-import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -24,7 +22,7 @@ fun EditorViewModel.applySunFlareOriginalMvp() {
 }
 
 private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode, title: String, strength: Float) {
-    if (shuttingDown) return
+    if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
 
     val current = prepareForExternalEdit()
@@ -35,8 +33,9 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
     }
 
     var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
-    val ownedBase = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
-        recycleHistorySnapshot(undoSnapshot!!)
+    var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
+        recycleHistorySnapshot(checkNotNull(undoSnapshot))
+        undoSnapshot = null
         updateUiState { it.copy(message = "이미지를 준비하지 못했습니다.") }
         return
     }
@@ -59,12 +58,11 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
     }
 
     launchManagedEdit { operationToken ->
-        var flareResult: Bitmap? = null
-        var preview: Bitmap? = null
+        var ownedPreview: Bitmap? = null
         try {
-            flareResult = withContext(Dispatchers.Default) {
+            withContext(Dispatchers.Default) {
                 val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
-                    ownedBase,
+                    checkNotNull(ownedBase),
                     mode.ordinal,
                     strength.coerceIn(0f, 1f),
                     nextRevision
@@ -72,10 +70,10 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                 if (result < 0) {
                     error("nativeApplyFlareGuardInPlace failed: $result")
                 }
-                ownedBase
             }
-            preview = withContext(Dispatchers.Default) {
-                val copy = flareResult!!.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+            withContext(Dispatchers.Default) {
+                val copy = checkNotNull(ownedBase).copyOrThrow(Bitmap.Config.ARGB_8888, true)
+                ownedPreview = copy
                 val result = NativePhotoCore.nativeRenderPreviewInPlace(
                     copy,
                     params.exposure,
@@ -103,18 +101,16 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                     presetLook
                 )
                 if (result < 0) {
-                    copy.recycle()
                     throw IllegalStateException("native flare preview render failed: code=$result")
                 }
                 applyActiveQuickEffectsToBitmap(copy, quickEffects, nextRevision)
-                copy
             }
-            val adoptedFlare = flareResult!!
-            val adoptedPreview = preview!!
+            val adoptedFlare = checkNotNull(ownedBase)
+            val adoptedPreview = checkNotNull(ownedPreview)
             if (isManagedEditCurrent(operationToken, nextRevision) &&
                 uiState.value.sourcePath == sourcePath &&
                 uiState.value.baseContentToken == baseToken &&
-                !shuttingDown) {
+                !isShuttingDown()) {
                 updateUiStateAndRecycleReplaced {
                     it.copy(
                         originalPreviewBitmap = adoptedFlare,
@@ -128,24 +124,17 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                 }
                 commitUndoSnapshot(undoSnapshot!!, clearRedo = true)
                 undoSnapshot = null
-                flareResult = null
-                preview = null
+                ownedBase = null
+                ownedPreview = null
                 scheduleDraftAutosave()
-            } else {
-                adoptedFlare.recycle()
-                adoptedPreview.recycle()
             }
         } catch (ce: CancellationException) {
-            flareResult?.recycle()
-            preview?.recycle()
             throw ce
         } catch (_: Throwable) {
-            flareResult?.recycle()
-            preview?.recycle()
             if (isManagedEditCurrent(operationToken, nextRevision) &&
                 uiState.value.sourcePath == sourcePath &&
                 uiState.value.baseContentToken == baseToken &&
-                !shuttingDown) {
+                !isShuttingDown()) {
                 updateUiState {
                     it.copy(
                         isBusy = false,
@@ -155,44 +144,9 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                 }
             }
         } finally {
+            ownedBase?.let { if (!it.isRecycled) it.recycle() }
+            ownedPreview?.let { if (!it.isRecycled) it.recycle() }
             undoSnapshot?.let(::recycleHistorySnapshot)
         }
     }
-}
-
-private fun renderPreviewFromState(base: Bitmap, state: EditorUiState, revision: Int): Bitmap {
-    val copy = base.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-    val params = state.params
-    val result = NativePhotoCore.nativeRenderPreviewInPlace(
-        copy,
-        params.exposure,
-        params.contrast,
-        params.shadows,
-        params.highlights,
-        params.whites,
-        params.blacks,
-        params.temperature,
-        params.tint,
-        params.saturation,
-        params.vibrance,
-        params.clarity,
-        params.dehaze,
-        params.sharpness,
-        params.noiseReduction,
-        params.luminanceNoiseReduction,
-        params.colorNoiseReduction,
-        params.noiseDetailProtection,
-        state.noiseEngine.nativeId,
-        state.detailEngine.nativeId,
-        state.toneEngine.nativeId,
-        state.hazeEngine.nativeId,
-        revision,
-        state.presetLook
-    )
-    if (result < 0) {
-        copy.recycle()
-        throw IllegalStateException("native flare preview render failed: code=$result")
-    }
-    applyActiveQuickEffectsToBitmap(copy, state.activeQuickEffects, revision)
-    return copy
 }
