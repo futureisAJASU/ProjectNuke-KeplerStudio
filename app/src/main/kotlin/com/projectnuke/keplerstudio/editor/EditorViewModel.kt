@@ -276,7 +276,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             recycleHistorySnapshot(transaction.snapshot)
             clearSelectionParamTransaction(transaction)
         } else {
-            transaction.settled = false
             restoreSelectionParamTransaction(transaction)
         }
     }
@@ -293,7 +292,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         restoreSnapshotWithoutHistory(transaction.snapshot)
-        recycleHistorySnapshot(transaction.snapshot)
         clearSelectionParamTransaction(transaction)
     }
 

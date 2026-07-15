@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> EditParams) {
+    val transaction = currentSelectionParamTransaction() ?: return
     val initial = prepareForExternalEdit()
     var activeId = initial.activeSelectionLayerId
     var base = initial.originalPreviewBitmap ?: initial.previewBitmap
@@ -22,12 +23,6 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         updateUiState { it.copy(message = "보정할 선택 마스크가 없습니다.") }
         return
     }
-
-    if (!startSelectionParamGesture()) {
-        updateUiState { it.copy(message = "선택 마스크 편집 기록을 준비하지 못했습니다.") }
-        return
-    }
-    val transaction = currentSelectionParamTransaction() ?: return
     val current = uiState.value
     activeId = current.activeSelectionLayerId
     base = current.originalPreviewBitmap ?: current.previewBitmap

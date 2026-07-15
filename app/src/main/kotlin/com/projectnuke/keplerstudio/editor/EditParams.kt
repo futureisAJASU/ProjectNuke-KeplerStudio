@@ -87,4 +87,3 @@ internal fun parseEditParamsFromJson(json: JSONObject?): EditParams? {
         noiseDetailProtection = json.optDouble("noiseDetailProtection", 0.50).toFloat()
     )
 }
-
