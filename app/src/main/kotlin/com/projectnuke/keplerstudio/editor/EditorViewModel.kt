@@ -1036,20 +1036,36 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun resetAdjustments() {
-        invalidateSelectionPreview()
+        if (isShuttingDown()) return
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val current = prepareForExternalEdit()
-        val path = current.sourcePath ?: return
-        val nextRevision = current.revision + 1
+        val sourcePath = current.sourcePath
+        if (sourcePath == null) {
+            updateUiStateAndRecycleReplaced { it.copy(message = "초기화할 이미지가 없습니다.") }
+            return
+        }
+        val baseContentToken = current.baseContentToken
+        val startRevision = current.revision
+        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+        if (undoSnapshot == null) {
+            updateUiStateAndRecycleReplaced { it.copy(message = "초기화 준비에 실패했습니다.") }
+            return
+        }
+        val nextRevision = startRevision + 1
         renderJob?.cancel()
         exportJob?.cancel()
-        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
+        var decoded: Bitmap? = null
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "초기화하는 중입니다") }
         renderJob = launchManagedEdit { operationToken ->
-            var preview: Bitmap? = null
             try {
-                preview = withContext(Dispatchers.IO) { decodeSampledMutableBitmapWithExif(path, maxSide = 2048) }
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
-                    val adopted = preview!!
+                withContext(Dispatchers.IO) {
+                    val result = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048)
+                    decoded = result
+                }
+                val identityUnchanged = uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken
+                if (isManagedEditCurrent(operationToken, nextRevision) && identityUnchanged) {
+                    val adopted = checkNotNull(decoded)
                     lastSuccessfullyRenderedParams = EditParams()
                     updateUiStateAndRecycleReplaced {
                         it.copy(
@@ -1063,28 +1079,32 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             cropState = CropState(),
                             selectionLayers = emptyList(),
                             activeSelectionLayerId = null,
+                            selectionPaintSettings = SelectionPaintSettings(),
                             showSelectionOverlay = true,
                             flareGuardRuntimeStatus = null,
                             isBusy = false,
                             message = "초기화가 완료되었습니다"
                         )
                     }
-                    preview = null
+                    decoded = null
                     commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
                     undoSnapshot = null
                     forceDraftSaveAsync()
-                } else {
-                    preview?.recycle()
-                    preview = null
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                val failureIdentityUnchanged = uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken
+                if (isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "초기화에 실패했습니다: ${t.message}") }
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } finally {
-                preview?.recycle()
+                decoded?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
