@@ -208,6 +208,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         transaction.finalPreviewRevision = revision
         transaction.finalPreviewBaseToken = baseToken
         transaction.finalPreviewLayerId = activeId
+        transaction.previewRevision = revision
+        transaction.previewBaseToken = baseToken
+        transaction.previewLayerId = activeId
         transaction.succeeded = true
     }
 
@@ -317,7 +320,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (activeParamRenderRevision != null && activeParamRenderRevision == state.revision && renderJob?.isActive == true) return true
         val transaction = selectionParamTransaction
         if (transaction != null && transaction.previewJob?.isActive == true) {
-            if (isSelectionPreviewCurrent(transaction, transaction.latestPreviewToken, state.revision, state.baseContentToken, state.activeSelectionLayerId)) {
+            if (transaction.previewRevision != null &&
+                transaction.previewRevision == state.revision &&
+                transaction.previewBaseToken == state.baseContentToken &&
+                transaction.previewLayerId == state.activeSelectionLayerId) {
                 return true
             }
         }
@@ -731,11 +737,33 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             updateUiStateAndRecycleReplaced { it.copy(message = "미리보기 입력 이미지를 준비하지 못했습니다.") }
             return
         }
-        beginParamUndoWindow()
+        val windowWasOpen = paramUndoWindowOpen
+        if (!paramUndoWindowOpen) {
+            val hasActiveRender = activeParamRenderRevision != null && renderJob?.isActive == true
+            val hasLiveParams = current.params != lastSuccessfullyRenderedParams
+            val hasPendingSnapshot = pendingParamUndoSnapshot != null
+            if (hasActiveRender || hasLiveParams || hasPendingSnapshot) {
+                renderJob?.cancel()
+                activeParamRenderRevision = null
+                if (pendingParamUndoSnapshot != null && !paramUndoSnapshotCommitted) {
+                    pendingParamUndoSnapshot?.recycleBitmaps()
+                    pendingParamUndoSnapshot = null
+                }
+                updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = it.revision + 1, isBusy = false) }
+            }
+        }
+        if (!windowWasOpen) {
+            pendingParamUndoSnapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
+            paramUndoSnapshotCommitted = false
+            paramUndoWindowOpen = true
+        }
+        paramUndoWindowJob?.cancel()
+        paramUndoWindowJob = viewModelScope.launch {
+            delay(900L)
+            paramUndoWindowOpen = false
+        }
         updateUiState { it.copy(params = nextParams) }
         val nextRevision = current.revision + 1
-
-        // Commit the undo snapshot only after rendering succeeds.
         updateUiStateAndRecycleReplaced { it.copy(revision = nextRevision, isBusy = true, message = "미리보기를 렌더링하는 중입니다") }
         renderJob?.cancel()
         activeParamRenderRevision = nextRevision
@@ -768,9 +796,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 rendered?.recycle()
                 if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
-                    discardPendingParamUndoSnapshot()
-                    updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = nextRevision + 1) }
-                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
+                    if (paramUndoSnapshotCommitted) {
+                        updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = nextRevision + 1) }
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
+                    } else {
+                        val snapshot = pendingParamUndoSnapshot
+                        discardPendingParamUndoSnapshot()
+                        snapshot?.let { restoreSnapshotWithoutHistory(it) }
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
+                    }
                 }
             } finally {
                 ownedBase.recycle()
@@ -1749,30 +1783,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun beginParamUndoWindow() {
-        if (!paramUndoWindowOpen) {
-            if (pendingParamUndoSnapshot != null) {
-                pendingParamUndoSnapshot?.recycleBitmaps()
-                pendingParamUndoSnapshot = null
-                updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = it.revision + 1, isBusy = false) }
-            }
-            pendingParamUndoSnapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
-            paramUndoSnapshotCommitted = false
-            paramUndoWindowOpen = true
-        }
-        paramUndoWindowJob?.cancel()
-        paramUndoWindowJob = viewModelScope.launch {
-            delay(900L)
-            paramUndoWindowOpen = false
-        }
-    }
-
-    private fun resolveOrAbortPreviousParamGroupIfNeeded() {
-        if (!paramUndoWindowOpen && (activeParamRenderRevision != null || pendingParamUndoSnapshot != null)) {
-            abortPendingParameterEdit()
-        }
-    }
-
     private fun commitPendingParamUndoSnapshot() {
         val snapshot = pendingParamUndoSnapshot ?: return
         if (!paramUndoSnapshotCommitted) {
@@ -1983,6 +1993,9 @@ internal class SelectionParamTransaction(
     var settled: Boolean = false
     @Volatile var finished: Boolean = false
     @Volatile var finishJobRef: Job? = null
+    var previewRevision: Int? = null
+    var previewBaseToken: String? = null
+    var previewLayerId: String? = null
 
     fun hasOptimisticLiveParams(state: EditorUiState): Boolean {
         if (activeSelectionLayerId == null) return false
