@@ -868,8 +868,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var rendered: Bitmap? = null
             try {
                 val nextParams = withContext(Dispatchers.Default) { computeAutoEnhanceParams(ownedBase) }
-                rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(ownedBase, nextParams, engines, nextRevision, presetLook, quickEffects)
+                withContext(Dispatchers.Default) {
+                    rendered = renderEditedPreview(ownedBase, nextParams, engines, nextRevision, presetLook, quickEffects)
                 }
                 if (isManagedEditCurrent(operationToken, nextRevision) &&
                     uiState.value.sourcePath == sourcePath &&
