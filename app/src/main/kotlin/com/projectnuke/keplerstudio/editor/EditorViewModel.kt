@@ -313,9 +313,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun isBusyOwnedByMaskSupersedable(): Boolean {
-        if (activeParamRenderRevision != null && renderJob?.isActive == true) return true
+        val state = _uiState.value
+        if (activeParamRenderRevision != null && activeParamRenderRevision == state.revision && renderJob?.isActive == true) return true
         val transaction = selectionParamTransaction
-        if (transaction != null && transaction.previewJob?.isActive == true) return true
+        if (transaction != null && transaction.previewJob?.isActive == true) {
+            if (isSelectionPreviewCurrent(transaction, transaction.latestPreviewToken, state.revision, state.baseContentToken, state.activeSelectionLayerId)) {
+                return true
+            }
+        }
         return false
     }
 
@@ -717,8 +722,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun updateParams(transform: (EditParams) -> EditParams) {
         if (shuttingDown) return
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-        resolveOrAbortPreviousParamGroupIfNeeded()
-        prepareForMaskInteraction()
+        prepareForGlobalParamEdit()
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
@@ -1801,6 +1805,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun prepareForMaskInteraction(): EditorUiState {
         abortPendingParameterEdit()
+        if (brushingSnapshot != null) {
+            cancelBrushStroke()
+        }
+        settleSelectionParamTransactionForSupersession()
+        return uiState.value
+    }
+
+    private fun prepareForGlobalParamEdit(): EditorUiState {
         if (brushingSnapshot != null) {
             cancelBrushStroke()
         }
