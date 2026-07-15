@@ -137,7 +137,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun isManagedEditTokenCurrent(token: Long): Boolean =
         !shuttingDown && managedEditToken == token
 
-
     internal fun isShuttingDown(): Boolean = shuttingDown
 
     internal fun beginCropOperation(): Long = ++cropOperationToken
@@ -834,6 +833,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun applyAutoEnhance() {
+        if (shuttingDown) return
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val current = prepareForExternalEdit()
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
@@ -841,14 +842,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
-        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
+        val sourcePath = current.sourcePath
+        val baseContentToken = current.baseContentToken
+        val engines = current.engineSelection()
+        val presetLook = current.presetLook
+        val quickEffects = current.activeQuickEffects
+        val startRevision = current.revision
+
+        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: run {
+            updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정 준비에 실패했습니다.") }
+            return
+        }
         val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
             recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정 준비에 실패했습니다.") }
             return
         }
 
-        val nextRevision = current.revision + 1
+        val nextRevision = startRevision + 1
         renderJob?.cancel()
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다") }
 
@@ -857,9 +869,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val nextParams = withContext(Dispatchers.Default) { computeAutoEnhanceParams(ownedBase) }
                 rendered = withContext(Dispatchers.Default) {
-                    renderEditedPreview(ownedBase, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
+                    renderEditedPreview(ownedBase, nextParams, engines, nextRevision, presetLook, quickEffects)
                 }
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                if (isManagedEditCurrent(operationToken, nextRevision) &&
+                    uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken &&
+                    !isShuttingDown()) {
                     val adopted = rendered!!
                     lastSuccessfullyRenderedParams = nextParams
                     updateUiStateAndRecycleReplaced {
@@ -874,19 +889,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
                     undoSnapshot = null
                     scheduleDraftAutosave()
-                } else {
-                    rendered?.recycle()
-                    rendered = null
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                if (isManagedEditCurrent(operationToken, nextRevision) &&
+                    uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}") }
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } finally {
-                rendered?.recycle()
-                ownedBase.recycle()
+                rendered?.takeIf { !it.isRecycled }?.recycle()
+                ownedBase.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
