@@ -16,17 +16,14 @@ import kotlinx.coroutines.withContext
 
 fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> EditParams) {
     val transaction = currentSelectionParamTransaction() ?: return
-    val initial = prepareForExternalEdit()
-    var activeId = initial.activeSelectionLayerId
-    var base = initial.originalPreviewBitmap ?: initial.previewBitmap
-    if (activeId == null || base == null) {
-        updateUiState { it.copy(message = "보정할 선택 마스크가 없습니다.") }
-        return
-    }
     val current = uiState.value
-    activeId = current.activeSelectionLayerId
-    base = current.originalPreviewBitmap ?: current.previewBitmap
-    if (activeId == null || base == null || transaction.activeSelectionLayerId != activeId) return
+    if (transaction.settled || transaction.committed) return
+    if (current.baseContentToken != transaction.baseContentToken) return
+    if (current.activeSelectionLayerId != transaction.activeSelectionLayerId) return
+    if (hasActiveBrushStroke()) return
+    val activeId = current.activeSelectionLayerId ?: return
+    val base = current.originalPreviewBitmap ?: current.previewBitmap ?: return
+    if (transaction.activeSelectionLayerId != activeId) return
 
     val nextLayers = current.selectionLayers.map { layer ->
         if (layer.id == activeId) {

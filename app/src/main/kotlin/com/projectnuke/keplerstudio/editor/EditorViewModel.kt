@@ -188,8 +188,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun startSelectionParamGesture(): Boolean {
-        abortPendingParameterEdit()
-        settleSelectionParamTransactionForSupersession()
+        prepareForMaskInteraction()
+        if (uiState.value.isBusy) return false
         return beginSelectionParamGesture()
     }
 
@@ -310,6 +310,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         clearSelectionParamTransaction(selectionParamTransaction ?: return)
     }
 
+    private fun settleBrushBeforeSelection() {
+        cancelBrushStroke()
+        settleSelectionParamTransactionForSupersession()
+    }
+
     internal fun negateBrushStrokeDuringShutdownIfPresent() {
         val snapshot = brushingSnapshot
         if (snapshot == null) return
@@ -321,18 +326,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun invalidateSelectionPreview() {
-        settleSelectionParamTransactionForSupersession()
-        cancelBrushStroke()
+        prepareForMaskInteraction()
     }
 
     internal fun beginBrushStroke(): Boolean {
         if (shuttingDown) return false
-        abortPendingParameterEdit()
-        settleSelectionParamTransactionForSupersession()
+        prepareForMaskInteraction()
+        if (uiState.value.isBusy) return false
         if (brushingSnapshot != null) return true
         val state = _uiState.value
         val layerId = state.activeSelectionLayerId ?: return false
         val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
+        if (state.params != lastSuccessfullyRenderedParams || activeParamRenderRevision != null) return false
         val snapshot = captureCurrentHistorySnapshot() ?: return false
         val ownedMask = runCatching { layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
             recycleHistorySnapshot(snapshot)
@@ -706,7 +711,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun updateParams(transform: (EditParams) -> EditParams) {
         resolveOrAbortPreviousParamGroupIfNeeded()
-        settleSelectionParamTransactionForSupersession()
+        prepareForMaskInteraction()
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
@@ -1787,8 +1792,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         discardPendingParamUndoSnapshot()
     }
 
-    internal fun prepareForExternalEdit(): EditorUiState {
+    private fun prepareForMaskInteraction(): EditorUiState {
         abortPendingParameterEdit()
+        if (brushingSnapshot != null) {
+            cancelBrushStroke()
+        }
+        settleSelectionParamTransactionForSupersession()
+        return uiState.value
+    }
+
+    internal fun prepareForExternalEdit(): EditorUiState {
+        prepareForMaskInteraction()
         return uiState.value
     }
 
