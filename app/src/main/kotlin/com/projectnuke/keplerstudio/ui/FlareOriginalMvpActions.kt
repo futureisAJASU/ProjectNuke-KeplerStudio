@@ -3,10 +3,11 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
-import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import kotlinx.coroutines.CancellationException
@@ -23,6 +24,9 @@ fun EditorViewModel.applySunFlareOriginalMvp() {
 }
 
 private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode, title: String, strength: Float) {
+    if (shuttingDown) return
+    if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+
     val current = prepareForExternalEdit()
     val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
     if (baseOriginal == null) {
@@ -31,7 +35,20 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
     }
 
     var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
+    val ownedBase = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
+        recycleHistorySnapshot(undoSnapshot!!)
+        updateUiState { it.copy(message = "이미지를 준비하지 못했습니다.") }
+        return
+    }
+
+    val sourcePath = current.sourcePath
+    val baseToken = current.baseContentToken
+    val params = current.params
+    val engines = current.engineSelection()
+    val presetLook = current.presetLook
+    val quickEffects = current.activeQuickEffects
     val nextRevision = current.revision + 1
+
     updateUiState {
         it.copy(
             isBusy = true,
@@ -42,32 +59,65 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
     }
 
     launchManagedEdit { operationToken ->
-        var nextOriginal: Bitmap? = null
-        var nextPreview: Bitmap? = null
+        var flareResult: Bitmap? = null
+        var preview: Bitmap? = null
         try {
-            nextOriginal = withContext(Dispatchers.Default) {
-                val copy = baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+            flareResult = withContext(Dispatchers.Default) {
                 val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
-                    copy,
+                    ownedBase,
                     mode.ordinal,
                     strength.coerceIn(0f, 1f),
                     nextRevision
                 )
                 if (result < 0) {
-                    copy.recycle()
                     error("nativeApplyFlareGuardInPlace failed: $result")
                 }
+                ownedBase
+            }
+            preview = withContext(Dispatchers.Default) {
+                val copy = flareResult!!.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+                val result = NativePhotoCore.nativeRenderPreviewInPlace(
+                    copy,
+                    params.exposure,
+                    params.contrast,
+                    params.shadows,
+                    params.highlights,
+                    params.whites,
+                    params.blacks,
+                    params.temperature,
+                    params.tint,
+                    params.saturation,
+                    params.vibrance,
+                    params.clarity,
+                    params.dehaze,
+                    params.sharpness,
+                    params.noiseReduction,
+                    params.luminanceNoiseReduction,
+                    params.colorNoiseReduction,
+                    params.noiseDetailProtection,
+                    engines.noiseEngine.nativeId,
+                    engines.detailEngine.nativeId,
+                    engines.toneEngine.nativeId,
+                    engines.hazeEngine.nativeId,
+                    nextRevision,
+                    presetLook
+                )
+                if (result < 0) {
+                    copy.recycle()
+                    throw IllegalStateException("native flare preview render failed: code=$result")
+                }
+                applyActiveQuickEffectsToBitmap(copy, quickEffects, nextRevision)
                 copy
             }
-            nextPreview = withContext(Dispatchers.Default) {
-                renderPreviewFromState(nextOriginal ?: error("missing flare original"), current, nextRevision)
-            }
-            val adoptedOriginal = nextOriginal ?: error("missing flare original")
-            val adoptedPreview = nextPreview ?: error("missing flare preview")
-            if (isManagedEditCurrent(operationToken, nextRevision)) {
+            val adoptedFlare = flareResult!!
+            val adoptedPreview = preview!!
+            if (isManagedEditCurrent(operationToken, nextRevision) &&
+                uiState.value.sourcePath == sourcePath &&
+                uiState.value.baseContentToken == baseToken &&
+                !shuttingDown) {
                 updateUiStateAndRecycleReplaced {
                     it.copy(
-                        originalPreviewBitmap = adoptedOriginal,
+                        originalPreviewBitmap = adoptedFlare,
                         previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
                         baseContentToken = newBaseContentToken(),
@@ -76,30 +126,33 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                         flareGuardRuntimeStatus = "규칙 기반 보정으로 번짐을 완화했습니다."
                     )
                 }
-                commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                commitUndoSnapshot(undoSnapshot!!, clearRedo = true)
                 undoSnapshot = null
-                nextOriginal = null
-                nextPreview = null
-                persistDraftSnapshot()
+                flareResult = null
+                preview = null
+                scheduleDraftAutosave()
             } else {
-                nextOriginal?.recycle()
-                nextOriginal = null
-                nextPreview?.recycle()
-                nextPreview = null
+                adoptedFlare.recycle()
+                adoptedPreview.recycle()
             }
         } catch (ce: CancellationException) {
-            nextOriginal?.recycle()
-            nextPreview?.recycle()
+            flareResult?.recycle()
+            preview?.recycle()
             throw ce
         } catch (_: Throwable) {
-            nextOriginal?.recycle()
-            nextPreview?.recycle()
-            if (isManagedEditCurrent(operationToken, nextRevision)) updateUiState {
-                it.copy(
-                    isBusy = false,
-                    message = "번짐 완화에 실패했습니다.",
-                    flareGuardRuntimeStatus = "번짐 완화에 실패했습니다."
-                )
+            flareResult?.recycle()
+            preview?.recycle()
+            if (isManagedEditCurrent(operationToken, nextRevision) &&
+                uiState.value.sourcePath == sourcePath &&
+                uiState.value.baseContentToken == baseToken &&
+                !shuttingDown) {
+                updateUiState {
+                    it.copy(
+                        isBusy = false,
+                        message = "번짐 완화에 실패했습니다.",
+                        flareGuardRuntimeStatus = "번짐 완화에 실패했습니다."
+                    )
+                }
             }
         } finally {
             undoSnapshot?.let(::recycleHistorySnapshot)

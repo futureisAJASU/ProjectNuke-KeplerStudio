@@ -46,7 +46,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
-    private val _uiState = MutableStateFlow(
+    internal val _uiState = MutableStateFlow(
         EditorUiState(nativeVersion = runCatching { NativePhotoCore.nativeVersion() }.getOrElse { "native load failed: ${it.message}" })
     )
     val uiState: StateFlow<EditorUiState> = _uiState.asStateFlow()
@@ -65,7 +65,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var draftOperationEpoch: Long = 0L
     private var managedEditJob: Job? = null
     private var managedEditToken: Long = 0L
-    @Volatile private var shuttingDown: Boolean = false
+    @Volatile internal var shuttingDown: Boolean = false
     private var cropOperationToken: Long = 0L
     internal var selectionParamTransaction: SelectionParamTransaction? = null
     private var selectionGestureCounter: Long = 0L
@@ -321,7 +321,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         clearSelectionParamTransaction(selectionParamTransaction ?: return)
     }
 
-    private fun isBusyOwnedByMaskSupersedable(): Boolean {
+    internal fun isBusyOwnedByMaskSupersedable(): Boolean {
         val state = _uiState.value
         if (activeParamRenderRevision != null && activeParamRenderRevision == state.revision && renderJob?.isActive == true) return true
         val transaction = selectionParamTransaction
@@ -533,7 +533,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return persistDraftSnapshotInternal()
     }
 
-    private fun scheduleDraftAutosave(delayMs: Long = 2000L) {
+    internal fun scheduleDraftAutosave(delayMs: Long = 2000L) {
         draftSaveJob?.cancel()
         draftSaveJob = viewModelScope.launch {
             delay(delayMs)
@@ -736,7 +736,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         prepareForGlobalParamEdit()
 
-        // Handle closed-window boundary before capturing state
         val windowWasOpen = paramUndoWindowOpen
         if (!paramUndoWindowOpen) {
             val hasActiveRender = activeParamRenderRevision != null && renderJob?.isActive == true
