@@ -100,7 +100,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
             ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
         }
     }
-    bindSelectionPreviewJob(transaction, previewJob)
+    bindSelectionPreviewJob(transaction, previewJob, nextRevision, baseToken, activeId)
 }
 
 fun EditorViewModel.finishActiveSelectionParamsGesture() {

@@ -152,6 +152,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         transaction.finalPreviewRevision = null
         transaction.finalPreviewBaseToken = null
         transaction.finalPreviewLayerId = null
+        transaction.previewRevision = null
+        transaction.previewBaseToken = null
+        transaction.previewLayerId = null
         transaction.succeeded = false
         transaction.previewJob?.cancel()
         return token
@@ -217,9 +220,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun currentSelectionParamTransaction(): SelectionParamTransaction? =
         selectionParamTransaction
 
-    internal fun bindSelectionPreviewJob(transaction: SelectionParamTransaction, job: Job) {
+    internal fun bindSelectionPreviewJob(transaction: SelectionParamTransaction, job: Job, revision: Int, baseToken: String, activeId: String?) {
         transaction.previewJob?.cancel()
         transaction.previewJob = job
+        transaction.previewRevision = revision
+        transaction.previewBaseToken = baseToken
+        transaction.previewLayerId = activeId
         selectionLivePreviewJob = job
     }
 
@@ -729,18 +735,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (shuttingDown) return
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         prepareForGlobalParamEdit()
-        val current = _uiState.value
-        val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
-        val nextParams = transform(current.params)
-        if (nextParams == current.params) return
-        val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
-            updateUiStateAndRecycleReplaced { it.copy(message = "미리보기 입력 이미지를 준비하지 못했습니다.") }
-            return
-        }
+
+        // Handle closed-window boundary before capturing state
         val windowWasOpen = paramUndoWindowOpen
         if (!paramUndoWindowOpen) {
             val hasActiveRender = activeParamRenderRevision != null && renderJob?.isActive == true
-            val hasLiveParams = current.params != lastSuccessfullyRenderedParams
+            val hasLiveParams = _uiState.value.params != lastSuccessfullyRenderedParams
             val hasPendingSnapshot = pendingParamUndoSnapshot != null
             if (hasActiveRender || hasLiveParams || hasPendingSnapshot) {
                 renderJob?.cancel()
@@ -752,6 +752,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = it.revision + 1, isBusy = false) }
             }
         }
+
+        val current = _uiState.value
+        val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
+        val nextParams = transform(current.params)
+        if (nextParams == current.params) return
+        val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+            updateUiStateAndRecycleReplaced { it.copy(message = "미리보기 입력 이미지를 준비하지 못했습니다.") }
+            return
+        }
+
         if (!windowWasOpen) {
             pendingParamUndoSnapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
             paramUndoSnapshotCommitted = false
@@ -797,6 +807,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
                     if (paramUndoSnapshotCommitted) {
+                        closeParamUndoWindow()
                         updateUiState { it.copy(params = lastSuccessfullyRenderedParams, revision = nextRevision + 1) }
                         updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}") }
                     } else {
