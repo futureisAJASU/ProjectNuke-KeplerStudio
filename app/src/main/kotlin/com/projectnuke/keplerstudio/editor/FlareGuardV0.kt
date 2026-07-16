@@ -11,14 +11,23 @@ enum class FlareGuardMode {
 
 fun createFlareMaskV0(bitmap: Bitmap, threshold: Float = 0.90f): Bitmap {
     val mask = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-    NativePhotoCore.nativeCreateFlareMask(
-        source = bitmap,
-        mask = mask,
-        threshold = threshold.coerceIn(0.70f, 0.98f),
-        radius = max(6, max(bitmap.width, bitmap.height) / 96),
-        passes = 2
-    )
-    return mask
+    try {
+        val result = NativePhotoCore.nativeCreateFlareMask(
+            source = bitmap,
+            mask = mask,
+            threshold = threshold.coerceIn(0.70f, 0.98f),
+            radius = max(6, max(bitmap.width, bitmap.height) / 96),
+            passes = 2
+        )
+        if (result < 0) {
+            mask.recycle()
+            error("nativeCreateFlareMask failed: $result")
+        }
+        return mask
+    } catch (t: Throwable) {
+        mask.recycle()
+        throw t
+    }
 }
 
 fun applyFlareGuardV0(source: Bitmap, strength: Float = 0.28f): Bitmap {

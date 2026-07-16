@@ -102,25 +102,29 @@ fun applyFlareGuardMaskBlendV0(
     mode: FlareGuardMode,
     strength: Float
 ): Bitmap {
-    val output = source.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-    val ruleMask = createFlareMaskV0(source, if (mode == FlareGuardMode.DaySun) 0.88f else 0.92f)
-    val scaledMask = if (modelMask.width == source.width && modelMask.height == source.height) {
-        modelMask
-    } else {
-        Bitmap.createScaledBitmap(modelMask, source.width, source.height, true)
-    }
+    var output: Bitmap? = null
+    var ruleMask: Bitmap? = null
+    var scaledMask: Bitmap? = null
     var success = false
     try {
-        val width = output.width
+        output = source.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+        ruleMask = createFlareMaskV0(source, if (mode == FlareGuardMode.DaySun) 0.88f else 0.92f)
+        scaledMask = if (modelMask.width == source.width && modelMask.height == source.height) {
+            modelMask
+        } else {
+            Bitmap.createScaledBitmap(modelMask, source.width, source.height, true)
+        }
+
+        val width = output!!.width
         val row = IntArray(width)
         val ruleRow = IntArray(width)
         val modelRow = IntArray(width)
         val safeStrength = strength.coerceIn(0f, 1f)
 
-        for (y in 0 until output.height) {
-            output.getPixels(row, 0, width, 0, y, width, 1)
-            ruleMask.getPixels(ruleRow, 0, width, 0, y, width, 1)
-            scaledMask.getPixels(modelRow, 0, width, 0, y, width, 1)
+        for (y in 0 until output!!.height) {
+            output!!.getPixels(row, 0, width, 0, y, width, 1)
+            ruleMask!!.getPixels(ruleRow, 0, width, 0, y, width, 1)
+            scaledMask!!.getPixels(modelRow, 0, width, 0, y, width, 1)
 
             for (x in 0 until width) {
                 val pixel = row[x]
@@ -143,15 +147,15 @@ fun applyFlareGuardMaskBlendV0(
                 }
             }
 
-            output.setPixels(row, 0, width, 0, y, width, 1)
+            output!!.setPixels(row, 0, width, 0, y, width, 1)
         }
         success = true
-        return output
+        return output!!
     } finally {
-        ruleMask.recycle()
-        if (scaledMask !== modelMask) scaledMask.recycle()
+        ruleMask?.recycle()
+        if (scaledMask !== modelMask) scaledMask?.recycle()
         if (!success) {
-            output.recycle()
+            output?.recycle()
         }
     }
 }

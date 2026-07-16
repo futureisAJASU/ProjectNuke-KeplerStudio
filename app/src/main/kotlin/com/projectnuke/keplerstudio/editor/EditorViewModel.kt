@@ -1660,13 +1660,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
         if (shuttingDown) return
+        val stateBeforePrepare = _uiState.value
+        if (stateBeforePrepare.isBusy && !isBusyOwnedByMaskSupersedable()) {
+            return
+        }
         val current = prepareForExternalEdit()
         val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
         if (baseOriginal == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화를 적용할 이미지가 없습니다.") }
-            return
-        }
-        if (current.isBusy && !isBusyOwnedByMaskSupersedable()) {
             return
         }
 
@@ -1692,7 +1693,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val engines = current.engineSelection()
         val presetLook = current.presetLook
         val quickEffects = current.activeQuickEffects
-        val startRevision = current.revision
         val appContext = context.applicationContext
 
         updateUiStateAndRecycleReplaced {
@@ -1741,7 +1741,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val adoptedPreview = renderedPreview!!
                     flareGuardBitmap = null
                     renderedPreview = null
-                    ownedBaseOwned = null
 
                     updateUiStateAndRecycleReplaced {
                         it.copy(
@@ -1760,7 +1759,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     Log.i(FLARE_GUARD_AI_TAG, "Finished FlareGuard preview: mode=$mode status=${flareGuardResult!!.status} output=${flareGuardResult!!.bitmap.width}x${flareGuardResult!!.bitmap.height}")
                 } else if (isManagedEditTokenCurrent(operationToken)) {
                     updateUiState { it.copy(isBusy = false) }
-                } else {
                 }
             } catch (ce: CancellationException) {
                 throw ce
