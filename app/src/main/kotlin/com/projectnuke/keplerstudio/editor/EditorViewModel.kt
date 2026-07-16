@@ -1659,25 +1659,42 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
+        if (shuttingDown) return
         val current = prepareForExternalEdit()
         val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
         if (baseOriginal == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화를 적용할 이미지가 없습니다.") }
             return
         }
-
-        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
-        val ownedBase = runCatching { baseOriginal.copyOrThrow() }.getOrElse {
-            recycleHistorySnapshot(checkNotNull(undoSnapshot))
-            updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화 준비에 실패했습니다.") }
+        if (current.isBusy && !isBusyOwnedByMaskSupersedable()) {
             return
         }
+
         val label = when (mode) {
             FlareGuardMode.NightLight -> "번짐 영역 감지"
             FlareGuardMode.DaySun -> "태양 번짐 영역 감지"
         }
         val nextRevision = current.revision + 1
+
+        val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: run {
+            updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화 준비에 실패했습니다.") }
+            return
+        }
+        val ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse {
+            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화 준비에 실패했습니다.") }
+            return
+        }
+
+        val sourcePath = current.sourcePath
+        val baseContentToken = current.baseContentToken
+        val params = current.params
+        val engines = current.engineSelection()
+        val presetLook = current.presetLook
+        val quickEffects = current.activeQuickEffects
+        val startRevision = current.revision
         val appContext = context.applicationContext
+
         updateUiStateAndRecycleReplaced {
             it.copy(
                 isBusy = true,
@@ -1689,22 +1706,43 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         Log.i(FLARE_GUARD_AI_TAG, "Starting FlareGuard preview: mode=$mode source=${baseOriginal.width}x${baseOriginal.height} revision=$nextRevision")
 
         renderJob = launchManagedEdit { operationToken ->
-            var resultBitmap: Bitmap? = null
+            var flareGuardResult: FlareGuardApplyResult? = null
+            var flareGuardBitmap: Bitmap? = null
             var renderedPreview: Bitmap? = null
+            var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
+            var ownedBaseOwned: Bitmap? = ownedBase
+
             try {
                 val result = withContext(Dispatchers.Default) {
-                    applyFlareGuardModelOrRuleResultV0(appContext, ownedBase, mode, allowRuleFallback = true)
+                    applyFlareGuardModelOrRuleResultV0(appContext, checkNotNull(ownedBaseOwned), mode, allowRuleFallback = true)
                 }
-                resultBitmap = result.bitmap
+                flareGuardResult = result
+                flareGuardBitmap = result.bitmap
+
                 renderedPreview = withContext(Dispatchers.Default) {
-                    renderEditedPreview(resultBitmap!!, current.params, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
+                    renderEditedPreview(
+                        checkNotNull(flareGuardBitmap),
+                        params,
+                        engines,
+                        nextRevision,
+                        presetLook,
+                        quickEffects
+                    )
                 }
-                if (isManagedEditCurrent(operationToken, nextRevision) &&
-                    (_uiState.value.originalPreviewBitmap === baseOriginal || _uiState.value.previewBitmap === baseOriginal) &&
-                    _uiState.value.baseContentToken == current.baseContentToken
-                ) {
-                    val adoptedOriginal = resultBitmap!!
+
+                val adoptionIdentityUnchanged = !shuttingDown &&
+                    _uiState.value.sourcePath == sourcePath &&
+                    _uiState.value.baseContentToken == baseContentToken &&
+                    _uiState.value.revision == nextRevision &&
+                    managedEditToken == operationToken
+
+                if (isManagedEditCurrent(operationToken, nextRevision) && adoptionIdentityUnchanged) {
+                    val adoptedOriginal = flareGuardBitmap!!
                     val adoptedPreview = renderedPreview!!
+                    flareGuardBitmap = null
+                    renderedPreview = null
+                    ownedBaseOwned = null
+
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             originalPreviewBitmap = adoptedOriginal,
@@ -1712,28 +1750,29 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             baseBitmapDirty = true,
                             baseContentToken = newBaseContentToken(),
                             isBusy = false,
-                            message = result.status.uiText,
-                            flareGuardRuntimeStatus = result.status.uiText
+                            message = flareGuardResult!!.status.uiText,
+                            flareGuardRuntimeStatus = flareGuardResult!!.status.uiText
                         )
                     }
-                    resultBitmap = null
-                    renderedPreview = null
-                    commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
-                    undoSnapshot = null
+                    commitUndoSnapshot(checkNotNull(undoSnapshotOwned), clearRedo = true)
+                    undoSnapshotOwned = null
                     forceDraftSaveAsync()
-                    Log.i(FLARE_GUARD_AI_TAG, "Finished FlareGuard preview: mode=$mode status=${result.status} output=${result.bitmap.width}x${result.bitmap.height}")
+                    Log.i(FLARE_GUARD_AI_TAG, "Finished FlareGuard preview: mode=$mode status=${flareGuardResult!!.status} output=${flareGuardResult!!.bitmap.width}x${flareGuardResult!!.bitmap.height}")
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 } else {
-                    resultBitmap?.recycle()
-                    renderedPreview?.recycle()
-                    resultBitmap = null
-                    renderedPreview = null
-                    Log.w(FLARE_GUARD_AI_TAG, "Discarded stale FlareGuard preview: expected=$nextRevision actual=${_uiState.value.revision}")
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
                 Log.e(FLARE_GUARD_AI_TAG, "FlareGuard preview failed", t)
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                val failureIdentityUnchanged = !shuttingDown &&
+                    _uiState.value.sourcePath == sourcePath &&
+                    _uiState.value.baseContentToken == baseContentToken &&
+                    _uiState.value.revision == nextRevision &&
+                    managedEditToken == operationToken
+
+                if (isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged) {
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             isBusy = false,
@@ -1741,12 +1780,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             flareGuardRuntimeStatus = "번짐 영역 감지에 실패했습니다."
                         )
                     }
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } finally {
-                resultBitmap?.recycle()
-                renderedPreview?.recycle()
-                ownedBase.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
+                flareGuardBitmap?.takeIf { !it.isRecycled }?.recycle()
+                renderedPreview?.takeIf { !it.isRecycled }?.recycle()
+                ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
+                undoSnapshotOwned?.let(::recycleHistorySnapshot)
             }
         }
     }

@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -64,6 +65,8 @@ fun applyFlareGuardModelOrRuleResultV0(
                 }
             }
             Log.w(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model inference returned null")
+        } catch (ce: CancellationException) {
+            throw ce
         } catch (t: Throwable) {
             Log.e(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model path failed", t)
             if (!allowRuleFallback) {
@@ -106,7 +109,7 @@ fun applyFlareGuardMaskBlendV0(
     } else {
         Bitmap.createScaledBitmap(modelMask, source.width, source.height, true)
     }
-
+    var success = false
     try {
         val width = output.width
         val row = IntArray(width)
@@ -142,12 +145,15 @@ fun applyFlareGuardMaskBlendV0(
 
             output.setPixels(row, 0, width, 0, y, width, 1)
         }
+        success = true
+        return output
     } finally {
         ruleMask.recycle()
         if (scaledMask !== modelMask) scaledMask.recycle()
+        if (!success) {
+            output.recycle()
+        }
     }
-
-    return output
 }
 
 private fun bridgeReduceNight(pixel: Int, amount: Float): Int {
