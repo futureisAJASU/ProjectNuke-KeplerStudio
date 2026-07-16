@@ -1714,13 +1714,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
             try {
                 val result = withContext(Dispatchers.Default) {
-                    applyFlareGuardModelOrRuleResultV0(appContext, checkNotNull(ownedBaseOwned), mode, allowRuleFallback = true)
+                    val r = applyFlareGuardModelOrRuleResultV0(appContext, checkNotNull(ownedBaseOwned), mode, allowRuleFallback = true)
+                    flareGuardResult = r
+                    flareGuardBitmap = r.bitmap
+                    r
                 }
-                flareGuardResult = result
-                flareGuardBitmap = result.bitmap
 
                 renderedPreview = withContext(Dispatchers.Default) {
-                    renderEditedPreview(
+                    val p = renderEditedPreview(
                         checkNotNull(flareGuardBitmap),
                         params,
                         engines,
@@ -1728,6 +1729,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         presetLook,
                         quickEffects
                     )
+                    renderedPreview = p
+                    p
                 }
 
                 val adoptionIdentityUnchanged = !shuttingDown &&
@@ -1739,8 +1742,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (isManagedEditCurrent(operationToken, nextRevision) && adoptionIdentityUnchanged) {
                     val adoptedOriginal = flareGuardBitmap!!
                     val adoptedPreview = renderedPreview!!
-                    flareGuardBitmap = null
-                    renderedPreview = null
 
                     updateUiStateAndRecycleReplaced {
                         it.copy(
@@ -1753,6 +1754,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             flareGuardRuntimeStatus = flareGuardResult!!.status.uiText
                         )
                     }
+                    flareGuardBitmap = null
+                    renderedPreview = null
                     commitUndoSnapshot(checkNotNull(undoSnapshotOwned), clearRedo = true)
                     undoSnapshotOwned = null
                     forceDraftSaveAsync()
