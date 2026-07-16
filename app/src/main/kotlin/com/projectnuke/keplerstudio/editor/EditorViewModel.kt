@@ -1563,6 +1563,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         failureMessage: String,
         effect: ActiveQuickEffect
     ) {
+        if (isShuttingDown()) return
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val current = prepareForExternalEdit()
         val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
         if (baseOriginal == null) {
@@ -1570,15 +1572,28 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
 
-        val nextActiveQuickEffects = current.activeQuickEffects.toggle(effect)
-        if (nextActiveQuickEffects == current.activeQuickEffects) return
-        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
-        val ownedBase = try { baseOriginal.copyOrThrow() } catch (t: Throwable) {
-            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+        val currentQuickEffects = current.activeQuickEffects
+        val nextActiveQuickEffects = currentQuickEffects.toggle(effect)
+        if (nextActiveQuickEffects == currentQuickEffects) return
+        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+        if (undoSnapshot == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = failureMessage) }
             return
         }
-        val nextRevision = current.revision + 1
+        var ownedBase: Bitmap? = try { baseOriginal.copyOrThrow() } catch (t: Throwable) {
+            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            undoSnapshot = null
+            updateUiStateAndRecycleReplaced { it.copy(message = failureMessage) }
+            return
+        }
+        val sourcePath = current.sourcePath
+        val baseContentToken = current.baseContentToken
+        val params = current.params
+        val engines = current.engineSelection()
+        val presetLook = current.presetLook
+        val startRevision = current.revision
+        val requestedQuickEffects = nextActiveQuickEffects
+        val nextRevision = startRevision + 1
         renderJob?.cancel()
         updateUiStateAndRecycleReplaced {
             it.copy(
@@ -1591,24 +1606,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob = launchManagedEdit { operationToken ->
             var renderedPreview: Bitmap? = null
             try {
-                renderedPreview = withContext(Dispatchers.Default) {
-                    renderEditedPreview(
-                        ownedBase,
-                        current.params,
-                        current.engineSelection(),
+                withContext(Dispatchers.Default) {
+                    val result = renderEditedPreview(
+                        checkNotNull(ownedBase),
+                        params,
+                        engines,
                         nextRevision,
-                        current.presetLook,
-                        nextActiveQuickEffects
+                        presetLook,
+                        requestedQuickEffects
                     )
+                    renderedPreview = result
                 }
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                val identityUnchanged = uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken
+                if (isManagedEditCurrent(operationToken, nextRevision) && identityUnchanged) {
                     val adoptedPreview = renderedPreview!!
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             previewBitmap = adoptedPreview,
-                            activeQuickEffects = nextActiveQuickEffects,
+                            activeQuickEffects = requestedQuickEffects,
                             isBusy = false,
-                            message = if (nextActiveQuickEffects.any { active -> active.matches(effect) }) {
+                            message = if (requestedQuickEffects.any { active -> active.matches(effect) }) {
                                 "$title 적용했습니다. 다시 누르면 해제할 수 있습니다."
                             } else {
                                 "$title 적용을 해제했습니다."
@@ -1619,20 +1637,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
                     undoSnapshot = null
                     forceDraftSaveAsync()
-                } else {
-                    renderedPreview?.recycle()
-                    renderedPreview = null
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
                 Log.e(FLARE_GUARD_AI_TAG, "$title native special effect failed", t)
-                if (isManagedEditCurrent(operationToken, nextRevision)) {
+                val failureIdentityUnchanged = uiState.value.sourcePath == sourcePath &&
+                    uiState.value.baseContentToken == baseContentToken
+                if (isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = failureMessage) }
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             } finally {
-                renderedPreview?.recycle()
-                ownedBase.recycle()
+                renderedPreview?.takeIf { !it.isRecycled }?.recycle()
+                ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
