@@ -107,7 +107,10 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             if (isManagedEditCurrent(operationToken, nextRevision) && adoptionIdentityUnchanged) {
                 val adoptedOriginal = remasteredOriginal ?: error("missing mask-aware original")
                 val adoptedPreview = renderedPreview ?: error("missing mask-aware preview")
+                var adoptionAttempted = false
+                var adoptionThrowable: Throwable? = null
                 try {
+                    adoptionAttempted = true
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             params = EditParams(),
@@ -119,24 +122,26 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                             message = "Edge Masker 기반 마스크 보정을 적용했습니다."
                         )
                     }
+                } catch (t: Throwable) {
+                    if (t is CancellationException) throw t
+                    adoptionThrowable = t
+                }
+                if (adoptionAttempted) {
                     val liveState = uiState.value
-                    if (liveState.originalPreviewBitmap === adoptedOriginal &&
-                        liveState.previewBitmap === adoptedPreview) {
+                    val originalAdopted = liveState.originalPreviewBitmap === adoptedOriginal
+                    val previewAdopted = liveState.previewBitmap === adoptedPreview
+                    if (originalAdopted && previewAdopted) {
                         remasteredOriginal = null
                         renderedPreview = null
                         markParamsSuccessfullyRendered(EditParams())
                         commitUndoSnapshot(checkNotNull(undoSnapshotOwned), clearRedo = true)
                         undoSnapshotOwned = null
                         persistDraftSnapshot()
+                    } else {
+                        if (originalAdopted) remasteredOriginal = null
+                        if (previewAdopted) renderedPreview = null
+                        if (adoptionThrowable != null) throw adoptionThrowable
                     }
-                } catch (t: Throwable) {
-                    val liveState = uiState.value
-                    if (liveState.originalPreviewBitmap === adoptedOriginal &&
-                        liveState.previewBitmap === adoptedPreview) {
-                        remasteredOriginal = null
-                        renderedPreview = null
-                    }
-                    throw t
                 }
             } else if (isManagedEditTokenCurrent(operationToken)) {
                 updateUiState { it.copy(isBusy = false) }
