@@ -166,6 +166,15 @@ internal fun findCurrentDraftGenerationDirectory(context: Context): DraftGenerat
     return DraftGenerationDirectory(dir)
 }
 
+internal fun findDraftGenerationDirectory(context: Context, generationId: String): DraftGenerationDirectory? {
+    if (!generationId.startsWith(DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(generationId)) return null
+    val root = draftGenerationsRoot(context).canonicalFile
+    val dir = runCatching { File(root, generationId).canonicalFile }.getOrNull() ?: return null
+    if (dir.parentFile != root || !dir.isDirectory) return null
+    val generation = DraftGenerationDirectory(dir)
+    return generation.takeIf { it.completionFile.isFile }
+}
+
 internal fun validateCurrentDraftGeneration(context: Context): ValidatedDraftGeneration? {
     val pointer = currentDraftGenerationId(context) ?: return null
     if (!pointer.startsWith(DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(pointer)) return null

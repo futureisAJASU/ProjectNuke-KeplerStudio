@@ -111,80 +111,142 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
 }
 
 internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationManifest? = runCatching {
-    val formatVersion = json.optInt("formatVersion", -1)
+    val formatVersion = json.requiredInt("formatVersion")
     if (formatVersion != DRAFT_FORMAT_VERSION) return null
-    val layerArray = json.optJSONArray("selectionLayers") ?: JSONArray()
+    val layerArray = json.requiredArray("selectionLayers")
     val layers = ArrayList<DraftSelectionLayerEntry>(layerArray.length())
     for (i in 0 until layerArray.length()) {
         val layerObj = layerArray.getJSONObject(i)
         layers += DraftSelectionLayerEntry(
-            id = layerObj.optString("id"),
-            name = layerObj.optString("name"),
-            kind = layerObj.optString("kind"),
-            enabled = layerObj.optBoolean("enabled", true),
-            inverted = layerObj.optBoolean("inverted", false),
-            opacity = layerObj.optDouble("opacity", 1.0).toFloat(),
-            localParams = parseEditParamsFromJson(layerObj.optJSONObject("localParams")) ?: EditParams(),
-            maskFileName = layerObj.optString("maskFileName"),
-            maskWidth = layerObj.optInt("maskWidth", 0),
-            maskHeight = layerObj.optInt("maskHeight", 0),
-            sourceIdentity = layerObj.optString("sourceIdentity")
+            id = layerObj.requiredString("id"),
+            name = layerObj.requiredString("name", allowBlank = true),
+            kind = layerObj.requiredEnum<SelectionLayerKind>("kind").name,
+            enabled = layerObj.requiredBoolean("enabled"),
+            inverted = layerObj.requiredBoolean("inverted"),
+            opacity = layerObj.requiredFloat("opacity", 0f..1f),
+            localParams = layerObj.requiredEditParams("localParams"),
+            maskFileName = layerObj.requiredString("maskFileName"),
+            maskWidth = layerObj.requiredPositiveInt("maskWidth"),
+            maskHeight = layerObj.requiredPositiveInt("maskHeight"),
+            sourceIdentity = layerObj.requiredString("sourceIdentity")
         )
     }
-    val paintObj = json.optJSONObject("selectionPaintSettings")
-    val paintSettings = if (paintObj != null) {
-        SelectionPaintSettings(
-            mode = runCatching { SelectionPaintMode.valueOf(paintObj.optString("mode")) }.getOrNull() ?: return null,
-            sizePx = paintObj.optDouble("sizePx", 120.0).toFloat(),
-            feather = paintObj.optDouble("feather", 0.55).toFloat(),
-            strength = paintObj.optDouble("strength", 0.70).toFloat()
-        )
-    } else SelectionPaintSettings()
-    val quickArray = json.optJSONArray("activeQuickEffects") ?: JSONArray()
+    val paintObj = json.requiredObject("selectionPaintSettings")
+    val paintSettings = SelectionPaintSettings(
+        mode = paintObj.requiredEnum("mode"),
+        sizePx = paintObj.requiredFloat("sizePx", 1f..4096f),
+        feather = paintObj.requiredFloat("feather", 0f..1f),
+        strength = paintObj.requiredFloat("strength", 0f..1f)
+    )
+    val quickArray = json.requiredArray("activeQuickEffects")
     val quickEffects = ArrayList<ActiveQuickEffect>(quickArray.length())
     for (i in 0 until quickArray.length()) {
         val qObj = quickArray.getJSONObject(i)
         quickEffects += ActiveQuickEffect(
-            kind = runCatching { QuickEffectKind.valueOf(qObj.optString("kind")) }.getOrNull() ?: return null,
-            strength = runCatching { QuickEffectStrength.valueOf(qObj.optString("strength")) }.getOrNull() ?: return null
+            kind = qObj.requiredEnum("kind"),
+            strength = qObj.requiredEnum("strength")
         )
     }
-    val cropObject = json.optJSONObject("cropState")
-    if (cropObject != null && runCatching {
-            CropAspectRatio.valueOf(cropObject.optString("aspectRatio", CropAspectRatio.Original.name))
-        }.isFailure) return null
+    val cropObject = json.requiredObject("cropState")
+    val cropState = CropState(
+        aspectRatio = cropObject.requiredEnum("aspectRatio"),
+        cropLeft = cropObject.requiredFloat("cropLeft", 0f..1f),
+        cropTop = cropObject.requiredFloat("cropTop", 0f..1f),
+        cropRight = cropObject.requiredFloat("cropRight", 0f..1f),
+        cropBottom = cropObject.requiredFloat("cropBottom", 0f..1f),
+        rotationDegrees = cropObject.requiredInt("rotationDegrees"),
+        straightenDegrees = cropObject.requiredFloat("straightenDegrees", -45f..45f),
+        flipHorizontal = cropObject.requiredBoolean("flipHorizontal")
+    )
     val presetObject = json.optJSONObject("presetLook")
     val parsedPreset = presetObject?.let { presetColorLookFromJson(it) }
     if (presetObject != null && parsedPreset == null) return null
+    val activeLayerId = json.optionalString("activeSelectionLayerId")
     DraftGenerationManifest(
         formatVersion = formatVersion,
-        generationId = json.optString("generationId"),
-        savedAtMillis = json.optLong("savedAtMillis", 0L),
-        draftOperationEpoch = json.optLong("draftOperationEpoch", Long.MIN_VALUE),
-        editorRevision = json.optInt("editorRevision", -1),
-        originalSourceIdentity = json.optString("originalSourceIdentity").takeIf { it.isNotBlank() },
-        sourceIdentity = json.optString("sourceIdentity").takeIf { it.isNotBlank() },
-        baseContentToken = json.optString("baseContentToken"),
-        baseBitmapDirty = json.optBoolean("baseBitmapDirty", false),
-        sourceFileName = json.optString("sourceFileName"),
-        sourceWidth = json.optInt("sourceWidth", 0),
-        sourceHeight = json.optInt("sourceHeight", 0),
-        thumbnailFileName = json.optString("thumbnailFileName"),
-        thumbnailWidth = json.optInt("thumbnailWidth", 0),
-        thumbnailHeight = json.optInt("thumbnailHeight", 0),
-        params = parseEditParamsFromJson(json.optJSONObject("params")) ?: EditParams(),
-        noiseEngine = json.optString("noiseEngine"),
-        detailEngine = json.optString("detailEngine"),
-        toneEngine = json.optString("toneEngine"),
-        hazeEngine = json.optString("hazeEngine"),
+        generationId = json.requiredString("generationId"),
+        savedAtMillis = json.requiredPositiveLong("savedAtMillis"),
+        draftOperationEpoch = json.requiredNonNegativeLong("draftOperationEpoch"),
+        editorRevision = json.requiredNonNegativeInt("editorRevision"),
+        originalSourceIdentity = json.optionalString("originalSourceIdentity"),
+        sourceIdentity = json.requiredString("sourceIdentity"),
+        baseContentToken = json.requiredString("baseContentToken"),
+        baseBitmapDirty = json.requiredBoolean("baseBitmapDirty"),
+        sourceFileName = json.requiredString("sourceFileName"),
+        sourceWidth = json.requiredPositiveInt("sourceWidth"),
+        sourceHeight = json.requiredPositiveInt("sourceHeight"),
+        thumbnailFileName = json.requiredString("thumbnailFileName"),
+        thumbnailWidth = json.requiredPositiveInt("thumbnailWidth"),
+        thumbnailHeight = json.requiredPositiveInt("thumbnailHeight"),
+        params = json.requiredEditParams("params"),
+        noiseEngine = json.requiredEnum<NoiseEngine>("noiseEngine").name,
+        detailEngine = json.requiredEnum<DetailEngine>("detailEngine").name,
+        toneEngine = json.requiredEnum<ToneEngine>("toneEngine").name,
+        hazeEngine = json.requiredEnum<DehazeEngine>("hazeEngine").name,
         presetLook = parsedPreset,
         activeQuickEffects = quickEffects,
-        exportFormat = json.optString("exportFormat"),
-        exportResolution = json.optString("exportResolution"),
-        cropState = cropObject?.let { parseCropStateFromJson(it) } ?: CropState(),
+        exportFormat = json.requiredEnum<ExportFormat>("exportFormat").name,
+        exportResolution = json.requiredEnum<ExportResolution>("exportResolution").name,
+        cropState = cropState,
         selectionLayers = layers,
-        activeSelectionLayerId = json.optString("activeSelectionLayerId").takeIf { it.isNotBlank() },
+        activeSelectionLayerId = activeLayerId,
         selectionPaintSettings = paintSettings,
-        showSelectionOverlay = json.optBoolean("showSelectionOverlay", true)
+        showSelectionOverlay = json.requiredBoolean("showSelectionOverlay")
     )
 }.getOrNull()
+
+private fun JSONObject.requiredObject(key: String): JSONObject = get(key) as? JSONObject ?: error("missing object: $key")
+private fun JSONObject.requiredArray(key: String): JSONArray = get(key) as? JSONArray ?: error("missing array: $key")
+private fun JSONObject.requiredBoolean(key: String): Boolean = get(key) as? Boolean ?: error("missing boolean: $key")
+private fun JSONObject.requiredString(key: String, allowBlank: Boolean = false): String =
+    (get(key) as? String)?.takeIf { allowBlank || it.isNotBlank() } ?: error("missing string: $key")
+
+private fun JSONObject.optionalString(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    return requiredString(key)
+}
+
+private fun JSONObject.requiredNumber(key: String): Number = get(key) as? Number ?: error("missing number: $key")
+private fun JSONObject.requiredInt(key: String): Int {
+    val value = requiredNumber(key).toDouble()
+    check(value.isFinite() && value % 1.0 == 0.0 && value in Int.MIN_VALUE.toDouble()..Int.MAX_VALUE.toDouble())
+    return value.toInt()
+}
+private fun JSONObject.requiredPositiveInt(key: String): Int = requiredInt(key).also { check(it > 0) }
+private fun JSONObject.requiredNonNegativeInt(key: String): Int = requiredInt(key).also { check(it >= 0) }
+private fun JSONObject.requiredLong(key: String): Long {
+    val number = requiredNumber(key)
+    val value = number.toDouble()
+    check(value.isFinite() && value % 1.0 == 0.0)
+    return number.toLong()
+}
+private fun JSONObject.requiredPositiveLong(key: String): Long = requiredLong(key).also { check(it > 0L) }
+private fun JSONObject.requiredNonNegativeLong(key: String): Long = requiredLong(key).also { check(it >= 0L) }
+private fun JSONObject.requiredFloat(key: String, range: ClosedFloatingPointRange<Float>): Float =
+    requiredNumber(key).toFloat().also { check(it.isFinite() && it in range) }
+
+private inline fun <reified T : Enum<T>> JSONObject.requiredEnum(key: String): T =
+    enumValueOf<T>(requiredString(key))
+
+private fun JSONObject.requiredEditParams(key: String): EditParams {
+    val value = requiredObject(key)
+    return EditParams(
+        exposure = value.requiredFloat("exposure", -1f..1f),
+        contrast = value.requiredFloat("contrast", -1f..1f),
+        shadows = value.requiredFloat("shadows", -1f..1f),
+        highlights = value.requiredFloat("highlights", -1f..1f),
+        whites = value.requiredFloat("whites", -1f..1f),
+        blacks = value.requiredFloat("blacks", -1f..1f),
+        temperature = value.requiredFloat("temperature", -1f..1f),
+        tint = value.requiredFloat("tint", -1f..1f),
+        saturation = value.requiredFloat("saturation", -1f..1f),
+        vibrance = value.requiredFloat("vibrance", -1f..1f),
+        clarity = value.requiredFloat("clarity", -1f..1f),
+        dehaze = value.requiredFloat("dehaze", -1f..1f),
+        sharpness = value.requiredFloat("sharpness", 0f..1f),
+        noiseReduction = value.requiredFloat("noiseReduction", 0f..1f),
+        luminanceNoiseReduction = value.requiredFloat("luminanceNoiseReduction", 0f..1f),
+        colorNoiseReduction = value.requiredFloat("colorNoiseReduction", 0f..1f),
+        noiseDetailProtection = value.requiredFloat("noiseDetailProtection", 0f..1f)
+    )
+}

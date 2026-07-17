@@ -143,6 +143,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun isShuttingDown(): Boolean = shuttingDown
 
+    internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
+        if (shuttingDown) return false
+        val state = _uiState.value
+        return !state.isBusy || allowMaskSupersession && isBusyOwnedByMaskSupersedable()
+    }
+
     private suspend fun isCurrentExport(
         token: Long,
         sourcePath: String,
@@ -540,7 +546,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun isDraftResultCurrent(result: DraftSaveResult): Boolean {
-        val current = _uiState.value
+        return result.epoch == draftOperationEpoch && draftResultMatchesState(result, _uiState.value)
+    }
+
+    private fun draftResultMatchesState(result: DraftSaveResult, current: EditorUiState): Boolean {
         return result.epoch == draftOperationEpoch &&
             result.baseContentToken == current.baseContentToken &&
             result.capturedRevision == current.revision &&
@@ -637,30 +646,53 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return false
         }
         val owningJob = currentCoroutineContext()[Job]
-        val saved = try {
+        var committed: DraftSaveResult? = null
+        var settled = false
+        try {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
-                    saveDraftSnapshot(context, payload) {
+                    committed = saveDraftSnapshot(context, payload) {
                         owningJob?.isActive != false && !shuttingDown && isDraftPayloadCurrent(payload)
+                    }
+                    committed?.let { saved ->
+                        settled = withContext(NonCancellable) {
+                            settleCommittedDraft(context, saved, payload, owningJob)
+                        }
                     }
                 }
             }
-        } catch (ce: CancellationException) {
-            throw ce
+        } catch (_: CancellationException) {
+            // A published pointer must be settled even when dispatcher return delivers cancellation.
         } catch (t: Throwable) {
             logDraftSaveFailure(t)
-            updateUiStateAndRecycleReplaced {
-                if (isDraftPayloadCurrent(payload)) it.copy(message = "\uc784\uc2dc \uc800\uc7a5\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2E4. \ud3b8\uc9d1\uc740 \uacc4\uc18d\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.") else it
-            }
-            null
-        } finally {
+        }
+        if (committed == null) {
             payload.recycleOwnedBitmaps()
-        } ?: return false
-        var adoptedMetadata = false
-        updateUiStateAndRecycleReplaced {
-            if (isDraftResultCurrent(saved)) {
-                adoptedMetadata = true
-                it.copy(
+            updateUiStateAndRecycleReplaced {
+                if (owningJob?.isActive != false && isDraftPayloadCurrent(payload)) {
+                    it.copy(message = "\uc784\uc2dc \uc800\uc7a5\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. \ud3b8\uc9d1\uc740 \uacc4\uc18d\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.")
+                } else it
+            }
+            return false
+        }
+        payload.recycleOwnedBitmaps()
+        return settled
+    }
+
+    private suspend fun settleCommittedDraft(
+        context: Context,
+        saved: DraftSaveResult,
+        payload: DraftSavePayload,
+        owningJob: Job?
+    ): Boolean {
+        val current = owningJob?.isActive != false && draftSaveJob === owningJob && isDraftResultCurrent(saved)
+        if (!current) {
+            withContext(Dispatchers.IO) { rollbackCommittedDraft(context, saved) }
+            return false
+        }
+        _uiState.update { state ->
+            if (draftResultMatchesState(saved, state)) {
+                state.copy(
                     draftSavedAtMillis = saved.savedAtMillis,
                     draftSourcePath = saved.sourcePath,
                     draftBaseContentToken = saved.baseContentToken,
@@ -668,9 +700,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     draftGenerationSourcePath = saved.sourcePath,
                     draftGenerationThumbnailPath = saved.thumbnailPath
                 )
-            } else it
+            } else state
         }
-        if (adoptedMetadata) saved.previousGenerationId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
+        val adopted = _uiState.value.let { state ->
+            state.draftGenerationId == saved.generationId &&
+                state.draftGenerationSourcePath == saved.sourcePath &&
+                state.draftGenerationThumbnailPath == saved.thumbnailPath &&
+                state.draftBaseContentToken == saved.baseContentToken &&
+                state.revision == saved.capturedRevision
+        }
+        if (!adopted) {
+            withContext(Dispatchers.IO) { rollbackCommittedDraft(context, saved) }
+            return false
+        }
+        saved.previousGenerationId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
+        withContext(Dispatchers.IO) {
+            persistLegacyDraftCompatibility(context, payload, saved)
+            deleteAllDraftGenerationsExcept(context, saved.generationDirectory)
+        }
         return true
     }
 
@@ -707,7 +754,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openImage(uri: Uri) {
-        if (shuttingDown) return
+        if (!canEnterEditorAction()) return
         abortPendingParameterEdit()
         invalidateSelectionPreview()
         invalidateCropOperation()
@@ -1313,7 +1360,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
-        if (state.isBusy) return
+        if (state.isBusy || brushingSnapshot != null) return
 
         val exportFormat = state.exportFormat
         val exportResolution = state.exportResolution
@@ -1578,6 +1625,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun undoEdit() {
+        if (!canEnterEditorAction()) return
         invalidateSelectionPreview()
         abortPendingParameterEdit()
         invalidateCropOperation()
@@ -1606,6 +1654,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun redoEdit() {
+        if (!canEnterEditorAction()) return
         invalidateSelectionPreview()
         abortPendingParameterEdit()
         invalidateCropOperation()
@@ -2029,7 +2078,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             inMutable = true
                         }
                     ) ?: error("draft mask decode failed")
-                    ownedMasks += mask
+                    try {
+                        ownedMasks += mask
+                    } catch (t: Throwable) {
+                        if (!mask.isRecycled) mask.recycle()
+                        throw t
+                    }
                 }
             }
             val base = checkNotNull(ownedBase)
@@ -2125,6 +2179,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (t: Throwable) {
                 nativeSession = previousSession
                 throw t
+            }
+            val adoptedState = _uiState.value
+            val fullyAdopted = nativeSession == createdSession &&
+                adoptedState.sourcePath == nextState.sourcePath &&
+                adoptedState.originalPreviewBitmap === base &&
+                adoptedState.previewBitmap === ownedRendered &&
+                adoptedState.selectionLayers.size == layers.size &&
+                adoptedState.selectionLayers.zip(layers).all { (live, expected) ->
+                    live.id == expected.id && live.bitmap === expected.bitmap
+                } &&
+                adoptedState.baseContentToken == manifest.baseContentToken &&
+                adoptedState.revision == nextRevision
+            if (!fullyAdopted) {
+                if (nativeSession == createdSession) nativeSession = previousSession
+                error("draft generation adoption was not confirmed")
             }
             createdSession = 0L
             ownedBase = null
@@ -2530,6 +2599,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         paramUndoWindowJob?.cancel()
         cropJob?.cancel()
         transactionFinishJob?.cancel()
+        ThumbnailBitmapCache.clear()
         releaseNativeSession()
         clearEditHistory()
         super.onCleared()
@@ -3487,6 +3557,7 @@ private fun writeHeifToUri(context: Context, uri: Uri, bitmap: Bitmap) {
 
 private data class DraftSaveResult(
     val generationId: String,
+    val generationDirectory: File,
     val sourcePath: String,
     val thumbnailPath: String,
     val savedAtMillis: Long,
@@ -3494,6 +3565,10 @@ private data class DraftSaveResult(
     val capturedRevision: Int,
     val epoch: Long = Long.MIN_VALUE,
     val previousGenerationId: String? = null,
+    val previousGenerationDirectory: File? = null,
+    val pointerPublished: Boolean,
+    val compatibilitySourceFile: File? = null,
+    val compatibilitySourceChanged: Boolean = false,
     val previousDraftPath: String? = null,
     val originalSourcePath: String? = null
 )
@@ -3689,11 +3764,22 @@ private fun saveDraftSnapshot(
         if (draftSource.changed && isOwnedDraftSource(context, draftSource.file)) draftSource.file.delete()
         return null
     }
-    val sourceIsOwned = isOwnedDraftSource(context, draftSource.file)
+    return generationResult.copy(
+        compatibilitySourceFile = draftSource.file,
+        compatibilitySourceChanged = draftSource.changed
+    )
+}
+
+private fun persistLegacyDraftCompatibility(
+    context: Context,
+    payload: DraftSavePayload,
+    saved: DraftSaveResult
+) {
+    val draftSource = saved.compatibilitySourceFile ?: return
     val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
     val commitSucceeded = try {
         preferences.edit()
-        .putString(KEY_DRAFT_SOURCE, draftSource.file.absolutePath)
+        .putString(KEY_DRAFT_SOURCE, draftSource.absolutePath)
         .putFloat(KEY_DRAFT_EXPOSURE, payload.params.exposure)
         .putFloat(KEY_DRAFT_CONTRAST, payload.params.contrast)
         .putFloat(KEY_DRAFT_SHADOWS, payload.params.shadows)
@@ -3716,7 +3802,7 @@ private fun saveDraftSnapshot(
         .putString(KEY_DRAFT_LOOK, presetColorLookToJson(payload.presetLook)?.toString())
         .putString(KEY_DRAFT_QUICK_EFFECTS, payload.activeQuickEffects.toDraftString())
         .putString(KEY_DRAFT_BASE_TOKEN, payload.baseContentToken)
-        .putLong(KEY_DRAFT_SAVED_AT, savedAt)
+        .putLong(KEY_DRAFT_SAVED_AT, saved.savedAtMillis)
         .commit()
     } catch (t: Throwable) {
         logDraftSaveFailure(t)
@@ -3725,9 +3811,10 @@ private fun saveDraftSnapshot(
     if (!commitSucceeded) {
         logDraftSaveFailure(IllegalStateException("failed to commit legacy draft preferences"))
     }
-    if (commitSucceeded && draftSource.changed) runCatching { saveDraftThumbnailFile(context, draftSource.file) }
-    if (commitSucceeded && sourceIsOwned) deleteObsoleteDraftSources(context, draftSource.file, payload.sourcePath)
-    return generationResult
+    if (commitSucceeded && saved.compatibilitySourceChanged) runCatching { saveDraftThumbnailFile(context, draftSource) }
+    if (commitSucceeded && isOwnedDraftSource(context, draftSource)) {
+        deleteObsoleteDraftSources(context, draftSource, payload.sourcePath)
+    }
 }
 
 private fun persistDraftGenerationInternal(
@@ -3740,6 +3827,8 @@ private fun persistDraftGenerationInternal(
 ): DraftSaveResult? {
     val genId = UUID.randomUUID().toString()
     var genDir = newDraftGenerationDirectory(context)
+    var pendingResult: DraftSaveResult? = null
+    var pointerCommitted = false
     try {
         if (!isCurrent()) return null
         val maskEntries = ArrayList<Pair<SelectionLayer, DraftSelectionLayerEntry>>(payload.selectionLayers.size)
@@ -3828,13 +3917,10 @@ private fun persistDraftGenerationInternal(
             deleteDraftDirectory(context, genDir)
             return null
         }
-        if (!publishDraftGeneration(context, genDir.root.name)) {
-            deleteDraftDirectory(context, genDir)
-            return null
-        }
-        deleteAllDraftGenerationsExcept(context, genDir.root)
-        return DraftSaveResult(
+        val previousDirectory = payload.previousGenerationId?.let { findDraftGenerationDirectory(context, it)?.root }
+        pendingResult = DraftSaveResult(
             generationId = genDir.root.name,
+            generationDirectory = genDir.root,
             sourcePath = validated.sourceFile.absolutePath,
             thumbnailPath = validated.thumbnailFile.absolutePath,
             savedAtMillis = savedAt,
@@ -3842,13 +3928,51 @@ private fun persistDraftGenerationInternal(
             capturedRevision = payload.capturedRevision,
             epoch = payload.epoch,
             previousGenerationId = payload.previousGenerationId,
+            previousGenerationDirectory = previousDirectory,
+            pointerPublished = false,
             previousDraftPath = payload.draftSourcePath,
             originalSourcePath = payload.sourcePath
         )
+        if (!publishDraftGeneration(context, genDir.root.name)) {
+            deleteDraftDirectory(context, genDir)
+            return null
+        }
+        pointerCommitted = true
+        return checkNotNull(pendingResult).copy(pointerPublished = true)
     } catch (t: Throwable) {
-        deleteDraftDirectory(context, genDir)
+        if (pointerCommitted && pendingResult != null) {
+            rollbackCommittedDraft(context, checkNotNull(pendingResult).copy(pointerPublished = true))
+        } else {
+            deleteDraftDirectory(context, genDir)
+        }
         Log.w(FLARE_GUARD_AI_TAG, "Draft generation save failed", t)
         return null
+    }
+}
+
+private fun rollbackCommittedDraft(context: Context, saved: DraftSaveResult) {
+    if (!saved.pointerPublished) {
+        deleteDraftDirectory(context, DraftGenerationDirectory(saved.generationDirectory))
+        return
+    }
+    val pointer = currentDraftGenerationId(context)
+    if (pointer == saved.generationId) {
+        val previousIsComplete = runCatching {
+            saved.previousGenerationId != null &&
+                saved.previousGenerationDirectory?.let { directory ->
+                    findDraftGenerationDirectory(context, saved.previousGenerationId)?.root?.canonicalFile == directory.canonicalFile
+                } == true
+        }.getOrDefault(false)
+        val restoredPrevious = previousIsComplete &&
+            publishDraftGeneration(context, checkNotNull(saved.previousGenerationId))
+        val rolledBack = restoredPrevious || clearCurrentDraftGenerationPointer(context)
+        if (!rolledBack || currentDraftGenerationId(context) == saved.generationId) return
+    }
+    if (currentDraftGenerationId(context) != saved.generationId) {
+        deleteDraftDirectory(context, DraftGenerationDirectory(saved.generationDirectory))
+        saved.compatibilitySourceFile?.takeIf {
+            saved.compatibilitySourceChanged && isOwnedDraftSource(context, it)
+        }?.delete()
     }
 }
 

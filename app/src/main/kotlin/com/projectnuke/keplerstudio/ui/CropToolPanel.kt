@@ -76,8 +76,7 @@ private enum class CropDragMode {
 }
 
 @Composable
-fun CropToolPanel() {
-    val editorViewModel: EditorViewModel = viewModel()
+fun CropToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     val state by editorViewModel.uiState.collectAsState()
     val bitmap = state.previewBitmap ?: state.originalPreviewBitmap
     val cropState = state.cropState
@@ -106,7 +105,7 @@ fun CropToolPanel() {
                     .padding(top = 4.dp)
             ) {
                 CropAspectRatio.values().forEach { ratio ->
-                    TextButton(onClick = { editorViewModel.setCropAspectRatio(ratio) }) {
+                    TextButton(onClick = { editorViewModel.setCropAspectRatio(ratio) }, enabled = !state.isBusy) {
                         Text(
                             ratio.label,
                             color = if (cropState.aspectRatio == ratio) CropAccent else CropTextSecondary
@@ -125,9 +124,9 @@ fun CropToolPanel() {
         ) {
             Text("\uD68C\uC804 \uBC0F \uC218\uD3C9", color = CropTextPrimary, style = MaterialTheme.typography.titleSmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
-                TextButton(onClick = { editorViewModel.rotateCropLeft() }) { Text("\uC67C\uCABD 90\u00B0") }
-                TextButton(onClick = { editorViewModel.rotateCropRight() }) { Text("\uC624\uB978\uCABD 90\u00B0") }
-                TextButton(onClick = { editorViewModel.toggleCropFlipHorizontal() }) {
+                TextButton(onClick = { editorViewModel.rotateCropLeft() }, enabled = !state.isBusy) { Text("\uC67C\uCABD 90\u00B0") }
+                TextButton(onClick = { editorViewModel.rotateCropRight() }, enabled = !state.isBusy) { Text("\uC624\uB978\uCABD 90\u00B0") }
+                TextButton(onClick = { editorViewModel.toggleCropFlipHorizontal() }, enabled = !state.isBusy) {
                     Text(
                         if (cropState.flipHorizontal) {
                             "\uC88C\uC6B0 \uBC18\uC804 \uD574\uC81C"
@@ -136,7 +135,7 @@ fun CropToolPanel() {
                         }
                     )
                 }
-                TextButton(onClick = { editorViewModel.autoStraightenCrop() }) { Text("\uC790\uB3D9 \uC218\uD3C9") }
+                TextButton(onClick = { editorViewModel.autoStraightenCrop() }, enabled = !state.isBusy) { Text("\uC790\uB3D9 \uC218\uD3C9") }
             }
             Text(
                 "\uC218\uB3D9 \uC218\uD3C9: ${String.format(java.util.Locale.US, "%.1f", cropState.straightenDegrees)}\u00B0",
@@ -147,7 +146,8 @@ fun CropToolPanel() {
             Slider(
                 value = cropState.straightenDegrees.coerceIn(-45f, 45f),
                 onValueChange = editorViewModel::setStraightenDegrees,
-                valueRange = -45f..45f
+                valueRange = -45f..45f,
+                enabled = !state.isBusy
             )
         }
 
@@ -162,7 +162,7 @@ fun CropToolPanel() {
                 enabled = bitmap != null && !state.isBusy,
                 colors = ButtonDefaults.buttonColors(containerColor = CropAccent, contentColor = CropButtonTextDark)
             ) { Text("\uC790\uB974\uAE30 \uC801\uC6A9") }
-            TextButton(onClick = { showResetDialog = true }) { Text("\uCD08\uAE30\uD654") }
+            TextButton(onClick = { showResetDialog = true }, enabled = !state.isBusy) { Text("\uCD08\uAE30\uD654") }
         }
     }
 

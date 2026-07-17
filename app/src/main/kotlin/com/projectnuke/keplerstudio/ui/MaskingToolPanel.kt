@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -49,11 +50,16 @@ private val MaskTextMuted = Color(0xFF8E8E8E)
 private val MaskButtonTextDark = Color(0xFF111111)
 
 @Composable
-fun MaskingToolPanel() {
-    val editorViewModel: EditorViewModel = viewModel()
+fun MaskingToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     val state by editorViewModel.uiState.collectAsState()
     val activeLayer = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId }
     val settings = state.selectionPaintSettings
+    val context = LocalContext.current
+    val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
+    val edgeLoaded = RemasterModelSession.isModelLoaded && RemasterModelSession.activeModel?.id == edgeMasker.id
+    val edgeAvailable = RemasterModelSession.hasModelAsset(context, edgeMasker.assetPath)
+    val hasImage = state.previewBitmap != null || state.originalPreviewBitmap != null
+    val actionsEnabled = !state.isBusy || editorViewModel.isBusyOwnedByMaskSupersedable()
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -71,27 +77,30 @@ fun MaskingToolPanel() {
         ) {
             Text("마스크 레이어", color = MaskTextPrimary, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
-                TextButton(onClick = { editorViewModel.addSubjectSelectionFromEdgeModel() }) {
+                TextButton(
+                    onClick = { editorViewModel.addSubjectSelectionFromEdgeModel() },
+                    enabled = actionsEnabled && hasImage && edgeAvailable && edgeLoaded
+                ) {
                     Text("피사체 가져오기")
                 }
-                TextButton(onClick = { editorViewModel.createBrushSelection() }) {
+                TextButton(onClick = { editorViewModel.createBrushSelection() }, enabled = actionsEnabled && hasImage) {
                     Text("브러시 마스크")
                 }
-                TextButton(onClick = { editorViewModel.toggleSelectionOverlay() }) {
+                TextButton(onClick = { editorViewModel.toggleSelectionOverlay() }, enabled = actionsEnabled && state.selectionLayers.isNotEmpty()) {
                     Text(if (state.showSelectionOverlay) "표시 끄기" else "표시 켜기")
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 2.dp)) {
-                TextButton(onClick = { editorViewModel.createBackgroundSelectionFromActive() }, enabled = activeLayer != null) {
+                TextButton(onClick = { editorViewModel.createBackgroundSelectionFromActive() }, enabled = actionsEnabled && activeLayer != null) {
                     Text("배경 만들기")
                 }
-                TextButton(onClick = { editorViewModel.duplicateActiveSelectionLayer() }, enabled = activeLayer != null) {
+                TextButton(onClick = { editorViewModel.duplicateActiveSelectionLayer() }, enabled = actionsEnabled && activeLayer != null) {
                     Text("복제")
                 }
-                TextButton(onClick = { editorViewModel.invertActiveSelectionLayer() }, enabled = activeLayer != null) {
+                TextButton(onClick = { editorViewModel.invertActiveSelectionLayer() }, enabled = actionsEnabled && activeLayer != null) {
                     Text("반전")
                 }
-                TextButton(onClick = { editorViewModel.deleteActiveSelectionLayer() }, enabled = activeLayer != null) {
+                TextButton(onClick = { editorViewModel.deleteActiveSelectionLayer() }, enabled = actionsEnabled && activeLayer != null) {
                     Text("삭제")
                 }
             }
@@ -117,7 +126,7 @@ fun MaskingToolPanel() {
             }
         }
 
-        MaskPaintCard(activeLayer = activeLayer, editorViewModel = editorViewModel)
+        MaskPaintCard(activeLayer = activeLayer, editorViewModel = editorViewModel, enabled = actionsEnabled)
 
         Column(
             modifier = Modifier
@@ -128,33 +137,33 @@ fun MaskingToolPanel() {
         ) {
             Text("브러시", color = MaskTextPrimary, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
-                TextButton(onClick = { editorViewModel.updateSelectionPaintSettings { it.copy(mode = SelectionPaintMode.Add) } }) {
+                TextButton(onClick = { editorViewModel.updateSelectionPaintSettings { it.copy(mode = SelectionPaintMode.Add) } }, enabled = actionsEnabled && activeLayer != null) {
                     Text("더하기", color = if (settings.mode == SelectionPaintMode.Add) MaskAccent else MaskTextSecondary)
                 }
-                TextButton(onClick = { editorViewModel.updateSelectionPaintSettings { it.copy(mode = SelectionPaintMode.Remove) } }) {
+                TextButton(onClick = { editorViewModel.updateSelectionPaintSettings { it.copy(mode = SelectionPaintMode.Remove) } }, enabled = actionsEnabled && activeLayer != null) {
                     Text("빼기", color = if (settings.mode == SelectionPaintMode.Remove) MaskAccent else MaskTextSecondary)
                 }
-                TextButton(onClick = { editorViewModel.clearActiveSelectionLayer() }, enabled = activeLayer != null) {
+                TextButton(onClick = { editorViewModel.clearActiveSelectionLayer() }, enabled = actionsEnabled && activeLayer != null) {
                     Text("비우기")
                 }
             }
-            MaskSliderRow("크기", settings.sizePx, 16f, 360f) { value ->
+            MaskSliderRow("크기", settings.sizePx, 16f, 360f, actionsEnabled && activeLayer != null) { value ->
                 editorViewModel.updateSelectionPaintSettings { it.copy(sizePx = value) }
             }
-            MaskSliderRow("부드러움", settings.feather, 0f, 0.95f) { value ->
+            MaskSliderRow("부드러움", settings.feather, 0f, 0.95f, actionsEnabled && activeLayer != null) { value ->
                 editorViewModel.updateSelectionPaintSettings { it.copy(feather = value) }
             }
-            MaskSliderRow("강도", settings.strength, 0.05f, 1f) { value ->
+            MaskSliderRow("강도", settings.strength, 0.05f, 1f, actionsEnabled && activeLayer != null) { value ->
                 editorViewModel.updateSelectionPaintSettings { it.copy(strength = value) }
             }
         }
 
-        LocalMaskEditCard(activeLayer = activeLayer, editorViewModel = editorViewModel)
+        LocalMaskEditCard(activeLayer = activeLayer, editorViewModel = editorViewModel, enabled = actionsEnabled)
     }
 }
 
 @Composable
-private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorViewModel) {
+private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorViewModel, enabled: Boolean) {
     val epoch by editorViewModel.brushPreviewEpoch.collectAsState()
     Column(
         modifier = Modifier
@@ -177,7 +186,8 @@ private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorV
                 .height(180.dp)
                 .background(Color(0xFF111111))
                 .onSizeChanged { boxSize = it }
-                .pointerInput(activeLayer?.id, boxSize) {
+                .pointerInput(activeLayer?.id, boxSize, enabled) {
+                    if (!enabled) return@pointerInput
                     detectDragGestures(
                         onDragStart = { offset ->
                             if (!editorViewModel.beginBrushStroke()) return@detectDragGestures
@@ -218,8 +228,9 @@ private fun paintAtOffset(editorViewModel: EditorViewModel, activeLayerId: Strin
 }
 
 @Composable
-private fun LocalMaskEditCard(activeLayer: SelectionLayer?, editorViewModel: EditorViewModel) {
+private fun LocalMaskEditCard(activeLayer: SelectionLayer?, editorViewModel: EditorViewModel, enabled: Boolean) {
     val params = activeLayer?.localParams ?: EditParams()
+    val controlsEnabled = enabled && activeLayer != null
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -234,24 +245,24 @@ private fun LocalMaskEditCard(activeLayer: SelectionLayer?, editorViewModel: Edi
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(top = 2.dp, bottom = 6.dp)
         )
-        LocalParamSlider("노출", params.exposure, -0.8f, 0.8f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("노출", params.exposure, -0.8f, 0.8f, controlsEnabled, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(exposure = value) }
         }
-        LocalParamSlider("대비", params.contrast, -0.6f, 0.6f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("대비", params.contrast, -0.6f, 0.6f, controlsEnabled, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(contrast = value) }
         }
-        LocalParamSlider("채도", params.saturation, -0.6f, 0.6f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("채도", params.saturation, -0.6f, 0.6f, controlsEnabled, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(saturation = value) }
         }
-        LocalParamSlider("명료도", params.clarity, -0.6f, 0.6f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("명료도", params.clarity, -0.6f, 0.6f, controlsEnabled, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(clarity = value) }
         }
-        LocalParamSlider("디헤이즈", params.dehaze, -0.6f, 0.6f, activeLayer != null, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
+        LocalParamSlider("디헤이즈", params.dehaze, -0.6f, 0.6f, controlsEnabled, onValueChangeStarted = { editorViewModel.startSelectionParamGesture() }, onValueChangeFinished = { editorViewModel.finishActiveSelectionParamsGesture() }) { value ->
             editorViewModel.updateActiveSelectionParamsLive { it.copy(dehaze = value) }
         }
         Button(
             onClick = { editorViewModel.applyActiveSelectionLocalEditNativeBaked() },
-            enabled = activeLayer != null,
+            enabled = enabled && activeLayer != null,
             colors = ButtonDefaults.buttonColors(containerColor = MaskAccent, contentColor = MaskButtonTextDark),
             modifier = Modifier.padding(top = 8.dp)
         ) {
@@ -261,13 +272,13 @@ private fun LocalMaskEditCard(activeLayer: SelectionLayer?, editorViewModel: Edi
 }
 
 @Composable
-private fun MaskSliderRow(label: String, value: Float, min: Float, max: Float, onValueChange: (Float) -> Unit) {
+private fun MaskSliderRow(label: String, value: Float, min: Float, max: Float, enabled: Boolean, onValueChange: (Float) -> Unit) {
     Column(modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(label, color = MaskTextSecondary, style = MaterialTheme.typography.bodySmall)
             Text(value.formatSliderValue(), color = MaskTextMuted, style = MaterialTheme.typography.bodySmall)
         }
-        Slider(value = value.coerceIn(min, max), onValueChange = onValueChange, valueRange = min..max)
+        Slider(value = value.coerceIn(min, max), onValueChange = onValueChange, valueRange = min..max, enabled = enabled)
     }
 }
 

@@ -205,6 +205,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                                 selectedTool = selectedTool,
                                 params = state.params,
                                 activeLook = state.presetLook,
+                                controlsEnabled = !state.isBusy,
                                 panelCollapsed = panelCollapsed,
                                 onTogglePanel = { panelCollapsed = !panelCollapsed },
                                 onFullScreen = { chromeHidden = true },
@@ -317,7 +318,7 @@ private fun V2TopBar(
             TextButton(onClick = onRotate, enabled = hasImage && !isBusy) { Text("회전") }
             TextButton(onClick = onReset, enabled = hasImage && !isBusy) { Text("초기화") }
             TextButton(onClick = onSave, enabled = canExport && !isBusy) { Text("저장") }
-            Button(onClick = onOpen, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
+            Button(onClick = onOpen, enabled = !isBusy, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
                 Text("사진")
             }
         }
@@ -533,6 +534,7 @@ private fun V2AdjustmentPanel(
     selectedTool: V2EditorTool,
     params: EditParams,
     activeLook: PresetColorLook?,
+    controlsEnabled: Boolean,
     panelCollapsed: Boolean,
     onTogglePanel: () -> Unit,
     onFullScreen: () -> Unit,
@@ -556,21 +558,21 @@ private fun V2AdjustmentPanel(
             ) {
                 Text(selectedTool.description, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 8.dp))
                 when (selectedTool) {
-                    V2EditorTool.Auto -> V2AutoPanel(onAutoEnhance)
+                    V2EditorTool.Auto -> V2AutoPanel(onAutoEnhance, controlsEnabled)
                     V2EditorTool.Remaster -> RemasterToolPanel(onQuickAutoEnhance = onAutoEnhance, editorViewModel = editorViewModel)
-                    V2EditorTool.Profiles -> NativeProfilesToolPanel()
+                    V2EditorTool.Profiles -> NativeProfilesToolPanel(editorViewModel)
                     V2EditorTool.Presets -> PresetToolPanel(editorViewModel = editorViewModel, params = params, activeLook = activeLook)
-                    V2EditorTool.Crop -> CropToolPanel()
-                    V2EditorTool.Masking -> MaskingToolPanel()
-                    V2EditorTool.Remove -> NativeRemoveToolPanel()
-                    V2EditorTool.Light -> V2LightPanel(params, onChange)
-                    V2EditorTool.Color -> V2ColorPanel(params, onChange)
-                    V2EditorTool.Effects -> V2EffectsPanel(params, onChange)
-                    V2EditorTool.Detail -> V2DetailPanel(params, onChange)
-                    V2EditorTool.Optics -> NativeOpticsToolPanel()
-                    V2EditorTool.Geometry -> NativeGeometryToolPanel()
-                    V2EditorTool.Blur -> NativeBlurToolPanel()
-                    V2EditorTool.Model -> NativeModelToolPanel()
+                    V2EditorTool.Crop -> CropToolPanel(editorViewModel)
+                    V2EditorTool.Masking -> MaskingToolPanel(editorViewModel)
+                    V2EditorTool.Remove -> NativeRemoveToolPanel(editorViewModel)
+                    V2EditorTool.Light -> V2LightPanel(params, controlsEnabled, onChange)
+                    V2EditorTool.Color -> V2ColorPanel(params, controlsEnabled, onChange)
+                    V2EditorTool.Effects -> V2EffectsPanel(params, controlsEnabled, onChange)
+                    V2EditorTool.Detail -> V2DetailPanel(params, controlsEnabled, onChange)
+                    V2EditorTool.Optics -> NativeOpticsToolPanel(editorViewModel)
+                    V2EditorTool.Geometry -> NativeGeometryToolPanel(editorViewModel)
+                    V2EditorTool.Blur -> NativeBlurToolPanel(editorViewModel)
+                    V2EditorTool.Model -> NativeModelToolPanel(editorViewModel)
                 }
             }
         }
@@ -592,8 +594,8 @@ private fun V2AdjustmentPanel(
 }
 
 @Composable
-private fun V2AutoPanel(onAutoEnhance: () -> Unit) {
-    Button(onClick = onAutoEnhance, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
+private fun V2AutoPanel(onAutoEnhance: () -> Unit, enabled: Boolean) {
+    Button(onClick = onAutoEnhance, enabled = enabled, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
         Text("빠른 자동 보정 적용")
     }
 }
@@ -604,41 +606,41 @@ private fun V2PlaceholderPanel(message: String) {
 }
 
 @Composable
-private fun V2LightPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    V2AdjustmentSlider("노출", params.exposure, -1f, 1f) { v -> onChange { it.copy(exposure = v) } }
-    V2AdjustmentSlider("대비", params.contrast, -1f, 1f) { v -> onChange { it.copy(contrast = v) } }
-    V2AdjustmentSlider("하이라이트", params.highlights, -1f, 1f) { v -> onChange { it.copy(highlights = v) } }
-    V2AdjustmentSlider("그림자", params.shadows, -1f, 1f) { v -> onChange { it.copy(shadows = v) } }
-    V2AdjustmentSlider("화이트", params.whites, -1f, 1f) { v -> onChange { it.copy(whites = v) } }
-    V2AdjustmentSlider("블랙", params.blacks, -1f, 1f) { v -> onChange { it.copy(blacks = v) } }
+private fun V2LightPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit) {
+    V2AdjustmentSlider("노출", params.exposure, -1f, 1f, enabled) { v -> onChange { it.copy(exposure = v) } }
+    V2AdjustmentSlider("대비", params.contrast, -1f, 1f, enabled) { v -> onChange { it.copy(contrast = v) } }
+    V2AdjustmentSlider("하이라이트", params.highlights, -1f, 1f, enabled) { v -> onChange { it.copy(highlights = v) } }
+    V2AdjustmentSlider("그림자", params.shadows, -1f, 1f, enabled) { v -> onChange { it.copy(shadows = v) } }
+    V2AdjustmentSlider("화이트", params.whites, -1f, 1f, enabled) { v -> onChange { it.copy(whites = v) } }
+    V2AdjustmentSlider("블랙", params.blacks, -1f, 1f, enabled) { v -> onChange { it.copy(blacks = v) } }
 }
 
 @Composable
-private fun V2ColorPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    V2AdjustmentSlider("색온도", params.temperature, -1f, 1f) { v -> onChange { it.copy(temperature = v) } }
-    V2AdjustmentSlider("색조", params.tint, -1f, 1f) { v -> onChange { it.copy(tint = v) } }
-    V2AdjustmentSlider("생동감", params.vibrance, -1f, 1f) { v -> onChange { it.copy(vibrance = v) } }
-    V2AdjustmentSlider("채도", params.saturation, -1f, 1f) { v -> onChange { it.copy(saturation = v) } }
+private fun V2ColorPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit) {
+    V2AdjustmentSlider("색온도", params.temperature, -1f, 1f, enabled) { v -> onChange { it.copy(temperature = v) } }
+    V2AdjustmentSlider("색조", params.tint, -1f, 1f, enabled) { v -> onChange { it.copy(tint = v) } }
+    V2AdjustmentSlider("생동감", params.vibrance, -1f, 1f, enabled) { v -> onChange { it.copy(vibrance = v) } }
+    V2AdjustmentSlider("채도", params.saturation, -1f, 1f, enabled) { v -> onChange { it.copy(saturation = v) } }
     V2PlaceholderPanel("HSL과 색상 혼합은 아직 연결하지 않았습니다")
 }
 
 @Composable
-private fun V2EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    V2AdjustmentSlider("선명 대비", params.clarity, -1f, 1f) { v -> onChange { it.copy(clarity = v) } }
-    V2AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f) { v -> onChange { it.copy(dehaze = v) } }
+private fun V2EffectsPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit) {
+    V2AdjustmentSlider("선명 대비", params.clarity, -1f, 1f, enabled) { v -> onChange { it.copy(clarity = v) } }
+    V2AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f, enabled) { v -> onChange { it.copy(dehaze = v) } }
     V2PlaceholderPanel("텍스처, 그레인, 고급 효과는 아직 연결하지 않았습니다")
 }
 
 @Composable
-private fun V2DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    V2AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
-    V2AdjustmentSlider("노이즈 감소", params.luminanceNoiseReduction, 0f, 1f) { v ->
+private fun V2DetailPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit) {
+    V2AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f, enabled) { v -> onChange { it.copy(sharpness = v) } }
+    V2AdjustmentSlider("노이즈 감소", params.luminanceNoiseReduction, 0f, 1f, enabled) { v ->
         onChange { it.copy(noiseReduction = v, luminanceNoiseReduction = v) }
     }
-    V2AdjustmentSlider("색상 노이즈 감소", params.colorNoiseReduction, 0f, 1f) { v ->
+    V2AdjustmentSlider("색상 노이즈 감소", params.colorNoiseReduction, 0f, 1f, enabled) { v ->
         onChange { it.copy(colorNoiseReduction = v) }
     }
-    V2AdjustmentSlider("디테일 보호", params.noiseDetailProtection, 0f, 1f) { v ->
+    V2AdjustmentSlider("디테일 보호", params.noiseDetailProtection, 0f, 1f, enabled) { v ->
         onChange { it.copy(noiseDetailProtection = v) }
     }
 }
@@ -649,6 +651,7 @@ private fun V2AdjustmentSlider(
     value: Float,
     min: Float,
     max: Float,
+    enabled: Boolean,
     onValue: (Float) -> Unit
 ) {
     Row(
@@ -657,7 +660,7 @@ private fun V2AdjustmentSlider(
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(label, modifier = Modifier.width(86.dp), style = MaterialTheme.typography.bodyMedium, color = V2TextPrimary)
-        Slider(value = value, onValueChange = onValue, valueRange = min..max, modifier = Modifier.weight(1f))
+        Slider(value = value, onValueChange = onValue, valueRange = min..max, enabled = enabled, modifier = Modifier.weight(1f))
         Text(String.format(Locale.US, "%.2f", value), modifier = Modifier.width(52.dp), style = MaterialTheme.typography.bodyMedium, color = V2TextSecondary)
     }
 }

@@ -25,6 +25,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val base = state.originalPreviewBitmap ?: state.previewBitmap
@@ -132,6 +133,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
 }
 
 fun EditorViewModel.createBrushSelection() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val base = state.originalPreviewBitmap ?: state.previewBitmap
@@ -156,11 +158,13 @@ fun EditorViewModel.createBrushSelection() {
 }
 
 fun EditorViewModel.selectSelectionLayer(id: String) {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     updateUiState { it.copy(activeSelectionLayerId = id, message = "마스크를 선택했습니다.") }
 }
 
 fun EditorViewModel.deleteActiveSelectionLayer() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: return
@@ -177,6 +181,7 @@ fun EditorViewModel.deleteActiveSelectionLayer() {
 }
 
 fun EditorViewModel.invertActiveSelectionLayer() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: run {
@@ -196,6 +201,7 @@ fun EditorViewModel.invertActiveSelectionLayer() {
 }
 
 fun EditorViewModel.clearActiveSelectionLayer() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: run {
@@ -223,10 +229,12 @@ fun EditorViewModel.clearActiveSelectionLayer() {
 }
 
 fun EditorViewModel.updateSelectionPaintSettings(transform: (SelectionPaintSettings) -> SelectionPaintSettings) {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     updateUiState { it.copy(selectionPaintSettings = transform(it.selectionPaintSettings)) }
 }
 
 fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     if (!hasActiveBrushStroke()) return
     val state = uiState.value
     val activeId = state.activeSelectionLayerId
@@ -243,6 +251,7 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
 }
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: run {

@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -31,7 +30,6 @@ import com.projectnuke.keplerstudio.editor.createPresetColorLookFromParams
 
 private val NativePanelBackground = Color(0xFF242424)
 private val NativePanelAccent = Color(0xFFE6E6E6)
-private val NativePanelTextDark = Color(0xFF111111)
 private val NativePanelTextPrimary = Color(0xFFF2F2F2)
 private val NativePanelTextSecondary = Color(0xFFC8C8C8)
 private val NativePanelTextMuted = Color(0xFF8E8E8E)
@@ -87,6 +85,7 @@ fun NativeRemoveToolPanel(editorViewModel: EditorViewModel = viewModel()) {
         NativeQuickEffectButton(
             label = "작은 얼룩 완화",
             selected = selected,
+            enabled = !state.isBusy,
             onClick = { editorViewModel.applySpotCleanup() }
         )
     }
@@ -103,17 +102,20 @@ fun NativeOpticsToolPanel(editorViewModel: EditorViewModel = viewModel()) {
             NativeQuickEffectButton(
                 label = "색수차 완화",
                 selected = state.activeQuickEffects.any { it.kind == QuickEffectKind.ChromaticAberrationReduction },
+                enabled = !state.isBusy,
                 onClick = { editorViewModel.applyChromaticAberrationReduction() }
             )
             NativeQuickEffectButton(
                 label = "주변부 어두움 완화",
                 selected = state.activeQuickEffects.any { it.kind == QuickEffectKind.VignetteCorrection },
+                enabled = !state.isBusy,
                 onClick = { editorViewModel.applyVignetteCorrection() }
             )
         }
         NativeQuickEffectButton(
             label = "통합 광학 보정",
             selected = state.activeQuickEffects.any { it.kind == QuickEffectKind.OpticsCorrection },
+            enabled = !state.isBusy,
             onClick = { editorViewModel.applyOpticsCorrection() }
         )
     }
@@ -121,13 +123,14 @@ fun NativeOpticsToolPanel(editorViewModel: EditorViewModel = viewModel()) {
 
 @Composable
 fun NativeGeometryToolPanel(editorViewModel: EditorViewModel = viewModel()) {
+    val state by editorViewModel.uiState.collectAsState()
     NativeToolCard(
         title = "기하 보정",
         description = "자르기와 기울기 보정만 지원합니다. 원근 보정은 아직 지원되지 않습니다."
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { editorViewModel.autoStraightenCrop() }) { Text("기울기 보정") }
-            TextButton(onClick = { editorViewModel.setStraightenDegrees(0f) }) { Text("기울기 초기화") }
+            TextButton(onClick = { editorViewModel.autoStraightenCrop() }, enabled = !state.isBusy) { Text("기울기 보정") }
+            TextButton(onClick = { editorViewModel.setStraightenDegrees(0f) }, enabled = !state.isBusy) { Text("기울기 초기화") }
         }
     }
 }
@@ -143,30 +146,34 @@ fun NativeBlurToolPanel(editorViewModel: EditorViewModel = viewModel()) {
             NativeQuickEffectButton(
                 label = "약하게",
                 selected = state.activeQuickEffects.contains(ActiveQuickEffect(QuickEffectKind.SoftBlur, QuickEffectStrength.Weak)),
+                enabled = !state.isBusy,
                 onClick = { editorViewModel.applySoftBlur(0.22f) }
             )
             NativeQuickEffectButton(
                 label = "보통",
                 selected = state.activeQuickEffects.contains(ActiveQuickEffect(QuickEffectKind.SoftBlur, QuickEffectStrength.Medium)),
+                enabled = !state.isBusy,
                 onClick = { editorViewModel.applySoftBlur(0.38f) }
             )
             NativeQuickEffectButton(
                 label = "강하게",
                 selected = state.activeQuickEffects.contains(ActiveQuickEffect(QuickEffectKind.SoftBlur, QuickEffectStrength.Strong)),
+                enabled = !state.isBusy,
                 onClick = { editorViewModel.applySoftBlur(0.58f) }
             )
         }
     }
 }
-
 @Composable
 private fun NativeQuickEffectButton(
     label: String,
     selected: Boolean,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     TextButton(
         onClick = onClick,
+        enabled = enabled,
         colors = ButtonDefaults.textButtonColors(
             containerColor = if (selected) NativePanelTextMuted.copy(alpha = 0.28f) else Color.Transparent,
             contentColor = if (selected) NativePanelAccent else NativePanelTextSecondary
@@ -179,6 +186,7 @@ private fun NativeQuickEffectButton(
 @Composable
 fun NativeModelToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     val context = LocalContext.current
+    val state by editorViewModel.uiState.collectAsState()
     val flareMasker = OnDeviceRemasterModels.first { it.id == "flare_masker" }
     val flareRestorer = OnDeviceRemasterModels.first { it.id == "flare_restorer" }
     val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
@@ -220,25 +228,26 @@ fun NativeModelToolPanel(editorViewModel: EditorViewModel = viewModel()) {
             modifier = Modifier.padding(bottom = 8.dp)
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }) { Text("분석 실행") }
+            TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }, enabled = !state.isBusy) { Text("분석 실행") }
             TextButton(
                 onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.NightLight) },
-                enabled = flareMaskerAvailable
+                enabled = flareMaskerAvailable && !state.isBusy
             ) { Text("마스크 기반 기본 보정") }
-            TextButton(onClick = { editorViewModel.applyFlareOriginalMvp() }) { Text("규칙 기반 번짐 완화") }
+            TextButton(onClick = { editorViewModel.applyFlareOriginalMvp() }, enabled = !state.isBusy) { Text("규칙 기반 번짐 완화") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
             TextButton(
                 onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.DaySun) },
-                enabled = flareMaskerAvailable
+                enabled = flareMaskerAvailable && !state.isBusy
             ) { Text("태양 번짐 마스크 보정") }
-            TextButton(onClick = { editorViewModel.applySunFlareOriginalMvp() }) { Text("태양 번짐 규칙 보정") }
+            TextButton(onClick = { editorViewModel.applySunFlareOriginalMvp() }, enabled = !state.isBusy) { Text("태양 번짐 규칙 보정") }
         }
     }
 }
 
 @Composable
 fun NativeProfilesToolPanel(editorViewModel: EditorViewModel = viewModel()) {
+    val state by editorViewModel.uiState.collectAsState()
     NativeToolCard(
         title = "룩 엔진",
         description = "내장 프로필입니다. 전용 카메라 프로필은 아직 지원되지 않습니다."
@@ -265,7 +274,8 @@ fun NativeProfilesToolPanel(editorViewModel: EditorViewModel = viewModel()) {
                                 message = "프로필을 적용했습니다."
                             )
                         },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        enabled = !state.isBusy
                     ) {
                         Text(profile.title)
                     }
@@ -298,15 +308,5 @@ private fun NativeToolCard(
             modifier = Modifier.padding(top = 4.dp, bottom = 8.dp)
         )
         content()
-    }
-}
-
-@Composable
-private fun NativePrimaryButton(text: String, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        colors = ButtonDefaults.buttonColors(containerColor = NativePanelAccent, contentColor = NativePanelTextDark)
-    ) {
-        Text(text)
     }
 }

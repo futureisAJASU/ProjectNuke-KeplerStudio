@@ -64,7 +64,7 @@ fun RemasterToolPanel(
         ) {
             Button(
                 onClick = onQuickAutoEnhance,
-                enabled = hasImage,
+                enabled = hasImage && !editorState.isBusy,
                 colors = ButtonDefaults.buttonColors(containerColor = RemasterAccent, contentColor = RemasterButtonTextDark)
             ) {
                 Text("기본 자동 보정 적용")
@@ -96,13 +96,13 @@ fun RemasterToolPanel(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 TextButton(
                     onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.NightLight) },
-                    enabled = hasImage && flareMaskerAvailable
+                    enabled = hasImage && flareMaskerAvailable && !editorState.isBusy
                 ) {
                     Text("마스크 기반 기본 보정")
                 }
                 TextButton(
                     onClick = { editorViewModel.applyFlareOriginalMvp() },
-                    enabled = hasImage
+                    enabled = hasImage && !editorState.isBusy
                 ) {
                     Text("규칙 기반 번짐 완화")
                 }
@@ -110,13 +110,13 @@ fun RemasterToolPanel(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 TextButton(
                     onClick = { editorViewModel.applyFlareGuardAiOrRulePreview(context, FlareGuardMode.DaySun) },
-                    enabled = hasImage && flareMaskerAvailable
+                    enabled = hasImage && flareMaskerAvailable && !editorState.isBusy
                 ) {
                     Text("태양 번짐 마스크 보정")
                 }
                 TextButton(
                     onClick = { editorViewModel.applySunFlareOriginalMvp() },
-                    enabled = hasImage
+                    enabled = hasImage && !editorState.isBusy
                 ) {
                     Text("태양 번짐 규칙 보정")
                 }
@@ -161,20 +161,20 @@ fun RemasterToolPanel(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 TextButton(
                     onClick = { RemasterModelSession.load(context, edgeMasker) },
-                    enabled = edgeAssetAvailable && !RemasterModelSession.isModelLoading && !RemasterModelSession.isInferring
+                    enabled = edgeAssetAvailable && !editorState.isBusy && !RemasterModelSession.isModelLoading && !RemasterModelSession.isInferring
                 ) {
                     Text(if (edgeLoaded) "다시 로드" else "Edge Masker 로드")
                 }
                 TextButton(
                     onClick = { RemasterModelSession.unload() },
-                    enabled = activeModel != null && !RemasterModelSession.isModelLoading && !RemasterModelSession.isInferring
+                    enabled = activeModel != null && !editorState.isBusy && !RemasterModelSession.isModelLoading && !RemasterModelSession.isInferring
                 ) {
                     Text("모델 해제")
                 }
             }
             Button(
                 onClick = { editorViewModel.applyMaskAwareRemaster() },
-                enabled = hasImage && edgeLoaded && !RemasterModelSession.isModelLoading && !RemasterModelSession.isInferring,
+                enabled = hasImage && edgeLoaded && !editorState.isBusy && !RemasterModelSession.isModelLoading && !RemasterModelSession.isInferring,
                 colors = ButtonDefaults.buttonColors(containerColor = RemasterAccent, contentColor = RemasterButtonTextDark),
                 modifier = Modifier.padding(top = 6.dp)
             ) {
@@ -187,7 +187,7 @@ fun RemasterToolPanel(
             status = "분석 전용",
             explanation = "자동 라우터는 현재 분석 전용입니다. 추천만 표시하고 자동 적용하지 않았습니다."
         ) {
-            TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }, enabled = hasImage) {
+            TextButton(onClick = { editorViewModel.runAutoRouterV0Analysis() }, enabled = hasImage && !editorState.isBusy) {
                 Text("분석 실행")
             }
         }
@@ -198,7 +198,7 @@ fun RemasterToolPanel(
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(top = 14.dp, bottom = 4.dp)
         )
-        MaskingToolPanel()
+        MaskingToolPanel(editorViewModel)
     }
 }
 

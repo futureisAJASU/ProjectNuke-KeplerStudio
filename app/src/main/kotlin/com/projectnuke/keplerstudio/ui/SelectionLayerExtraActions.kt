@@ -8,6 +8,7 @@ import com.projectnuke.keplerstudio.editor.SelectionLayerKind
 import java.util.UUID
 
 fun EditorViewModel.toggleSelectionOverlay() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     updateUiState {
         it.copy(
             showSelectionOverlay = !it.showSelectionOverlay,
@@ -17,6 +18,7 @@ fun EditorViewModel.toggleSelectionOverlay() {
 }
 
 fun EditorViewModel.duplicateActiveSelectionLayer() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val active = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId } ?: run {
@@ -45,6 +47,7 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
 }
 
 fun EditorViewModel.createBackgroundSelectionFromActive() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val active = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId } ?: run {

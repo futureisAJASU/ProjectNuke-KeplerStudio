@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.setCropAspectRatio(aspectRatio: CropAspectRatio) {
+    if (!canEnterEditorAction()) return
     invalidateCropOperation()
     updateUiState { state ->
         val bitmap = state.previewBitmap ?: state.originalPreviewBitmap
@@ -28,16 +29,18 @@ fun EditorViewModel.setCropAspectRatio(aspectRatio: CropAspectRatio) {
 }
 
 fun EditorViewModel.updateCropRect(left: Float, top: Float, right: Float, bottom: Float) {
+    if (!canEnterEditorAction()) return
     invalidateCropOperation()
     updateUiState { it.copy(cropState = it.cropState.copy(cropLeft = left, cropTop = top, cropRight = right, cropBottom = bottom).normalized()) }
 }
 
-fun EditorViewModel.rotateCropLeft() { invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(rotationDegrees = it.cropState.rotationDegrees - 90).normalized()) } }
-fun EditorViewModel.rotateCropRight() { invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(rotationDegrees = it.cropState.rotationDegrees + 90).normalized()) } }
-fun EditorViewModel.toggleCropFlipHorizontal() { invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(flipHorizontal = !it.cropState.flipHorizontal)) } }
-fun EditorViewModel.setStraightenDegrees(value: Float) { invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(straightenDegrees = value.coerceIn(-45f, 45f))) } }
+fun EditorViewModel.rotateCropLeft() { if (!canEnterEditorAction()) return; invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(rotationDegrees = it.cropState.rotationDegrees - 90).normalized()) } }
+fun EditorViewModel.rotateCropRight() { if (!canEnterEditorAction()) return; invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(rotationDegrees = it.cropState.rotationDegrees + 90).normalized()) } }
+fun EditorViewModel.toggleCropFlipHorizontal() { if (!canEnterEditorAction()) return; invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(flipHorizontal = !it.cropState.flipHorizontal)) } }
+fun EditorViewModel.setStraightenDegrees(value: Float) { if (!canEnterEditorAction()) return; invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(straightenDegrees = value.coerceIn(-45f, 45f))) } }
 
 fun EditorViewModel.autoStraightenCrop() {
+    if (!canEnterEditorAction()) return
     val state = uiState.value
     val bitmap = state.previewBitmap ?: state.originalPreviewBitmap ?: return
     val cropToken = beginCropOperation()
@@ -63,6 +66,7 @@ fun EditorViewModel.autoStraightenCrop() {
 }
 
 fun EditorViewModel.resetCropState() {
+    if (!canEnterEditorAction()) return
     invalidateCropOperation()
     val current = prepareForExternalEdit()
     recordUserEditForUndo(clearRedo = true)

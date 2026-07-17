@@ -9,6 +9,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.runAutoRouterV0Analysis() {
+    if (!canEnterEditorAction()) return
     val bitmap = uiState.value.originalPreviewBitmap ?: uiState.value.previewBitmap
     if (bitmap == null) {
         updateUiState { it.copy(message = "자동 라우터 분석을 실행할 이미지가 없습니다.") }
@@ -22,6 +23,7 @@ fun EditorViewModel.runAutoRouterV0Analysis() {
 }
 
 fun EditorViewModel.applyFlareGuardV0Preview() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     val context = appContext()
     viewModelScope.launch {
         withContext(Dispatchers.Main) {
@@ -31,6 +33,7 @@ fun EditorViewModel.applyFlareGuardV0Preview() {
 }
 
 fun EditorViewModel.applyDaySunFlareGuardV0Preview() {
+    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     val context = appContext()
     viewModelScope.launch {
         withContext(Dispatchers.Main) {
