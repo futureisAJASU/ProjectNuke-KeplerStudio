@@ -15,7 +15,7 @@ internal data class DraftGenerationManifest(
     val savedAtMillis: Long,
     val draftOperationEpoch: Long,
     val editorRevision: Int,
-    val originalSourcePath: String?,
+    val originalSourceIdentity: String?,
     val sourceIdentity: String?,
     val baseContentToken: String,
     val baseBitmapDirty: Boolean,
@@ -61,7 +61,7 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("savedAtMillis", savedAtMillis)
     put("draftOperationEpoch", draftOperationEpoch)
     put("editorRevision", editorRevision)
-    put("originalSourcePath", originalSourcePath ?: JSONObject.NULL)
+    put("originalSourceIdentity", originalSourceIdentity ?: JSONObject.NULL)
     put("sourceIdentity", sourceIdentity ?: JSONObject.NULL)
     put("baseContentToken", baseContentToken)
     put("baseBitmapDirty", baseBitmapDirty)
@@ -134,7 +134,7 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
     val paintObj = json.optJSONObject("selectionPaintSettings")
     val paintSettings = if (paintObj != null) {
         SelectionPaintSettings(
-            mode = runCatching { SelectionPaintMode.valueOf(paintObj.optString("mode")) }.getOrDefault(SelectionPaintMode.Add),
+            mode = runCatching { SelectionPaintMode.valueOf(paintObj.optString("mode")) }.getOrNull() ?: return null,
             sizePx = paintObj.optDouble("sizePx", 120.0).toFloat(),
             feather = paintObj.optDouble("feather", 0.55).toFloat(),
             strength = paintObj.optDouble("strength", 0.70).toFloat()
@@ -145,17 +145,24 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
     for (i in 0 until quickArray.length()) {
         val qObj = quickArray.getJSONObject(i)
         quickEffects += ActiveQuickEffect(
-            kind = runCatching { QuickEffectKind.valueOf(qObj.optString("kind")) }.getOrNull() ?: continue,
-            strength = runCatching { QuickEffectStrength.valueOf(qObj.optString("strength")) }.getOrDefault(QuickEffectStrength.Medium)
+            kind = runCatching { QuickEffectKind.valueOf(qObj.optString("kind")) }.getOrNull() ?: return null,
+            strength = runCatching { QuickEffectStrength.valueOf(qObj.optString("strength")) }.getOrNull() ?: return null
         )
     }
+    val cropObject = json.optJSONObject("cropState")
+    if (cropObject != null && runCatching {
+            CropAspectRatio.valueOf(cropObject.optString("aspectRatio", CropAspectRatio.Original.name))
+        }.isFailure) return null
+    val presetObject = json.optJSONObject("presetLook")
+    val parsedPreset = presetObject?.let { presetColorLookFromJson(it) }
+    if (presetObject != null && parsedPreset == null) return null
     DraftGenerationManifest(
         formatVersion = formatVersion,
         generationId = json.optString("generationId"),
         savedAtMillis = json.optLong("savedAtMillis", 0L),
         draftOperationEpoch = json.optLong("draftOperationEpoch", Long.MIN_VALUE),
         editorRevision = json.optInt("editorRevision", -1),
-        originalSourcePath = json.optString("originalSourcePath").takeIf { it.isNotBlank() },
+        originalSourceIdentity = json.optString("originalSourceIdentity").takeIf { it.isNotBlank() },
         sourceIdentity = json.optString("sourceIdentity").takeIf { it.isNotBlank() },
         baseContentToken = json.optString("baseContentToken"),
         baseBitmapDirty = json.optBoolean("baseBitmapDirty", false),
@@ -170,11 +177,11 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         detailEngine = json.optString("detailEngine"),
         toneEngine = json.optString("toneEngine"),
         hazeEngine = json.optString("hazeEngine"),
-        presetLook = json.optJSONObject("presetLook")?.let { presetColorLookFromJson(it) },
+        presetLook = parsedPreset,
         activeQuickEffects = quickEffects,
         exportFormat = json.optString("exportFormat"),
         exportResolution = json.optString("exportResolution"),
-        cropState = json.optJSONObject("cropState")?.let { parseCropStateFromJson(it) } ?: CropState(),
+        cropState = cropObject?.let { parseCropStateFromJson(it) } ?: CropState(),
         selectionLayers = layers,
         activeSelectionLayerId = json.optString("activeSelectionLayerId").takeIf { it.isNotBlank() },
         selectionPaintSettings = paintSettings,

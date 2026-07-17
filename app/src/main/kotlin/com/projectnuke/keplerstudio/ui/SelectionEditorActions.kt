@@ -260,6 +260,8 @@ fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditP
 }
 
 fun EditorViewModel.applyActiveSelectionLocalEdit() {
+    if (isShuttingDown()) return
+    if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val base = state.originalPreviewBitmap ?: state.previewBitmap

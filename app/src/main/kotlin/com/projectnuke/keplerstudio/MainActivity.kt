@@ -46,6 +46,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -132,6 +134,8 @@ class MainActivity : ComponentActivity() {
                     AppMode.Home -> HomeScreen(
                         draftSavedAtMillis = state.draftSavedAtMillis,
                         draftSourcePath = state.draftSourcePath,
+                        draftGenerationId = state.draftGenerationId,
+                        draftGenerationThumbnailPath = state.draftGenerationThumbnailPath,
                         recoveryDebugInfo = state.recoveryDebugInfo,
                         activeSourcePath = state.sourcePath,
                         onOpenPhoto = { picker.launch("image/*") },
@@ -145,6 +149,8 @@ class MainActivity : ComponentActivity() {
                         savedExports = state.savedExports,
                         draftSavedAtMillis = state.draftSavedAtMillis,
                         draftSourcePath = state.draftSourcePath,
+                        draftGenerationId = state.draftGenerationId,
+                        draftGenerationThumbnailPath = state.draftGenerationThumbnailPath,
                         recoveryDebugInfo = state.recoveryDebugInfo,
                         onBack = { appMode = AppMode.Home },
                         onContinueEditing = { appMode = AppMode.Editor },
@@ -208,6 +214,8 @@ class MainActivity : ComponentActivity() {
 private fun HomeScreen(
     draftSavedAtMillis: Long?,
     draftSourcePath: String?,
+    draftGenerationId: String?,
+    draftGenerationThumbnailPath: String?,
     recoveryDebugInfo: RecoveryDebugInfo?,
     activeSourcePath: String?,
     onOpenPhoto: () -> Unit,
@@ -243,6 +251,8 @@ private fun HomeScreen(
             AutoRecoveryCard(
                 draftSavedAtMillis = draftSavedAtMillis,
                 draftSourcePath = draftSourcePath,
+                draftGenerationId = draftGenerationId,
+                draftGenerationThumbnailPath = draftGenerationThumbnailPath,
                 draftSourceExists = draftSourceExists,
                 recoveryDebugInfo = recoveryDebugInfo,
                 canContinueDraft = canContinueDraft,
@@ -278,6 +288,8 @@ private fun HomeScreen(
 private fun AutoRecoveryCard(
     draftSavedAtMillis: Long?,
     draftSourcePath: String?,
+    draftGenerationId: String?,
+    draftGenerationThumbnailPath: String?,
     draftSourceExists: Boolean,
     recoveryDebugInfo: RecoveryDebugInfo?,
     canContinueDraft: Boolean,
@@ -307,7 +319,8 @@ private fun AutoRecoveryCard(
                         .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier)
                 ) {
                     DraftSourceThumbnail(
-                        sourcePath = draftSourcePath,
+                        cacheIdentity = draftGenerationId ?: "legacy:$draftSourcePath",
+                        sourcePath = draftGenerationThumbnailPath ?: draftSourcePath,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -342,6 +355,8 @@ private fun GalleryScreen(
     savedExports: List<SavedExport>,
     draftSavedAtMillis: Long?,
     draftSourcePath: String?,
+    draftGenerationId: String?,
+    draftGenerationThumbnailPath: String?,
     recoveryDebugInfo: RecoveryDebugInfo?,
     onBack: () -> Unit,
     onContinueEditing: () -> Unit,
@@ -392,6 +407,8 @@ private fun GalleryScreen(
                 GalleryDisplayMode.Draft -> DraftGalleryContent(
                     draftSavedAtMillis = draftSavedAtMillis,
                     draftSourcePath = draftSourcePath,
+                    draftGenerationId = draftGenerationId,
+                    draftGenerationThumbnailPath = draftGenerationThumbnailPath,
                     draftSourceExists = draftSourceExists,
                     recoveryDebugInfo = recoveryDebugInfo,
                     canContinueDraft = canContinueDraft,
@@ -408,6 +425,8 @@ private fun GalleryScreen(
 private fun DraftGalleryContent(
     draftSavedAtMillis: Long?,
     draftSourcePath: String?,
+    draftGenerationId: String?,
+    draftGenerationThumbnailPath: String?,
     draftSourceExists: Boolean,
     recoveryDebugInfo: RecoveryDebugInfo?,
     canContinueDraft: Boolean,
@@ -439,7 +458,11 @@ private fun DraftGalleryContent(
                         .aspectRatio(16f / 9f)
                         .then(if (canContinueDraft) Modifier.clickable(onClick = onContinueEditing) else Modifier)
                 ) {
-                    DraftSourceThumbnail(sourcePath = draftSourcePath, modifier = Modifier.fillMaxSize())
+                    DraftSourceThumbnail(
+                        cacheIdentity = draftGenerationId ?: "legacy:$draftSourcePath",
+                        sourcePath = draftGenerationThumbnailPath ?: draftSourcePath,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
                 if (canContinueDraft) {
                     Text(
@@ -568,24 +591,44 @@ private fun SavedExportThumbnailTile(item: SavedExport, onRemoveSavedExport: (St
 }
 
 @Composable
-private fun DraftSourceThumbnail(sourcePath: String, modifier: Modifier = Modifier) {
-    val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = sourcePath) {
-        value = withContext(Dispatchers.IO) {
-            ThumbnailBitmapCache.load("draft:$sourcePath") { decodeFileThumbnail(sourcePath) }
+private fun DraftSourceThumbnail(cacheIdentity: String, sourcePath: String, modifier: Modifier = Modifier) {
+    var lease by remember(cacheIdentity) { mutableStateOf<com.projectnuke.keplerstudio.editor.ThumbnailBitmapLease?>(null) }
+    LaunchedEffect(cacheIdentity, sourcePath) {
+        var acquired: com.projectnuke.keplerstudio.editor.ThumbnailBitmapLease? = null
+        try {
+            withContext(Dispatchers.IO) {
+                acquired = ThumbnailBitmapCache.acquire("draft:$cacheIdentity") { decodeFileThumbnail(sourcePath) }
+            }
+            lease = acquired
+            acquired = null
+        } finally {
+            acquired?.close()
         }
     }
-    ThumbnailBox(thumbnail = thumbnail, emptyText = "\uC784\uC2DC \uC800\uC7A5 \uBBF8\uB9AC\uBCF4\uAE30\uB97C \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", modifier = modifier)
+    val activeLease = lease
+    DisposableEffect(activeLease) { onDispose { activeLease?.close() } }
+    ThumbnailBox(thumbnail = lease?.bitmap, emptyText = "\uC784\uC2DC \uC800\uC7A5 \uBBF8\uB9AC\uBCF4\uAE30\uB97C \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", modifier = modifier)
 }
 
 @Composable
 private fun SavedExportThumbnail(uriString: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = uriString) {
-        value = withContext(Dispatchers.IO) {
-            ThumbnailBitmapCache.load("export:$uriString") { decodeSavedExportThumbnail(context, uriString) }
+    var lease by remember(uriString) { mutableStateOf<com.projectnuke.keplerstudio.editor.ThumbnailBitmapLease?>(null) }
+    LaunchedEffect(uriString) {
+        var acquired: com.projectnuke.keplerstudio.editor.ThumbnailBitmapLease? = null
+        try {
+            withContext(Dispatchers.IO) {
+                acquired = ThumbnailBitmapCache.acquire("export:$uriString") { decodeSavedExportThumbnail(context, uriString) }
+            }
+            lease = acquired
+            acquired = null
+        } finally {
+            acquired?.close()
         }
     }
-    ThumbnailBox(thumbnail = thumbnail, emptyText = "\uBBF8\uB9AC\uBCF4\uAE30 \uC5C6\uC74C", modifier = modifier)
+    val activeLease = lease
+    DisposableEffect(activeLease) { onDispose { activeLease?.close() } }
+    ThumbnailBox(thumbnail = lease?.bitmap, emptyText = "\uBBF8\uB9AC\uBCF4\uAE30 \uC5C6\uC74C", modifier = modifier)
 }
 
 @Composable
