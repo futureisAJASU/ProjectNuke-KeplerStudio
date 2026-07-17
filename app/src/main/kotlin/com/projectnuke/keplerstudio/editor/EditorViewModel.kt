@@ -66,9 +66,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var draftSaveJob: Job? = null
     private val draftSaveMutex = Mutex()
     private val savedExportHistoryMutex = Mutex()
+    @Volatile private var savedExportHistoryRevision: Long = 0L
     /** Invalidates every queued draft save/restore when the document changes. */
     private var draftOperationEpoch: Long = 0L
-    private var draftPointerBaseline: String? = currentDraftGenerationId(app.applicationContext)
+    @Volatile private var draftPointerBaseline: String? = currentDraftGenerationId(app.applicationContext)
     private var managedEditJob: Job? = null
     private var managedEditToken: Long = 0L
     @Volatile private var shuttingDown: Boolean = false
@@ -149,6 +150,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (shuttingDown) return false
         val state = _uiState.value
         return !state.isBusy || allowMaskSupersession && isBusyOwnedByMaskSupersedable()
+    }
+
+    private suspend fun invalidateRemovedHistoryThumbnails(context: Context, result: SavedExportHistoryResult) {
+        withContext(Dispatchers.IO) {
+            savedExportHistoryMutex.withLock {
+                if (result.revision != savedExportHistoryRevision) return@withLock
+                val retained = loadSavedExportsFromPrefs(context).map { it.uriString }.toSet()
+                result.removedUris.filterNot(retained::contains).forEach { ThumbnailBitmapCache.invalidate("export:$it") }
+            }
+        }
     }
 
     private suspend fun isCurrentExport(
@@ -735,26 +746,32 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun appApplication(): Application = getApplication()
 
     init {
+        val startupRestoreToken = ++restoreDraftToken
+        val startupRevision = _uiState.value.revision
         viewModelScope.launch {
             val context = getApplication<Application>()
             val retention = loadExportHistoryRetention(context)
             val engines = loadEngineSelection(context)
-            val saved = withContext(Dispatchers.IO) {
-                val savedFromPrefs = loadSavedExportsFromPrefs(context)
-                val seed = if (savedFromPrefs.isEmpty()) rebuildSavedExportsFromMediaStore(context) else savedFromPrefs
-                pruneSavedExportsIfNeeded(context, seed, retention)
-            }
             updateUiStateAndRecycleReplaced {
                 it.copy(
-                    savedExports = saved,
-                    exportHistoryRetention = retention,
                     noiseEngine = engines.noiseEngine,
                     detailEngine = engines.detailEngine,
                     toneEngine = engines.toneEngine,
                     hazeEngine = engines.hazeEngine
                 )
             }
-            restoreDraftIfAvailable(context)
+            restoreDraftIfAvailable(context, startupRestoreToken, startupRevision)
+            val historyResult = withContext(Dispatchers.IO) {
+                savedExportHistoryMutex.withLock {
+                    SavedExportHistoryResult(++savedExportHistoryRevision, loadOrRebuildSavedExportHistory(context, retention))
+                }
+            }
+            updateUiStateAndRecycleReplaced {
+                if (historyResult.revision != savedExportHistoryRevision) it else it.copy(
+                    savedExports = historyResult.items,
+                    exportHistoryRetention = retention
+                )
+            }
         }
     }
 
@@ -1339,16 +1356,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun setExportHistoryRetention(retention: ExportHistoryRetention) {
         val context = getApplication<Application>()
         viewModelScope.launch {
-            val saved = withContext(Dispatchers.IO) {
+            val result = withContext(Dispatchers.IO) {
                 savedExportHistoryMutex.withLock {
                     saveExportHistoryRetention(context, retention)
-                    pruneSavedExportsIfNeeded(context, loadSavedExportsFromPrefs(context), retention)
+                    val current = loadSavedExportsFromPrefs(context)
+                    val pruned = pruneSavedExportsIfNeeded(context, current, retention)
+                    SavedExportHistoryResult(
+                        ++savedExportHistoryRevision,
+                        pruned,
+                        (current.map { it.uriString }.toSet() - pruned.map { it.uriString }.toSet())
+                    )
                 }
             }
+            invalidateRemovedHistoryThumbnails(context, result)
             updateUiStateAndRecycleReplaced {
-                it.copy(
+                if (result.revision != savedExportHistoryRevision) it else it.copy(
                     exportHistoryRetention = retention,
-                    savedExports = saved,
+                    savedExports = result.items,
                     message = if (it.isBusy) it.message else "내보낸 사진 기록 자동 정리가 ${retention.label}으로 설정되었습니다"
                 )
             }
@@ -1407,6 +1431,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var historySaved = false
             var historyError: Throwable? = null
             var persistedHistory: List<SavedExport> = emptyList()
+            var persistedHistoryRevision = Long.MIN_VALUE
             try {
                 val context = getApplication<Application>()
                 withContext(Dispatchers.Default) {
@@ -1474,16 +1499,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     publishExportRow(context, pendingUri!!)
                     published = true
                     try {
-                        persistedHistory = savedExportHistoryMutex.withLock {
-                            rememberSavedExport(context, savedItem, exportRetention)
+                        val historyResult = savedExportHistoryMutex.withLock {
+                            SavedExportHistoryResult(
+                                ++savedExportHistoryRevision,
+                                rememberSavedExport(context, savedItem, loadExportHistoryRetention(context))
+                            )
                         }
+                        persistedHistory = historyResult.items
+                        persistedHistoryRevision = historyResult.revision
                         historySaved = true
                     } catch (t: Throwable) {
                         historyError = t
                     }
                     if (!shuttingDown && historySaved) {
                         updateUiStateAndRecycleReplaced { current ->
-                            val merged = persistedHistory
+                            val merged = if (persistedHistoryRevision == savedExportHistoryRevision) persistedHistory else current.savedExports
                             if (isCurrentExportIdentity(token, sourcePath, exportBaseToken, exportRevision, exportCoroutine)) {
                                 current.copy(
                                     isBusy = false,
@@ -1538,16 +1568,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val thumbnailKey = clearState.draftGenerationId?.let { "draft:$it" }
             ?: clearState.draftSourcePath?.let { "draft:legacy:$it" }
         invalidateDraftOperations()
+        val clearEpoch = draftOperationEpoch
+        val expectedPointer = draftPointerBaseline
         viewModelScope.launch {
             try {
                 draftSaveJob?.cancelAndJoin()
                 val cleared = withContext(Dispatchers.IO) {
                     draftSaveMutex.withLock {
-                        clearDraftPrefs(context, preserveSourcePath = _uiState.value.sourcePath)
+                        if (clearEpoch != draftOperationEpoch || expectedPointer != draftPointerBaseline) return@withLock false
+                        clearDraftPrefs(context, expectedPointer, preserveSourcePath = _uiState.value.sourcePath) {
+                            clearEpoch == draftOperationEpoch && expectedPointer == draftPointerBaseline
+                        }
                     }
                 }
                 if (!cleared) {
-                    updateUiStateAndRecycleReplaced { it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") }
+                    updateUiStateAndRecycleReplaced {
+                        if (clearEpoch == draftOperationEpoch && !it.isBusy) it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") else it
+                    }
                     return@launch
                 }
                 draftPointerBaseline = null
@@ -1555,7 +1592,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     _uiState.value.draftBaseContentToken != clearState.draftBaseContentToken) return@launch
                 thumbnailKey?.let { ThumbnailBitmapCache.invalidate(it) }
                 updateUiStateAndRecycleReplaced {
-                    it.copy(
+                    if (clearEpoch != draftOperationEpoch) it else it.copy(
                         draftSavedAtMillis = null,
                         draftSourcePath = null,
                         draftBaseContentToken = null,
@@ -1572,7 +1609,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } catch (t: Throwable) {
                 logDraftSaveFailure(t)
                 updateUiStateAndRecycleReplaced {
-                    it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.")
+                    if (clearEpoch == draftOperationEpoch && !it.isBusy) it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") else it
                 }
                 return@launch
             }
@@ -1599,13 +1636,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun clearSavedExports() {
         val context = getApplication<Application>()
         viewModelScope.launch {
-            val removed = withContext(Dispatchers.IO) { savedExportHistoryMutex.withLock {
+            val result = withContext(Dispatchers.IO) { savedExportHistoryMutex.withLock {
                 val current = loadSavedExportsFromPrefs(context)
                 clearSavedExportsPrefs(context)
-                current.map { it.uriString }
+                SavedExportHistoryResult(++savedExportHistoryRevision, emptyList(), current.map { it.uriString }.toSet())
             } }
-            removed.forEach { ThumbnailBitmapCache.invalidate("export:$it") }
-            updateUiStateAndRecycleReplaced { it.copy(savedExports = emptyList(), message = if (it.isBusy) it.message else "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다") }
+            if (result.revision != savedExportHistoryRevision) return@launch
+            invalidateRemovedHistoryThumbnails(context, result)
+            updateUiStateAndRecycleReplaced {
+                if (result.revision != savedExportHistoryRevision) it else it.copy(savedExports = result.items, message = if (it.isBusy) it.message else "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다")
+            }
         }
     }
 
@@ -1616,10 +1656,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val current = loadSavedExportsFromPrefs(context)
                 val next = current.filterNot { it.uriString == uriString }
                 saveSavedExportsToPrefs(context, next)
-                next to (next.size != current.size)
+                SavedExportHistoryResult(
+                    ++savedExportHistoryRevision,
+                    next,
+                    if (next.size != current.size) setOf(uriString) else emptySet()
+                )
             } }
-            if (result.second) ThumbnailBitmapCache.invalidate("export:$uriString")
-            updateUiStateAndRecycleReplaced { it.copy(savedExports = result.first, message = if (it.isBusy) it.message else "선택한 내보낸 사진 기록을 삭제했습니다. 갤러리 파일은 삭제되지 않습니다") }
+            if (result.revision != savedExportHistoryRevision) return@launch
+            invalidateRemovedHistoryThumbnails(context, result)
+            updateUiStateAndRecycleReplaced {
+                if (result.revision != savedExportHistoryRevision) it else it.copy(savedExports = result.items, message = if (it.isBusy) it.message else "선택한 내보낸 사진 기록을 삭제했습니다. 갤러리 파일은 삭제되지 않습니다")
+            }
         }
     }
 
@@ -2238,20 +2285,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun restoreDraftIfAvailable(context: Context) {
-        if (shuttingDown) return
-        val restoreToken = ++restoreDraftToken
-        val restoreStartRevision = _uiState.value.revision
+    private suspend fun restoreDraftIfAvailable(context: Context, restoreToken: Long, restoreStartRevision: Int) {
+        if (shuttingDown || restoreToken != restoreDraftToken || restoreStartRevision != _uiState.value.revision) return
         val generationRestore = restoreCurrentDraftGeneration(context, restoreToken, restoreStartRevision)
         if (generationRestore == GenerationRestoreOutcome.Restored) return
         if (generationRestore == GenerationRestoreOutcome.Stale) return
         if (generationRestore is GenerationRestoreOutcome.Invalid) {
-            withContext(Dispatchers.IO) {
+            val cleared = withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
-                    if (currentDraftGenerationId(context) == generationRestore.generationId) {
-                        clearCurrentDraftGenerationPointer(context)
-                    }
+                    if (restoreToken != restoreDraftToken || restoreStartRevision != _uiState.value.revision) return@withLock false
+                    if (currentDraftGenerationId(context) != generationRestore.generationId) return@withLock false
+                    clearCurrentDraftGenerationPointer(context)
                 }
+            }
+            if (!cleared) {
+                val replacement = withContext(Dispatchers.IO) { validateCurrentDraftGeneration(context) }
+                if (replacement != null) draftPointerBaseline = replacement.directory.root.name
+                return
+            }
+            draftPointerBaseline = null
+            withContext(Dispatchers.IO) {
+                deleteDraftGenerationById(context, generationRestore.generationId)
             }
         }
         val restoreSnapshot = try {
@@ -3593,6 +3647,12 @@ private data class DraftRestoreSnapshot(
     val recovery: DraftRecoveryResolution
 )
 
+private data class SavedExportHistoryResult(
+    val revision: Long,
+    val items: List<SavedExport>,
+    val removedUris: Set<String> = emptySet()
+)
+
 private sealed class GenerationRestoreOutcome {
     data object Restored : GenerationRestoreOutcome()
     data object Absent : GenerationRestoreOutcome()
@@ -4016,11 +4076,17 @@ private fun restoreDraftPreferences(
     return editor.commit()
 }
 
-private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null): Boolean {
+private fun clearDraftPrefs(
+    context: Context,
+    expectedPointer: String?,
+    preserveSourcePath: String? = null,
+    isCurrent: () -> Boolean
+): Boolean {
     val preserve = preserveSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() }
     val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
     val previous = snapshotDraftPreferences(preferences)
     val previousGenerationId = currentDraftGenerationId(context)
+    if (previousGenerationId != expectedPointer || !isCurrent()) return false
     if (!clearCurrentDraftGenerationPointer(context)) return false
     val removed = try {
         preferences.edit()
@@ -4191,15 +4257,24 @@ private fun pruneSavedExportsIfNeeded(
 }
 
 private fun saveSavedExportsToPrefs(context: Context, items: List<SavedExport>) {
-    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+    check(context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
         .putString(KEY_SAVED_EXPORTS, items.joinToString("\n") { encodeSavedExport(it) })
-        .apply()
+        .putBoolean(KEY_SAVED_EXPORTS_INITIALIZED, true)
+        .commit()) { "failed to persist saved export history" }
 }
 
 private fun clearSavedExportsPrefs(context: Context) {
-    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
-        .remove(KEY_SAVED_EXPORTS)
-        .apply()
+    check(context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+        .putString(KEY_SAVED_EXPORTS, "")
+        .putBoolean(KEY_SAVED_EXPORTS_INITIALIZED, true)
+        .commit()) { "failed to clear saved export history" }
+}
+
+private fun loadOrRebuildSavedExportHistory(context: Context, retention: ExportHistoryRetention): List<SavedExport> {
+    val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+    val initialized = prefs.getBoolean(KEY_SAVED_EXPORTS_INITIALIZED, false) || prefs.contains(KEY_SAVED_EXPORTS)
+    val seed = if (initialized) loadSavedExportsFromPrefs(context) else rebuildSavedExportsFromMediaStore(context)
+    return pruneSavedExportsIfNeeded(context, seed, retention)
 }
 
 private fun loadSavedExportsFromPrefs(context: Context): List<SavedExport> {
@@ -4272,9 +4347,9 @@ private fun mimeTypeToExportLabel(mimeType: String, displayName: String): String
     }
 
 private fun saveExportHistoryRetention(context: Context, retention: ExportHistoryRetention) {
-    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+    check(context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
         .putString(KEY_EXPORT_HISTORY_RETENTION, retention.name)
-        .apply()
+        .commit()) { "failed to persist export history retention" }
 }
 
 private fun loadExportHistoryRetention(context: Context): ExportHistoryRetention =
@@ -4341,6 +4416,7 @@ private const val DRAFT_SOURCE_FILE_NAME = "source.img"
 private const val DRAFT_THUMBNAIL_FILE_NAME = "thumbnail.jpg"
 private const val PREF_NAME = "kepler_studio_editor"
 private const val KEY_SAVED_EXPORTS = "saved_exports"
+private const val KEY_SAVED_EXPORTS_INITIALIZED = "saved_exports_initialized"
 private const val KEY_EXPORT_HISTORY_RETENTION = "export_history_retention"
 private const val KEY_NOISE_ENGINE = "noise_engine"
 private const val KEY_DETAIL_ENGINE = "detail_engine"

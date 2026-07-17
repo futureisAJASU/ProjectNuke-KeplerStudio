@@ -18,6 +18,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,6 +64,8 @@ private data class StoredPreset(
     val look: PresetColorLook? = null
 )
 
+private data class PresetDocumentIdentity(val sourcePath: String?, val baseToken: String, val revision: Int)
+
 @Composable
 fun PresetToolPanel(
     editorViewModel: EditorViewModel,
@@ -70,13 +73,17 @@ fun PresetToolPanel(
     activeLook: PresetColorLook?
 ) {
     val context = LocalContext.current
+    val editorState by editorViewModel.uiState.collectAsState()
+    val mutatingEnabled = !editorState.isBusy
     val scope = rememberCoroutineScope()
     var presetName by remember { mutableStateOf(defaultPresetName()) }
     var presets by remember { mutableStateOf(emptyList<StoredPreset>()) }
     var statusMessage by remember { mutableStateOf("프리셋 저장, JSON 백업, 통계 기반 추출을 사용할 수 있습니다.") }
     var pendingBeforeUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingIdentity by remember { mutableStateOf<PresetDocumentIdentity?>(null) }
 
     fun applyStoredPreset(preset: StoredPreset, message: String) {
+        if (!editorViewModel.canEnterEditorAction()) return
         editorViewModel.applyPresetLook(preset.params, preset.look, message)
         statusMessage = message
     }
@@ -115,7 +122,9 @@ fun PresetToolPanel(
 
     val pairAfterPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { afterUri ->
         val beforeUri = pendingBeforeUri
+        val identity = pendingIdentity
         pendingBeforeUri = null
+        pendingIdentity = null
         if (beforeUri == null || afterUri == null) {
             statusMessage = "원본과 보정본을 모두 선택해 주세요"
             return@rememberLauncherForActivityResult
@@ -134,7 +143,10 @@ fun PresetToolPanel(
                 )
                 presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
-                applyStoredPreset(item, "전/후 비교 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
+                val current = editorViewModel.uiState.value
+                if (identity != null && mutatingEnabled && current.sourcePath == identity.sourcePath && current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
+                    applyStoredPreset(item, "전/후 비교 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
+                } else statusMessage = "전/후 비교 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
             }.onFailure {
                 statusMessage = "레퍼런스 프리셋 추출에 실패했습니다: ${it.message}"
             }
@@ -153,6 +165,8 @@ fun PresetToolPanel(
 
     val referencePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
+        val identity = pendingIdentity
+        pendingIdentity = null
         scope.launch {
             statusMessage = "레퍼런스 이미지를 분석하여 스타일 프리셋을 추출하는 중입니다"
             runCatching {
@@ -167,7 +181,10 @@ fun PresetToolPanel(
                 )
                 presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
-                applyStoredPreset(item, "레퍼런스 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
+                val current = editorViewModel.uiState.value
+                if (identity != null && current.sourcePath == identity.sourcePath && current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
+                    applyStoredPreset(item, "레퍼런스 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
+                } else statusMessage = "레퍼런스 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
             }.onFailure {
                 statusMessage = "전/후 비교 프리셋 추출에 실패했습니다: ${it.message}"
             }
@@ -240,10 +257,16 @@ fun PresetToolPanel(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            TextButton(onClick = { pairBeforePicker.launch("image/*") }) {
+            TextButton(onClick = {
+                pendingIdentity = PresetDocumentIdentity(editorState.sourcePath, editorState.baseContentToken, editorState.revision)
+                pairBeforePicker.launch("image/*")
+            }, enabled = mutatingEnabled) {
                 Text("전/후 비교 추출")
             }
-            TextButton(onClick = { referencePicker.launch("image/*") }) {
+            TextButton(onClick = {
+                pendingIdentity = PresetDocumentIdentity(editorState.sourcePath, editorState.baseContentToken, editorState.revision)
+                referencePicker.launch("image/*")
+            }, enabled = mutatingEnabled) {
                 Text("레퍼런스 추출")
             }
         }
@@ -284,7 +307,7 @@ fun PresetToolPanel(
                             Text(formatPresetSummary(preset), color = PresetTextSecondary, style = MaterialTheme.typography.bodySmall)
                             Text(formatPresetTime(preset.timestampMillis), color = PresetTextMuted, style = MaterialTheme.typography.bodySmall)
                         }
-                        TextButton(onClick = { applyStoredPreset(preset, "프리셋을 적용했습니다.") }) {
+                        TextButton(onClick = { applyStoredPreset(preset, "프리셋을 적용했습니다.") }, enabled = mutatingEnabled) {
                             Text("적용")
                         }
                         TextButton(

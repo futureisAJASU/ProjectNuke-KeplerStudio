@@ -112,7 +112,7 @@ fun MaskingToolPanel(editorViewModel: EditorViewModel = viewModel()) {
                     .padding(top = 4.dp)
             ) {
                 state.selectionLayers.forEach { layer ->
-                    TextButton(onClick = { editorViewModel.selectSelectionLayer(layer.id) }) {
+                    TextButton(onClick = { editorViewModel.selectSelectionLayer(layer.id) }, enabled = actionsEnabled) {
                         Text(
                             text = layer.name,
                             color = if (layer.id == state.activeSelectionLayerId) MaskAccent else MaskTextSecondary,

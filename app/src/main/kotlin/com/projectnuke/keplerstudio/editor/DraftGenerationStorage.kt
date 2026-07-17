@@ -175,6 +175,15 @@ internal fun findDraftGenerationDirectory(context: Context, generationId: String
     return generation.takeIf { it.completionFile.isFile }
 }
 
+internal fun deleteDraftGenerationById(context: Context, generationId: String) {
+    if (!generationId.startsWith(DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(generationId)) return
+    val root = draftGenerationsRoot(context).canonicalFile
+    val directory = runCatching { File(root, generationId).canonicalFile }.getOrNull() ?: return
+    if (directory.parentFile == root && directory.isDirectory && currentDraftGenerationId(context) != generationId) {
+        deleteDraftDirectory(context, DraftGenerationDirectory(directory))
+    }
+}
+
 internal fun validateCurrentDraftGeneration(context: Context): ValidatedDraftGeneration? {
     val pointer = currentDraftGenerationId(context) ?: return null
     if (!pointer.startsWith(DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(pointer)) return null
@@ -202,12 +211,13 @@ internal fun validateDraftGeneration(directory: DraftGenerationDirectory, expect
     if (sourceBounds.first != manifest.sourceWidth || sourceBounds.second != manifest.sourceHeight) return null
     val thumbnailBounds = decodeBounds(thumbnail) ?: return null
     if (thumbnailBounds.first != manifest.thumbnailWidth || thumbnailBounds.second != manifest.thumbnailHeight) return null
+    var maskGeometry: Pair<Int, Int>? = null
     val masks = manifest.selectionLayers.map { layer ->
         if (layer.sourceIdentity != manifest.baseContentToken || layer.maskWidth <= 0 || layer.maskHeight <= 0) return null
         val file = containedPayload(directory, layer.maskFileName) ?: return null
         val bounds = decodeBounds(file) ?: return null
         if (bounds.first != layer.maskWidth || bounds.second != layer.maskHeight) return null
-        if (bounds != sourceBounds) return null
+        if (maskGeometry == null) maskGeometry = bounds else if (maskGeometry != bounds) return null
         file
     }
     ValidatedDraftGeneration(directory, manifest, source, thumbnail, masks)
