@@ -163,29 +163,33 @@ fun EditorViewModel.applyCropTransform() {
                 }
             }
 
-            val identityUnchanged = !isShuttingDown() &&
+            val expectedOriginal = transformedOriginal ?: transformedPreview
+            val expectedPreview = transformedPreview ?: transformedOriginal
+            val expectedTransformedLayers = transformedMasks
+
+            val adoptable =
                 isManagedEditCurrent(operationToken, nextRevision) &&
                 isCropOperationCurrent(cropToken) &&
                 uiState.value.sourcePath == sourcePath &&
                 uiState.value.baseContentToken == baseContentToken &&
                 uiState.value.activeSelectionLayerId == activeSelectionLayerId &&
-                uiState.value.selectionLayers.size == capturedSelectionLayers.size &&
-                uiState.value.selectionLayers.zip(capturedSelectionLayers).all { (a, b) -> a.id == b.id && a.bitmap === b.bitmap }
+                uiState.value.selectionLayers == capturedSelectionLayers
 
-            if (identityUnchanged) {
-                val liveStateBefore = uiState.value
+            val managedCurrent = isManagedEditTokenCurrent(operationToken)
+
+            if (adoptable) {
                 var stateUpdateThrew = false
                 try {
                     updateUiStateAndRecycleReplaced {
-                        val adoptedOriginal = transformedOriginal ?: transformedPreview ?: error("missing transformed original")
-                        val adoptedPreview = transformedPreview ?: transformedOriginal ?: error("missing transformed preview")
+                        val adoptedOriginal = expectedOriginal ?: error("missing transformed original")
+                        val adoptedPreview = expectedPreview ?: error("missing transformed preview")
                         it.copy(
                             originalPreviewBitmap = adoptedOriginal,
                             previewBitmap = adoptedPreview,
                             baseBitmapDirty = true,
                             baseContentToken = newBaseContentToken(),
                             cropState = CropState(),
-                            selectionLayers = checkNotNull(transformedMasks),
+                            selectionLayers = checkNotNull(expectedTransformedLayers),
                             isBusy = false,
                             message = "변경사항을 적용했습니다."
                         )
@@ -194,11 +198,12 @@ fun EditorViewModel.applyCropTransform() {
                     stateUpdateThrew = true
                     if (t is CancellationException) throw t
                 }
+
                 val liveStateAfter = uiState.value
-                val originalAdopted = liveStateAfter.originalPreviewBitmap === transformedOriginal || liveStateAfter.originalPreviewBitmap === transformedPreview
-                val previewAdopted = liveStateAfter.previewBitmap === transformedPreview || liveStateAfter.previewBitmap === transformedOriginal
-                val masksAdopted = transformedMasks != null && liveStateAfter.selectionLayers.size == transformedMasks.size &&
-                    liveStateAfter.selectionLayers.zip(transformedMasks).all { (a, b) -> a.bitmap === b.bitmap }
+                val originalAdopted = !stateUpdateThrew && liveStateAfter.originalPreviewBitmap === expectedOriginal
+                val previewAdopted = !stateUpdateThrew && liveStateAfter.previewBitmap === expectedPreview
+                val masksAdopted = !stateUpdateThrew && expectedTransformedLayers != null &&
+                    liveStateAfter.selectionLayers == expectedTransformedLayers
                 val fullyAdopted = originalAdopted && previewAdopted && masksAdopted
 
                 if (fullyAdopted) {
@@ -210,40 +215,42 @@ fun EditorViewModel.applyCropTransform() {
                     commitUndoSnapshot(checkNotNull(undoSnapshotOwned), clearRedo = true)
                     undoSnapshotOwned = null
                     persistDraftSnapshot()
-                } else {
-                    if (originalAdopted) transformedOriginal = null
-                    if (previewAdopted) transformedPreview = null
-                    if (masksAdopted) transformedMasks = null
-                    if (stateUpdateThrew) {
-                        // State update threw but adoption was incomplete - fall through to outer catch
-                        throw IllegalStateException("Crop state update failed with partial adoption")
-                    }
                 }
-            } else if (isManagedEditTokenCurrent(operationToken) && isCropOperationCurrent(cropToken)) {
+            } else if (managedCurrent) {
                 updateUiState { it.copy(isBusy = false) }
             }
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
-            val failureIdentityUnchanged = !isShuttingDown() &&
+            val failureAdoptable =
                 isManagedEditCurrent(operationToken, nextRevision) &&
                 isCropOperationCurrent(cropToken) &&
                 uiState.value.sourcePath == sourcePath &&
                 uiState.value.baseContentToken == baseContentToken &&
                 uiState.value.activeSelectionLayerId == activeSelectionLayerId &&
-                uiState.value.selectionLayers.size == capturedSelectionLayers.size &&
-                uiState.value.selectionLayers.zip(capturedSelectionLayers).all { (a, b) -> a.id == b.id && a.bitmap === b.bitmap }
-            if (failureIdentityUnchanged) {
+                uiState.value.selectionLayers == capturedSelectionLayers
+
+            val failureManagedCurrent = isManagedEditTokenCurrent(operationToken)
+
+            if (failureAdoptable) {
                 updateUiState { it.copy(isBusy = false, message = "자르기에 실패했습니다: ${t.message}") }
-            } else if (isManagedEditTokenCurrent(operationToken) && isCropOperationCurrent(cropToken)) {
+            } else if (failureManagedCurrent) {
                 updateUiState { it.copy(isBusy = false) }
             }
         } finally {
-            if (!adoptionConfirmed) {
-                transformedOriginal?.takeIf { !it.isRecycled }?.recycle()
-                if (transformedPreview !== transformedOriginal) transformedPreview?.takeIf { !it.isRecycled }?.recycle()
-                transformedMasks?.forEach { it.bitmap.takeIf { !it.isRecycled }?.recycle() }
+            val retained = mutableSetOf<Bitmap>()
+            uiState.value.originalPreviewBitmap?.let(retained::add)
+            uiState.value.previewBitmap?.let(retained::add)
+            uiState.value.selectionLayers.forEach { retained.add(it.bitmap) }
+
+            transformedOriginal?.takeIf { it !in retained && !it.isRecycled }?.recycle()
+            if (transformedPreview !== transformedOriginal) {
+                transformedPreview?.takeIf { it !in retained && !it.isRecycled }?.recycle()
             }
+            transformedMasks?.forEach { layer ->
+                layer.bitmap.takeIf { it !in retained && !it.isRecycled }?.recycle()
+            }
+
             previewInputOwned?.takeIf { !it.isRecycled }?.recycle()
             if (originalInputOwned !== previewInputOwned) originalInputOwned?.takeIf { !it.isRecycled }?.recycle()
             maskInputsOwned.forEach { it.bitmap.takeIf { !it.isRecycled }?.recycle() }
