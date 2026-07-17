@@ -178,7 +178,7 @@ fun EditorViewModel.applyCropTransform() {
             val managedCurrent = isManagedEditTokenCurrent(operationToken)
 
             if (adoptable) {
-                var stateUpdateThrew = false
+                var stateUpdateException: Throwable? = null
                 try {
                     updateUiStateAndRecycleReplaced {
                         val adoptedOriginal = expectedOriginal ?: error("missing transformed original")
@@ -195,14 +195,14 @@ fun EditorViewModel.applyCropTransform() {
                         )
                     }
                 } catch (t: Throwable) {
-                    stateUpdateThrew = true
+                    stateUpdateException = t
                     if (t is CancellationException) throw t
                 }
 
                 val liveStateAfter = uiState.value
-                val originalAdopted = !stateUpdateThrew && liveStateAfter.originalPreviewBitmap === expectedOriginal
-                val previewAdopted = !stateUpdateThrew && liveStateAfter.previewBitmap === expectedPreview
-                val masksAdopted = !stateUpdateThrew && expectedTransformedLayers != null &&
+                val originalAdopted = liveStateAfter.originalPreviewBitmap === expectedOriginal
+                val previewAdopted = liveStateAfter.previewBitmap === expectedPreview
+                val masksAdopted = expectedTransformedLayers != null &&
                     liveStateAfter.selectionLayers == expectedTransformedLayers
                 val fullyAdopted = originalAdopted && previewAdopted && masksAdopted
 
@@ -215,6 +215,8 @@ fun EditorViewModel.applyCropTransform() {
                     commitUndoSnapshot(checkNotNull(undoSnapshotOwned), clearRedo = true)
                     undoSnapshotOwned = null
                     persistDraftSnapshot()
+                } else if (stateUpdateException != null) {
+                    throw stateUpdateException
                 }
             } else if (managedCurrent) {
                 updateUiState { it.copy(isBusy = false) }
