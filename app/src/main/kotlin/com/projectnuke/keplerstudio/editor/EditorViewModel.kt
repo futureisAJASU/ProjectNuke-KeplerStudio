@@ -29,6 +29,8 @@ import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -39,6 +41,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
 import org.json.JSONObject
 import kotlin.math.floor
 import kotlin.math.ln
@@ -57,6 +60,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var nativeSession: Long = 0L
     private var renderJob: Job? = null
     private var exportJob: Job? = null
+    private var exportToken: Long = 0L
     internal var selectionLivePreviewJob: Job? = null
     internal var cropJob: Job? = null
     private var draftSaveJob: Job? = null
@@ -138,6 +142,34 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         !shuttingDown && managedEditToken == token
 
     internal fun isShuttingDown(): Boolean = shuttingDown
+
+    private suspend fun isCurrentExport(
+        token: Long,
+        sourcePath: String,
+        baseToken: String,
+        revision: Int
+    ): Boolean {
+        val job = currentCoroutineContext()[Job] ?: return false
+        if (!job.isActive || exportJob !== job || exportToken != token || shuttingDown) return false
+        val state = _uiState.value
+        return state.sourcePath == sourcePath &&
+            state.baseContentToken == baseToken &&
+            state.revision == revision
+    }
+
+    private fun isCurrentExportIdentity(
+        token: Long,
+        sourcePath: String,
+        baseToken: String,
+        revision: Int,
+        job: Job
+    ): Boolean {
+        if (!job.isActive || exportJob !== job || exportToken != token || shuttingDown) return false
+        val state = _uiState.value
+        return state.sourcePath == sourcePath &&
+            state.baseContentToken == baseToken &&
+            state.revision == revision
+    }
 
     internal fun beginCropOperation(): Long = ++cropOperationToken
 
@@ -479,6 +511,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         managedEditJob = null
     }
 
+    private fun invalidateExport() {
+        exportToken += 1L
+        exportJob?.cancel()
+    }
+
     private fun invalidateDraftOperations() {
         draftOperationEpoch += 1L
         restoreDraftToken += 1L
@@ -644,7 +681,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         invalidateManagedEdits()
         invalidateDraftOperations()
         renderJob?.cancel()
-        exportJob?.cancel()
+        invalidateExport()
         invalidateSelectionPreview()
         cropJob?.cancel()
         closeParamUndoWindow()
@@ -1053,7 +1090,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val nextRevision = startRevision + 1
         renderJob?.cancel()
-        exportJob?.cancel()
+        invalidateExport()
         var decoded: Bitmap? = null
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "초기화하는 중입니다") }
         renderJob = launchManagedEdit { operationToken ->
@@ -1220,95 +1257,166 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun exportPreview() {
+        if (shuttingDown) return
         val state = _uiState.value
         val sourcePath = state.sourcePath
         val exportBusyMessage = "${state.exportFormat.label} 형식, ${state.exportResolution.label} 목표 해상도로 내보내는 중입니다."
         if (sourcePath == null) {
-            updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0BC \uC6D0\uBCF8 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4") }
+            val missingMsg = "\uB0B4\uBCF4\uB0BC \uC6D0\uBCF8 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4"
+            if (state.message != missingMsg) {
+                updateUiStateAndRecycleReplaced { it.copy(message = missingMsg) }
+            }
             return
         }
+        if (state.isBusy) return
 
-        exportJob?.cancel()
+        val exportFormat = state.exportFormat
+        val exportResolution = state.exportResolution
+        val exportParams = state.params
+        val exportEngines = state.engineSelection()
+        val exportLook = state.presetLook
+        val exportQuickEffects = state.activeQuickEffects.toList()
+        val exportRevision = state.revision
+        val exportBaseToken = state.baseContentToken
+        val exportDirty = state.baseBitmapDirty
+        val exportRetention = state.exportHistoryRetention
+
+        var ownedDirtyBase: Bitmap? = null
+        if (exportDirty) {
+            val liveBase = state.originalPreviewBitmap ?: state.previewBitmap
+            ownedDirtyBase = runCatching { liveBase?.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
+                updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0B4\uAE30 \uC900\uBE44\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4") }
+                return
+            }
+            if (ownedDirtyBase == null) {
+                updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0B4\uAE30 \uC900\uBE44\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4") }
+                return
+            }
+        }
+
+        invalidateExport()
+        val token = exportToken
+        val fileName = "KeplerStudio_${exportTimestamp()}.${exportFormat.extension}"
+
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = exportBusyMessage) }
-        val launchedJob = viewModelScope.launch {
-            val exportRevision = state.revision
-            val exportSourcePath = sourcePath
-            var ownedBaseBitmap: Bitmap? = null
-            var exportedResolutionLabel = state.exportResolution.label
+
+        val launchedJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val exportCoroutine = currentCoroutineContext()[Job] ?: return@launch
+            var exportedBitmap: Bitmap? = null
+            var pendingUri: Uri? = null
+            var published = false
+            var historySaved = false
+            var historyError: Throwable? = null
+            var savedExports = state.savedExports
             try {
                 val context = getApplication<Application>()
-                val fileName = "KeplerStudio_${exportTimestamp()}.${state.exportFormat.extension}"
-                val savedUri = withContext(Dispatchers.IO) {
-                    val exportBitmap = if (!state.baseBitmapDirty) {
-                        renderEditedExport(
-                            sourcePath = sourcePath,
-                            params = state.params,
-                            resolution = state.exportResolution,
-                            engines = state.engineSelection(),
-                            revision = state.revision + 1,
-                            look = state.presetLook,
-                            quickEffects = state.activeQuickEffects
-                        )
+                exportedBitmap = withContext(Dispatchers.Default) {
+                    if (isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
+                        if (exportDirty) {
+                            renderEditedExportFromBitmap(
+                                baseBitmap = checkNotNull(ownedDirtyBase),
+                                params = exportParams,
+                                resolution = exportResolution,
+                                engines = exportEngines,
+                                revision = exportRevision + 1,
+                                look = exportLook,
+                                quickEffects = exportQuickEffects
+                            )
+                        } else {
+                            renderEditedExport(
+                                sourcePath = sourcePath,
+                                params = exportParams,
+                                resolution = exportResolution,
+                                engines = exportEngines,
+                                revision = exportRevision + 1,
+                                look = exportLook,
+                                quickEffects = exportQuickEffects
+                            )
+                        }
                     } else {
-                        ownedBaseBitmap = withContext(Dispatchers.Default) {
-                            (state.originalPreviewBitmap ?: state.previewBitmap)?.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-                        } ?: error("export bitmap is missing")
-                        renderEditedExportFromBitmap(
-                            baseBitmap = ownedBaseBitmap ?: error("export bitmap is missing"),
-                            params = state.params,
-                            resolution = state.exportResolution,
-                            engines = state.engineSelection(),
-                            revision = state.revision + 1,
-                            look = state.presetLook,
-                            quickEffects = state.activeQuickEffects
-                        )
-                    }
-                    try {
-                        exportedResolutionLabel = "${exportBitmap.width}x${exportBitmap.height}"
-                        saveBitmapToGallery(context, exportBitmap, fileName, state.exportFormat)
-                    } finally {
-                        exportBitmap.recycle()
+                        null
                     }
                 }
+                if (exportedBitmap == null) {
+                    return@launch
+                }
+                val exportedResolutionLabel = "${exportedBitmap!!.width}x${exportedBitmap!!.height}"
+
+                pendingUri = withContext(Dispatchers.IO) {
+                    if (!isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
+                        return@withContext null
+                    }
+                    insertExportPendingRow(context, checkNotNull(exportedBitmap), fileName, exportFormat).also { pendingUri = it }
+                }
+                if (pendingUri == null) {
+                    return@launch
+                }
+
+                if (!isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
+                    // Before commit, a stale export must remain invisible and be removed.
+                    deletePendingExportRow(context, pendingUri!!)
+                    return@launch
+                }
+
                 val savedItem = SavedExport(
                     displayName = fileName,
-                    uriString = savedUri.toString(),
-                    formatLabel = state.exportFormat.label,
+                    uriString = pendingUri!!.toString(),
+                    formatLabel = exportFormat.label,
                     resolutionLabel = exportedResolutionLabel,
                     timestampMillis = System.currentTimeMillis()
                 )
-                val savedExports = withContext(Dispatchers.IO) {
-                    rememberSavedExport(context, savedItem, state.exportHistoryRetention)
-                }
-                val currentState = _uiState.value
-                if (currentState.sourcePath != exportSourcePath || currentState.revision != exportRevision) {
-                    if (currentState.isBusy && currentState.message == exportBusyMessage) {
-                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
+                withContext(NonCancellable + Dispatchers.IO) {
+                    if (!isCurrentExportIdentity(token, sourcePath, exportBaseToken, exportRevision, exportCoroutine)) {
+                        deletePendingExportRow(context, pendingUri!!)
+                        return@withContext
                     }
+                    publishExportRow(context, pendingUri!!)
+                    published = true
+                    try {
+                        savedExports = rememberSavedExport(context, savedItem, exportRetention)
+                        historySaved = true
+                    } catch (t: Throwable) {
+                        historyError = t
+                    }
+                }
+                if (!published || !isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
                     return@launch
                 }
-                updateUiStateAndRecycleReplaced {
-                    it.copy(
-                        isBusy = false,
-                        savedExports = savedExports,
-                        message = "이미지가 Gallery > Pictures/KeplerStudio에 저장되었고, 앱 내 내보낸 사진 기록에도 추가되었습니다."
-                    )
+                if (historySaved) {
+                    updateUiStateAndRecycleReplaced {
+                        it.copy(
+                            isBusy = false,
+                            savedExports = savedExports,
+                            message = "이미지가 Gallery > Pictures/KeplerStudio에 저장되었고, 앱 내 내보낸 사진 기록에도 추가되었습니다."
+                        )
+                    }
+                } else {
+                    val errorMsg = historyError?.message ?: "unknown"
+                    updateUiStateAndRecycleReplaced {
+                        it.copy(
+                            isBusy = false,
+                            message = "갤러리 파일은 저장되었지만 앱 내 내보낸 사진 기록 저장에 실패했습니다: $errorMsg"
+                        )
+                    }
                 }
-            } catch (ce: CancellationException) {
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                if (!published) {
+                    pendingUri?.let { deletePendingExportRow(getApplication<Application>(), it) }
+                }
                 throw ce
             } catch (t: Throwable) {
-                val currentState = _uiState.value
-                if (currentState.sourcePath == exportSourcePath && currentState.revision == exportRevision) {
+                if (!published) pendingUri?.let { deletePendingExportRow(getApplication<Application>(), it) }
+                if (!published && isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uB0B4\uBCF4\uB0B4\uAE30\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
-                } else if (currentState.isBusy && currentState.message == exportBusyMessage) {
-                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
                 }
             } finally {
-                ownedBaseBitmap?.takeIf { !it.isRecycled }?.recycle()
-                if (exportJob === kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job]) exportJob = null
+                exportedBitmap?.takeIf { !it.isRecycled }?.recycle()
+                ownedDirtyBase?.takeIf { !it.isRecycled }?.recycle()
+                if (exportJob === currentCoroutineContext()[Job]) exportJob = null
             }
         }
         exportJob = launchedJob
+        launchedJob.start()
     }
 
     fun clearDraft() {
@@ -1404,7 +1512,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         renderJob?.cancel()
-        exportJob?.cancel()
+        invalidateExport()
         val redoSnapshot = try {
             _uiState.value.toHistorySnapshot()
         } catch (t: Throwable) {
@@ -1432,7 +1540,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         renderJob?.cancel()
-        exportJob?.cancel()
+        invalidateExport()
         val undoSnapshot = try {
             _uiState.value.toHistorySnapshot()
         } catch (t: Throwable) {
@@ -2119,7 +2227,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         invalidateManagedEdits()
         invalidateDraftOperations()
         renderJob?.cancel()
-        exportJob?.cancel()
+        invalidateExport()
         invalidateSelectionPreview()
         abortPendingParameterEdit()
         paramUndoWindowJob?.cancel()
@@ -2992,7 +3100,7 @@ private fun scaleBitmapForExport(bitmap: Bitmap, resolution: ExportResolution): 
     return Bitmap.createScaledBitmap(bitmap, width, height, true)
 }
 
-private fun saveBitmapToGallery(
+private fun insertExportPendingRow(
     context: Context,
     bitmap: Bitmap,
     fileName: String,
@@ -3005,29 +3113,32 @@ private fun saveBitmapToGallery(
         put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/KeplerStudio")
         put(MediaStore.Images.Media.IS_PENDING, 1)
     }
-
     val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
         ?: error("저장 위치를 만들 수 없습니다")
-
     try {
         if (format == ExportFormat.Heif) {
             writeHeifToUri(context, uri, bitmap)
         } else {
             writeCompressedBitmapToUri(context, uri, bitmap, format)
         }
-
-        values.clear()
-        values.put(MediaStore.Images.Media.IS_PENDING, 0)
-        val updatedRows = resolver.update(uri, values, null, null)
-        if (updatedRows <= 0) {
-            resolver.delete(uri, null, null)
-            error("failed to publish media store row")
-        }
         return uri
     } catch (t: Throwable) {
-        resolver.delete(uri, null, null)
+        runCatching { resolver.delete(uri, null, null) }
         throw t
     }
+}
+
+private fun publishExportRow(context: Context, uri: Uri) {
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.IS_PENDING, 0)
+    }
+    val resolver = context.contentResolver
+    val updated = resolver.update(uri, values, null, null)
+    require(updated > 0) { "failed to publish media store row" }
+}
+
+private fun deletePendingExportRow(context: Context, uri: Uri) {
+    runCatching { context.contentResolver.delete(uri, null, null) }
 }
 
 private fun writeCompressedBitmapToUri(
