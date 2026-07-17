@@ -147,6 +147,8 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
             strength = qObj.requiredEnum("strength")
         )
     }
+    if (quickEffects.map { it.kind }.toSet().size != quickEffects.size ||
+        quickEffects.map { it.kind.manifestGroup() }.toSet().size != quickEffects.size) return null
     val cropObject = json.requiredObject("cropState")
     val cropState = CropState(
         aspectRatio = cropObject.requiredEnum("aspectRatio"),
@@ -158,6 +160,8 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         straightenDegrees = cropObject.requiredFloat("straightenDegrees", -45f..45f),
         flipHorizontal = cropObject.requiredBoolean("flipHorizontal")
     )
+    if (cropState.rotationDegrees !in 0..270 || cropState.rotationDegrees % 90 != 0 ||
+        cropState.cropLeft >= cropState.cropRight || cropState.cropTop >= cropState.cropBottom) return null
     val presetObject = json.optJSONObject("presetLook")
     val parsedPreset = presetObject?.let { presetColorLookFromJson(it) }
     if (presetObject != null && parsedPreset == null) return null
@@ -227,6 +231,14 @@ private fun JSONObject.requiredFloat(key: String, range: ClosedFloatingPointRang
 
 private inline fun <reified T : Enum<T>> JSONObject.requiredEnum(key: String): T =
     enumValueOf<T>(requiredString(key))
+
+private fun QuickEffectKind.manifestGroup(): Int = when (this) {
+    QuickEffectKind.SpotCleanup -> 0
+    QuickEffectKind.ChromaticAberrationReduction,
+    QuickEffectKind.VignetteCorrection,
+    QuickEffectKind.OpticsCorrection -> 1
+    QuickEffectKind.SoftBlur -> 2
+}
 
 private fun JSONObject.requiredEditParams(key: String): EditParams {
     val value = requiredObject(key)

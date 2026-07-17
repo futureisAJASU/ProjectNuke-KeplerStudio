@@ -65,8 +65,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal var cropJob: Job? = null
     private var draftSaveJob: Job? = null
     private val draftSaveMutex = Mutex()
+    private val savedExportHistoryMutex = Mutex()
     /** Invalidates every queued draft save/restore when the document changes. */
     private var draftOperationEpoch: Long = 0L
+    private var draftPointerBaseline: String? = currentDraftGenerationId(app.applicationContext)
     private var managedEditJob: Job? = null
     private var managedEditToken: Long = 0L
     @Volatile private var shuttingDown: Boolean = false
@@ -540,9 +542,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return payload.epoch == draftOperationEpoch &&
             payload.baseContentToken == current.baseContentToken &&
             payload.capturedRevision == current.revision &&
-            payload.previousGenerationId == current.draftGenerationId &&
+            payload.expectedPointerGenerationId == draftPointerBaseline &&
+            payload.previousVisibleGenerationId == current.draftGenerationId &&
             sameCanonicalPath(payload.sourcePath, current.sourcePath) &&
-            sameCanonicalPath(payload.draftSourcePath, current.draftSourcePath)
+            sameOptionalCanonicalPath(payload.previousVisibleDraftPath, current.draftSourcePath)
     }
 
     private fun isDraftResultCurrent(result: DraftSaveResult): Boolean {
@@ -553,9 +556,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return result.epoch == draftOperationEpoch &&
             result.baseContentToken == current.baseContentToken &&
             result.capturedRevision == current.revision &&
-            result.previousGenerationId == current.draftGenerationId &&
+            result.expectedPointerGenerationId == draftPointerBaseline &&
+            result.previousVisibleGenerationId == current.draftGenerationId &&
             sameCanonicalPath(result.originalSourcePath, current.sourcePath) &&
-            sameCanonicalPath(result.previousDraftPath, current.draftSourcePath)
+            sameOptionalCanonicalPath(result.previousDraftPath, current.draftSourcePath)
     }
 
     private fun isBitmapRetainedByCurrentState(bitmap: Bitmap): Boolean {
@@ -633,7 +637,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val context = getApplication<Application>()
         val draftState = _uiState.value
         val payload = try {
-            createDraftSavePayload(context, draftState, draftEpoch)
+            createDraftSavePayload(context, draftState, draftEpoch, draftPointerBaseline)
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
@@ -713,10 +717,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             withContext(Dispatchers.IO) { rollbackCommittedDraft(context, saved) }
             return false
         }
-        saved.previousGenerationId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
+        draftPointerBaseline = saved.generationId
+        saved.expectedPointerGenerationId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
         withContext(Dispatchers.IO) {
-            persistLegacyDraftCompatibility(context, payload, saved)
-            deleteAllDraftGenerationsExcept(context, saved.generationDirectory)
+            runCatching { persistLegacyDraftCompatibility(context, payload, saved) }.onFailure(::logDraftSaveFailure)
+            runCatching { deleteAllDraftGenerationsExcept(context, saved.generationDirectory) }.onFailure(::logDraftSaveFailure)
         }
         return true
     }
@@ -1333,16 +1338,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setExportHistoryRetention(retention: ExportHistoryRetention) {
         val context = getApplication<Application>()
-        saveExportHistoryRetention(context, retention)
         viewModelScope.launch {
             val saved = withContext(Dispatchers.IO) {
-                pruneSavedExportsIfNeeded(context, _uiState.value.savedExports, retention)
+                savedExportHistoryMutex.withLock {
+                    saveExportHistoryRetention(context, retention)
+                    pruneSavedExportsIfNeeded(context, loadSavedExportsFromPrefs(context), retention)
+                }
             }
             updateUiStateAndRecycleReplaced {
                 it.copy(
                     exportHistoryRetention = retention,
                     savedExports = saved,
-                    message = "내보낸 사진 기록 자동 정리가 ${retention.label}으로 설정되었습니다"
+                    message = if (it.isBusy) it.message else "내보낸 사진 기록 자동 정리가 ${retention.label}으로 설정되었습니다"
                 )
             }
         }
@@ -1399,6 +1406,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var published = false
             var historySaved = false
             var historyError: Throwable? = null
+            var persistedHistory: List<SavedExport> = emptyList()
             try {
                 val context = getApplication<Application>()
                 withContext(Dispatchers.Default) {
@@ -1466,22 +1474,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     publishExportRow(context, pendingUri!!)
                     published = true
                     try {
-                        rememberSavedExport(context, savedItem, exportRetention)
+                        persistedHistory = savedExportHistoryMutex.withLock {
+                            rememberSavedExport(context, savedItem, exportRetention)
+                        }
                         historySaved = true
                     } catch (t: Throwable) {
                         historyError = t
                     }
                     if (!shuttingDown && historySaved) {
                         updateUiStateAndRecycleReplaced { current ->
-                            val merged = (listOf(savedItem) + current.savedExports)
-                                .distinctBy { it.uriString }
-                                .take(60)
-                                .let { items ->
-                                    current.exportHistoryRetention.days?.let { days ->
-                                        val cutoff = System.currentTimeMillis() - days * 24L * 60L * 60L * 1000L
-                                        items.filter { it.timestampMillis >= cutoff }
-                                    } ?: items
-                                }
+                            val merged = persistedHistory
                             if (isCurrentExportIdentity(token, sourcePath, exportBaseToken, exportRevision, exportCoroutine)) {
                                 current.copy(
                                     isBusy = false,
@@ -1548,6 +1550,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     updateUiStateAndRecycleReplaced { it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") }
                     return@launch
                 }
+                draftPointerBaseline = null
                 if (_uiState.value.draftGenerationId != clearState.draftGenerationId ||
                     _uiState.value.draftBaseContentToken != clearState.draftBaseContentToken) return@launch
                 thumbnailKey?.let { ThumbnailBitmapCache.invalidate(it) }
@@ -1595,27 +1598,28 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearSavedExports() {
         val context = getApplication<Application>()
-        val removed = _uiState.value.savedExports.map { it.uriString }
-        clearSavedExportsPrefs(context)
-        updateUiStateAndRecycleReplaced {
-            it.copy(
-                savedExports = emptyList(),
-                message = "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다"
-            )
+        viewModelScope.launch {
+            val removed = withContext(Dispatchers.IO) { savedExportHistoryMutex.withLock {
+                val current = loadSavedExportsFromPrefs(context)
+                clearSavedExportsPrefs(context)
+                current.map { it.uriString }
+            } }
+            removed.forEach { ThumbnailBitmapCache.invalidate("export:$it") }
+            updateUiStateAndRecycleReplaced { it.copy(savedExports = emptyList(), message = if (it.isBusy) it.message else "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다") }
         }
-        viewModelScope.launch { removed.forEach { ThumbnailBitmapCache.invalidate("export:$it") } }
     }
 
     fun removeSavedExport(uriString: String) {
         val context = getApplication<Application>()
-        val next = _uiState.value.savedExports.filterNot { it.uriString == uriString }
-        saveSavedExportsToPrefs(context, next)
-        viewModelScope.launch { ThumbnailBitmapCache.invalidate("export:$uriString") }
-        updateUiStateAndRecycleReplaced {
-            it.copy(
-                savedExports = next,
-                message = "선택한 내보낸 사진 기록을 삭제했습니다. 갤러리 파일은 삭제되지 않습니다"
-            )
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { savedExportHistoryMutex.withLock {
+                val current = loadSavedExportsFromPrefs(context)
+                val next = current.filterNot { it.uriString == uriString }
+                saveSavedExportsToPrefs(context, next)
+                next to (next.size != current.size)
+            } }
+            if (result.second) ThumbnailBitmapCache.invalidate("export:$uriString")
+            updateUiStateAndRecycleReplaced { it.copy(savedExports = result.first, message = if (it.isBusy) it.message else "선택한 내보낸 사진 기록을 삭제했습니다. 갤러리 파일은 삭제되지 않습니다") }
         }
     }
 
@@ -2195,6 +2199,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (nativeSession == createdSession) nativeSession = previousSession
                 error("draft generation adoption was not confirmed")
             }
+            draftPointerBaseline = pointer
             createdSession = 0L
             ownedBase = null
             ownedRendered = null
@@ -3058,6 +3063,9 @@ private fun sameCanonicalPath(first: String?, second: String?): Boolean =
         File(first).canonicalFile == File(second).canonicalFile
     }.getOrDefault(false)
 
+private fun sameOptionalCanonicalPath(first: String?, second: String?): Boolean =
+    if (first == null || second == null) first == second else sameCanonicalPath(first, second)
+
 private fun deleteObsoleteDraftSources(context: Context, keep: File, preservePath: String?) {
     val directory = persistentDraftDirectory(context)
     val preserve = preservePath?.let { runCatching { File(it).canonicalFile }.getOrNull() }
@@ -3564,7 +3572,8 @@ private data class DraftSaveResult(
     val baseContentToken: String,
     val capturedRevision: Int,
     val epoch: Long = Long.MIN_VALUE,
-    val previousGenerationId: String? = null,
+    val expectedPointerGenerationId: String? = null,
+    val previousVisibleGenerationId: String? = null,
     val previousGenerationDirectory: File? = null,
     val pointerPublished: Boolean,
     val compatibilitySourceFile: File? = null,
@@ -3594,13 +3603,14 @@ private sealed class GenerationRestoreOutcome {
 private data class DraftSavePayload(
     val epoch: Long,
     val sourcePath: String?,
-    val draftSourcePath: String?,
+    val previousVisibleDraftPath: String?,
     val baseContentToken: String,
     val baseBitmapDirty: Boolean,
     val dirtyBitmapCopy: Bitmap?,
     val editedPreviewCopy: Bitmap?,
     val capturedRevision: Int,
-    val previousGenerationId: String?,
+    val expectedPointerGenerationId: String?,
+    val previousVisibleGenerationId: String?,
     val params: EditParams,
     val exportFormat: ExportFormat,
     val exportResolution: ExportResolution,
@@ -3629,7 +3639,12 @@ private enum class QuickEffectGroup {
     Blur
 }
 
-private fun createDraftSavePayload(context: Context, state: EditorUiState, epoch: Long): DraftSavePayload {
+private fun createDraftSavePayload(
+    context: Context,
+    state: EditorUiState,
+    epoch: Long,
+    expectedPointerGenerationId: String?
+): DraftSavePayload {
     val reusableSource = isReusableCommittedDraftSource(context, state)
     val owned = identityBitmapSet()
     val copiedBySource = IdentityHashMap<Bitmap, Bitmap>()
@@ -3654,13 +3669,14 @@ private fun createDraftSavePayload(context: Context, state: EditorUiState, epoch
         return DraftSavePayload(
         epoch = epoch,
         sourcePath = state.sourcePath,
-        draftSourcePath = state.draftSourcePath,
+        previousVisibleDraftPath = state.draftSourcePath,
         baseContentToken = state.baseContentToken,
         baseBitmapDirty = state.baseBitmapDirty,
         dirtyBitmapCopy = dirtyBitmapCopy,
         editedPreviewCopy = editedPreviewCopy,
         capturedRevision = state.revision,
-        previousGenerationId = state.draftGenerationId,
+        expectedPointerGenerationId = expectedPointerGenerationId,
+        previousVisibleGenerationId = state.draftGenerationId,
         params = state.params,
         exportFormat = state.exportFormat,
         exportResolution = state.exportResolution,
@@ -3733,15 +3749,15 @@ private fun saveDraftSnapshot(
     isCurrent: () -> Boolean
 ): DraftSaveResult? {
     val draftSource = when {
-        payload.draftSourcePath?.let(::File)?.isFile == true &&
+        payload.previousVisibleDraftPath?.let(::File)?.isFile == true &&
             sameCanonicalPath(
                 context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
                     .getString(KEY_DRAFT_SOURCE, null),
-                payload.draftSourcePath
+                payload.previousVisibleDraftPath
             ) && context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
                 .getString(KEY_DRAFT_BASE_TOKEN, null) == payload.baseContentToken &&
-            isSupportedDraftSource(context, File(payload.draftSourcePath)) ->
-            DraftSourceResult(File(payload.draftSourcePath), changed = false)
+            isSupportedDraftSource(context, File(payload.previousVisibleDraftPath)) ->
+            DraftSourceResult(File(payload.previousVisibleDraftPath), changed = false)
         !payload.baseBitmapDirty && payload.sourcePath != null ->
             persistDraftSourceFileIfNeeded(context, payload.sourcePath)
         payload.dirtyBitmapCopy != null -> persistDraftBitmapFile(context, payload.dirtyBitmapCopy)?.let { DraftSourceResult(it, changed = true) }
@@ -3913,11 +3929,11 @@ private fun persistDraftGenerationInternal(
             deleteDraftDirectory(context, genDir)
             return null
         }
-        if (currentDraftGenerationId(context) != payload.previousGenerationId) {
+        if (currentDraftGenerationId(context) != payload.expectedPointerGenerationId) {
             deleteDraftDirectory(context, genDir)
             return null
         }
-        val previousDirectory = payload.previousGenerationId?.let { findDraftGenerationDirectory(context, it)?.root }
+        val previousDirectory = payload.expectedPointerGenerationId?.let { findDraftGenerationDirectory(context, it)?.root }
         pendingResult = DraftSaveResult(
             generationId = genDir.root.name,
             generationDirectory = genDir.root,
@@ -3927,10 +3943,11 @@ private fun persistDraftGenerationInternal(
             baseContentToken = payload.baseContentToken,
             capturedRevision = payload.capturedRevision,
             epoch = payload.epoch,
-            previousGenerationId = payload.previousGenerationId,
+            expectedPointerGenerationId = payload.expectedPointerGenerationId,
+            previousVisibleGenerationId = payload.previousVisibleGenerationId,
             previousGenerationDirectory = previousDirectory,
             pointerPublished = false,
-            previousDraftPath = payload.draftSourcePath,
+            previousDraftPath = payload.previousVisibleDraftPath,
             originalSourcePath = payload.sourcePath
         )
         if (!publishDraftGeneration(context, genDir.root.name)) {
@@ -3958,13 +3975,13 @@ private fun rollbackCommittedDraft(context: Context, saved: DraftSaveResult) {
     val pointer = currentDraftGenerationId(context)
     if (pointer == saved.generationId) {
         val previousIsComplete = runCatching {
-            saved.previousGenerationId != null &&
+            saved.expectedPointerGenerationId != null &&
                 saved.previousGenerationDirectory?.let { directory ->
-                    findDraftGenerationDirectory(context, saved.previousGenerationId)?.root?.canonicalFile == directory.canonicalFile
+                    findDraftGenerationDirectory(context, saved.expectedPointerGenerationId)?.root?.canonicalFile == directory.canonicalFile
                 } == true
         }.getOrDefault(false)
         val restoredPrevious = previousIsComplete &&
-            publishDraftGeneration(context, checkNotNull(saved.previousGenerationId))
+            publishDraftGeneration(context, checkNotNull(saved.expectedPointerGenerationId))
         val rolledBack = restoredPrevious || clearCurrentDraftGenerationPointer(context)
         if (!rolledBack || currentDraftGenerationId(context) == saved.generationId) return
     }

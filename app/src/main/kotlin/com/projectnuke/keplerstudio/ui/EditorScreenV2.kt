@@ -371,6 +371,7 @@ private fun V2PreviewArea(
                 V2CropPreview(
                     bitmap = bitmap,
                     cropState = cropState,
+                    enabled = !isBusy,
                     onCropRectChanged = onCropRectChanged
                 )
             } else {
@@ -411,6 +412,7 @@ private fun isImportantPreviewMessage(message: String): Boolean {
 private fun V2CropPreview(
     bitmap: Bitmap,
     cropState: CropState,
+    enabled: Boolean,
     onCropRectChanged: (Float, Float, Float, Float) -> Unit
 ) {
     Box(
@@ -431,6 +433,7 @@ private fun V2CropPreview(
             cropState = cropState,
             imageWidth = bitmap.width,
             imageHeight = bitmap.height,
+            enabled = enabled,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(8.dp),

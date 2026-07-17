@@ -207,6 +207,7 @@ internal fun validateDraftGeneration(directory: DraftGenerationDirectory, expect
         val file = containedPayload(directory, layer.maskFileName) ?: return null
         val bounds = decodeBounds(file) ?: return null
         if (bounds.first != layer.maskWidth || bounds.second != layer.maskHeight) return null
+        if (bounds != sourceBounds) return null
         file
     }
     ValidatedDraftGeneration(directory, manifest, source, thumbnail, masks)

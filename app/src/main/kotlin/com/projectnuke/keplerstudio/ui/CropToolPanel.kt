@@ -177,7 +177,8 @@ fun CropToolPanel(editorViewModel: EditorViewModel = viewModel()) {
                         showResetDialog = false
                         editorViewModel.resetCropState()
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = CropAccent, contentColor = CropButtonTextDark)
+                    colors = ButtonDefaults.buttonColors(containerColor = CropAccent, contentColor = CropButtonTextDark),
+                    enabled = !state.isBusy
                 ) { Text("\uCD08\uAE30\uD654") }
             },
             dismissButton = {
@@ -193,6 +194,7 @@ fun CropOverlayPreview(
     imageWidth: Int,
     imageHeight: Int,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     onCropRectChanged: (Float, Float, Float, Float) -> Unit
 ) {
     var boxSize by remember { mutableStateOf(IntSize.Zero) }
@@ -203,7 +205,8 @@ fun CropOverlayPreview(
     Box(
         modifier = modifier
             .onSizeChanged { boxSize = it }
-            .pointerInput(imageRect, imageWidth, imageHeight) {
+            .pointerInput(imageRect, imageWidth, imageHeight, enabled) {
+                if (!enabled) return@pointerInput
                 detectDragGestures(
                     onDragStart = { offset ->
                         dragMode = hitCropHandle(offset, latestCropState.value, imageRect)
