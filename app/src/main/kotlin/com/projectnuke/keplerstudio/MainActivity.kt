@@ -68,6 +68,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
 import com.projectnuke.keplerstudio.editor.SavedExport
+import com.projectnuke.keplerstudio.editor.ThumbnailBitmapCache
 import com.projectnuke.keplerstudio.ui.EditorScreenV2
 import java.io.File
 import java.text.DecimalFormat
@@ -569,7 +570,9 @@ private fun SavedExportThumbnailTile(item: SavedExport, onRemoveSavedExport: (St
 @Composable
 private fun DraftSourceThumbnail(sourcePath: String, modifier: Modifier = Modifier) {
     val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = sourcePath) {
-        value = withContext(Dispatchers.IO) { decodeFileThumbnail(sourcePath) }
+        value = withContext(Dispatchers.IO) {
+            ThumbnailBitmapCache.load("draft:$sourcePath") { decodeFileThumbnail(sourcePath) }
+        }
     }
     ThumbnailBox(thumbnail = thumbnail, emptyText = "\uC784\uC2DC \uC800\uC7A5 \uBBF8\uB9AC\uBCF4\uAE30\uB97C \uBD88\uB7EC\uC62C \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.", modifier = modifier)
 }
@@ -578,7 +581,9 @@ private fun DraftSourceThumbnail(sourcePath: String, modifier: Modifier = Modifi
 private fun SavedExportThumbnail(uriString: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val thumbnail by produceState<Bitmap?>(initialValue = null, key1 = uriString) {
-        value = withContext(Dispatchers.IO) { decodeSavedExportThumbnail(context, uriString) }
+        value = withContext(Dispatchers.IO) {
+            ThumbnailBitmapCache.load("export:$uriString") { decodeSavedExportThumbnail(context, uriString) }
+        }
     }
     ThumbnailBox(thumbnail = thumbnail, emptyText = "\uBBF8\uB9AC\uBCF4\uAE30 \uC5C6\uC74C", modifier = modifier)
 }

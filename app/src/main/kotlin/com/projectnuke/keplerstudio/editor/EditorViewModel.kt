@@ -596,13 +596,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val draftEpoch = draftOperationEpoch + 1L
         draftOperationEpoch = draftEpoch
         val payload = try {
-            withContext(Dispatchers.IO) {
-                draftSaveMutex.withLock {
-                    withContext(Dispatchers.Default) {
-                        createDraftSavePayload(context, draftState, draftEpoch)
-                    }
-                }
-            }
+            createDraftSavePayload(context, draftState, draftEpoch)
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
@@ -627,7 +621,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             null
         } finally {
-            payload.dirtyBitmapCopy?.takeIf { !it.isRecycled }?.recycle()
+            payload.recycleOwnedBitmaps()
         } ?: return false
         updateUiStateAndRecycleReplaced {
             if (isDraftResultCurrent(saved)) {
@@ -1302,7 +1296,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         val launchedJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             val exportCoroutine = currentCoroutineContext()[Job] ?: return@launch
-            var exportedBitmap: Bitmap? = null
+            var ownedExportResult: Bitmap? = null
             var pendingUri: Uri? = null
             var published = false
             var historySaved = false
@@ -1310,9 +1304,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var savedExports = state.savedExports
             try {
                 val context = getApplication<Application>()
-                exportedBitmap = withContext(Dispatchers.Default) {
+                withContext(Dispatchers.Default) {
                     if (isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
-                        if (exportDirty) {
+                        val rendered = if (exportDirty) {
                             renderEditedExportFromBitmap(
                                 baseBitmap = checkNotNull(ownedDirtyBase),
                                 params = exportParams,
@@ -1333,20 +1327,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 quickEffects = exportQuickEffects
                             )
                         }
+                        ownedExportResult = rendered
+                        rendered
                     } else {
                         null
                     }
                 }
-                if (exportedBitmap == null) {
+                val exportResult = ownedExportResult ?: run {
                     return@launch
                 }
-                val exportedResolutionLabel = "${exportedBitmap!!.width}x${exportedBitmap!!.height}"
+                val exportedResolutionLabel = "${exportResult.width}x${exportResult.height}"
 
                 pendingUri = withContext(Dispatchers.IO) {
                     if (!isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
                         return@withContext null
                     }
-                    insertExportPendingRow(context, checkNotNull(exportedBitmap), fileName, exportFormat).also { pendingUri = it }
+                    insertExportPendingRow(context, exportResult, fileName, exportFormat).also { pendingUri = it }
                 }
                 if (pendingUri == null) {
                     return@launch
@@ -1354,7 +1350,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
                 if (!isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
                     // Before commit, a stale export must remain invisible and be removed.
-                    deletePendingExportRow(context, pendingUri!!)
+                    withContext(NonCancellable + Dispatchers.IO) { deletePendingExportRow(context, pendingUri!!) }
                     return@launch
                 }
 
@@ -1401,16 +1397,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } catch (ce: kotlinx.coroutines.CancellationException) {
                 if (!published) {
-                    pendingUri?.let { deletePendingExportRow(getApplication<Application>(), it) }
+                    pendingUri?.let { uri ->
+                        withContext(NonCancellable + Dispatchers.IO) { deletePendingExportRow(getApplication<Application>(), uri) }
+                    }
                 }
                 throw ce
             } catch (t: Throwable) {
-                if (!published) pendingUri?.let { deletePendingExportRow(getApplication<Application>(), it) }
+                if (!published) pendingUri?.let { uri ->
+                    withContext(NonCancellable + Dispatchers.IO) { deletePendingExportRow(getApplication<Application>(), uri) }
+                }
                 if (!published && isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uB0B4\uBCF4\uB0B4\uAE30\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
                 }
             } finally {
-                exportedBitmap?.takeIf { !it.isRecycled }?.recycle()
+                ownedExportResult?.takeIf { !it.isRecycled }?.recycle()
                 ownedDirtyBase?.takeIf { !it.isRecycled }?.recycle()
                 if (exportJob === currentCoroutineContext()[Job]) exportJob = null
             }
@@ -1421,6 +1421,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearDraft() {
         val context = getApplication<Application>()
+        val thumbnailKey = _uiState.value.draftSourcePath?.let { "draft:$it" }
         viewModelScope.launch {
             try {
                 invalidateDraftOperations()
@@ -1436,6 +1437,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 if (!sameCanonicalPath(_uiState.value.draftSourcePath, clearResult.sourcePath) ||
                     _uiState.value.draftBaseContentToken != clearResult.baseContentToken) return@launch
+                thumbnailKey?.let { ThumbnailBitmapCache.invalidate(it) }
                 updateUiStateAndRecycleReplaced {
                     it.copy(
                         draftSavedAtMillis = null,
@@ -1477,6 +1479,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun clearSavedExports() {
         val context = getApplication<Application>()
+        val removed = _uiState.value.savedExports.map { it.uriString }
         clearSavedExportsPrefs(context)
         updateUiStateAndRecycleReplaced {
             it.copy(
@@ -1484,12 +1487,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 message = "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다"
             )
         }
+        viewModelScope.launch { removed.forEach { ThumbnailBitmapCache.invalidate("export:$it") } }
     }
 
     fun removeSavedExport(uriString: String) {
         val context = getApplication<Application>()
         val next = _uiState.value.savedExports.filterNot { it.uriString == uriString }
         saveSavedExportsToPrefs(context, next)
+        viewModelScope.launch { ThumbnailBitmapCache.invalidate("export:$uriString") }
         updateUiStateAndRecycleReplaced {
             it.copy(
                 savedExports = next,
@@ -3229,6 +3234,8 @@ private data class DraftSavePayload(
     val baseContentToken: String,
     val baseBitmapDirty: Boolean,
     val dirtyBitmapCopy: Bitmap?,
+    val editedPreviewCopy: Bitmap?,
+    val capturedRevision: Int,
     val params: EditParams,
     val exportFormat: ExportFormat,
     val exportResolution: ExportResolution,
@@ -3275,34 +3282,46 @@ private fun saveDraftSnapshotSafely(context: Context, state: EditorUiState): Dra
         logDraftSaveFailure(t)
         null
     } finally {
-        payload.dirtyBitmapCopy?.takeIf { !it.isRecycled }?.recycle()
+        payload.recycleOwnedBitmaps()
     }
 }
 
 private fun createDraftSavePayload(context: Context, state: EditorUiState, epoch: Long = Long.MIN_VALUE): DraftSavePayload {
     val reusableSource = isReusableCommittedDraftSource(context, state)
-    val dirtyBitmapCopy = when {
-        reusableSource -> null
-        !state.baseBitmapDirty && state.sourcePath != null -> null
-        else -> (state.originalPreviewBitmap ?: state.previewBitmap)?.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+    val owned = identityBitmapSet()
+    fun copyOwned(bitmap: Bitmap?): Bitmap? {
+        if (bitmap == null) return null
+        return bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true).also(owned::add)
     }
-    if (state.baseBitmapDirty && dirtyBitmapCopy == null) {
-        error("draft save bitmap is missing")
-    }
-    return DraftSavePayload(
+    try {
+        val dirtyBitmapCopy = when {
+            reusableSource -> null
+            !state.baseBitmapDirty && state.sourcePath != null -> null
+            else -> copyOwned(state.originalPreviewBitmap ?: state.previewBitmap)
+        }
+        if (state.baseBitmapDirty && dirtyBitmapCopy == null) error("draft save bitmap is missing")
+        val editedPreviewCopy = copyOwned(state.previewBitmap) ?: error("draft preview is missing")
+        val copiedBySource = IdentityHashMap<Bitmap, Bitmap>()
+        val copiedLayers = state.selectionLayers.map { layer ->
+            val copy = copiedBySource.getOrPut(layer.bitmap) { copyOwned(layer.bitmap) ?: error("draft mask is missing") }
+            layer.copy(bitmap = copy)
+        }
+        return DraftSavePayload(
         epoch = epoch,
         sourcePath = state.sourcePath,
         draftSourcePath = state.draftSourcePath,
         baseContentToken = state.baseContentToken,
         baseBitmapDirty = state.baseBitmapDirty,
         dirtyBitmapCopy = dirtyBitmapCopy,
+        editedPreviewCopy = editedPreviewCopy,
+        capturedRevision = state.revision,
         params = state.params,
         exportFormat = state.exportFormat,
         exportResolution = state.exportResolution,
         presetLook = state.presetLook,
         activeQuickEffects = state.activeQuickEffects,
         cropState = state.cropState,
-        selectionLayers = state.selectionLayers,
+        selectionLayers = copiedLayers,
         activeSelectionLayerId = state.activeSelectionLayerId,
         selectionPaintSettings = state.selectionPaintSettings,
         showSelectionOverlay = state.showSelectionOverlay,
@@ -3312,7 +3331,19 @@ private fun createDraftSavePayload(context: Context, state: EditorUiState, epoch
         hazeEngine = state.hazeEngine,
         flareGuardRuntimeStatus = state.flareGuardRuntimeStatus,
         originalSourcePath = state.sourcePath
-    )
+        )
+    } catch (t: Throwable) {
+        owned.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
+        throw t
+    }
+}
+
+private fun DraftSavePayload.recycleOwnedBitmaps() {
+    val owned = identityBitmapSet()
+    dirtyBitmapCopy?.let(owned::add)
+    editedPreviewCopy?.let(owned::add)
+    selectionLayers.forEach { owned.add(it.bitmap) }
+    owned.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
 }
 
 private fun saveDraftSnapshot(
@@ -3337,6 +3368,17 @@ private fun saveDraftSnapshot(
     } ?: return null
     if (!isCurrent()) {
         if (draftSource.changed) draftSource.file.delete()
+        return null
+    }
+    if (!persistDraftGenerationInternal(
+            context = context,
+            payload = payload,
+            draftSourceFile = draftSource.file,
+            savedAt = System.currentTimeMillis(),
+            dirtyBitmapCopy = payload.dirtyBitmapCopy,
+            isCurrent = isCurrent
+        )) {
+        if (draftSource.changed && isOwnedDraftSource(context, draftSource.file)) draftSource.file.delete()
         return null
     }
     val sourceIsOwned = isOwnedDraftSource(context, draftSource.file)
@@ -3390,16 +3432,6 @@ private fun saveDraftSnapshot(
     }
     if (draftSource.changed) saveDraftThumbnailFile(context, draftSource.file)
     if (sourceIsOwned) deleteObsoleteDraftSources(context, draftSource.file, payload.sourcePath)
-    runCatching {
-        val genBitmap = if (payload.baseBitmapDirty) payload.dirtyBitmapCopy else null
-        persistDraftGenerationInternal(
-            context = context,
-            payload = payload,
-            draftSourceFile = draftSource.file,
-            savedAt = savedAt,
-            dirtyBitmapCopy = genBitmap
-        )
-    }
     return DraftSaveResult(
         sourcePath = draftSource.file.absolutePath,
         savedAtMillis = savedAt,
@@ -3415,14 +3447,16 @@ private fun persistDraftGenerationInternal(
     payload: DraftSavePayload,
     draftSourceFile: File,
     savedAt: Long,
-    dirtyBitmapCopy: Bitmap?
-) {
+    dirtyBitmapCopy: Bitmap?,
+    isCurrent: () -> Boolean
+): Boolean {
     val genId = UUID.randomUUID().toString()
-    val genDir = newDraftGenerationDirectory(context)
+    var genDir = newDraftGenerationDirectory(context)
     try {
+        if (!isCurrent()) return false
         val maskEntries = ArrayList<Pair<SelectionLayer, DraftSelectionLayerEntry>>(payload.selectionLayers.size)
-        payload.selectionLayers.forEachIndexed { _, layer ->
-            val fileName = "mask_${layer.id}.png"
+        payload.selectionLayers.forEachIndexed { index, layer ->
+            val fileName = "mask_${index}.png"
             val entry = DraftSelectionLayerEntry(
                 id = layer.id,
                 name = layer.name,
@@ -3434,23 +3468,29 @@ private fun persistDraftGenerationInternal(
                 maskFileName = fileName,
                 maskWidth = layer.bitmap.width,
                 maskHeight = layer.bitmap.height,
-                sourceIdentity = draftSourceFile.absolutePath
+                sourceIdentity = payload.baseContentToken
             )
             maskEntries += layer to entry
         }
-        val sourceIdentity = draftSourceFile.absolutePath
+        val sourceIdentity = payload.baseContentToken
+        val sourceBounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(draftSourceFile.absolutePath, sourceBounds)
         val manifest = DraftGenerationManifest(
             formatVersion = DRAFT_FORMAT_VERSION,
             generationId = genId,
             savedAtMillis = savedAt,
-            originalSourcePath = payload.originalSourcePath,
+            draftOperationEpoch = payload.epoch,
+            editorRevision = payload.capturedRevision,
+            originalSourcePath = null,
             sourceIdentity = sourceIdentity,
             baseContentToken = payload.baseContentToken,
             baseBitmapDirty = payload.baseBitmapDirty,
-            sourceFileName = draftSourceFile.name,
-            sourceWidth = 0,
-            sourceHeight = 0,
+            sourceFileName = "source.img",
+            sourceWidth = sourceBounds.outWidth,
+            sourceHeight = sourceBounds.outHeight,
             thumbnailFileName = "thumbnail.jpg",
+            thumbnailWidth = payload.editedPreviewCopy?.width ?: 0,
+            thumbnailHeight = payload.editedPreviewCopy?.height ?: 0,
             params = payload.params,
             noiseEngine = payload.noiseEngine.name,
             detailEngine = payload.detailEngine.name,
@@ -3473,19 +3513,32 @@ private fun persistDraftGenerationInternal(
                 baseBitmapDirty = payload.baseBitmapDirty,
                 reusableSourceFile = draftSourceFile.takeIf { !payload.baseBitmapDirty },
                 dirtyBitmapCopy = dirtyBitmapCopy ?: payload.dirtyBitmapCopy,
+                editedPreviewCopy = checkNotNull(payload.editedPreviewCopy),
                 maskEntries = maskEntries
             )) {
             cleanupIncompleteDraftGeneration(genDir.root)
-            return
+            return false
         }
-        if (!publishDraftGeneration(context, genDir.root.absolutePath)) {
+        val completedDir = finalizeDraftGeneration(context, genDir, genId)
+        if (completedDir == null) {
             cleanupIncompleteDraftGeneration(genDir.root)
-            return
+            return false
+        }
+        genDir = completedDir
+        if (!isCurrent()) {
+            cleanupIncompleteDraftGeneration(genDir.root)
+            return false
+        }
+        if (!publishDraftGeneration(context, genDir.root.name)) {
+            cleanupIncompleteDraftGeneration(genDir.root)
+            return false
         }
         deleteAllDraftGenerationsExcept(context, genDir.root)
+        return true
     } catch (t: Throwable) {
         cleanupIncompleteDraftGeneration(genDir.root)
         Log.w(FLARE_GUARD_AI_TAG, "Draft generation save failed", t)
+        return false
     }
 }
 
@@ -3544,6 +3597,7 @@ private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null
             .remove(KEY_DRAFT_QUICK_EFFECTS)
             .remove(KEY_DRAFT_BASE_TOKEN)
             .remove(KEY_DRAFT_BASE_VERSION_LEGACY)
+            .remove(KEY_DRAFT_GENERATION_ID)
             .remove(KEY_DRAFT_SAVED_AT)
             .commit()
     } catch (failure: Throwable) {
@@ -3564,6 +3618,7 @@ private fun clearDraftPrefs(context: Context, preserveSourcePath: String? = null
         }
     }
     persistentDraftThumbnailFile(context).delete()
+    deleteAllDraftGenerationsExcept(context, keep = null)
     return DraftClearResult(previousSource, previousToken)
 }
 
@@ -3866,8 +3921,9 @@ private const val KEY_DRAFT_BASE_VERSION_LEGACY = "draft_base_version"
 internal const val KEY_DRAFT_GENERATION_ID = "draft_generation_id"
 internal const val DRAFT_MANIFEST_FILE_NAME = "manifest.json"
 internal const val DRAFT_GENERATION_DIR_PREFIX = "gen_"
+internal const val DRAFT_GENERATION_STAGING_PREFIX = ".staging_"
 internal const val PREF_NAME_DRAFT = "kepler_studio_editor"
-internal const val DRAFT_FORMAT_VERSION = 1
+internal const val DRAFT_FORMAT_VERSION = 2
 internal val IMPLEMENTED_NOISE_ENGINES = listOf(
     NoiseEngine.FastEdgeAware,
     NoiseEngine.GuidedFilter,

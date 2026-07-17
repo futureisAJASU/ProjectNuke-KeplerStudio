@@ -13,6 +13,8 @@ internal data class DraftGenerationManifest(
     val formatVersion: Int,
     val generationId: String,
     val savedAtMillis: Long,
+    val draftOperationEpoch: Long,
+    val editorRevision: Int,
     val originalSourcePath: String?,
     val sourceIdentity: String?,
     val baseContentToken: String,
@@ -21,6 +23,8 @@ internal data class DraftGenerationManifest(
     val sourceWidth: Int,
     val sourceHeight: Int,
     val thumbnailFileName: String,
+    val thumbnailWidth: Int,
+    val thumbnailHeight: Int,
     val params: EditParams,
     val noiseEngine: String,
     val detailEngine: String,
@@ -55,6 +59,8 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("formatVersion", formatVersion)
     put("generationId", generationId)
     put("savedAtMillis", savedAtMillis)
+    put("draftOperationEpoch", draftOperationEpoch)
+    put("editorRevision", editorRevision)
     put("originalSourcePath", originalSourcePath ?: JSONObject.NULL)
     put("sourceIdentity", sourceIdentity ?: JSONObject.NULL)
     put("baseContentToken", baseContentToken)
@@ -63,6 +69,8 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("sourceWidth", sourceWidth)
     put("sourceHeight", sourceHeight)
     put("thumbnailFileName", thumbnailFileName)
+    put("thumbnailWidth", thumbnailWidth)
+    put("thumbnailHeight", thumbnailHeight)
     put("params", params.toJsonObject())
     put("noiseEngine", noiseEngine)
     put("detailEngine", detailEngine)
@@ -104,7 +112,7 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
 
 internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationManifest? = runCatching {
     val formatVersion = json.optInt("formatVersion", -1)
-    if (formatVersion < 1) return null
+    if (formatVersion != DRAFT_FORMAT_VERSION) return null
     val layerArray = json.optJSONArray("selectionLayers") ?: JSONArray()
     val layers = ArrayList<DraftSelectionLayerEntry>(layerArray.length())
     for (i in 0 until layerArray.length()) {
@@ -145,6 +153,8 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         formatVersion = formatVersion,
         generationId = json.optString("generationId"),
         savedAtMillis = json.optLong("savedAtMillis", 0L),
+        draftOperationEpoch = json.optLong("draftOperationEpoch", Long.MIN_VALUE),
+        editorRevision = json.optInt("editorRevision", -1),
         originalSourcePath = json.optString("originalSourcePath").takeIf { it.isNotBlank() },
         sourceIdentity = json.optString("sourceIdentity").takeIf { it.isNotBlank() },
         baseContentToken = json.optString("baseContentToken"),
@@ -153,6 +163,8 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         sourceWidth = json.optInt("sourceWidth", 0),
         sourceHeight = json.optInt("sourceHeight", 0),
         thumbnailFileName = json.optString("thumbnailFileName"),
+        thumbnailWidth = json.optInt("thumbnailWidth", 0),
+        thumbnailHeight = json.optInt("thumbnailHeight", 0),
         params = parseEditParamsFromJson(json.optJSONObject("params")) ?: EditParams(),
         noiseEngine = json.optString("noiseEngine"),
         detailEngine = json.optString("detailEngine"),
