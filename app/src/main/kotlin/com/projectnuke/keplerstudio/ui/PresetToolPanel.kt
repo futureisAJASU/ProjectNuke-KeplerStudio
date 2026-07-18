@@ -160,7 +160,10 @@ presets = mergePresets(presets, listOf(item)).take(40)
                 if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
                     (current.originalPreviewBitmap != null || current.previewBitmap != null) &&
                     current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
-                    applyStoredPreset(item, "전/후 비교 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
+                    val result = applyStoredPreset(item, "전/후 비교 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
+                    if (result == PresetApplyResult.Rejected) {
+                        statusMessage = "전/후 비교 프리셋을 저장했지만 적용하지 않았습니다."
+                    }
                 } else {
                     statusMessage = "전/후 비교 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
                 }
@@ -202,7 +205,10 @@ presets = mergePresets(presets, listOf(item)).take(40)
                 if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
                     (current.originalPreviewBitmap != null || current.previewBitmap != null) &&
                     current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
-                    applyStoredPreset(item, "레퍼런스 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
+                    val result = applyStoredPreset(item, "레퍼런스 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
+                    if (result == PresetApplyResult.Rejected) {
+                        statusMessage = "레퍼런스 프리셋을 저장했지만 적용하지 않았습니다."
+                    }
                 } else {
                     statusMessage = "레퍼런스 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
                 }
