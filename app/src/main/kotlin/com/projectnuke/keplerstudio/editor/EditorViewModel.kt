@@ -1614,10 +1614,15 @@ fun clearDraft() {
                         val draftBaseToken = _uiState.value.draftBaseContentToken
                         val draftThumbPath = _uiState.value.draftGenerationThumbnailPath
 
+                        // Snapshot previous prefs for rollback
+                        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                        val prevPrefs = snapshotDraftPreferences(prefs)
+
+                        // Clear pointer and baseline
                         if (!clearCurrentDraftGenerationPointer(context)) return@withLock false
                         draftPointerBaseline = null
 
-                        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                        // Clear legacy prefs
                         val committed = prefs.edit()
                             .remove(KEY_DRAFT_SOURCE)
                             .remove(KEY_DRAFT_EXPOSURE)
@@ -1647,23 +1652,24 @@ fun clearDraft() {
                             .remove(KEY_DRAFT_SAVED_AT)
                             .commit()
                         if (!committed) {
+                            // Rollback prefs, pointer, baseline
+                            restoreDraftPreferencesOrThrow(prefs, prevPrefs, IllegalStateException("failed to clear draft prefs"))
                             val restored = expectedPointer?.let { publishDraftGeneration(context, it) } ?: true
                             if (restored) draftPointerBaseline = expectedBaseline
                             return@withLock false
                         }
 
-                        persistentDraftDirectory(context).listFiles()?.forEach { file ->
-                            val ownedGeneration = file.name.startsWith("source_") && file.extension == "img"
-                            val legacySource = file.name == DRAFT_SOURCE_FILE_NAME
-                            val temporary = file.name.endsWith(".tmp")
-                            if (ownedGeneration || legacySource || temporary) file.delete()
-                        }
-                        persistentDraftThumbnailFile(context).delete()
-
+                        // Clear visible Draft metadata with explicit CAS
                         var adopted = false
                         var state = _uiState.value
                         while (!adopted) {
-                            if (state.draftGenerationId == draftGenId &&
+                            // Treat already-null Draft metadata as success
+                            if (state.draftGenerationId == null &&
+                                state.draftSourcePath == null &&
+                                state.draftBaseContentToken == null &&
+                                state.draftGenerationThumbnailPath == null) {
+                                adopted = true
+                            } else if (state.draftGenerationId == draftGenId &&
                                 state.draftSourcePath == draftSourcePath &&
                                 state.draftBaseContentToken == draftBaseToken &&
                                 state.draftGenerationThumbnailPath == draftThumbPath) {
@@ -1679,12 +1685,24 @@ fun clearDraft() {
                                 )
                                 adopted = _uiState.compareAndSet(state, updated)
                             } else {
+                                // State changed - rollback
+                                restoreDraftPreferencesOrThrow(prefs, prevPrefs, IllegalStateException("clear superseded"))
+                                val restored = expectedPointer?.let { publishDraftGeneration(context, it) } ?: true
+                                if (restored) draftPointerBaseline = expectedBaseline
                                 return@withLock false
                             }
                             state = _uiState.value
                         }
 
-                        draftGenId?.let { deleteDraftGenerationById(context, it) }
+                        // Payload cleanup and generation deletion ONLY after confirmed adoption
+                        persistentDraftDirectory(context).listFiles()?.forEach { file ->
+                            val ownedGeneration = file.name.startsWith("source_") && file.extension == "img"
+                            val legacySource = file.name == DRAFT_SOURCE_FILE_NAME
+                            val temporary = file.name.endsWith(".tmp")
+                            if (ownedGeneration || legacySource || temporary) file.delete()
+                        }
+                        persistentDraftThumbnailFile(context).delete()
+                        expectedPointer?.let { deleteDraftGenerationById(context, it) }
 
                         true
                     }
@@ -2390,17 +2408,17 @@ fun clearDraft() {
                 draftPointerBaseline = restorePreviousBaseline
                 error("draft generation adoption was not confirmed")
             }
-            restoreStateAdopted = true
+restoreStateAdopted = true
             createdSession = 0L
             ownedBase = null
             ownedRendered = null
             ownedMasks.clear()
             ownedWorkingSource = null
             lastSuccessfullyRenderedParams = manifest.params
-            clearEditHistory()
+            runCatching { clearEditHistory() }
             runCatching { releaseOrphanedBitmaps(previousState, nextState) }
-            releaseNativeSessionHandle(previousSession)
-            deleteOwnedWorkingSource(context, previousState.sourcePath)
+            runCatching { releaseNativeSessionHandle(previousSession) }
+            runCatching { deleteOwnedWorkingSource(context, previousState.sourcePath) }
             return GenerationRestoreOutcome.Restored
         } catch (ce: CancellationException) {
             throw ce
@@ -3857,17 +3875,7 @@ private data class DraftSavePayload(
     val detailEngine: DetailEngine = DetailEngine.MaskedUnsharp,
     val toneEngine: ToneEngine = ToneEngine.HistogramAuto,
     val hazeEngine: DehazeEngine = DehazeEngine.FastContrast,
-    val originalSourcePath: String? = null
-)
-
-private data class ClearDraftTransaction(
-    val epoch: Long,
-    val expectedPointer: String?,
-    val expectedBaseline: String?,
-    val expectedDraftGenId: String?,
-    val expectedDraftSourcePath: String?,
-    val expectedDraftBaseToken: String?,
-    val expectedDraftThumbPath: String?
+val originalSourcePath: String? = null
 )
 
 private data class DraftSourceResult(
