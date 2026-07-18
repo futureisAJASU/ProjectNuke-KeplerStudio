@@ -75,6 +75,8 @@ fun PresetToolPanel(
     val context = LocalContext.current
     val editorState by editorViewModel.uiState.collectAsState()
     val mutatingEnabled = !editorState.isBusy
+    val activeImageAvailable = editorState.sourcePath != null &&
+        (editorState.originalPreviewBitmap != null || editorState.previewBitmap != null)
     val scope = rememberCoroutineScope()
     var presetName by remember { mutableStateOf(defaultPresetName()) }
     var presets by remember { mutableStateOf(emptyList<StoredPreset>()) }
@@ -82,10 +84,20 @@ fun PresetToolPanel(
     var pendingBeforeUri by remember { mutableStateOf<Uri?>(null) }
     var pendingIdentity by remember { mutableStateOf<PresetDocumentIdentity?>(null) }
 
-    fun applyStoredPreset(preset: StoredPreset, message: String) {
-        if (!editorViewModel.canEnterEditorAction()) return
+    fun applyStoredPreset(preset: StoredPreset, message: String): Boolean {
+        val current = editorViewModel.uiState.value
+        if (current.sourcePath == null || current.originalPreviewBitmap == null && current.previewBitmap == null ||
+            !editorViewModel.canEnterEditorAction()) {
+            statusMessage = "활성 사진이 없어 프리셋을 적용하지 않았습니다."
+            return false
+        }
+        if (current.params == preset.params && current.presetLook == preset.look) {
+            statusMessage = "이미 적용된 프리셋입니다."
+            return true
+        }
         editorViewModel.applyPresetLook(preset.params, preset.look, message)
         statusMessage = message
+        return true
     }
 
     LaunchedEffect(Unit) {
@@ -144,7 +156,9 @@ fun PresetToolPanel(
                 presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
                 val current = editorViewModel.uiState.value
-                if (identity != null && mutatingEnabled && current.sourcePath == identity.sourcePath && current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
+                if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
+                    (current.originalPreviewBitmap != null || current.previewBitmap != null) &&
+                    current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
                     applyStoredPreset(item, "전/후 비교 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
                 } else statusMessage = "전/후 비교 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
             }.onFailure {
@@ -182,7 +196,9 @@ fun PresetToolPanel(
                 presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
                 val current = editorViewModel.uiState.value
-                if (identity != null && current.sourcePath == identity.sourcePath && current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
+                if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
+                    (current.originalPreviewBitmap != null || current.previewBitmap != null) &&
+                    current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
                     applyStoredPreset(item, "레퍼런스 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
                 } else statusMessage = "레퍼런스 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
             }.onFailure {
@@ -307,7 +323,7 @@ fun PresetToolPanel(
                             Text(formatPresetSummary(preset), color = PresetTextSecondary, style = MaterialTheme.typography.bodySmall)
                             Text(formatPresetTime(preset.timestampMillis), color = PresetTextMuted, style = MaterialTheme.typography.bodySmall)
                         }
-                        TextButton(onClick = { applyStoredPreset(preset, "프리셋을 적용했습니다.") }, enabled = mutatingEnabled) {
+                        TextButton(onClick = { applyStoredPreset(preset, "프리셋을 적용했습니다.") }, enabled = mutatingEnabled && activeImageAvailable) {
                             Text("적용")
                         }
                         TextButton(
