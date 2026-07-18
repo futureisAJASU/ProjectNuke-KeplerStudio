@@ -32,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.PresetApplyResult
 import com.projectnuke.keplerstudio.editor.PresetColorLook
 import com.projectnuke.keplerstudio.editor.createPresetColorLookFromParams
 import com.projectnuke.keplerstudio.editor.presetColorLookFromJson
@@ -84,20 +85,20 @@ fun PresetToolPanel(
     var pendingBeforeUri by remember { mutableStateOf<Uri?>(null) }
     var pendingIdentity by remember { mutableStateOf<PresetDocumentIdentity?>(null) }
 
-    fun applyStoredPreset(preset: StoredPreset, message: String): Boolean {
+fun applyStoredPreset(preset: StoredPreset, message: String): PresetApplyResult {
         val current = editorViewModel.uiState.value
         if (current.sourcePath == null || current.originalPreviewBitmap == null && current.previewBitmap == null ||
             !editorViewModel.canEnterEditorAction()) {
             statusMessage = "활성 사진이 없어 프리셋을 적용하지 않았습니다."
-            return false
+            return PresetApplyResult.Rejected
         }
-        if (current.params == preset.params && current.presetLook == preset.look) {
-            statusMessage = "이미 적용된 프리셋입니다."
-            return true
+        val result = editorViewModel.applyPresetLook(preset.params, preset.look, message)
+        when (result) {
+            PresetApplyResult.Accepted -> statusMessage = "프리셋 적용 중입니다..."
+            PresetApplyResult.AlreadyApplied -> statusMessage = "이미 적용된 프리셋입니다."
+            PresetApplyResult.Rejected -> statusMessage = "프리셋을 적용할 수 없습니다."
         }
-        editorViewModel.applyPresetLook(preset.params, preset.look, message)
-        statusMessage = message
-        return true
+        return result
     }
 
     LaunchedEffect(Unit) {
@@ -153,14 +154,16 @@ fun PresetToolPanel(
                     timestampMillis = System.currentTimeMillis(),
                     look = createPresetColorLookFromParams(extracted, strength = 0.82f)
                 )
-                presets = mergePresets(presets, listOf(item)).take(40)
+presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
                 val current = editorViewModel.uiState.value
                 if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
                     (current.originalPreviewBitmap != null || current.previewBitmap != null) &&
                     current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
                     applyStoredPreset(item, "전/후 비교 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
-                } else statusMessage = "전/후 비교 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
+                } else {
+                    statusMessage = "전/후 비교 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
+                }
             }.onFailure {
                 statusMessage = "레퍼런스 프리셋 추출에 실패했습니다: ${it.message}"
             }
@@ -193,14 +196,16 @@ fun PresetToolPanel(
                     timestampMillis = System.currentTimeMillis(),
                     look = createPresetColorLookFromParams(extracted, strength = 0.74f)
                 )
-                presets = mergePresets(presets, listOf(item)).take(40)
+presets = mergePresets(presets, listOf(item)).take(40)
                 savePresets(context, presets)
                 val current = editorViewModel.uiState.value
                 if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
                     (current.originalPreviewBitmap != null || current.previewBitmap != null) &&
                     current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
                     applyStoredPreset(item, "레퍼런스 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
-                } else statusMessage = "레퍼런스 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
+                } else {
+                    statusMessage = "레퍼런스 프리셋을 저장했지만 변경된 사진에는 적용하지 않았습니다."
+                }
             }.onFailure {
                 statusMessage = "전/후 비교 프리셋 추출에 실패했습니다: ${it.message}"
             }

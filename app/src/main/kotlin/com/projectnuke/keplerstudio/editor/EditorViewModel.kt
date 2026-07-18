@@ -1298,28 +1298,30 @@ private suspend fun settleCommittedDraft(
         }
     }
 
-    fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String) {
-        if (isShuttingDown()) return
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String): PresetApplyResult {
+        if (isShuttingDown()) return PresetApplyResult.Rejected
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return PresetApplyResult.Rejected
         val current = prepareForExternalEdit()
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "적용할 이미지가 없습니다.") }
-            return
+            return PresetApplyResult.Rejected
         }
 
-        if (params == current.params && look == current.presetLook) return
+        if (params == current.params && look == current.presetLook) {
+            return PresetApplyResult.AlreadyApplied
+        }
 
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
         if (undoSnapshot == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "편집 기록을 저장하지 못했습니다.") }
-            return
+            return PresetApplyResult.Rejected
         }
         var ownedBase: Bitmap? = runCatching { basePreview.copyOrThrow() }.getOrElse {
             recycleHistorySnapshot(checkNotNull(undoSnapshot))
             undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = "프리셋 적용 준비에 실패했습니다.") }
-            return
+            return PresetApplyResult.Rejected
         }
         val sourcePath = current.sourcePath
         val baseContentToken = current.baseContentToken
@@ -1374,6 +1376,7 @@ private suspend fun settleCommittedDraft(
                 undoSnapshot?.let(::recycleHistorySnapshot)
             }
         }
+        return PresetApplyResult.Accepted
     }
 
     fun setExportFormat(format: ExportFormat) {
@@ -3856,6 +3859,12 @@ private sealed class GenerationRestoreOutcome {
     data object Absent : GenerationRestoreOutcome()
     data object Stale : GenerationRestoreOutcome()
     data class Invalid(val generationId: String) : GenerationRestoreOutcome()
+}
+
+public sealed class PresetApplyResult {
+    data object Accepted : PresetApplyResult()
+    data object AlreadyApplied : PresetApplyResult()
+    data object Rejected : PresetApplyResult()
 }
 
 private data class DraftSavePayload(
