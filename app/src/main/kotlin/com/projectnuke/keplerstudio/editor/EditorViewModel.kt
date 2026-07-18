@@ -708,7 +708,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return settled
     }
 
-    private suspend fun settleCommittedDraft(
+private suspend fun settleCommittedDraft(
         context: Context,
         saved: DraftSaveResult,
         payload: DraftSavePayload,
@@ -721,10 +721,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val previousBaseline = draftPointerBaseline
         draftPointerBaseline = saved.generationId
-        var metadataAdopted = false
+        val expectedState = _uiState.value
+        var adoptionSucceeded = false
         _uiState.update { state ->
-            if (draftResultMatchesDocumentState(saved, state)) {
-                metadataAdopted = true
+            if (state === expectedState && draftResultMatchesDocumentState(saved, state)) {
+                adoptionSucceeded = true
                 state.copy(
                     draftSavedAtMillis = saved.savedAtMillis,
                     draftSourcePath = saved.sourcePath,
@@ -735,7 +736,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 )
             } else state
         }
-        if (!metadataAdopted) {
+        if (!adoptionSucceeded) {
+            val live = _uiState.value
+            val exactMatch = live.draftGenerationId == saved.generationId &&
+                live.draftSourcePath == saved.sourcePath &&
+                live.draftBaseContentToken == saved.baseContentToken &&
+                live.draftGenerationSourcePath == saved.sourcePath &&
+                live.draftGenerationThumbnailPath == saved.thumbnailPath
+            if (exactMatch) {
+                saved.expectedPointerGenerationId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
+                withContext(Dispatchers.IO) {
+                    runCatching { persistLegacyDraftCompatibility(context, payload, saved) }.onFailure(::logDraftSaveFailure)
+                    runCatching { deleteAllDraftGenerationsExcept(context, saved.generationDirectory) }.onFailure(::logDraftSaveFailure)
+                }
+                return true
+            }
             draftPointerBaseline = previousBaseline
             withContext(Dispatchers.IO) { rollbackCommittedDraft(context, saved) }
             return false
@@ -1588,7 +1603,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         launchedJob.start()
     }
 
-    fun clearDraft() {
+fun clearDraft() {
         val context = getApplication<Application>()
         val clearState = _uiState.value
         val thumbnailKey = clearState.draftGenerationId?.let { "draft:$it" }
@@ -1596,56 +1611,176 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         invalidateDraftOperations()
         val clearEpoch = draftOperationEpoch
         viewModelScope.launch {
+            var txn: ClearDraftTransaction? = null
+            var durableCleared = false
+            var visibleAdopted = false
             try {
                 draftSaveJob?.cancelAndJoin()
-                val cleared = withContext(Dispatchers.IO) {
+                txn = withContext(Dispatchers.IO) {
                     draftSaveMutex.withLock {
-                        if (clearEpoch != draftOperationEpoch) return@withLock false
+                        if (clearEpoch != draftOperationEpoch) return@withLock null
                         val expectedPointer = currentDraftGenerationId(context)
-                        if (expectedPointer != draftPointerBaseline) return@withLock false
-                        val result = clearDraftPrefs(
-                            context = context,
+                        val expectedBaseline = draftPointerBaseline
+                        if (expectedPointer != expectedBaseline) return@withLock null
+                        val draftGenId = _uiState.value.draftGenerationId
+                        val draftSourcePath = _uiState.value.draftSourcePath
+                        val draftBaseToken = _uiState.value.draftBaseContentToken
+                        val draftThumbPath = _uiState.value.draftGenerationThumbnailPath
+                        ClearDraftTransaction(
+                            epoch = clearEpoch,
                             expectedPointer = expectedPointer,
-                            preserveSourcePath = _uiState.value.sourcePath,
-                            isCurrent = { clearEpoch == draftOperationEpoch },
-                            onPointerCleared = { draftPointerBaseline = null },
-                            onPointerRestored = { draftPointerBaseline = expectedPointer }
+                            expectedBaseline = expectedBaseline,
+                            expectedDraftGenId = draftGenId,
+                            expectedDraftSourcePath = draftSourcePath,
+                            expectedDraftBaseToken = draftBaseToken,
+                            expectedDraftThumbPath = draftThumbPath
                         )
-                        result
                     }
                 }
-                if (!cleared) {
+                if (txn == null) {
                     updateUiStateAndRecycleReplaced {
                         if (clearEpoch == draftOperationEpoch && !it.isBusy) it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") else it
                     }
                     return@launch
                 }
-                if (_uiState.value.draftGenerationId != clearState.draftGenerationId ||
-                    _uiState.value.draftBaseContentToken != clearState.draftBaseContentToken) return@launch
-                thumbnailKey?.let { ThumbnailBitmapCache.invalidate(it) }
+
+                withContext(Dispatchers.IO) {
+                    draftSaveMutex.withLock {
+                        if (txn.epoch != draftOperationEpoch) return@withLock
+                        val actualPointer = currentDraftGenerationId(context)
+                        if (actualPointer != txn.expectedPointer || draftPointerBaseline != txn.expectedBaseline) return@withLock
+                        if (!clearCurrentDraftGenerationPointer(context)) return@withLock
+                        draftPointerBaseline = null
+                        durableCleared = true
+                    }
+                }
+
+                if (!durableCleared) {
+                    updateUiStateAndRecycleReplaced {
+                        if (txn.epoch == draftOperationEpoch && !it.isBusy) it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") else it
+                    }
+                    return@launch
+                }
+
+                val expectedStateForCAS = _uiState.value
+                var adoptionSucceeded = false
+                _uiState.update { state ->
+                    if (state === expectedStateForCAS &&
+                        state.draftGenerationId == txn.expectedDraftGenId &&
+                        state.draftSourcePath == txn.expectedDraftSourcePath &&
+                        state.draftBaseContentToken == txn.expectedDraftBaseToken &&
+                        state.draftGenerationThumbnailPath == txn.expectedDraftThumbPath) {
+                        adoptionSucceeded = true
+                        state.copy(
+                            draftSavedAtMillis = null,
+                            draftSourcePath = null,
+                            draftBaseContentToken = null,
+                            draftGenerationId = null,
+                            draftGenerationSourcePath = null,
+                            draftGenerationThumbnailPath = null,
+                            recoveryDebugInfo = null,
+                            showRecoveryDebugCard = false
+                        )
+                    } else state
+                }
+
+                if (!adoptionSucceeded) {
+                    val live = _uiState.value
+                    val exactMatch = live.draftGenerationId == txn.expectedDraftGenId &&
+                        live.draftSourcePath == txn.expectedDraftSourcePath &&
+                        live.draftBaseContentToken == txn.expectedDraftBaseToken &&
+                        live.draftGenerationThumbnailPath == txn.expectedDraftThumbPath
+                    if (!exactMatch) {
+                        withContext(Dispatchers.IO) {
+                            draftSaveMutex.withLock {
+                                if (txn.epoch != draftOperationEpoch) return@withLock
+                                val currentPointer = currentDraftGenerationId(context)
+                                if (currentPointer == null || currentPointer == txn.expectedPointer) {
+                                    publishDraftGeneration(context, txn.expectedPointer!!)
+                                    draftPointerBaseline = txn.expectedPointer
+                                }
+                            }
+                        }
+                        updateUiStateAndRecycleReplaced {
+                            if (txn.epoch == draftOperationEpoch && !it.isBusy) it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") else it
+                        }
+                        return@launch
+                    }
+                    visibleAdopted = true
+                } else {
+                    visibleAdopted = true
+                }
+
+                txn.expectedDraftGenId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
+
+                withContext(Dispatchers.IO) {
+                    runCatching { clearLegacyDraftCompatibility(context) }.onFailure(::logDraftSaveFailure)
+                    runCatching { deleteAllDraftGenerationsExcept(context, keep = null) }.onFailure(::logDraftSaveFailure)
+                }
+
                 updateUiStateAndRecycleReplaced {
-                    if (clearEpoch != draftOperationEpoch) it else it.copy(
-                        draftSavedAtMillis = null,
-                        draftSourcePath = null,
-                        draftBaseContentToken = null,
-                        draftGenerationId = null,
-                        draftGenerationSourcePath = null,
-                        draftGenerationThumbnailPath = null,
-                        recoveryDebugInfo = null,
-                        showRecoveryDebugCard = false,
-                        message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다"
-                    )
+                    if (txn.epoch != draftOperationEpoch) it else it.copy(message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다")
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
                 logDraftSaveFailure(t)
-                updateUiStateAndRecycleReplaced {
-                    if (clearEpoch == draftOperationEpoch && !it.isBusy) it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") else it
+                if (durableCleared && !visibleAdopted) {
+                    withContext(Dispatchers.IO) {
+                        draftSaveMutex.withLock {
+                            if (txn?.epoch != draftOperationEpoch) return@withLock
+                            val currentPointer = currentDraftGenerationId(context)
+                            if (currentPointer == null || currentPointer == txn.expectedPointer) {
+                                publishDraftGeneration(context, txn.expectedPointer!!)
+                                draftPointerBaseline = txn.expectedPointer
+                            }
+                        }
+                    }
                 }
-                return@launch
+                updateUiStateAndRecycleReplaced {
+                    if (txn?.epoch == draftOperationEpoch && !it.isBusy) it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.") else it
+                }
             }
         }
+    }
+
+    private fun clearLegacyDraftCompatibility(context: Context) {
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .remove(KEY_DRAFT_SOURCE)
+            .remove(KEY_DRAFT_EXPOSURE)
+            .remove(KEY_DRAFT_CONTRAST)
+            .remove(KEY_DRAFT_SHADOWS)
+            .remove(KEY_DRAFT_HIGHLIGHTS)
+            .remove(KEY_DRAFT_WHITES)
+            .remove(KEY_DRAFT_BLACKS)
+            .remove(KEY_DRAFT_TEMPERATURE)
+            .remove(KEY_DRAFT_TINT)
+            .remove(KEY_DRAFT_SATURATION)
+            .remove(KEY_DRAFT_VIBRANCE)
+            .remove(KEY_DRAFT_CLARITY)
+            .remove(KEY_DRAFT_DEHAZE)
+            .remove(KEY_DRAFT_SHARPNESS)
+            .remove(KEY_DRAFT_NOISE_REDUCTION)
+            .remove(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION)
+            .remove(KEY_DRAFT_COLOR_NOISE_REDUCTION)
+            .remove(KEY_DRAFT_NOISE_DETAIL_PROTECTION)
+            .remove(KEY_DRAFT_FORMAT)
+            .remove(KEY_DRAFT_RESOLUTION)
+            .remove(KEY_DRAFT_LOOK)
+            .remove(KEY_DRAFT_QUICK_EFFECTS)
+            .remove(KEY_DRAFT_BASE_TOKEN)
+            .remove(KEY_DRAFT_BASE_VERSION_LEGACY)
+            .remove(KEY_DRAFT_GENERATION_ID)
+            .remove(KEY_DRAFT_SAVED_AT)
+            .commit()
+        persistentDraftDirectory(context).listFiles()?.forEach { file ->
+            val ownedGeneration = file.name.startsWith("source_") && file.extension == "img"
+            val legacySource = file.name == DRAFT_SOURCE_FILE_NAME
+            val temporary = file.name.endsWith(".tmp")
+            if (ownedGeneration || legacySource || temporary) file.delete()
+        }
+        persistentDraftThumbnailFile(context).delete()
     }
 
     fun dismissRecoveryDebugCard() {
@@ -2301,8 +2436,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return GenerationRestoreOutcome.Restored
         } catch (ce: CancellationException) {
             throw ce
-        } catch (t: Throwable) {
+} catch (t: Throwable) {
             logDraftSaveFailure(t)
+            if (restoreStateAdopted) {
+                return GenerationRestoreOutcome.Restored
+            }
             if (withContext(Dispatchers.IO) { currentDraftGenerationId(context) } != pointer) {
                 if (!shuttingDown && restoreToken == restoreDraftToken && _uiState.value.revision == restoreStartRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
@@ -3746,6 +3884,16 @@ private data class DraftSavePayload(
     val toneEngine: ToneEngine = ToneEngine.HistogramAuto,
     val hazeEngine: DehazeEngine = DehazeEngine.FastContrast,
     val originalSourcePath: String? = null
+)
+
+private data class ClearDraftTransaction(
+    val epoch: Long,
+    val expectedPointer: String?,
+    val expectedBaseline: String?,
+    val expectedDraftGenId: String?,
+    val expectedDraftSourcePath: String?,
+    val expectedDraftBaseToken: String?,
+    val expectedDraftThumbPath: String?
 )
 
 private data class DraftSourceResult(
