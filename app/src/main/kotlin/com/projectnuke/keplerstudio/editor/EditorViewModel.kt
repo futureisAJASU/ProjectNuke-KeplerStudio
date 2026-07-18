@@ -1717,7 +1717,7 @@ fun clearDraft() {
                 updateUiStateAndRecycleReplaced {
                     if (clearEpoch != draftOperationEpoch) it else it.copy(message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다")
                 }
-            } catch (ce: CancellationException) {
+} catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
                 logDraftSaveFailure(t)
@@ -1726,47 +1726,6 @@ fun clearDraft() {
                 }
             }
         }
-    }
-
-    private fun clearLegacyDraftCompatibility(context: Context): Boolean {
-        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val committed = prefs.edit()
-            .remove(KEY_DRAFT_SOURCE)
-            .remove(KEY_DRAFT_EXPOSURE)
-            .remove(KEY_DRAFT_CONTRAST)
-            .remove(KEY_DRAFT_SHADOWS)
-            .remove(KEY_DRAFT_HIGHLIGHTS)
-            .remove(KEY_DRAFT_WHITES)
-            .remove(KEY_DRAFT_BLACKS)
-            .remove(KEY_DRAFT_TEMPERATURE)
-            .remove(KEY_DRAFT_TINT)
-            .remove(KEY_DRAFT_SATURATION)
-            .remove(KEY_DRAFT_VIBRANCE)
-            .remove(KEY_DRAFT_CLARITY)
-            .remove(KEY_DRAFT_DEHAZE)
-            .remove(KEY_DRAFT_SHARPNESS)
-            .remove(KEY_DRAFT_NOISE_REDUCTION)
-            .remove(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION)
-            .remove(KEY_DRAFT_COLOR_NOISE_REDUCTION)
-            .remove(KEY_DRAFT_NOISE_DETAIL_PROTECTION)
-            .remove(KEY_DRAFT_FORMAT)
-            .remove(KEY_DRAFT_RESOLUTION)
-            .remove(KEY_DRAFT_LOOK)
-            .remove(KEY_DRAFT_QUICK_EFFECTS)
-            .remove(KEY_DRAFT_BASE_TOKEN)
-            .remove(KEY_DRAFT_BASE_VERSION_LEGACY)
-            .remove(KEY_DRAFT_GENERATION_ID)
-            .remove(KEY_DRAFT_SAVED_AT)
-            .commit()
-        if (!committed) return false
-        persistentDraftDirectory(context).listFiles()?.forEach { file ->
-            val ownedGeneration = file.name.startsWith("source_") && file.extension == "img"
-            val legacySource = file.name == DRAFT_SOURCE_FILE_NAME
-            val temporary = file.name.endsWith(".tmp")
-            if (ownedGeneration || legacySource || temporary) file.delete()
-        }
-        persistentDraftThumbnailFile(context).delete()
-        return true
     }
 
     fun dismissRecoveryDebugCard() {
@@ -2415,10 +2374,10 @@ restoreStateAdopted = true
             ownedMasks.clear()
             ownedWorkingSource = null
             lastSuccessfullyRenderedParams = manifest.params
-            runCatching { clearEditHistory() }
-            runCatching { releaseOrphanedBitmaps(previousState, nextState) }
-            runCatching { releaseNativeSessionHandle(previousSession) }
-            runCatching { deleteOwnedWorkingSource(context, previousState.sourcePath) }
+            runCatching { clearEditHistory() }.onFailure { logDraftSaveFailure(it) }
+            runCatching { releaseOrphanedBitmaps(previousState, nextState) }.onFailure { logDraftSaveFailure(it) }
+            runCatching { releaseNativeSessionHandle(previousSession) }.onFailure { logDraftSaveFailure(it) }
+            runCatching { deleteOwnedWorkingSource(context, previousState.sourcePath) }.onFailure { logDraftSaveFailure(it) }
             return GenerationRestoreOutcome.Restored
         } catch (ce: CancellationException) {
             throw ce
