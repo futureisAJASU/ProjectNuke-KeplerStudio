@@ -8,6 +8,8 @@ import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.createBitmapOrThrow
+import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.engineSelection
@@ -145,7 +147,7 @@ fun EditorViewModel.createBrushSelection() {
         id = newSelectionId(),
         name = "브러시 마스크 ${state.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
         kind = SelectionLayerKind.Brush,
-        bitmap = Bitmap.createBitmap(base.width, base.height, Bitmap.Config.ARGB_8888)
+        bitmap = createBitmapOrThrow(base.width, base.height, Bitmap.Config.ARGB_8888)
     )
     updateUiState {
         it.copy(
@@ -453,7 +455,7 @@ private fun blendWithSelectionMask(local: Bitmap, global: Bitmap, layer: Selecti
     val scaledMask = if (layer.bitmap.width == width && layer.bitmap.height == height) {
         layer.bitmap
     } else {
-        Bitmap.createScaledBitmap(layer.bitmap, width, height, true)
+        createScaledBitmapOrThrow(layer.bitmap, width, height, true)
     }
     val localRow = IntArray(width)
     val globalRow = IntArray(width)

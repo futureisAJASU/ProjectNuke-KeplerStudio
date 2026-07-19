@@ -590,16 +590,30 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         pushUndoSnapshot(clearRedo = clearRedo)
     }
 
-    internal fun captureCurrentHistorySnapshot(): EditorHistorySnapshot? =
-        runCatching { uiState.value.toHistorySnapshot() }.getOrNull()
+    internal fun captureCurrentHistorySnapshot(protected: EditorHistorySnapshot? = null): EditorHistorySnapshot? {
+        val state = uiState.value
+        val required = state.historyBitmapBytes()
+        if (!makeHistoryRoom(required, protected) || !BitmapMemoryBudget.canAllocate(required)) {
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
+            }
+            return null
+        }
+        return runCatching { state.toHistorySnapshot() }.getOrNull()
+    }
 
     internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean) {
+        if (!makeHistoryRoom(snapshot.bitmapBytes(), protected = snapshot)) {
+            recycleHistorySnapshot(snapshot)
+            updateHistoryFlags()
+            return
+        }
         undoHistory.addLast(snapshot)
-        trimUndoHistory()
         if (clearRedo) {
             redoHistory.forEach(::recycleHistorySnapshot)
             redoHistory.clear()
         }
+        trimHistoryToBudget()
         updateHistoryFlags()
     }
 
@@ -941,7 +955,7 @@ private suspend fun settleCommittedDraft(
         }
 
         if (!windowWasOpen) {
-            val snapshot = runCatching { _uiState.value.toHistorySnapshot() }.getOrNull()
+            val snapshot = captureCurrentHistorySnapshot()
             if (snapshot == null) {
                 ownedBase.recycle()
                 updateUiState { it.copy(message = "편집을 준비하지 못했습니다.") }
@@ -1433,14 +1447,21 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
         var ownedDirtyBase: Bitmap? = null
         if (exportDirty) {
             val liveBase = state.originalPreviewBitmap ?: state.previewBitmap
+            if (liveBase == null || !BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(liveBase))) {
+                updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.") }
+                return
+            }
             ownedDirtyBase = runCatching { liveBase?.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
-                updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0B4\uAE30 \uC900\uBE44\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4") }
+                updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 내보내기를 준비하지 못했습니다.") }
                 return
             }
             if (ownedDirtyBase == null) {
                 updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0B4\uAE30 \uC900\uBE44\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4") }
                 return
             }
+        } else if (!canPreflightCleanExport(sourcePath, exportResolution)) {
+            updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.") }
+            return
         }
 
         invalidateExport()
@@ -1464,7 +1485,7 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
                     if (isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
                         val rendered = if (exportDirty) {
                             renderEditedExportFromBitmap(
-                                baseBitmap = checkNotNull(ownedDirtyBase),
+                                ownedBaseBitmap = checkNotNull(ownedDirtyBase).also { ownedDirtyBase = null },
                                 params = exportParams,
                                 resolution = exportResolution,
                                 engines = exportEngines,
@@ -1850,7 +1871,7 @@ fun clearDraft() {
         renderJob?.cancel()
         invalidateExport()
         val redoSnapshot = try {
-            _uiState.value.toHistorySnapshot()
+            captureCurrentHistorySnapshot(undoHistory.last()) ?: return
         } catch (t: Throwable) {
             Log.w(FLARE_GUARD_AI_TAG, "Failed to create redo snapshot", t)
             updateUiStateAndRecycleReplaced {
@@ -1863,6 +1884,7 @@ fun clearDraft() {
         val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "이전 편집 상태를 적용했습니다")
         applyHistorySnapshot(snapshot, message)
         scheduleDraftAutosave()
+        trimHistoryToBudget()
         updateHistoryFlags()
         Log.i(FLARE_GUARD_AI_TAG, "Undo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
     }
@@ -1879,7 +1901,7 @@ fun clearDraft() {
         renderJob?.cancel()
         invalidateExport()
         val undoSnapshot = try {
-            _uiState.value.toHistorySnapshot()
+            captureCurrentHistorySnapshot(redoHistory.last()) ?: return
         } catch (t: Throwable) {
             Log.w(FLARE_GUARD_AI_TAG, "Failed to create undo snapshot for redo", t)
             updateUiStateAndRecycleReplaced {
@@ -1892,6 +1914,7 @@ fun clearDraft() {
         val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "다음 편집 상태를 적용했습니다")
         applyHistorySnapshot(snapshot, message)
         scheduleDraftAutosave()
+        trimHistoryToBudget()
         updateHistoryFlags()
         Log.i(FLARE_GUARD_AI_TAG, "Redo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
     }
@@ -2686,11 +2709,7 @@ restoreStateAdopted = true
     private fun commitPendingParamUndoSnapshot() {
         val snapshot = pendingParamUndoSnapshot ?: return
         if (!paramUndoSnapshotCommitted) {
-            undoHistory.addLast(snapshot)
-            trimUndoHistory()
-            redoHistory.forEach(::recycleHistorySnapshot)
-            redoHistory.clear()
-            updateHistoryFlags()
+            commitUndoSnapshot(snapshot, clearRedo = true)
             paramUndoSnapshotCommitted = true
         }
         pendingParamUndoSnapshot = null
@@ -2755,23 +2774,29 @@ restoreStateAdopted = true
         closeParamUndoWindow()
         val state = _uiState.value
         if (state.previewBitmap == null && state.originalPreviewBitmap == null) return
-        val snapshot = try {
-            state.toHistorySnapshot()
+        val snapshot = captureCurrentHistorySnapshot() ?: return
+        if (!makeHistoryRoom(snapshot.bitmapBytes(), protected = snapshot)) {
+            recycleHistorySnapshot(snapshot)
+            updateHistoryFlags()
+            return
+        }
+        try {
+            undoHistory.addLast(snapshot)
+            if (clearRedo) {
+                redoHistory.forEach(::recycleHistorySnapshot)
+                redoHistory.clear()
+            }
+            trimHistoryToBudget()
+            updateHistoryFlags()
+            Log.i(FLARE_GUARD_AI_TAG, "Pushed undo snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
         } catch (t: Throwable) {
+            undoHistory.remove(snapshot)
+            recycleHistorySnapshot(snapshot)
             Log.w(FLARE_GUARD_AI_TAG, "Failed to create undo snapshot", t)
             updateUiStateAndRecycleReplaced {
                 it.copy(message = "되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
             }
-            return
         }
-        undoHistory.addLast(snapshot)
-        trimUndoHistory()
-        if (clearRedo) {
-            redoHistory.forEach(::recycleHistorySnapshot)
-            redoHistory.clear()
-        }
-        updateHistoryFlags()
-        Log.i(FLARE_GUARD_AI_TAG, "Pushed undo snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
     }
 
     private fun applyHistorySnapshot(snapshot: EditorHistorySnapshot, message: String) {
@@ -2815,6 +2840,34 @@ restoreStateAdopted = true
             recycleHistorySnapshot(evicted)
             Log.d(FLARE_GUARD_AI_TAG, "Evicted history snapshot")
         }
+    }
+
+    private fun historyBytes(): Long = BitmapMemoryBudget.saturatingAdd(
+        *undoHistory.map { it.bitmapBytes() }.toLongArray(),
+        *redoHistory.map { it.bitmapBytes() }.toLongArray()
+    )
+
+    private fun makeHistoryRoom(requiredBytes: Long, protected: EditorHistorySnapshot? = null): Boolean {
+        if (requiredBytes <= 0L || requiredBytes > BitmapMemoryBudget.historyBudgetBytes()) return false
+        while (BitmapMemoryBudget.saturatingAdd(historyBytes(), requiredBytes) > BitmapMemoryBudget.historyBudgetBytes()) {
+            val evicted = undoHistory.firstOrNull { it !== protected }
+                ?: redoHistory.firstOrNull { it !== protected }
+                ?: return false
+            if (undoHistory.remove(evicted) || redoHistory.remove(evicted)) recycleHistorySnapshot(evicted)
+        }
+        return true
+    }
+
+    private fun trimHistoryToBudget() {
+        while (historyBytes() > BitmapMemoryBudget.historyBudgetBytes()) {
+            val evicted = when {
+                undoHistory.isNotEmpty() -> undoHistory.removeFirst()
+                redoHistory.isNotEmpty() -> redoHistory.removeFirst()
+                else -> return
+            }
+            recycleHistorySnapshot(evicted)
+        }
+        trimUndoHistory()
     }
 
     private fun clearEditHistory() {
@@ -3031,8 +3084,21 @@ private fun historySignedValue(value: Float): String =
 private fun identityBitmapSet(): MutableSet<Bitmap> =
     Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
 
-internal fun Bitmap.copyOrThrow(config: Bitmap.Config = Bitmap.Config.ARGB_8888, mutable: Boolean = true): Bitmap =
-    copy(config, mutable) ?: throw IllegalStateException("bitmap copy failed")
+internal fun Bitmap.copyOrThrow(config: Bitmap.Config = Bitmap.Config.ARGB_8888, mutable: Boolean = true): Bitmap {
+    check(!isRecycled) { "bitmap is recycled" }
+    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(width, height, config))) { "insufficient bitmap memory" }
+    return copy(config, mutable) ?: throw IllegalStateException("bitmap copy failed")
+}
+
+internal fun createBitmapOrThrow(width: Int, height: Int, config: Bitmap.Config = Bitmap.Config.ARGB_8888): Bitmap {
+    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(width, height, config))) { "insufficient bitmap memory" }
+    return Bitmap.createBitmap(width, height, config)
+}
+
+internal fun createScaledBitmapOrThrow(bitmap: Bitmap, width: Int, height: Int, filter: Boolean): Bitmap {
+    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(width, height, bitmap.config))) { "insufficient bitmap memory" }
+    return Bitmap.createScaledBitmap(bitmap, width, height, filter)
+}
 
 private fun EditorHistorySnapshot.recycleBitmaps() {
     if (resourcesReleased) {
@@ -3364,6 +3430,14 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
     val longest = max(bounds.outWidth, bounds.outHeight)
     while (longest / sample > maxSide) sample *= 2
 
+    val estimatedBytes = BitmapMemoryBudget.bytes(
+        (bounds.outWidth + sample - 1) / sample,
+        (bounds.outHeight + sample - 1) / sample
+    )
+    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.saturatingMultiply(estimatedBytes, 2L))) {
+        "insufficient bitmap memory"
+    }
+
     val options = BitmapFactory.Options().apply {
         inSampleSize = sample
         inPreferredConfig = Bitmap.Config.ARGB_8888
@@ -3407,6 +3481,9 @@ private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
         else -> return bitmap
     }
 
+    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.saturatingMultiply(BitmapMemoryBudget.bytes(bitmap), 2L))) {
+        "insufficient bitmap memory"
+    }
     val transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
     if (transformed !== bitmap) bitmap.recycle()
     val mutable = transformed.copyOrThrow(Bitmap.Config.ARGB_8888, true)
@@ -3417,6 +3494,7 @@ private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
 
 private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
     val matrix = Matrix().apply { postRotate(90f) }
+    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(bitmap))) { "insufficient bitmap memory" }
     return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
 }
 
@@ -3473,6 +3551,26 @@ internal fun applyActiveQuickEffectsToBitmap(
     }
 }
 
+private fun canPreflightCleanExport(sourcePath: String, resolution: ExportResolution): Boolean {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(sourcePath, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return false
+    var sample = 1
+    val longest = max(bounds.outWidth, bounds.outHeight)
+    while (longest / sample > EXPORT_MAX_SIDE) sample *= 2
+    val decodedWidth = (bounds.outWidth + sample - 1) / sample
+    val decodedHeight = (bounds.outHeight + sample - 1) / sample
+    val decodedBytes = BitmapMemoryBudget.bytes(decodedWidth, decodedHeight)
+    val scale = resolution.scalePercent / 100f
+    val scaledBytes = BitmapMemoryBudget.bytes(
+        (decodedWidth * scale).roundToInt().coerceAtLeast(1),
+        (decodedHeight * scale).roundToInt().coerceAtLeast(1)
+    )
+    return BitmapMemoryBudget.canAllocate(
+        BitmapMemoryBudget.saturatingAdd(BitmapMemoryBudget.saturatingMultiply(decodedBytes, 3L), scaledBytes)
+    )
+}
+
 private fun renderEditedExport(
     sourcePath: String,
     params: EditParams,
@@ -3482,7 +3580,6 @@ private fun renderEditedExport(
     look: PresetColorLook? = null,
     quickEffects: List<ActiveQuickEffect> = emptyList()
 ): Bitmap {
-    // TODO v0.2: replace whole-bitmap export with ROI/tile rendering to reduce peak memory use.
     var decoded: Bitmap? = null
     var scaled: Bitmap? = null
     try {
@@ -3507,7 +3604,7 @@ private fun renderEditedExport(
 }
 
 private fun renderEditedExportFromBitmap(
-    baseBitmap: Bitmap,
+    ownedBaseBitmap: Bitmap,
     params: EditParams,
     resolution: ExportResolution,
     engines: EngineSelection,
@@ -3515,25 +3612,24 @@ private fun renderEditedExportFromBitmap(
     look: PresetColorLook? = null,
     quickEffects: List<ActiveQuickEffect> = emptyList()
 ): Bitmap {
-    var decoded: Bitmap? = null
+    var working: Bitmap? = ownedBaseBitmap
     var scaled: Bitmap? = null
     try {
-        decoded = baseBitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-        val working = decoded!!
-        renderBitmapInNative(working, params, engines, revision, look)
-        applyActiveQuickEffectsToBitmap(working, quickEffects, revision)
-        applySelectedToneEngine(working, engines.toneEngine)
-        scaled = scaleBitmapForExport(working, resolution)
-        if (scaled !== working) {
-            working.recycle()
+        val renderTarget = checkNotNull(working)
+        renderBitmapInNative(renderTarget, params, engines, revision, look)
+        applyActiveQuickEffectsToBitmap(renderTarget, quickEffects, revision)
+        applySelectedToneEngine(renderTarget, engines.toneEngine)
+        scaled = scaleBitmapForExport(renderTarget, resolution)
+        if (scaled !== renderTarget) {
+            renderTarget.recycle()
         }
         val result = scaled
-        decoded = null
+        working = null
         scaled = null
         return result
     } catch (t: Throwable) {
-        if (scaled != null && scaled !== decoded && !scaled.isRecycled) scaled.recycle()
-        if (decoded != null && !decoded.isRecycled) decoded.recycle()
+        if (scaled != null && scaled !== working && !scaled.isRecycled) scaled.recycle()
+        if (working != null && !working.isRecycled) working.recycle()
         throw t
     }
 }
@@ -3719,7 +3815,7 @@ private fun scaleBitmapForExport(bitmap: Bitmap, resolution: ExportResolution): 
     val scale = resolution.scalePercent / 100f
     val width = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
     val height = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
-    return Bitmap.createScaledBitmap(bitmap, width, height, true)
+    return createScaledBitmapOrThrow(bitmap, width, height, true)
 }
 
 private fun insertExportPendingRow(
@@ -3862,6 +3958,22 @@ public sealed class PresetApplyResult {
     data object Rejected : PresetApplyResult()
 }
 
+private fun EditorUiState.historyBitmapBytes(): Long {
+    val bitmaps = identityBitmapSet()
+    previewBitmap?.let(bitmaps::add)
+    originalPreviewBitmap?.let(bitmaps::add)
+    selectionLayers.forEach { bitmaps.add(it.bitmap) }
+    return BitmapMemoryBudget.saturatingAdd(*bitmaps.map(BitmapMemoryBudget::bytes).toLongArray())
+}
+
+private fun EditorHistorySnapshot.bitmapBytes(): Long {
+    val bitmaps = identityBitmapSet()
+    previewBitmap?.let(bitmaps::add)
+    originalPreviewBitmap?.let(bitmaps::add)
+    selectionLayers.forEach { bitmaps.add(it.bitmap) }
+    return BitmapMemoryBudget.saturatingAdd(*bitmaps.map(BitmapMemoryBudget::bytes).toLongArray())
+}
+
 private data class DraftSavePayload(
     val epoch: Long,
     val sourcePath: String?,
@@ -3916,6 +4028,7 @@ private fun createDraftSavePayload(
             bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true).also(owned::add)
         }
     }
+
     try {
         val dirtyBitmapCopy = when {
             reusableSource -> null

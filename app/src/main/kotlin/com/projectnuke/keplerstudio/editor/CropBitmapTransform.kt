@@ -14,7 +14,7 @@ fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap {
     val size = rotatedCanvasSize(source.width, source.height, rotation)
     val outWidth = ((state.cropRight - state.cropLeft).coerceIn(0.01f, 1f) * size.first).roundToInt().coerceAtLeast(1)
     val outHeight = ((state.cropBottom - state.cropTop).coerceIn(0.01f, 1f) * size.second).roundToInt().coerceAtLeast(1)
-    val output = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
+    val output = createBitmapOrThrow(outWidth, outHeight, Bitmap.Config.ARGB_8888)
     try {
         val result = NativePhotoCore.nativeRenderCropTransform(
             source,

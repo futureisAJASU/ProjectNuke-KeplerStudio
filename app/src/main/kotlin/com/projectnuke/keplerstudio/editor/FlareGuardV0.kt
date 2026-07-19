@@ -10,7 +10,7 @@ enum class FlareGuardMode {
 }
 
 fun createFlareMaskV0(bitmap: Bitmap, threshold: Float = 0.90f): Bitmap {
-    var mask: Bitmap? = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+    var mask: Bitmap? = createBitmapOrThrow(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
     try {
         val result = NativePhotoCore.nativeCreateFlareMask(
             source = bitmap,
