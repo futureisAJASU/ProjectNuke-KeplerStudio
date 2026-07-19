@@ -7,8 +7,9 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.copyOrThrow
-import com.projectnuke.keplerstudio.editor.createBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.SelectionLayer
@@ -44,15 +45,13 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     }
 
     var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-    if (undoSnapshot == null) {
-        updateUiState { it.copy(message = "\uD3C9\uC9D1 \uAE30\uB85D\uC744 \uC800\uC7A5\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1 \uD654\uBA74\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4.") }
-        return
-    }
     val ownedBase = try {
         base.copyOrThrow(mutable = false)
     } catch (t: Throwable) {
-        recycleHistorySnapshot(undoSnapshot)
+        undoSnapshot?.let(::recycleHistorySnapshot)
+        undoSnapshot = null
         updateUiState { it.copy(message = "마스크 입력 이미지를 준비하지 못했습니다.") }
+        if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.SubjectSelection, t.requiredBytes)
         return
     }
     updateUiState { it.copy(isBusy = true, message = busyMessage) }
@@ -111,9 +110,10 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 val current = uiState.value
                 return@launchManagedEdit
             }
-            commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+            settleAdoptedEditHistory(undoSnapshot)
             undoSnapshot = null
             pendingLayerBitmap = null
+            markMemoryRetrySucceeded(MemoryRetryAction.SubjectSelection)
             persistDraftSnapshot()
         } catch (ce: CancellationException) {
             pendingLayerBitmap?.recycle()
@@ -128,6 +128,9 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             if (isManagedEditCurrent(operationToken, sourceRevision) && current.sourcePath == sourcePath && current.revision == sourceRevision) {
                 updateUiState { it.copy(isBusy = false, message = "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C \uC0DD\uC131\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
             }
+            if (t is BitmapAllocationRejectedException && current.sourcePath == sourcePath && current.revision == sourceRevision) {
+                requestAllocationRecovery(MemoryRetryAction.SubjectSelection, t.requiredBytes)
+            }
         } finally {
             ownedBase.recycle()
         }
@@ -135,28 +138,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
 }
 
 fun EditorViewModel.createBrushSelection() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
-    invalidateSelectionPreview()
-    val state = prepareForExternalEdit()
-    val base = state.originalPreviewBitmap ?: state.previewBitmap
-    if (base == null) {
-        updateUiState { it.copy(message = "브러시 마스크를 만들 이미지가 없습니다.") }
-        return
-    }
-    val layer = SelectionLayer(
-        id = newSelectionId(),
-        name = "브러시 마스크 ${state.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
-        kind = SelectionLayerKind.Brush,
-        bitmap = createBitmapOrThrow(base.width, base.height, Bitmap.Config.ARGB_8888)
-    )
-    updateUiState {
-        it.copy(
-            selectionLayers = it.selectionLayers + layer,
-            activeSelectionLayerId = layer.id,
-            message = "브러시 마스크를 만들었습니다."
-        )
-    }
-    persistDraftSnapshot()
+    createBrushSelectionInternal()
 }
 
 fun EditorViewModel.selectSelectionLayer(id: String) {
@@ -281,7 +263,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         updateUiState { it.copy(message = "적용할 마스크 또는 이미지가 없습니다.") }
         return
     }
-    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: return
+    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
     val nextRevision = state.revision + 1
     updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "마스크 보정을 적용하는 중입니다.") }
     launchManagedEdit { operationToken ->
@@ -316,7 +298,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                         message = "선택한 마스크 보정을 적용했습니다."
                     )
                 }
-                commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                settleAdoptedEditHistory(undoSnapshot)
                 undoSnapshot = null
                 markParamsSuccessfullyRendered(EditParams())
                 renderedOriginal = null

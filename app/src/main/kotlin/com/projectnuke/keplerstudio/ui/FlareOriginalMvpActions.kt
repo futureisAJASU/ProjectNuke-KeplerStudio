@@ -3,6 +3,8 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
@@ -32,14 +34,13 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
     }
 
     var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-    if (undoSnapshot == null) {
-        updateUiState { it.copy(message = "번짐 보정 준비에 실패했습니다.") }
-        return
-    }
-    var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
-        recycleHistorySnapshot(checkNotNull(undoSnapshot))
+    var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
+        undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         updateUiState { it.copy(message = "이미지를 준비하지 못했습니다.") }
+        if (failure is BitmapAllocationRejectedException) {
+            requestAllocationRecovery(if (mode == FlareGuardMode.NightLight) MemoryRetryAction.FlareNight else MemoryRetryAction.FlareSun, failure.requiredBytes)
+        }
         return
     }
 
@@ -125,7 +126,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                         flareGuardRuntimeStatus = "규칙 기반 보정으로 번짐을 완화했습니다."
                     )
                 }
-                commitUndoSnapshot(undoSnapshot!!, clearRedo = true)
+                settleAdoptedEditHistory(undoSnapshot)
                 undoSnapshot = null
                 ownedBase = null
                 ownedPreview = null
@@ -133,7 +134,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
             }
         } catch (ce: CancellationException) {
             throw ce
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
             if (isManagedEditCurrent(operationToken, nextRevision) &&
                 uiState.value.sourcePath == sourcePath &&
                 uiState.value.baseContentToken == baseToken &&
@@ -145,6 +146,9 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                         flareGuardRuntimeStatus = "번짐 완화에 실패했습니다."
                     )
                 }
+            }
+            if (t is BitmapAllocationRejectedException && isManagedEditTokenCurrent(operationToken)) {
+                requestAllocationRecovery(if (mode == FlareGuardMode.NightLight) MemoryRetryAction.FlareNight else MemoryRetryAction.FlareSun, t.requiredBytes)
             }
         } finally {
             ownedBase?.let { if (!it.isRecycled) it.recycle() }

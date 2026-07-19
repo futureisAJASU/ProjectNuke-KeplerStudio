@@ -2,6 +2,8 @@ package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
@@ -32,7 +34,8 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
             bitmap = active.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
         )
     } catch (t: Throwable) {
-        updateUiState { it.copy(message = "마스크 복제에 실패했습니다.") }
+        updateUiState { it.copy(message = if (t is BitmapAllocationRejectedException) "메모리가 부족하여 마스크를 복제하지 못했습니다." else "마스크 복제에 실패했습니다.") }
+        if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.DuplicateSelection, t.requiredBytes)
         return
     }
     recordUserEditForUndo(clearRedo = true)
@@ -43,6 +46,7 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
             message = "마스크를 복제했습니다"
         )
     }
+    markMemoryRetrySucceeded(MemoryRetryAction.DuplicateSelection)
     persistDraftSnapshot()
 }
 
@@ -66,7 +70,8 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
             localParams = active.localParams
         )
     } catch (t: Throwable) {
-        updateUiState { it.copy(message = "배경 마스크 생성에 실패했습니다.") }
+        updateUiState { it.copy(message = if (t is BitmapAllocationRejectedException) "메모리가 부족하여 배경 마스크를 만들지 못했습니다." else "배경 마스크 생성에 실패했습니다.") }
+        if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.BackgroundSelection, t.requiredBytes)
         return
     }
     recordUserEditForUndo(clearRedo = true)
@@ -77,6 +82,7 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
             message = "선택한 마스크를 기준으로 배경 마스크를 만들었습니다"
         )
     }
+    markMemoryRetrySucceeded(MemoryRetryAction.BackgroundSelection)
     persistDraftSnapshot()
 }
 

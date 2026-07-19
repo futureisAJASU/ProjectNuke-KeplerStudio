@@ -286,6 +286,30 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
             }
         )
     }
+
+    state.memoryRecoveryRequest?.let { request ->
+        AlertDialog(
+            onDismissRequest = { viewModel.cancelPendingMemoryRecovery(request.token) },
+            title = { Text("더 많은 메모리가 필요합니다") },
+            text = {
+                Text(
+                    if (request.mayMoveOldHistory) {
+                        "현재 이미지와 적용된 편집은 안전하게 유지됩니다. 정리 과정에서 오래된 되돌리기 기록이 저장소로 이동되거나 제거될 수 있습니다."
+                    } else {
+                        "현재 이미지와 적용된 편집은 안전하게 유지됩니다."
+                    }
+                )
+            },
+            confirmButton = {
+                Button(onClick = { viewModel.retryPendingMemoryRecovery(request.token) }) {
+                    Text("정리 후 다시 시도")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.cancelPendingMemoryRecovery(request.token) }) { Text("취소") }
+            }
+        )
+    }
 }
 
 @Composable

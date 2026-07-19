@@ -7,6 +7,7 @@ import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -34,17 +35,17 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         }
     }
     if (nextLayers == current.selectionLayers) return
-    val ownedBase = runCatching { base.copyOrThrow() }.getOrElse {
+    val ownedBase = runCatching { base.copyOrThrow() }.getOrElse { failure ->
         invalidateSelectionPreview()
-        updateUiState { it.copy(message = "선택 마스크 미리보기용 이미지를 준비하지 못했습니다.") }
+        updateUiState { it.copy(message = if (failure is BitmapAllocationRejectedException) "메모리가 부족하여 선택 마스크 미리보기를 준비하지 못했습니다." else "선택 마스크 미리보기용 이미지를 준비하지 못했습니다.") }
         return
     }
     val ownedLayers = runCatching {
         nextLayers.copyBitmapsOwned()
-    }.getOrElse {
+    }.getOrElse { failure ->
         ownedBase.recycle()
         invalidateSelectionPreview()
-        updateUiState { it.copy(message = "선택 마스크 미리보기를 준비하지 못했습니다.") }
+        updateUiState { it.copy(message = if (failure is BitmapAllocationRejectedException) "메모리가 부족하여 선택 마스크 미리보기를 준비하지 못했습니다." else "선택 마스크 미리보기를 준비하지 못했습니다.") }
         return
     }
 

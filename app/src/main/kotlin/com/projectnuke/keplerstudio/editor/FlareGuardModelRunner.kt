@@ -43,11 +43,11 @@ class FlareGuardModelRunner private constructor(
         val maxAlpha: Float
     )
 
-    fun predictMaskOrNull(source: Bitmap): MaskResult? = runCatching {
+    fun predictMaskOrNull(source: Bitmap): MaskResult? = try {
         val resized = if (source.width == inputWidth && source.height == inputHeight) {
             source
         } else {
-            Bitmap.createScaledBitmap(source, inputWidth, inputHeight, true)
+            createScaledBitmapOrThrow(source, inputWidth, inputHeight, true)
         }
 
         try {
@@ -71,7 +71,10 @@ class FlareGuardModelRunner private constructor(
         } finally {
             if (resized !== source) resized.recycle()
         }
-    }.getOrNull()
+    } catch (t: Throwable) {
+        if (t is BitmapAllocationRejectedException) throw t
+        null
+    }
 
     private fun writeInput(buffer: ByteBuffer, pixels: IntArray) {
         when (inputLayout) {
@@ -125,10 +128,18 @@ class FlareGuardModelRunner private constructor(
             }
         }
 
-        val bitmap = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
-        bitmap.setPixels(outPixels, 0, outputWidth, 0, 0, outputWidth, outputHeight)
-        val mean = if (outPixels.isEmpty()) 0f else sum / outPixels.size
-        return MaskResult(mask = bitmap, meanAlpha = mean, maxAlpha = max)
+        var bitmap: Bitmap? = null
+        try {
+            bitmap = createBitmapOrThrow(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
+            bitmap!!.setPixels(outPixels, 0, outputWidth, 0, 0, outputWidth, outputHeight)
+            val mean = if (outPixels.isEmpty()) 0f else sum / outPixels.size
+            val result = MaskResult(mask = bitmap!!, meanAlpha = mean, maxAlpha = max)
+            bitmap = null
+            return result
+        } catch (t: Throwable) {
+            bitmap?.takeUnless(Bitmap::isRecycled)?.recycle()
+            throw t
+        }
     }
 
     private fun readOutputPixel(values: FloatArray, x: Int, y: Int): Float {

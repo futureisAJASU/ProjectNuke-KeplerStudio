@@ -8,6 +8,8 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.centeredCropForAspect
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.estimateAutoStraightenDegreesV0
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.normalized
@@ -44,8 +46,9 @@ fun EditorViewModel.autoStraightenCrop() {
     val state = uiState.value
     val bitmap = state.previewBitmap ?: state.originalPreviewBitmap ?: return
     val cropToken = beginCropOperation()
-    val input = runCatching { bitmap.copyOrThrow(mutable = false) }.getOrElse {
-        updateUiState { it.copy(message = "기울기 보정용 이미지를 준비하지 못했습니다.") }
+    val input = runCatching { bitmap.copyOrThrow(mutable = false) }.getOrElse { failure ->
+        updateUiState { it.copy(message = if (failure is BitmapAllocationRejectedException) "메모리가 부족하여 기울기 보정 이미지를 준비하지 못했습니다." else "기울기 보정용 이미지를 준비하지 못했습니다.") }
+        if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.AutoStraightenCrop, failure.requiredBytes)
         return
     }
     cropJob?.cancel()
@@ -54,6 +57,7 @@ fun EditorViewModel.autoStraightenCrop() {
             val angle = withContext(Dispatchers.Default) { estimateAutoStraightenDegreesV0(input) }
             if (isCropResultCurrent(cropToken, state.revision)) {
                 updateUiState { current -> current.copy(cropState = current.cropState.copy(straightenDegrees = angle), message = "기울기 보정값을 적용했습니다: ${String.format(Locale.US, "%.1f", angle)}°") }
+                markMemoryRetrySucceeded(MemoryRetryAction.AutoStraightenCrop)
             }
         } catch (ce: CancellationException) {
             throw ce
@@ -86,10 +90,6 @@ fun EditorViewModel.applyCropTransform() {
     if (preview == null && original == null) return
 
     var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-    if (undoSnapshot == null) {
-        updateUiState { it.copy(message = "자르기 준비에 실패했습니다. 기존 편집 상태를 유지합니다.") }
-        return
-    }
 
     var previewInput: Bitmap? = null
     var originalInput: Bitmap? = null
@@ -216,7 +216,7 @@ fun EditorViewModel.applyCropTransform() {
                     transformedPreview = null
                     transformedMasks = null
                     markParamsSuccessfullyRendered(liveStateAfter.params)
-                    commitUndoSnapshot(checkNotNull(undoSnapshotOwned), clearRedo = true)
+                    settleAdoptedEditHistory(undoSnapshotOwned)
                     undoSnapshotOwned = null
                     persistDraftSnapshot()
                 } else if (stateUpdateException != null) {

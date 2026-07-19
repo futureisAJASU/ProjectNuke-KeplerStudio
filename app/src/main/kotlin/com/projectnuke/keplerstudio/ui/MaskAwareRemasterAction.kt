@@ -6,7 +6,10 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
@@ -33,18 +36,15 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     }
 
     var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-    if (undoSnapshot == null) {
-        updateUiState { it.copy(message = "모델 마스크 보조 준비에 실패했습니다.") }
-        return
-    }
     var ownedBase: Bitmap? = null
     try {
         ownedBase = basePreview.copyOrThrow()
     } catch (t: Throwable) {
         ownedBase = null
-        recycleHistorySnapshot(checkNotNull(undoSnapshot))
+        undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         updateUiState { it.copy(message = "모델 마스크 보조 준비에 실패했습니다.") }
+        if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
         return
     }
 
@@ -134,7 +134,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                         remasteredOriginal = null
                         renderedPreview = null
                         markParamsSuccessfullyRendered(EditParams())
-                        commitUndoSnapshot(checkNotNull(undoSnapshotOwned), clearRedo = true)
+                        settleAdoptedEditHistory(undoSnapshotOwned)
                         undoSnapshotOwned = null
                         persistDraftSnapshot()
                     } else {
@@ -163,6 +163,9 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 }
             } else if (isManagedEditTokenCurrent(operationToken)) {
                 updateUiState { it.copy(isBusy = false) }
+            }
+            if (t is BitmapAllocationRejectedException && failureIdentityUnchanged) {
+                requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
             }
         } finally {
             renderedPreview?.takeIf { !it.isRecycled }?.recycle()
@@ -285,7 +288,7 @@ private fun blendForegroundOverBackground(
         val scaledMask = if (mask.width == width && mask.height == height) {
             mask
         } else {
-            Bitmap.createScaledBitmap(mask, width, height, true).also { scaledMaskOwned = it }
+            createScaledBitmapOrThrow(mask, width, height, true).also { scaledMaskOwned = it }
         }
         val fgRow = IntArray(width)
         val bgRow = IntArray(width)

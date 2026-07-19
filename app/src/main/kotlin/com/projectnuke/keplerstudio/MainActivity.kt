@@ -100,11 +100,19 @@ private enum class GalleryDisplayMode(val label: String) {
 }
 
 class MainActivity : ComponentActivity() {
+    private var editorViewModel: EditorViewModel? = null
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        editorViewModel?.onTrimMemory(level)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             val context = LocalContext.current
             val vm: EditorViewModel = viewModel()
+            editorViewModel = vm
             val state by vm.uiState.collectAsState()
             val scope = rememberCoroutineScope()
             var appMode by remember { mutableStateOf(AppMode.Home) }

@@ -37,9 +37,15 @@ data class EditorUiState(
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val flareGuardRuntimeStatus: String? = null,
+    val memoryRecoveryRequest: MemoryRecoveryRequest? = null,
     val revision: Int = 0,
     val nativeVersion: String = "",
     val message: String? = null
+)
+
+data class MemoryRecoveryRequest(
+    val token: Long,
+    val mayMoveOldHistory: Boolean
 )
 
 data class RecoveryDebugInfo(

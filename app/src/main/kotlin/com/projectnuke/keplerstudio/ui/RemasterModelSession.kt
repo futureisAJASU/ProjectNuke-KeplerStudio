@@ -9,6 +9,8 @@ import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.createBitmapOrThrow
+import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.max
@@ -104,6 +106,18 @@ object RemasterModelSession {
                 statusText = "로드된 모델이 없습니다."
             }
         }
+    }
+
+    suspend fun unloadIdleNow(): Boolean = modelMutex.withLock {
+        if (isModelLoading || isInferring) return@withLock false
+        ++commandGeneration
+        runCatching { closeableModel?.close() }
+        closeableModel = null
+        activeModel = null
+        isModelLoaded = false
+        isModelLoading = false
+        statusText = "로드된 모델이 없습니다."
+        true
     }
 
     fun hasModelAsset(context: Context, assetPath: String): Boolean {
@@ -223,9 +237,9 @@ object RemasterModelSession {
             scaledMask = if (rawMask.width == targetWidth && rawMask.height == targetHeight) {
                 rawMask
             } else {
-                Bitmap.createScaledBitmap(rawMask, targetWidth, targetHeight, false)
+                createScaledBitmapOrThrow(rawMask, targetWidth, targetHeight, false)
             }
-            out = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+            out = createBitmapOrThrow(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
             val inRow = IntArray(targetWidth)
             val outRow = IntArray(targetWidth)
             for (y in 0 until targetHeight) {

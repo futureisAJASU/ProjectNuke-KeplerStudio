@@ -68,6 +68,7 @@ fun applyFlareGuardModelOrRuleResultV0(
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
+            if (t is BitmapAllocationRejectedException) throw t
             Log.e(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model path failed", t)
             if (!allowRuleFallback) {
                 return FlareGuardApplyResult(source.copyOrThrow(Bitmap.Config.ARGB_8888, true), FlareGuardRuntimeStatus.Unavailable)
@@ -112,7 +113,7 @@ fun applyFlareGuardMaskBlendV0(
         scaledMask = if (modelMask.width == source.width && modelMask.height == source.height) {
             modelMask
         } else {
-            Bitmap.createScaledBitmap(modelMask, source.width, source.height, true)
+            createScaledBitmapOrThrow(modelMask, source.width, source.height, true)
         }
 
         val width = output!!.width

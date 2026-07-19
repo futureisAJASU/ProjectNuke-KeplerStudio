@@ -22,7 +22,7 @@ internal class ThumbnailBitmapLease internal constructor(
 }
 
 internal object ThumbnailBitmapCache {
-    private const val MAX_BYTES = 24L * 1024L * 1024L
+    @Volatile private var maxBytes = 24L * 1024L * 1024L
     private val lock = Any()
     private val decodeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var residentBytes = 0L
@@ -40,6 +40,30 @@ internal object ThumbnailBitmapCache {
         var invalidated = false
         var completedEntry: Entry? = null
         var job: Job? = null
+    }
+
+    fun setByteBudget(bytes: Long) {
+        synchronized(lock) {
+            maxBytes = bytes.coerceAtLeast(1L)
+            evictLocked()
+        }
+    }
+
+    fun evictUnleased(): Long {
+        synchronized(lock) {
+            val before = residentBytes
+            val iterator = entries.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next().value
+                if (entry.leases == 0) {
+                    iterator.remove()
+                    residentBytes -= entry.bytes
+                    entry.removed = true
+                    recycleIfUnusedLocked(entry)
+                }
+            }
+            return (before - residentBytes).coerceAtLeast(0L)
+        }
     }
 
     suspend fun acquire(key: String, decode: () -> Bitmap?): ThumbnailBitmapLease? {
@@ -109,7 +133,7 @@ internal object ThumbnailBitmapCache {
                     if (entry != null && !flight.invalidated && flight.waiters > 0) {
                         entry.leases = flight.waiters
                         flight.completedEntry = entry
-                        if (entry.bytes <= MAX_BYTES) {
+                        if (entry.bytes <= maxBytes) {
                             entries[flight.key] = entry
                             residentBytes += entry.bytes
                             evictLocked()
@@ -168,7 +192,7 @@ internal object ThumbnailBitmapCache {
     }
 
     private fun evictLocked() {
-        while (residentBytes > MAX_BYTES && entries.isNotEmpty()) {
+        while (residentBytes > maxBytes && entries.isNotEmpty()) {
             val eldest = entries.entries.iterator().next()
             entries.remove(eldest.key)
             residentBytes -= eldest.value.bytes

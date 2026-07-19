@@ -93,7 +93,7 @@ internal fun writeDraftGeneration(
         val thumbnail = if (thumbnailWidth == editedPreviewCopy.width && thumbnailHeight == editedPreviewCopy.height) {
             editedPreviewCopy
         } else {
-            Bitmap.createScaledBitmap(editedPreviewCopy, thumbnailWidth, thumbnailHeight, true)
+            createScaledBitmapOrThrow(editedPreviewCopy, thumbnailWidth, thumbnailHeight, true)
         }
         val tempThumb = File(genDir.root, "thumbnail.${UUID.randomUUID()}.tmp")
         try {

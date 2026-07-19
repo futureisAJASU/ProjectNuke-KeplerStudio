@@ -10,6 +10,8 @@ import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -38,25 +40,24 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     val sourcePath = current.sourcePath
     val baseContentToken = current.baseContentToken
 
-    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: run {
-        updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
-        return
-    }
+    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot()
 
-    var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse {
-        recycleHistorySnapshot(checkNotNull(undoSnapshot))
+    var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse { failure ->
+        undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
+        if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.ApplySelectionNative, failure.requiredBytes)
         return
     }
     var ownedLayers: List<com.projectnuke.keplerstudio.editor.SelectionLayer> = runCatching {
         enabledLayers.copyBitmapsOwned()
-    }.getOrElse {
+    }.getOrElse { failure ->
         ownedBase?.takeIf { !it.isRecycled }?.recycle()
         ownedBase = null
-        recycleHistorySnapshot(checkNotNull(undoSnapshot))
+        undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
+        if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.ApplySelectionNative, failure.requiredBytes)
         return
     }
     val nextRevision = current.revision + 1
@@ -113,7 +114,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 }
                 bakedOriginal = null
                 renderedPreview = null
-                commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                settleAdoptedEditHistory(undoSnapshot)
                 undoSnapshot = null
                 persistDraftSnapshot()
             } else if (isManagedEditTokenCurrent(operationToken)) {

@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import android.content.ContentValues
+import android.content.ComponentCallbacks2
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -16,6 +17,15 @@ import androidx.heifwriter.HeifWriter
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
+import com.projectnuke.keplerstudio.ui.RemasterModelSession
+import com.projectnuke.keplerstudio.ui.addSubjectSelectionFromEdgeModel
+import com.projectnuke.keplerstudio.ui.applyFlareOriginalMvp
+import com.projectnuke.keplerstudio.ui.applyMaskAwareRemaster
+import com.projectnuke.keplerstudio.ui.applySunFlareOriginalMvp
+import com.projectnuke.keplerstudio.ui.applyActiveSelectionLocalEditNativeBaked
+import com.projectnuke.keplerstudio.ui.autoStraightenCrop
+import com.projectnuke.keplerstudio.ui.createBackgroundSelectionFromActive
+import com.projectnuke.keplerstudio.ui.duplicateActiveSelectionLayer
 import java.util.ArrayDeque
 import java.util.Collections
 import java.io.File
@@ -91,8 +101,209 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var lastSuccessfullyRenderedParams: EditParams = EditParams()
     private var activeParamRenderRevision: Int? = null
     private var restoreDraftToken: Long = 0L
-    private val undoHistory = ArrayDeque<EditorHistorySnapshot>()
-    private val redoHistory = ArrayDeque<EditorHistorySnapshot>()
+    private val historyStorage = EditorHistoryStorage(app.applicationContext)
+    private val undoHistory = ArrayDeque<EditorHistoryEntry>()
+    private val redoHistory = ArrayDeque<EditorHistoryEntry>()
+    private var historyIoJob: Job? = null
+    private var historyNavigationToken: Long = 0L
+    private var historyEpoch: Long = 0L
+    private var historyDocumentGeneration: String = UUID.randomUUID().toString()
+    private var memoryRecoveryToken: Long = 0L
+    private var pendingMemoryRetry: MemoryRetryDescriptor? = null
+    private var memoryRecoveryJob: Job? = null
+    private var automaticRetryAttempt: MemoryRetryDescriptor? = null
+    private var strongRetryAttempt: MemoryRetryDescriptor? = null
+
+    init {
+        BitmapMemoryBudget.initialize(app.applicationContext)
+        ThumbnailBitmapCache.setByteBudget(BitmapMemoryBudget.thumbnailBudgetBytes())
+        viewModelScope.launch(Dispatchers.IO) { historyStorage.cleanupIncomplete() }
+    }
+
+    internal fun createBrushSelectionInternal(allowRecovery: Boolean = true) {
+        if (!canEnterEditorAction(allowMaskSupersession = true)) return
+        val state = uiState.value
+        val base = state.originalPreviewBitmap ?: state.previewBitmap ?: run {
+            updateUiState { it.copy(message = "브러시 마스크를 만들 이미지가 없습니다.") }
+            return
+        }
+        val mask = try {
+            createBitmapOrThrow(base.width, base.height, Bitmap.Config.ARGB_8888)
+        } catch (t: Throwable) {
+            if (allowRecovery && t is BitmapAllocationRejectedException) {
+                requestAllocationRecovery(MemoryRetryAction.CreateBrushSelection, t.requiredBytes)
+            } else {
+                updateUiState { it.copy(message = "메모리가 부족하여 브러시 마스크를 만들 수 없습니다.") }
+            }
+            return
+        }
+        val prepared = prepareForExternalEdit()
+        val preparedBase = prepared.originalPreviewBitmap ?: prepared.previewBitmap
+        if (preparedBase !== base || base.isRecycled) {
+            mask.recycle()
+            return
+        }
+        val layer = SelectionLayer(
+            id = "sel_" + UUID.randomUUID().toString().take(8),
+            name = "브러시 마스크 ${prepared.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
+            kind = SelectionLayerKind.Brush,
+            bitmap = mask
+        )
+        updateUiState {
+            it.copy(selectionLayers = it.selectionLayers + layer, activeSelectionLayerId = layer.id, message = "브러시 마스크를 만들었습니다.")
+        }
+        markMemoryRetrySucceeded(MemoryRetryAction.CreateBrushSelection)
+        persistDraftSnapshot()
+    }
+
+    internal fun requestAllocationRecovery(action: MemoryRetryAction, requiredBytes: Long, payload: String? = null) {
+        if (shuttingDown || memoryRecoveryJob?.isActive == true) return
+        val state = _uiState.value
+        val descriptor = MemoryRetryDescriptor(
+            token = ++memoryRecoveryToken,
+            action = action,
+            requiredBytes = requiredBytes,
+            sourcePath = state.sourcePath,
+            baseContentToken = state.baseContentToken,
+            revision = state.revision,
+            payload = payload
+        )
+        if (strongRetryAttempt.matchesRetryFailure(action, state)) {
+            strongRetryAttempt = null
+            pendingMemoryRetry = null
+            updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, isBusy = false, message = "정리 후에도 현재 작업에 필요한 메모리를 확보하지 못했습니다. 이미지와 적용된 편집은 안전하게 유지됩니다.") }
+            return
+        }
+        if (automaticRetryAttempt.matchesRetryFailure(action, state)) {
+            automaticRetryAttempt = null
+            pendingMemoryRetry = descriptor
+            updateUiStateAndRecycleReplaced {
+                it.copy(memoryRecoveryRequest = MemoryRecoveryRequest(descriptor.token, mayMoveOldHistory = true), isBusy = false, message = "자동 정리 후에도 현재 작업에 더 많은 메모리가 필요합니다.")
+            }
+            return
+        }
+        pendingMemoryRetry = descriptor
+        memoryRecoveryJob = viewModelScope.launch {
+            performMemoryCleanup(strong = false)
+            if (isMemoryRetryCurrent(descriptor) && BitmapMemoryBudget.canAllocate(requiredBytes)) {
+                pendingMemoryRetry = null
+                updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, message = "메모리를 자동으로 정리했습니다. 작업을 다시 시도합니다.") }
+                automaticRetryAttempt = descriptor
+                memoryRecoveryJob = null
+                performMemoryRetry(descriptor)
+            } else if (isMemoryRetryCurrent(descriptor)) {
+                updateUiStateAndRecycleReplaced {
+                    it.copy(memoryRecoveryRequest = MemoryRecoveryRequest(descriptor.token, mayMoveOldHistory = true), message = "현재 작업에 더 많은 메모리가 필요합니다.")
+                }
+            }
+        }
+    }
+
+    fun retryPendingMemoryRecovery(token: Long) {
+        val descriptor = pendingMemoryRetry?.takeIf { it.token == token } ?: return
+        if (memoryRecoveryJob?.isActive == true) return
+        memoryRecoveryJob = viewModelScope.launch {
+            performMemoryCleanup(strong = true)
+            if (isMemoryRetryCurrent(descriptor) && BitmapMemoryBudget.canAllocate(descriptor.requiredBytes)) {
+                pendingMemoryRetry = null
+                updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, message = "메모리 정리를 완료했습니다. 작업을 다시 시도합니다.") }
+                strongRetryAttempt = descriptor
+                memoryRecoveryJob = null
+                performMemoryRetry(descriptor)
+            } else if (isMemoryRetryCurrent(descriptor)) {
+                pendingMemoryRetry = null
+                updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, message = "정리 후에도 현재 작업에 필요한 메모리를 확보하지 못했습니다. 이미지와 적용된 편집은 안전하게 유지됩니다.") }
+            }
+        }
+    }
+
+    fun cancelPendingMemoryRecovery(token: Long) {
+        if (pendingMemoryRetry?.token != token) return
+        pendingMemoryRetry = null
+        updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null) }
+    }
+
+    fun onTrimMemory(level: Int) {
+        if (shuttingDown || level < ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW || memoryRecoveryJob?.isActive == true) return
+        memoryRecoveryJob = viewModelScope.launch {
+            performMemoryCleanup(strong = level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL)
+            trimHistoryToBudget()
+        }
+    }
+
+    private suspend fun performMemoryCleanup(strong: Boolean) {
+        renderJob = renderJob?.takeIf { it.isActive }
+        exportJob = exportJob?.takeIf { it.isActive }
+        selectionLivePreviewJob = selectionLivePreviewJob?.takeIf { it.isActive }
+        cropJob = cropJob?.takeIf { it.isActive }
+        managedEditJob = managedEditJob?.takeIf { it.isActive }
+        draftSaveJob = draftSaveJob?.takeIf { it.isActive }
+        transactionFinishJob = transactionFinishJob?.takeIf { it.isActive }
+        historyIoJob = historyIoJob?.takeIf { it.isActive }
+        ThumbnailBitmapCache.evictUnleased()
+        RemasterModelSession.unloadIdleNow()
+        if (!_uiState.value.isBusy && renderJob?.isActive != true && exportJob?.isActive != true) releaseNativeSession()
+        val undoEntries = undoHistory.toList()
+        val redoEntries = redoHistory.toList()
+        val expectedHistoryEpoch = historyEpoch
+        val removedIds = withContext(Dispatchers.IO) {
+            redoEntries.filter { it.hotSnapshot != null }.forEach(historyStorage::spill)
+            val protectedUndo = undoEntries.lastOrNull()?.id
+            undoEntries.filter { it.id != protectedUndo && it.hotSnapshot != null }.forEach(historyStorage::spill)
+            if (strong) cleanupTemporarySourceFiles(getApplication<Application>(), _uiState.value.sourcePath)
+            historyStorage.trimDisk(undoEntries + redoEntries, setOfNotNull(protectedUndo), BitmapMemoryBudget.historyDiskBudgetBytes())
+        }
+        if (historyEpoch != expectedHistoryEpoch) {
+            (undoEntries + redoEntries).forEach(historyStorage::delete)
+            return
+        }
+        if (removedIds.isNotEmpty()) {
+            undoHistory.removeAll { it.id in removedIds }
+            redoHistory.removeAll { it.id in removedIds }
+            updateHistoryFlags()
+        }
+    }
+
+    private fun isMemoryRetryCurrent(descriptor: MemoryRetryDescriptor): Boolean {
+        val state = _uiState.value
+        return !shuttingDown && pendingMemoryRetry == descriptor && state.sourcePath == descriptor.sourcePath &&
+            state.baseContentToken == descriptor.baseContentToken && state.revision == descriptor.revision
+    }
+
+    private fun performMemoryRetry(descriptor: MemoryRetryDescriptor) {
+        if (!isDocumentIdentityCurrent(descriptor)) return
+        when (descriptor.action) {
+            MemoryRetryAction.CreateBrushSelection -> createBrushSelectionInternal()
+            MemoryRetryAction.SubjectSelection -> addSubjectSelectionFromEdgeModel()
+            MemoryRetryAction.MaskAwareRemaster -> applyMaskAwareRemaster()
+            MemoryRetryAction.FlareNight -> applyFlareOriginalMvp()
+            MemoryRetryAction.FlareSun -> applySunFlareOriginalMvp()
+            MemoryRetryAction.DuplicateSelection -> duplicateActiveSelectionLayer()
+            MemoryRetryAction.BackgroundSelection -> createBackgroundSelectionFromActive()
+            MemoryRetryAction.AutoStraightenCrop -> autoStraightenCrop()
+            MemoryRetryAction.ApplySelectionNative -> applyActiveSelectionLocalEditNativeBaked()
+            MemoryRetryAction.ExportPreview -> exportPreview()
+            MemoryRetryAction.OpenImage -> descriptor.payload?.let { openImage(Uri.parse(it)) }
+            MemoryRetryAction.RestoreDraft -> retryDraftRestoreAfterMemory()
+            MemoryRetryAction.RotatePreview -> rotatePreview90()
+        }
+    }
+
+    private fun retryDraftRestoreAfterMemory() {
+        val token = ++restoreDraftToken
+        val revision = _uiState.value.revision
+        viewModelScope.launch { restoreDraftIfAvailable(getApplication<Application>(), token, revision) }
+    }
+
+    private fun isDocumentIdentityCurrent(descriptor: MemoryRetryDescriptor): Boolean {
+        val state = _uiState.value
+        return state.sourcePath == descriptor.sourcePath && state.baseContentToken == descriptor.baseContentToken && state.revision == descriptor.revision
+    }
+
+    internal fun markMemoryRetrySucceeded(action: MemoryRetryAction) {
+        if (automaticRetryAttempt?.action == action) automaticRetryAttempt = null
+        if (strongRetryAttempt?.action == action) strongRetryAttempt = null
+    }
 
     fun updateUiState(transform: (EditorUiState) -> EditorUiState) {
         updateUiStateAndRecycleReplaced(transform)
@@ -416,8 +627,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
         if (state.params != lastSuccessfullyRenderedParams || activeParamRenderRevision != null) return false
         val snapshot = captureCurrentHistorySnapshot() ?: return false
-        val ownedMask = runCatching { layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
+        val ownedMask = runCatching { layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
             recycleHistorySnapshot(snapshot)
+            if (failure is BitmapAllocationRejectedException) {
+                updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 브러시 작업을 시작하지 못했습니다.") }
+            }
             return false
         }
         brushingSnapshot = snapshot
@@ -590,29 +804,37 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         pushUndoSnapshot(clearRedo = clearRedo)
     }
 
-    internal fun captureCurrentHistorySnapshot(protected: EditorHistorySnapshot? = null): EditorHistorySnapshot? {
+    internal fun captureCurrentHistorySnapshot(protected: EditorHistoryEntry? = null): EditorHistorySnapshot? {
         val state = uiState.value
         val required = state.historyBitmapBytes()
-        if (!makeHistoryRoom(required, protected) || !BitmapMemoryBudget.canAllocate(required)) {
+        if (!BitmapMemoryBudget.canAllocate(required)) {
             updateUiStateAndRecycleReplaced {
                 it.copy(message = "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
             }
             return null
         }
-        return runCatching { state.toHistorySnapshot() }.getOrNull()
+        val snapshot = runCatching { state.toHistorySnapshot() }.getOrNull() ?: return null
+        if (!makeHistoryRoom(snapshot.bitmapBytes(), protected)) {
+            recycleHistorySnapshot(snapshot)
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
+            }
+            return null
+        }
+        return snapshot
     }
 
     internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean) {
-        if (!makeHistoryRoom(snapshot.bitmapBytes(), protected = snapshot)) {
+        if (clearRedo) clearRedoAfterAdoptedEdit()
+        if (!makeHistoryRoom(snapshot.bitmapBytes())) {
             recycleHistorySnapshot(snapshot)
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
+            }
             updateHistoryFlags()
             return
         }
-        undoHistory.addLast(snapshot)
-        if (clearRedo) {
-            redoHistory.forEach(::recycleHistorySnapshot)
-            redoHistory.clear()
-        }
+        undoHistory.addLast(EditorHistoryEntry(documentGeneration = historyDocumentGeneration, hotSnapshot = snapshot))
         trimHistoryToBudget()
         updateHistoryFlags()
     }
@@ -919,6 +1141,9 @@ private suspend fun settleCommittedDraft(
                 sourceFile?.delete()
                 if (!shuttingDown && openToken == restoreDraftToken && _uiState.value.revision == invalidateRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC774\uBBF8\uC9C0\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
+                    if (t is BitmapAllocationRejectedException) {
+                        requestAllocationRecovery(MemoryRetryAction.OpenImage, t.requiredBytes, uri.toString())
+                    }
                 }
             }
         }
@@ -1037,12 +1262,9 @@ private suspend fun settleCommittedDraft(
         val quickEffects = current.activeQuickEffects
         val startRevision = current.revision
 
-        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: run {
-            updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정 준비에 실패했습니다.") }
-            return
-        }
+        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
         val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
-            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            undoSnapshot?.let(::recycleHistorySnapshot)
             undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정 준비에 실패했습니다.") }
             return
@@ -1074,7 +1296,7 @@ private suspend fun settleCommittedDraft(
                         )
                     }
                     rendered = null
-                    commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                    settleAdoptedEditHistory(undoSnapshot)
                     undoSnapshot = null
                     scheduleDraftAutosave()
                 } else if (isManagedEditTokenCurrent(operationToken)) {
@@ -1149,12 +1371,8 @@ private suspend fun settleCommittedDraft(
         }
 
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-        if (undoSnapshot == null) {
-            updateUiStateAndRecycleReplaced { it.copy(message = "처리 엔진 변경 준비에 실패했습니다.") }
-            return
-        }
         var ownedBase: Bitmap? = runCatching { basePreview.copyOrThrow() }.getOrElse {
-            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            undoSnapshot?.let(::recycleHistorySnapshot)
             undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = "처리 엔진 변경 준비에 실패했습니다.") }
             return
@@ -1199,7 +1417,7 @@ private suspend fun settleCommittedDraft(
                         )
                     }
                     rendered = null
-                    commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                    settleAdoptedEditHistory(undoSnapshot)
                     undoSnapshot = null
                     scheduleDraftAutosave()
                 } else if (isManagedEditTokenCurrent(operationToken)) {
@@ -1235,10 +1453,6 @@ private suspend fun settleCommittedDraft(
         val baseContentToken = current.baseContentToken
         val startRevision = current.revision
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-        if (undoSnapshot == null) {
-            updateUiStateAndRecycleReplaced { it.copy(message = "초기화 준비에 실패했습니다.") }
-            return
-        }
         val nextRevision = startRevision + 1
         renderJob?.cancel()
         invalidateExport()
@@ -1275,7 +1489,7 @@ private suspend fun settleCommittedDraft(
                         )
                     }
                     decoded = null
-                    commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                    settleAdoptedEditHistory(undoSnapshot)
                     undoSnapshot = null
                     forceDraftSaveAsync()
                 } else if (isManagedEditTokenCurrent(operationToken)) {
@@ -1313,12 +1527,8 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
         }
 
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-        if (undoSnapshot == null) {
-            updateUiStateAndRecycleReplaced { it.copy(message = "편집 기록을 저장하지 못했습니다.") }
-            return PresetApplyResult.Rejected
-        }
         var ownedBase: Bitmap? = runCatching { basePreview.copyOrThrow() }.getOrElse {
-            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            undoSnapshot?.let(::recycleHistorySnapshot)
             undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = "프리셋 적용 준비에 실패했습니다.") }
             return PresetApplyResult.Rejected
@@ -1354,7 +1564,7 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
                     }
                     lastSuccessfullyRenderedParams = params
                     rendered = null
-                    commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                    settleAdoptedEditHistory(undoSnapshot)
                     undoSnapshot = null
                     scheduleDraftAutosave()
                 } else if (isManagedEditTokenCurrent(operationToken)) {
@@ -1447,12 +1657,25 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
         var ownedDirtyBase: Bitmap? = null
         if (exportDirty) {
             val liveBase = state.originalPreviewBitmap ?: state.previewBitmap
-            if (liveBase == null || !BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(liveBase))) {
+            val dirtyPeakBytes = liveBase?.let { bitmap ->
+                val scale = exportResolution.scalePercent / 100f
+                BitmapMemoryBudget.saturatingAdd(
+                    BitmapMemoryBudget.bytes(bitmap),
+                    BitmapMemoryBudget.bytes(
+                        (bitmap.width * scale).roundToInt().coerceAtLeast(1),
+                        (bitmap.height * scale).roundToInt().coerceAtLeast(1),
+                        bitmap.config
+                    )
+                )
+            } ?: Long.MAX_VALUE
+            if (liveBase == null || !BitmapMemoryBudget.canAllocate(dirtyPeakBytes)) {
                 updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.") }
+                requestAllocationRecovery(MemoryRetryAction.ExportPreview, dirtyPeakBytes)
                 return
             }
-            ownedDirtyBase = runCatching { liveBase?.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse {
+            ownedDirtyBase = runCatching { liveBase.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
                 updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 내보내기를 준비하지 못했습니다.") }
+                if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.ExportPreview, failure.requiredBytes)
                 return
             }
             if (ownedDirtyBase == null) {
@@ -1461,6 +1684,7 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
             }
         } else if (!canPreflightCleanExport(sourcePath, exportResolution)) {
             updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.") }
+            requestAllocationRecovery(MemoryRetryAction.ExportPreview, estimateCleanExportPeakBytes(sourcePath, exportResolution))
             return
         }
 
@@ -1513,6 +1737,7 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
                 val exportResult = ownedExportResult ?: run {
                     return@launch
                 }
+                markMemoryRetrySucceeded(MemoryRetryAction.ExportPreview)
                 val exportedResolutionLabel = "${exportResult.width}x${exportResult.height}"
 
                 pendingUri = withContext(Dispatchers.IO) {
@@ -1600,6 +1825,7 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
                 }
                 if (!published && isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uB0B4\uBCF4\uB0B4\uAE30\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
+                    if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.ExportPreview, t.requiredBytes)
                 }
             } finally {
                 val owned = identityBitmapSet()
@@ -1859,64 +2085,116 @@ fun clearDraft() {
         // TODO v0.2: viewport가 scale 임계값 이상이면 ROI 타일 렌더 Job 발행.
     }
 
-    fun undoEdit() {
+    fun undoEdit() = navigateHistory(undo = true)
+
+    fun redoEdit() = navigateHistory(undo = false)
+
+    private fun navigateHistory(undo: Boolean) {
         if (!canEnterEditorAction()) return
+        if (historyIoJob?.isActive == true) {
+            updateUiStateAndRecycleReplaced { it.copy(message = "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요.") }
+            return
+        }
         invalidateSelectionPreview()
         abortPendingParameterEdit()
         invalidateCropOperation()
-        if (undoHistory.isEmpty()) {
-            updateUiStateAndRecycleReplaced { it.copy(message = "되돌릴 편집 기록이 없습니다.") }
+        val source = if (undo) undoHistory else redoHistory
+        if (source.isEmpty()) {
+            updateUiStateAndRecycleReplaced { it.copy(message = if (undo) "되돌리기 편집 기록이 없습니다." else "다시 실행할 편집 기록이 없습니다.") }
             return
         }
         renderJob?.cancel()
         invalidateExport()
-        val redoSnapshot = try {
-            captureCurrentHistorySnapshot(undoHistory.last()) ?: return
-        } catch (t: Throwable) {
-            Log.w(FLARE_GUARD_AI_TAG, "Failed to create redo snapshot", t)
-            updateUiStateAndRecycleReplaced {
-                it.copy(message = "되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
-            }
+        val target = source.last()
+        if (target.payloadState == HistoryPayloadState.Spilling || target.payloadState == HistoryPayloadState.Loading || target.payloadState == HistoryPayloadState.Adopting) {
+            updateUiStateAndRecycleReplaced { it.copy(message = "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요.") }
             return
         }
-        redoHistory.addLast(redoSnapshot)
-        val snapshot = undoHistory.removeLast()
-        val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "이전 편집 상태를 적용했습니다")
-        applyHistorySnapshot(snapshot, message)
-        scheduleDraftAutosave()
-        trimHistoryToBudget()
-        updateHistoryFlags()
-        Log.i(FLARE_GUARD_AI_TAG, "Undo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
+        val currentSnapshot = captureCurrentHistorySnapshot(target) ?: return
+        val expected = _uiState.value
+        val token = ++historyNavigationToken
+        val hot = target.hotSnapshot
+        if (hot != null) {
+            settleHistoryNavigation(undo, target, hot, currentSnapshot, expected, token)
+            return
+        }
+        updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "저장된 편집 기록을 불러오는 중입니다.") }
+        var loaded: EditorHistorySnapshot? = null
+        historyIoJob = viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    loaded = historyStorage.load(target, historyDocumentGeneration)
+                    loaded
+                }
+                val snapshot = loaded ?: error("cold history load failed")
+                settleHistoryNavigation(undo, target, snapshot, currentSnapshot, expected, token)
+                loaded = null
+            } catch (ce: CancellationException) {
+                currentSnapshot.recycleBitmaps()
+                if (historyNavigationToken == token && !shuttingDown) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
+                }
+                throw ce
+            } catch (_: Throwable) {
+                currentSnapshot.recycleBitmaps()
+                if (historyNavigationToken == token && !shuttingDown) {
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "저장된 편집 기록을 불러오지 못했습니다. 현재 편집과 기록은 유지됩니다.") }
+                }
+            } finally {
+                loaded?.recycleBitmaps()
+                if (historyIoJob === currentCoroutineContext()[Job]) historyIoJob = null
+            }
+        }
     }
 
-    fun redoEdit() {
-        if (!canEnterEditorAction()) return
-        invalidateSelectionPreview()
-        abortPendingParameterEdit()
-        invalidateCropOperation()
-        if (redoHistory.isEmpty()) {
-            updateUiStateAndRecycleReplaced { it.copy(message = "다시 실행할 편집 기록이 없습니다.") }
+    private fun settleHistoryNavigation(
+        undo: Boolean,
+        target: EditorHistoryEntry,
+        snapshot: EditorHistorySnapshot,
+        currentSnapshot: EditorHistorySnapshot,
+        expected: EditorUiState,
+        token: Long
+    ) {
+        val source = if (undo) undoHistory else redoHistory
+        val destination = if (undo) redoHistory else undoHistory
+        val current = _uiState.value
+        val valid = !shuttingDown && historyNavigationToken == token && source.lastOrNull() === target &&
+            current.baseContentToken == expected.baseContentToken && current.revision == expected.revision
+        if (!valid) {
+            if (snapshot !== target.hotSnapshot) snapshot.recycleBitmaps()
+            currentSnapshot.recycleBitmaps()
+            if (!shuttingDown) updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
             return
         }
-        renderJob?.cancel()
-        invalidateExport()
-        val undoSnapshot = try {
-            captureCurrentHistorySnapshot(redoHistory.last()) ?: return
-        } catch (t: Throwable) {
-            Log.w(FLARE_GUARD_AI_TAG, "Failed to create undo snapshot for redo", t)
-            updateUiStateAndRecycleReplaced {
-                it.copy(message = "되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
-            }
-            return
-        }
-        undoHistory.addLast(undoSnapshot)
-        val snapshot = redoHistory.removeLast()
-        val message = buildHistoryAppliedMessage(_uiState.value, snapshot, "다음 편집 상태를 적용했습니다")
+        target.payloadState = HistoryPayloadState.Adopting
+        val message = buildHistoryAppliedMessage(current, snapshot, if (undo) "이전 편집 상태를 적용했습니다" else "다음 편집 상태를 적용했습니다")
         applyHistorySnapshot(snapshot, message)
+        source.removeLast()
+        target.hotSnapshot = null
+        historyStorage.deleteColdPayload(target)
+        destination.addLast(EditorHistoryEntry(documentGeneration = historyDocumentGeneration, hotSnapshot = currentSnapshot))
         scheduleDraftAutosave()
         trimHistoryToBudget()
         updateHistoryFlags()
-        Log.i(FLARE_GUARD_AI_TAG, "Redo editor snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
+    }
+
+    internal fun clearRedoAfterAdoptedEdit() {
+        if (redoHistory.isEmpty()) return
+        redoHistory.forEach(historyStorage::delete)
+        redoHistory.clear()
+        updateHistoryFlags()
+    }
+
+    internal fun settleAdoptedEditHistory(snapshot: EditorHistorySnapshot?) {
+        automaticRetryAttempt = null
+        strongRetryAttempt = null
+        if (snapshot != null) commitUndoSnapshot(snapshot, clearRedo = true)
+        else {
+            clearRedoAfterAdoptedEdit()
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "편집은 적용했지만 메모리가 부족하여 이번 되돌리기 기록은 저장하지 못했습니다.")
+            }
+        }
     }
 
     fun rotatePreview90() {
@@ -1932,7 +2210,7 @@ fun clearDraft() {
             updateUiStateAndRecycleReplaced { it.copy(message = "회전할 이미지가 없습니다.") }
             return
         }
-        val undoSnapshot = captureCurrentHistorySnapshot() ?: return
+        val undoSnapshot = captureCurrentHistorySnapshot()
         var rotatedPreview: Bitmap? = null
         var rotatedOriginal: Bitmap? = null
         val rotatedMasks = ArrayList<Bitmap>(current.selectionLayers.size)
@@ -1972,7 +2250,7 @@ fun clearDraft() {
             rotatedPreview = null
             if (rotatedOriginal !== adoptedPreview) rotatedOriginal = null
             rotatedMasks.clear()
-            commitUndoSnapshot(undoSnapshot, clearRedo = true)
+            settleAdoptedEditHistory(undoSnapshot)
             forceDraftSaveAsync()
             Log.i(FLARE_GUARD_AI_TAG, "Rotated preview manually: ${preview.width}x${preview.height} -> ${adoptedPreview.width}x${adoptedPreview.height}")
         } catch (t: Throwable) {
@@ -1980,8 +2258,9 @@ fun clearDraft() {
             listOf(rotatedPreview, rotatedOriginal).forEach { it?.let(cleanup::add) }
             rotatedMasks.forEach(cleanup::add)
             cleanup.forEach { if (!it.isRecycled) it.recycle() }
-            recycleHistorySnapshot(undoSnapshot)
+            undoSnapshot?.let(::recycleHistorySnapshot)
             updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 회전에 실패했습니다.") }
+            if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.RotatePreview, t.requiredBytes)
         }
     }
 
@@ -2046,12 +2325,8 @@ fun clearDraft() {
         val nextActiveQuickEffects = currentQuickEffects.toggle(effect)
         if (nextActiveQuickEffects == currentQuickEffects) return
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-        if (undoSnapshot == null) {
-            updateUiStateAndRecycleReplaced { it.copy(message = failureMessage) }
-            return
-        }
         var ownedBase: Bitmap? = try { baseOriginal.copyOrThrow() } catch (t: Throwable) {
-            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            undoSnapshot?.let(::recycleHistorySnapshot)
             undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = failureMessage) }
             return
@@ -2104,7 +2379,7 @@ fun clearDraft() {
                         )
                     }
                     renderedPreview = null
-                    commitUndoSnapshot(checkNotNull(undoSnapshot), clearRedo = true)
+                    settleAdoptedEditHistory(undoSnapshot)
                     undoSnapshot = null
                     forceDraftSaveAsync()
                 } else if (isManagedEditTokenCurrent(operationToken)) {
@@ -2147,12 +2422,9 @@ fun clearDraft() {
         }
         val nextRevision = current.revision + 1
 
-        val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot() ?: run {
-            updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화 준비에 실패했습니다.") }
-            return
-        }
+        val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
         val ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse {
-            recycleHistorySnapshot(checkNotNull(undoSnapshot))
+            undoSnapshot?.let(::recycleHistorySnapshot)
             updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화 준비에 실패했습니다.") }
             return
         }
@@ -2226,7 +2498,7 @@ fun clearDraft() {
                     }
                     flareGuardBitmap = null
                     renderedPreview = null
-                    commitUndoSnapshot(checkNotNull(undoSnapshotOwned), clearRedo = true)
+                    settleAdoptedEditHistory(undoSnapshotOwned)
                     undoSnapshotOwned = null
                     forceDraftSaveAsync()
                     Log.i(FLARE_GUARD_AI_TAG, "Finished FlareGuard preview: mode=$mode status=${flareGuardResult!!.status} output=${flareGuardResult!!.bitmap.width}x${flareGuardResult!!.bitmap.height}")
@@ -2312,13 +2584,7 @@ fun clearDraft() {
                 val decodedBase = decodeSampledMutableBitmapWithExif(workingSource.absolutePath, maxSide = 2048)
                 ownedBase = decodedBase
                 validated.maskFiles.forEach { file ->
-                    val mask = BitmapFactory.decodeFile(
-                        file.absolutePath,
-                        BitmapFactory.Options().apply {
-                            inPreferredConfig = Bitmap.Config.ARGB_8888
-                            inMutable = true
-                        }
-                    ) ?: error("draft mask decode failed")
+                    val mask = decodeMutableBitmapOrThrow(file.absolutePath)
                     try {
                         ownedMasks += mask
                     } catch (t: Throwable) {
@@ -2462,6 +2728,15 @@ restoreStateAdopted = true
             if (restoreStateAdopted) {
                 return GenerationRestoreOutcome.Restored
             }
+            if (t is BitmapAllocationRejectedException) {
+                if (!shuttingDown && restoreToken == restoreDraftToken && _uiState.value.revision == restoreStartRevision) {
+                    updateUiStateAndRecycleReplaced {
+                        it.copy(isBusy = false, message = "메모리가 부족하여 임시저장 복구를 완료하지 못했습니다. 기존 편집과 임시저장은 안전합니다.")
+                    }
+                    requestAllocationRecovery(MemoryRetryAction.RestoreDraft, t.requiredBytes)
+                }
+                return GenerationRestoreOutcome.MemoryRejected(t.requiredBytes)
+            }
             if (withContext(Dispatchers.IO) { currentDraftGenerationId(context) } != pointer) {
                 if (!shuttingDown && restoreToken == restoreDraftToken && _uiState.value.revision == restoreStartRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
@@ -2494,6 +2769,7 @@ restoreStateAdopted = true
         val generationRestore = restoreCurrentDraftGeneration(context, restoreToken, restoreStartRevision)
         if (generationRestore == GenerationRestoreOutcome.Restored) return
         if (generationRestore == GenerationRestoreOutcome.Stale) return
+        if (generationRestore is GenerationRestoreOutcome.MemoryRejected) return
         if (generationRestore is GenerationRestoreOutcome.Invalid) {
             val cleared = withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
@@ -2702,6 +2978,9 @@ restoreStateAdopted = true
                 (currentRevision == restoreStartRevision || currentRevision == expectedRestoreRevision)
             if (isRestoreStillCurrent) {
                 updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC784\uC2DC\uC800\uC7A5\uC744 \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
+                if (t is BitmapAllocationRejectedException) {
+                    requestAllocationRecovery(MemoryRetryAction.RestoreDraft, t.requiredBytes)
+                }
             }
         }
     }
@@ -2774,29 +3053,9 @@ restoreStateAdopted = true
         closeParamUndoWindow()
         val state = _uiState.value
         if (state.previewBitmap == null && state.originalPreviewBitmap == null) return
-        val snapshot = captureCurrentHistorySnapshot() ?: return
-        if (!makeHistoryRoom(snapshot.bitmapBytes(), protected = snapshot)) {
-            recycleHistorySnapshot(snapshot)
-            updateHistoryFlags()
-            return
-        }
-        try {
-            undoHistory.addLast(snapshot)
-            if (clearRedo) {
-                redoHistory.forEach(::recycleHistorySnapshot)
-                redoHistory.clear()
-            }
-            trimHistoryToBudget()
-            updateHistoryFlags()
-            Log.i(FLARE_GUARD_AI_TAG, "Pushed undo snapshot: undo=${undoHistory.size} redo=${redoHistory.size}")
-        } catch (t: Throwable) {
-            undoHistory.remove(snapshot)
-            recycleHistorySnapshot(snapshot)
-            Log.w(FLARE_GUARD_AI_TAG, "Failed to create undo snapshot", t)
-            updateUiStateAndRecycleReplaced {
-                it.copy(message = "되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
-            }
-        }
+        val snapshot = captureCurrentHistorySnapshot()
+        if (snapshot != null) commitUndoSnapshot(snapshot, clearRedo)
+        else if (clearRedo) clearRedoAfterAdoptedEdit()
     }
 
     private fun applyHistorySnapshot(snapshot: EditorHistorySnapshot, message: String) {
@@ -2837,7 +3096,7 @@ restoreStateAdopted = true
         while (undoHistory.size > EDITOR_HISTORY_MAX) {
             if (undoHistory.isEmpty()) break
             val evicted = undoHistory.removeFirst()
-            recycleHistorySnapshot(evicted)
+            historyStorage.delete(evicted)
             Log.d(FLARE_GUARD_AI_TAG, "Evicted history snapshot")
         }
     }
@@ -2847,35 +3106,58 @@ restoreStateAdopted = true
         *redoHistory.map { it.bitmapBytes() }.toLongArray()
     )
 
-    private fun makeHistoryRoom(requiredBytes: Long, protected: EditorHistorySnapshot? = null): Boolean {
+    private fun makeHistoryRoom(requiredBytes: Long, protected: EditorHistoryEntry? = null): Boolean {
         if (requiredBytes <= 0L || requiredBytes > BitmapMemoryBudget.historyBudgetBytes()) return false
-        while (BitmapMemoryBudget.saturatingAdd(historyBytes(), requiredBytes) > BitmapMemoryBudget.historyBudgetBytes()) {
-            val evicted = undoHistory.firstOrNull { it !== protected }
-                ?: redoHistory.firstOrNull { it !== protected }
-                ?: return false
-            if (undoHistory.remove(evicted) || redoHistory.remove(evicted)) recycleHistorySnapshot(evicted)
-        }
-        return true
+        return BitmapMemoryBudget.saturatingAdd(historyBytes(), requiredBytes) <= BitmapMemoryBudget.historyBudgetBytes() ||
+            (undoHistory + redoHistory).any { it !== protected && it.hotSnapshot != null && it.payloadState == HistoryPayloadState.Hot }
     }
 
     private fun trimHistoryToBudget() {
-        while (historyBytes() > BitmapMemoryBudget.historyBudgetBytes()) {
-            val evicted = when {
-                undoHistory.isNotEmpty() -> undoHistory.removeFirst()
-                redoHistory.isNotEmpty() -> redoHistory.removeFirst()
-                else -> return
-            }
-            recycleHistorySnapshot(evicted)
-        }
         trimUndoHistory()
+        if (historyBytes() <= BitmapMemoryBudget.historyBudgetBytes() || historyIoJob?.isActive == true) return
+        val protected = setOfNotNull(undoHistory.lastOrNull()?.id, redoHistory.lastOrNull()?.id)
+        val entries = undoHistory.toList() + redoHistory.toList()
+        val spillable = entries.filter { it.payloadState == HistoryPayloadState.Hot && it.hotSnapshot != null }
+        val candidates = spillable.filter { it.id !in protected } + spillable.filter { it.id in protected }
+        val expectedHistoryEpoch = historyEpoch
+        historyIoJob = viewModelScope.launch(Dispatchers.IO) {
+            var moved = false
+            for (entry in candidates) {
+                val residentBytes = entries.fold(0L) { bytes, candidate ->
+                    BitmapMemoryBudget.saturatingAdd(bytes, candidate.bitmapBytes())
+                }
+                if (residentBytes <= BitmapMemoryBudget.historyBudgetBytes()) break
+                moved = historyStorage.spill(entry) || moved
+            }
+            val removedIds = historyStorage.trimDisk(entries, protected, BitmapMemoryBudget.historyDiskBudgetBytes())
+            if (historyEpoch != expectedHistoryEpoch) {
+                entries.forEach(historyStorage::delete)
+                return@launch
+            }
+            if ((moved || removedIds.isNotEmpty()) && !shuttingDown) withContext(Dispatchers.Main) {
+                undoHistory.removeAll { it.id in removedIds }
+                redoHistory.removeAll { it.id in removedIds }
+                updateHistoryFlags()
+                if (moved) updateUiStateAndRecycleReplaced { it.copy(message = "오래된 편집 기록을 저장소로 옮겼습니다.") }
+            }
+        }
     }
 
     private fun clearEditHistory() {
+        historyEpoch += 1L
+        historyDocumentGeneration = UUID.randomUUID().toString()
+        historyNavigationToken += 1L
+        automaticRetryAttempt = null
+        strongRetryAttempt = null
+        pendingMemoryRetry = null
+        historyIoJob?.cancel()
+        historyIoJob = null
         discardPendingParamUndoSnapshot()
-        undoHistory.forEach(::recycleHistorySnapshot)
-        redoHistory.forEach(::recycleHistorySnapshot)
+        undoHistory.forEach(historyStorage::delete)
+        redoHistory.forEach(historyStorage::delete)
         undoHistory.clear()
         redoHistory.clear()
+        if (!shuttingDown) updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null) }
         updateHistoryFlags()
     }
 
@@ -2904,12 +3186,44 @@ restoreStateAdopted = true
         paramUndoWindowJob?.cancel()
         cropJob?.cancel()
         transactionFinishJob?.cancel()
+        memoryRecoveryJob?.cancel()
+        pendingMemoryRetry = null
         ThumbnailBitmapCache.clear()
         releaseNativeSession()
         clearEditHistory()
         super.onCleared()
     }
 }
+
+internal enum class MemoryRetryAction {
+    CreateBrushSelection,
+    SubjectSelection,
+    MaskAwareRemaster,
+    FlareNight,
+    FlareSun,
+    DuplicateSelection,
+    BackgroundSelection,
+    AutoStraightenCrop,
+    ApplySelectionNative,
+    ExportPreview,
+    OpenImage,
+    RestoreDraft,
+    RotatePreview
+}
+
+internal data class MemoryRetryDescriptor(
+    val token: Long,
+    val action: MemoryRetryAction,
+    val requiredBytes: Long,
+    val sourcePath: String?,
+    val baseContentToken: String,
+    val revision: Int,
+    val payload: String?
+)
+
+private fun MemoryRetryDescriptor?.matchesRetryFailure(action: MemoryRetryAction, state: EditorUiState): Boolean =
+    this != null && this.action == action && this.sourcePath == state.sourcePath && this.baseContentToken == state.baseContentToken &&
+        state.revision.toLong() in this.revision.toLong()..(this.revision.toLong() + 1L)
 
 internal data class EditorHistorySnapshot(
     val params: EditParams,
@@ -3086,21 +3400,36 @@ private fun identityBitmapSet(): MutableSet<Bitmap> =
 
 internal fun Bitmap.copyOrThrow(config: Bitmap.Config = Bitmap.Config.ARGB_8888, mutable: Boolean = true): Bitmap {
     check(!isRecycled) { "bitmap is recycled" }
-    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(width, height, config))) { "insufficient bitmap memory" }
-    return copy(config, mutable) ?: throw IllegalStateException("bitmap copy failed")
+    val required = BitmapMemoryBudget.bytes(width, height, config)
+    if (!BitmapMemoryBudget.canAllocate(required)) throw BitmapAllocationRejectedException(required)
+    return try {
+        copy(config, mutable) ?: throw IllegalStateException("bitmap copy failed")
+    } catch (_: OutOfMemoryError) {
+        throw BitmapAllocationRejectedException(required)
+    }
 }
 
 internal fun createBitmapOrThrow(width: Int, height: Int, config: Bitmap.Config = Bitmap.Config.ARGB_8888): Bitmap {
-    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(width, height, config))) { "insufficient bitmap memory" }
-    return Bitmap.createBitmap(width, height, config)
+    val required = BitmapMemoryBudget.bytes(width, height, config)
+    if (!BitmapMemoryBudget.canAllocate(required)) throw BitmapAllocationRejectedException(required)
+    return try {
+        Bitmap.createBitmap(width, height, config)
+    } catch (_: OutOfMemoryError) {
+        throw BitmapAllocationRejectedException(required)
+    }
 }
 
 internal fun createScaledBitmapOrThrow(bitmap: Bitmap, width: Int, height: Int, filter: Boolean): Bitmap {
-    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(width, height, bitmap.config))) { "insufficient bitmap memory" }
-    return Bitmap.createScaledBitmap(bitmap, width, height, filter)
+    val required = BitmapMemoryBudget.bytes(width, height, bitmap.config)
+    if (!BitmapMemoryBudget.canAllocate(required)) throw BitmapAllocationRejectedException(required)
+    return try {
+        Bitmap.createScaledBitmap(bitmap, width, height, filter)
+    } catch (_: OutOfMemoryError) {
+        throw BitmapAllocationRejectedException(required)
+    }
 }
 
-private fun EditorHistorySnapshot.recycleBitmaps() {
+internal fun EditorHistorySnapshot.recycleBitmaps() {
     if (resourcesReleased) {
         Log.w(FLARE_GUARD_AI_TAG, "History bitmap release underflow: snapshot already released")
         return
@@ -3434,20 +3763,27 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
         (bounds.outWidth + sample - 1) / sample,
         (bounds.outHeight + sample - 1) / sample
     )
-    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.saturatingMultiply(estimatedBytes, 2L))) {
-        "insufficient bitmap memory"
-    }
+    val decodePeakBytes = BitmapMemoryBudget.saturatingMultiply(estimatedBytes, 2L)
+    if (!BitmapMemoryBudget.canAllocate(decodePeakBytes)) throw BitmapAllocationRejectedException(decodePeakBytes)
 
     val options = BitmapFactory.Options().apply {
         inSampleSize = sample
         inPreferredConfig = Bitmap.Config.ARGB_8888
         inMutable = true
     }
-    val decoded = requireNotNull(BitmapFactory.decodeFile(path, options)) { "미리보기 디코딩에 실패했습니다" }
-    if (decoded.config == Bitmap.Config.ARGB_8888 && decoded.isMutable) return decoded
-    val mutable = decoded.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-    decoded.recycle()
-    return mutable
+    var decoded: Bitmap? = null
+    try {
+        decoded = requireNotNull(BitmapFactory.decodeFile(path, options)) { "미리보기 디코딩에 실패했습니다" }
+        if (decoded!!.config == Bitmap.Config.ARGB_8888 && decoded!!.isMutable) return decoded!!
+        val mutable = decoded!!.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+        decoded!!.recycle()
+        decoded = null
+        return mutable
+    } catch (t: Throwable) {
+        decoded?.takeUnless(Bitmap::isRecycled)?.recycle()
+        if (t is OutOfMemoryError) throw BitmapAllocationRejectedException(decodePeakBytes)
+        throw t
+    }
 }
 
 private fun decodeSampledMutableBitmapWithExif(path: String, maxSide: Int): Bitmap {
@@ -3481,21 +3817,41 @@ private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
         else -> return bitmap
     }
 
-    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.saturatingMultiply(BitmapMemoryBudget.bytes(bitmap), 2L))) {
-        "insufficient bitmap memory"
+    val transformPeakBytes = BitmapMemoryBudget.saturatingMultiply(BitmapMemoryBudget.bytes(bitmap), 2L)
+    if (!BitmapMemoryBudget.canAllocate(transformPeakBytes)) {
+        if (!bitmap.isRecycled) bitmap.recycle()
+        throw BitmapAllocationRejectedException(transformPeakBytes)
     }
-    val transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-    if (transformed !== bitmap) bitmap.recycle()
-    val mutable = transformed.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-    if (mutable !== transformed) transformed.recycle()
-    Log.i(FLARE_GUARD_AI_TAG, "Applied EXIF orientation=$orientation -> ${mutable.width}x${mutable.height}")
-    return mutable
+    var transformed: Bitmap? = null
+    var mutable: Bitmap? = null
+    try {
+        transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        mutable = transformed!!.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+        if (transformed !== bitmap && !transformed!!.isRecycled) transformed!!.recycle()
+        if (mutable !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+        val result = mutable!!
+        mutable = null
+        transformed = null
+        Log.i(FLARE_GUARD_AI_TAG, "Applied EXIF orientation=$orientation -> ${result.width}x${result.height}")
+        return result
+    } catch (t: Throwable) {
+        mutable?.takeUnless(Bitmap::isRecycled)?.recycle()
+        transformed?.takeUnless { it === bitmap || it.isRecycled }?.recycle()
+        if (transformed !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+        if (t is OutOfMemoryError) throw BitmapAllocationRejectedException(transformPeakBytes)
+        throw t
+    }
 }
 
 private fun rotateBitmap90(bitmap: Bitmap): Bitmap {
     val matrix = Matrix().apply { postRotate(90f) }
-    check(BitmapMemoryBudget.canAllocate(BitmapMemoryBudget.bytes(bitmap))) { "insufficient bitmap memory" }
-    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    val requiredBytes = BitmapMemoryBudget.bytes(bitmap)
+    if (!BitmapMemoryBudget.canAllocate(requiredBytes)) throw BitmapAllocationRejectedException(requiredBytes)
+    return try {
+        Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    } catch (_: OutOfMemoryError) {
+        throw BitmapAllocationRejectedException(requiredBytes)
+    }
 }
 
 private fun CropAspectRatio.rotatedForQuarterTurn(): CropAspectRatio = when (this) {
@@ -3552,9 +3908,14 @@ internal fun applyActiveQuickEffectsToBitmap(
 }
 
 private fun canPreflightCleanExport(sourcePath: String, resolution: ExportResolution): Boolean {
+    val requiredBytes = estimateCleanExportPeakBytes(sourcePath, resolution)
+    return requiredBytes != Long.MAX_VALUE && BitmapMemoryBudget.canAllocate(requiredBytes)
+}
+
+private fun estimateCleanExportPeakBytes(sourcePath: String, resolution: ExportResolution): Long {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(sourcePath, bounds)
-    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return false
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return Long.MAX_VALUE
     var sample = 1
     val longest = max(bounds.outWidth, bounds.outHeight)
     while (longest / sample > EXPORT_MAX_SIDE) sample *= 2
@@ -3566,9 +3927,7 @@ private fun canPreflightCleanExport(sourcePath: String, resolution: ExportResolu
         (decodedWidth * scale).roundToInt().coerceAtLeast(1),
         (decodedHeight * scale).roundToInt().coerceAtLeast(1)
     )
-    return BitmapMemoryBudget.canAllocate(
-        BitmapMemoryBudget.saturatingAdd(BitmapMemoryBudget.saturatingMultiply(decodedBytes, 3L), scaledBytes)
-    )
+    return BitmapMemoryBudget.saturatingAdd(BitmapMemoryBudget.saturatingMultiply(decodedBytes, 3L), scaledBytes)
 }
 
 private fun renderEditedExport(
@@ -3949,6 +4308,7 @@ private sealed class GenerationRestoreOutcome {
     data object Restored : GenerationRestoreOutcome()
     data object Absent : GenerationRestoreOutcome()
     data object Stale : GenerationRestoreOutcome()
+    data class MemoryRejected(val requiredBytes: Long) : GenerationRestoreOutcome()
     data class Invalid(val generationId: String) : GenerationRestoreOutcome()
 }
 
@@ -3966,7 +4326,7 @@ private fun EditorUiState.historyBitmapBytes(): Long {
     return BitmapMemoryBudget.saturatingAdd(*bitmaps.map(BitmapMemoryBudget::bytes).toLongArray())
 }
 
-private fun EditorHistorySnapshot.bitmapBytes(): Long {
+internal fun EditorHistorySnapshot.bitmapBytes(): Long {
     val bitmaps = identityBitmapSet()
     previewBitmap?.let(bitmaps::add)
     originalPreviewBitmap?.let(bitmaps::add)
