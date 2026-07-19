@@ -1648,7 +1648,6 @@ fun clearDraft() {
                             .remove(KEY_DRAFT_SAVED_AT)
                             .commit()
                         if (!committed) {
-                            // Rollback prefs, pointer, baseline - verify restoration
                             val prefsRestored = restoreDraftPreferencesOrThrow(prefs, prevPrefs, IllegalStateException("failed to clear draft prefs"))
                             if (!prefsRestored) {
                                 logDraftSaveFailure(IllegalStateException("clearDraft pref rollback failed"))
@@ -1661,11 +1660,8 @@ fun clearDraft() {
                             if (!pointerRestored) {
                                 logDraftSaveFailure(IllegalStateException("clearDraft pointer rollback failed"))
                             }
-                            draftPointerBaseline = if (prefsRestored && pointerRestored) {
-                                currentDraftGenerationId(context)
-                            } else {
-                                expectedBaseline
-                            }
+                            val currentPointer = currentDraftGenerationId(context)
+                            draftPointerBaseline = currentPointer
                             return@withLock false
                         }
 
@@ -1716,11 +1712,8 @@ fun clearDraft() {
                                 if (!pointerRestored) {
                                     logDraftSaveFailure(IllegalStateException("clearDraft supersession pointer rollback failed"))
                                 }
-                                draftPointerBaseline = if (prefsRestored && pointerRestored) {
-                                    currentDraftGenerationId(context)
-                                } else {
-                                    expectedBaseline
-                                }
+                                val currentPointer = currentDraftGenerationId(context)
+                                draftPointerBaseline = currentPointer
                                 return@withLock false
                             }
                             state = _uiState.value
@@ -1731,24 +1724,34 @@ fun clearDraft() {
 
                         // Durable clear succeeded — cleanup is best-effort from here
                         val liveSourceCanonical = liveSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() }
+                        val legacyDraftSourceCanonical = legacyDraftSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() }
                         runCatching {
                             persistentDraftDirectory(context).listFiles()?.forEach { file ->
                                 val canonical = runCatching { file.canonicalFile }.getOrNull()
                                 val isLiveSource = canonical != null && liveSourceCanonical != null && canonical == liveSourceCanonical
                                 if (isLiveSource) return@forEach
                                 if (file.name.endsWith(".tmp")) {
-                                    file.delete()
+                                    val deleted = file.delete()
+                                    if (!deleted) logDraftSaveFailure(IllegalStateException("failed to delete temp file: ${file.absolutePath}"))
                                     return@forEach
                                 }
-                                val isLegacyPayload = file.name == DRAFT_SOURCE_FILE_NAME && legacyDraftSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() } == canonical
-                                if (isLegacyPayload) file.delete()
+                                val matchesLegacySource = canonical != null && legacyDraftSourceCanonical != null && canonical == legacyDraftSourceCanonical
+                                val isOwnedDraft = matchesLegacySource && isOwnedDraftSource(context, file)
+                                if (matchesLegacySource && isOwnedDraft) {
+                                    val deleted = file.delete()
+                                    if (!deleted) logDraftSaveFailure(IllegalStateException("failed to delete legacy draft source: ${file.absolutePath}"))
+                                }
                             }
                         }.onFailure { logDraftSaveFailure(it) }
                         runCatching {
                             expectedPointer?.let { deleteDraftGenerationById(context, it) }
                         }.onFailure { logDraftSaveFailure(it) }
                         runCatching {
-                            persistentDraftThumbnailFile(context).delete()
+                            val thumbFile = persistentDraftThumbnailFile(context)
+                            if (thumbFile.isFile) {
+                                val deleted = thumbFile.delete()
+                                if (!deleted) logDraftSaveFailure(IllegalStateException("failed to delete draft thumbnail: ${thumbFile.absolutePath}"))
+                            }
                         }.onFailure { logDraftSaveFailure(it) }
                         runCatching {
                             expectedPointer?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
@@ -4543,7 +4546,7 @@ private inline fun <reified T : Enum<T>> enumValueOrDefault(name: String?, defau
 
 private fun exportTimestamp(): String = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
-private const val FLARE_GUARD_AI_TAG = "KeplerFlareAI"
+internal const val FLARE_GUARD_AI_TAG = "KeplerFlareAI"
 private const val EDITOR_HISTORY_MAX = 5
 private const val EXPORT_MAX_SIDE = 8192
 private const val DRAFT_SOURCE_FILE_NAME = "source.img"

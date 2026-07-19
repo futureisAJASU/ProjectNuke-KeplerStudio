@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -138,8 +139,12 @@ internal fun deleteDraftDirectory(context: Context, directory: DraftGenerationDi
     val root = draftGenerationsRoot(context).canonicalFile
     val target = runCatching { directory.root.canonicalFile }.getOrNull() ?: return
     if (target.parentFile != root) return
-    target.listFiles()?.forEach { it.delete() }
-    target.delete()
+    target.listFiles()?.forEach { file ->
+        val deleted = file.delete()
+        if (!deleted) Log.w(FLARE_GUARD_AI_TAG, "Failed to delete draft generation file: ${file.absolutePath}")
+    }
+    val deleted = target.delete()
+    if (!deleted) Log.w(FLARE_GUARD_AI_TAG, "Failed to delete draft generation directory: ${target.absolutePath}")
 }
 
 internal fun publishDraftGeneration(context: Context, generationId: String): Boolean {
