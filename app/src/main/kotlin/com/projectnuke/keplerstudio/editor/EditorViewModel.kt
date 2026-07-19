@@ -1650,9 +1650,22 @@ fun clearDraft() {
                         if (!committed) {
                             // Rollback prefs, pointer, baseline - verify restoration
                             val prefsRestored = restoreDraftPreferencesOrThrow(prefs, prevPrefs, IllegalStateException("failed to clear draft prefs"))
-                            val pointerRestored = expectedPointer?.let { publishDraftGeneration(context, it) } ?: true
-                            if (prefsRestored && pointerRestored) draftPointerBaseline = expectedBaseline
-                            logDraftSaveFailure(IllegalStateException("clearDraft rollback: prefsRestored=$prefsRestored pointerRestored=$pointerRestored"))
+                            if (!prefsRestored) {
+                                logDraftSaveFailure(IllegalStateException("clearDraft pref rollback failed"))
+                            }
+                            val pointerRestored = if (expectedPointer != null) {
+                                publishDraftGeneration(context, expectedPointer)
+                            } else {
+                                true
+                            }
+                            if (!pointerRestored) {
+                                logDraftSaveFailure(IllegalStateException("clearDraft pointer rollback failed"))
+                            }
+                            draftPointerBaseline = if (prefsRestored && pointerRestored) {
+                                currentDraftGenerationId(context)
+                            } else {
+                                expectedBaseline
+                            }
                             return@withLock false
                         }
 
@@ -1692,47 +1705,55 @@ fun clearDraft() {
                             } else {
                                 // State changed - rollback
                                 val prefsRestored = restoreDraftPreferencesOrThrow(prefs, prevPrefs, IllegalStateException("clear superseded"))
-                                val pointerRestored = expectedPointer?.let { publishDraftGeneration(context, it) } ?: true
-                                if (prefsRestored && pointerRestored) draftPointerBaseline = expectedBaseline
-                                logDraftSaveFailure(IllegalStateException("clearDraft rollback on supersession: prefsRestored=$prefsRestored pointerRestored=$pointerRestored"))
+                                if (!prefsRestored) {
+                                    logDraftSaveFailure(IllegalStateException("clearDraft supersession pref rollback failed"))
+                                }
+                                val pointerRestored = if (expectedPointer != null) {
+                                    publishDraftGeneration(context, expectedPointer)
+                                } else {
+                                    true
+                                }
+                                if (!pointerRestored) {
+                                    logDraftSaveFailure(IllegalStateException("clearDraft supersession pointer rollback failed"))
+                                }
+                                draftPointerBaseline = if (prefsRestored && pointerRestored) {
+                                    currentDraftGenerationId(context)
+                                } else {
+                                    expectedBaseline
+                                }
                                 return@withLock false
                             }
                             state = _uiState.value
                         }
 
-                        // Capture legacy Draft source from prefs before clearing for thumbnail invalidation
+                        // Capture legacy Draft source from prefs for thumbnail invalidation
                         val legacyDraftSourcePath = prevPrefs[KEY_DRAFT_SOURCE] as? String
 
-                        // Payload cleanup and generation deletion ONLY after confirmed adoption
-                        // Preserve live source (visibleBefore.sourcePath)
+                        // Durable clear succeeded — cleanup is best-effort from here
                         val liveSourceCanonical = liveSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() }
-                        persistentDraftDirectory(context).listFiles()?.forEach { file ->
-                            val canonical = runCatching { file.canonicalFile }.getOrNull()
-                            val isLiveSource = canonical != null && liveSourceCanonical != null && canonical == liveSourceCanonical
-                            val isTemp = file.name.endsWith(".tmp")
-                            if (isLiveSource) return@forEach
-                            if (isTemp) {
-                                file.delete()
-                                return@forEach
+                        runCatching {
+                            persistentDraftDirectory(context).listFiles()?.forEach { file ->
+                                val canonical = runCatching { file.canonicalFile }.getOrNull()
+                                val isLiveSource = canonical != null && liveSourceCanonical != null && canonical == liveSourceCanonical
+                                if (isLiveSource) return@forEach
+                                if (file.name.endsWith(".tmp")) {
+                                    file.delete()
+                                    return@forEach
+                                }
+                                val isLegacyPayload = file.name == DRAFT_SOURCE_FILE_NAME && legacyDraftSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() } == canonical
+                                if (isLegacyPayload) file.delete()
                             }
-                            // Delete legacy payload captured from prefs if not live source
-                            val isLegacyPayload = file.name == DRAFT_SOURCE_FILE_NAME && legacyDraftSourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() } == canonical
-                            if (isLegacyPayload) {
-                                file.delete()
-                                return@forEach
-                            }
-                            // Only delete owned generation sources (source_*.img) if they're not the live source
-                            val isOwnedGeneration = file.name.startsWith("source_") && file.extension == "img"
-                            if (isOwnedGeneration && !isLiveSource) {
-                                file.delete()
-                            }
-                        }
-                        persistentDraftThumbnailFile(context).delete()
-                        expectedPointer?.let { deleteDraftGenerationById(context, it) }
-
-                        // Invalidate cache keys from actual cleared data
-                        expectedPointer?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
-                        legacyDraftSourcePath?.let { ThumbnailBitmapCache.invalidate("draft:legacy:$it") }
+                        }.onFailure { logDraftSaveFailure(it) }
+                        runCatching {
+                            expectedPointer?.let { deleteDraftGenerationById(context, it) }
+                        }.onFailure { logDraftSaveFailure(it) }
+                        runCatching {
+                            persistentDraftThumbnailFile(context).delete()
+                        }.onFailure { logDraftSaveFailure(it) }
+                        runCatching {
+                            expectedPointer?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
+                            legacyDraftSourcePath?.let { ThumbnailBitmapCache.invalidate("draft:legacy:$it") }
+                        }.onFailure { logDraftSaveFailure(it) }
 
                         true
                     }
