@@ -152,15 +152,14 @@ fun EditorViewModel.deleteActiveSelectionLayer() {
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: return
-    recordUserEditForUndo(clearRedo = true)
-    updateUiState { current ->
+    if (!applySynchronousEditWithHistory { current ->
         val nextLayers = current.selectionLayers.filterNot { it.id == activeId }
         current.copy(
             selectionLayers = nextLayers,
             activeSelectionLayerId = nextLayers.lastOrNull()?.id,
             message = "선택한 마스크를 삭제했습니다."
         )
-    }
+    }) return
     persistDraftSnapshot()
 }
 
@@ -172,15 +171,14 @@ fun EditorViewModel.invertActiveSelectionLayer() {
         updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
         return
     }
-    recordUserEditForUndo(clearRedo = true)
-    updateUiState { current ->
+    if (!applySynchronousEditWithHistory { current ->
         current.copy(
             selectionLayers = current.selectionLayers.map { layer ->
                 if (layer.id == activeId) layer.copy(inverted = !layer.inverted) else layer
             },
             message = "마스크 반전을 전환했습니다."
         )
-    }
+    }) return
     persistDraftSnapshot()
 }
 
@@ -192,8 +190,7 @@ fun EditorViewModel.clearActiveSelectionLayer() {
         updateUiState { it.copy(message = "\uBA3C\uC800 \uB9C8\uC2A4\uD06C\uB97C \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.") }
         return
     }
-    recordUserEditForUndo(clearRedo = true)
-    updateUiState { current ->
+    if (!applySynchronousEditWithHistory { current ->
         var changed = false
         current.copy(
             selectionLayers = current.selectionLayers.map { layer ->
@@ -208,7 +205,7 @@ fun EditorViewModel.clearActiveSelectionLayer() {
             revision = current.revision + if (changed) 1 else 0,
             message = "\uB9C8\uC2A4\uD06C\uB97C \uBE44\uC6E0\uC2B5\uB2C8\uB2E4."
         )
-    }
+    }) return
     persistDraftSnapshot()
 }
 

@@ -73,8 +73,7 @@ fun EditorViewModel.resetCropState() {
     if (!canEnterEditorAction()) return
     invalidateCropOperation()
     val current = prepareForExternalEdit()
-    recordUserEditForUndo(clearRedo = true)
-    updateUiState { state ->
+    applySynchronousEditWithHistory { state ->
         val bitmap = current.previewBitmap ?: current.originalPreviewBitmap
         state.copy(cropState = bitmap?.let { centeredCropForAspect(it.width, it.height, CropAspectRatio.Original) } ?: CropState(), message = "변경사항을 되돌렸습니다.")
     }

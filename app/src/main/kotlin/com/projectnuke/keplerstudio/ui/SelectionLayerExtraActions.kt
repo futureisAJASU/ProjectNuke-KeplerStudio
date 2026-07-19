@@ -38,13 +38,16 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
         if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.DuplicateSelection, t.requiredBytes)
         return
     }
-    recordUserEditForUndo(clearRedo = true)
-    updateUiState { current ->
+    val adopted = applySynchronousEditWithHistory { current ->
         current.copy(
             selectionLayers = current.selectionLayers + copy,
             activeSelectionLayerId = copy.id,
             message = "마스크를 복제했습니다"
         )
+    }
+    if (!adopted) {
+        if (!copy.bitmap.isRecycled) copy.bitmap.recycle()
+        return
     }
     markMemoryRetrySucceeded(MemoryRetryAction.DuplicateSelection)
     persistDraftSnapshot()
@@ -74,13 +77,16 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
         if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.BackgroundSelection, t.requiredBytes)
         return
     }
-    recordUserEditForUndo(clearRedo = true)
-    updateUiState { current ->
+    val adopted = applySynchronousEditWithHistory { current ->
         current.copy(
             selectionLayers = current.selectionLayers + layer,
             activeSelectionLayerId = layer.id,
             message = "선택한 마스크를 기준으로 배경 마스크를 만들었습니다"
         )
+    }
+    if (!adopted) {
+        if (!layer.bitmap.isRecycled) layer.bitmap.recycle()
+        return
     }
     markMemoryRetrySucceeded(MemoryRetryAction.BackgroundSelection)
     persistDraftSnapshot()
