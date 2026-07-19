@@ -277,6 +277,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             MemoryRetryAction.OpenImage -> descriptor.payload?.let { openImage(Uri.parse(it)) }
             MemoryRetryAction.RestoreDraft -> retryDraftRestoreAfterMemory()
             MemoryRetryAction.RotatePreview -> rotatePreview90()
+            MemoryRetryAction.HistoryUndo -> descriptor.payload?.let { navigateHistory(true, it) }
+            MemoryRetryAction.HistoryRedo -> descriptor.payload?.let { navigateHistory(false, it) }
         }
     }
 
@@ -820,12 +822,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             return null
         }
-        return runCatching { state.toHistorySnapshot(effectiveStorage) }.getOrNull()
+        return runCatching { state.toHistorySnapshot(effectiveStorage).also { it.coordinatorGeneration = historyCoordinator.currentGeneration() } }.getOrNull()
     }
 
     internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean) {
         val reserve = _uiState.value.historyBitmapBytes()
-        historyIoJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+        historyIoJob = viewModelScope.launch(NonCancellable, start = CoroutineStart.UNDISPATCHED) {
             val result = historyCoordinator.admitAdoptedSnapshot(snapshot, clearRedo, reserve)
             historyIoJob = null
             updateHistoryFlags()
@@ -2086,7 +2088,7 @@ fun clearDraft() {
 
     fun redoEdit() = navigateHistory(undo = false)
 
-    private fun navigateHistory(undo: Boolean) {
+    private fun navigateHistory(undo: Boolean, expectedTargetId: String? = null) {
         if (!canEnterEditorAction()) return
         if (historyCoordinator.flags().busy || historyIoJob?.isActive == true) {
             updateUiStateAndRecycleReplaced { it.copy(message = "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요.") }
@@ -2107,6 +2109,8 @@ fun clearDraft() {
             try {
                 val result = historyCoordinator.navigate(
                     undoDirection = undo,
+                    expectedTargetId = expectedTargetId,
+                    currentCaptureBytes = _uiState.value.historyBitmapBytes(),
                     captureCurrent = { preferredStorage, targetBaseToken ->
                         captureHistorySnapshotForNavigation(preferredStorage, targetBaseToken)
                     },
@@ -2128,6 +2132,17 @@ fun clearDraft() {
                     is HistoryNavigationResult.Busy -> updateUiStateAndRecycleReplaced {
                         it.copy(isBusy = false, message = "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요.")
                     }
+                    is HistoryNavigationResult.MemoryRejected -> {
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
+                        val targetId = historyCoordinator.navigationTargetId(undo)
+                        if (targetId != null && (expectedTargetId == null || expectedTargetId == targetId)) {
+                            requestAllocationRecovery(
+                                if (undo) MemoryRetryAction.HistoryUndo else MemoryRetryAction.HistoryRedo,
+                                result.requiredBytes,
+                                targetId
+                            )
+                        }
+                    }
                     is HistoryNavigationResult.Failed -> updateUiStateAndRecycleReplaced {
                         it.copy(isBusy = false, message = "저장된 편집 기록을 불러오지 못했습니다. 현재 편집과 기록은 유지됩니다.")
                     }
@@ -2145,7 +2160,7 @@ fun clearDraft() {
     }
 
     internal fun clearRedoAfterAdoptedEdit() {
-        historyIoJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+        historyIoJob = viewModelScope.launch(NonCancellable, start = CoroutineStart.UNDISPATCHED) {
             historyCoordinator.clearRedoAfterAdoptedEdit()
             historyIoJob = null
             updateHistoryFlags()
@@ -3068,7 +3083,13 @@ restoreStateAdopted = true
         }
         val required = if (storage == HistorySnapshotStorage.Exact) state.historyBitmapBytes() else 0L
         if (!BitmapMemoryBudget.canAllocate(required)) return null
-        return runCatching { state.toHistorySnapshot(storage) }.getOrNull()
+        return try {
+            state.toHistorySnapshot(storage)
+        } catch (failure: BitmapAllocationRejectedException) {
+            throw failure
+        } catch (_: Throwable) {
+            null
+        }
     }
 
     private suspend fun materializeHistorySnapshot(
@@ -3099,6 +3120,8 @@ restoreStateAdopted = true
             }
         } catch (ce: CancellationException) {
             throw ce
+        } catch (failure: BitmapAllocationRejectedException) {
+            throw failure
         } catch (_: Throwable) {
             null
         } finally {
@@ -3173,7 +3196,9 @@ internal enum class MemoryRetryAction {
     ExportPreview,
     OpenImage,
     RestoreDraft,
-    RotatePreview
+    RotatePreview,
+    HistoryUndo,
+    HistoryRedo
 }
 
 internal data class MemoryRetryDescriptor(
@@ -3209,7 +3234,8 @@ internal data class EditorHistorySnapshot(
     val activeQuickEffects: List<ActiveQuickEffect>,
     val flareGuardRuntimeStatus: String?,
     val storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
-    var resourcesReleased: Boolean = false
+    var resourcesReleased: Boolean = false,
+    var coordinatorGeneration: String? = null
 )
 
 /**

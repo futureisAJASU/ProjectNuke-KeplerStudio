@@ -50,6 +50,7 @@ internal sealed class HistoryNavigationResult {
     data class Adopted(val flags: HistoryFlags, val movedToStorage: Boolean) : HistoryNavigationResult()
     data class Unavailable(val flags: HistoryFlags) : HistoryNavigationResult()
     data class Failed(val flags: HistoryFlags) : HistoryNavigationResult()
+    data class MemoryRejected(val requiredBytes: Long, val flags: HistoryFlags) : HistoryNavigationResult()
     data class Busy(val flags: HistoryFlags) : HistoryNavigationResult()
 }
 
@@ -64,8 +65,9 @@ internal class EditorHistoryCoordinator(
     private var operationToken = 0L
     private val operationCompletions = HashMap<Long, CompletableDeferred<Unit>>()
     private var operationBusy = true
-    @Volatile private var visibleHotBytes = 0L
+    private var closed = false
     @Volatile private var visibleFlags = HistoryFlags(false, false, true)
+    private var idleSignal = CompletableDeferred<Unit>()
 
     init {
         val initialGeneration = documentGeneration
@@ -75,17 +77,17 @@ internal class EditorHistoryCoordinator(
             if (isMainOwner() && documentGeneration == initialGeneration && operationBusy) {
                 operationBusy = false
                 publishState()
+                idleSignal.complete(Unit)
             }
         }
     }
 
     fun flags(): HistoryFlags = visibleFlags
+    fun currentGeneration(): String = documentGeneration
+    fun navigationTargetId(undoDirection: Boolean): String? = (if (undoDirection) undo else redo).lastOrNull()?.id
 
     fun canCapture(requiredBytes: Long): Boolean {
-        val budget = BitmapMemoryBudget.historyBudgetBytes()
-        return !visibleFlags.busy && requiredBytes >= 0L && requiredBytes <= budget &&
-            BitmapMemoryBudget.saturatingAdd(visibleHotBytes, requiredBytes) <= budget &&
-            BitmapMemoryBudget.canAllocate(requiredBytes)
+        return !visibleFlags.busy && requiredBytes >= 0L && BitmapMemoryBudget.canAllocate(requiredBytes)
     }
 
     suspend fun admitAdoptedSnapshot(
@@ -94,7 +96,11 @@ internal class EditorHistoryCoordinator(
         foregroundReserveBytes: Long
     ): HistoryAdmissionResult {
         checkMainOwner()
-        if (operationBusy) {
+        if (!awaitIdle()) {
+            snapshot.recycleBitmaps()
+            return HistoryAdmissionResult(false, false, visibleFlags)
+        }
+        if (snapshot.coordinatorGeneration != documentGeneration) {
             snapshot.recycleBitmaps()
             return HistoryAdmissionResult(false, false, visibleFlags)
         }
@@ -110,9 +116,23 @@ internal class EditorHistoryCoordinator(
         var retained = false
         var moved = false
         try {
-            moved = spillUntilFits(snapshot.bitmapBytes(), emptySet(), token, generation)
-            if (isOperationCurrent(token, generation) && fitsWith(snapshot.bitmapBytes())) {
+            val snapshotBytes = snapshot.bitmapBytes()
+            moved = spillUntilFits(snapshotBytes, emptySet(), token, generation)
+            if (isOperationCurrent(token, generation) && (fitsWith(snapshotBytes) || snapshotBytes > BitmapMemoryBudget.historyBudgetBytes())) {
                 val admittedEntry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
+                if (snapshotBytes > BitmapMemoryBudget.historyBudgetBytes()) {
+                    val published = storage.publish(admittedEntry, snapshot)
+                    if (published != null && isOperationCurrent(token, generation)) {
+                        admittedEntry.coldPayload = published
+                        admittedEntry.hotSnapshot = null
+                        admittedEntry.payloadState = HistoryPayloadState.Cold
+                        snapshot.recycleBitmaps()
+                        moved = true
+                    } else {
+                        published?.let { storage.delete(it) }
+                    }
+                }
+                if (admittedEntry.hotSnapshot == null || fitsWith(snapshotBytes)) {
                 undo.addLast(admittedEntry)
                 retained = true
                 publishState()
@@ -120,18 +140,19 @@ internal class EditorHistoryCoordinator(
                 moved = rebalanceHot(foregroundReserveBytes, token, generation) || moved
                 trimDiskBudget(discarded)
                 retained = undo.contains(admittedEntry)
+                }
             }
-            if (!retained && !snapshot.resourcesReleased) snapshot.recycleBitmaps()
             deleteEntries(discarded)
             return HistoryAdmissionResult(retained, moved, visibleFlags.copy(busy = false))
         } finally {
+            if (!retained && !snapshot.resourcesReleased) snapshot.recycleBitmaps()
             finishOperation(token)
         }
     }
 
     suspend fun clearRedoAfterAdoptedEdit(): HistoryFlags {
         checkMainOwner()
-        if (operationBusy) return visibleFlags
+        if (!awaitIdle()) return visibleFlags
         val token = beginOperation()
         val discarded = redo.toList()
         redo = ArrayDeque()
@@ -147,6 +168,8 @@ internal class EditorHistoryCoordinator(
 
     suspend fun navigate(
         undoDirection: Boolean,
+        expectedTargetId: String? = null,
+        currentCaptureBytes: Long,
         captureCurrent: (HistorySnapshotStorage, String) -> EditorHistorySnapshot?,
         materialize: suspend (EditorHistorySnapshot, (EditorHistorySnapshot) -> Unit) -> EditorHistorySnapshot?,
         adopt: (EditorHistorySnapshot) -> Boolean
@@ -155,6 +178,7 @@ internal class EditorHistoryCoordinator(
         if (operationBusy) return HistoryNavigationResult.Busy(visibleFlags)
         val source = if (undoDirection) undo else redo
         if (source.isEmpty()) return HistoryNavigationResult.Unavailable(visibleFlags)
+        if (expectedTargetId != null && source.last().id != expectedTargetId) return HistoryNavigationResult.Unavailable(visibleFlags)
         val token = beginOperation()
         val generation = documentGeneration
         val target = source.last()
@@ -167,6 +191,15 @@ internal class EditorHistoryCoordinator(
         val discarded = ArrayList<EditorHistoryEntry>()
         try {
             target.payloadState = if (loadedFromDisk) HistoryPayloadState.Loading else HistoryPayloadState.Adopting
+            if (loadedFromDisk) {
+                val required = storage.requiredBitmapBytes(target, generation)
+                    ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                val transientRequired = BitmapMemoryBudget.saturatingAdd(required, currentCaptureBytes)
+                spillUntilFits(currentCaptureBytes, setOf(target.id), token, generation)
+                if (!BitmapMemoryBudget.canAllocate(transientRequired)) {
+                    return HistoryNavigationResult.MemoryRejected(transientRequired, visibleFlags.copy(busy = false))
+                }
+            }
             loaded = if (loadedFromDisk) storage.load(target, generation) { loaded = it } else target.hotSnapshot
             val baseTarget = loaded ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
             if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target) {
@@ -212,6 +245,8 @@ internal class EditorHistoryCoordinator(
                 runCatching { deleteEntries(discarded) }
             }
             return HistoryNavigationResult.Adopted(visibleFlags.copy(busy = false), moved)
+        } catch (failure: BitmapAllocationRejectedException) {
+            return HistoryNavigationResult.MemoryRejected(failure.requiredBytes, visibleFlags.copy(busy = false))
         } finally {
             if (!adopted) {
                 val cleanup = Collections.newSetFromMap(IdentityHashMap<EditorHistorySnapshot, Boolean>())
@@ -291,12 +326,14 @@ internal class EditorHistoryCoordinator(
             if (isMainOwner() && documentGeneration == newGeneration) {
                 operationBusy = false
                 publishState()
+                idleSignal.complete(Unit)
             }
         }
     }
 
     fun close() {
         checkMainOwner()
+        closed = true
         operationToken += 1L
         val generation = documentGeneration
         val entries = (undo + redo).toList()
@@ -310,6 +347,7 @@ internal class EditorHistoryCoordinator(
             entry.payloadState = HistoryPayloadState.Discarded
         }
         operationBusy = true
+        idleSignal.complete(Unit)
         publishState()
         scope.launch(NonCancellable) {
             pendingOperations.forEach { it.await() }
@@ -453,6 +491,7 @@ internal class EditorHistoryCoordinator(
     private fun beginOperation(): Long {
         checkMainOwner()
         operationBusy = true
+        idleSignal = CompletableDeferred()
         val token = ++operationToken
         operationCompletions[token] = CompletableDeferred()
         publishState()
@@ -464,14 +503,19 @@ internal class EditorHistoryCoordinator(
         if (operationToken == token) {
             operationBusy = false
             publishState()
+            idleSignal.complete(Unit)
         }
+    }
+
+    private suspend fun awaitIdle(): Boolean {
+        while (operationBusy && !closed) idleSignal.await()
+        return !closed
     }
 
     private fun isOperationCurrent(token: Long, generation: String): Boolean =
         operationToken == token && documentGeneration == generation
 
     private fun publishState() {
-        visibleHotBytes = hotBytes()
         visibleFlags = HistoryFlags(undo.isNotEmpty(), redo.isNotEmpty(), operationBusy)
     }
 
@@ -546,6 +590,7 @@ private class EditorHistoryStorage(context: Context) {
         val directory = payload.directory
         if (entry.documentGeneration != expectedGeneration || !isOwnedEntryDirectory(directory, expectedGeneration, entry.id) || !directory.isCompleteHistoryDirectory()) return@withContext null
         val owned = ArrayList<Bitmap>()
+        var requiredBytes = 0L
         try {
             val manifestFile = File(directory, MANIFEST)
             val completeFile = File(directory, COMPLETE)
@@ -559,7 +604,6 @@ private class EditorHistoryStorage(context: Context) {
             val bitmapSpecs = json.getJSONArray("bitmaps")
             val keys = HashSet<String>()
             val fileNames = HashSet<String>()
-            var requiredBytes = 0L
             for (i in 0 until bitmapSpecs.length()) {
                 val spec = bitmapSpecs.getJSONObject(i)
                 val key = spec.getString("key")
@@ -588,10 +632,33 @@ private class EditorHistoryStorage(context: Context) {
         } catch (ce: CancellationException) {
             owned.forEach { if (!it.isRecycled) it.recycle() }
             throw ce
+        } catch (failure: BitmapAllocationRejectedException) {
+            owned.forEach { if (!it.isRecycled) it.recycle() }
+            throw failure
+        } catch (_: OutOfMemoryError) {
+            owned.forEach { if (!it.isRecycled) it.recycle() }
+            throw BitmapAllocationRejectedException(requiredBytes)
         } catch (_: Throwable) {
             owned.forEach { if (!it.isRecycled) it.recycle() }
             null
         }
+    }
+
+    suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long? = withContext(Dispatchers.IO) {
+        runCatching {
+            val payload = checkNotNull(entry.coldPayload)
+            val directory = payload.directory
+            check(entry.documentGeneration == expectedGeneration && isOwnedEntryDirectory(directory, expectedGeneration, entry.id))
+            val json = JSONObject(File(directory, MANIFEST).readText(Charsets.UTF_8))
+            check(json.getInt("version") == VERSION && json.getString("entryId") == entry.id && json.getString("documentGeneration") == expectedGeneration)
+            val specs = json.getJSONArray("bitmaps")
+            var total = 0L
+            for (index in 0 until specs.length()) {
+                val spec = specs.getJSONObject(index)
+                total = BitmapMemoryBudget.saturatingAdd(total, BitmapMemoryBudget.bytes(spec.getInt("width"), spec.getInt("height")))
+            }
+            total
+        }.getOrNull()
     }
 
     suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>) = withContext(Dispatchers.IO) {
