@@ -153,9 +153,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         persistDraftSnapshot()
     }
 
-    internal fun requestAllocationRecovery(action: MemoryRetryAction, requiredBytes: Long, payload: String? = null) {
+internal fun requestAllocationRecovery(action: MemoryRetryAction, requiredBytes: Long, payload: String? = null) {
         if (shuttingDown || memoryRecoveryJob?.isActive == true) return
         val state = _uiState.value
+        val flags = historyCoordinator.flags()
+        val (targetEntryId, navigationDirection, coordinatorGeneration) = when (action) {
+            MemoryRetryAction.HistoryUndo -> {
+                val targetId = historyCoordinator.navigationTargetId(true)
+                Triple(targetId, true, historyCoordinator.currentGeneration())
+            }
+            MemoryRetryAction.HistoryRedo -> {
+                val targetId = historyCoordinator.navigationTargetId(false)
+                Triple(targetId, false, historyCoordinator.currentGeneration())
+            }
+            else -> Triple<String?, Boolean?, String?>(null, null, null)
+        }
         val descriptor = MemoryRetryDescriptor(
             token = ++memoryRecoveryToken,
             action = action,
@@ -163,7 +175,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             sourcePath = state.sourcePath,
             baseContentToken = state.baseContentToken,
             revision = state.revision,
-            payload = payload
+            payload = payload,
+            navigationDirection = navigationDirection,
+            targetEntryId = targetEntryId,
+            coordinatorGeneration = coordinatorGeneration
         )
         if (strongRetryAttempt.matchesRetryFailure(action, state)) {
             strongRetryAttempt = null
@@ -180,8 +195,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         pendingMemoryRetry = descriptor
-        memoryRecoveryJob = viewModelScope.launch {
-            val reclaimed = performMemoryCleanup(strong = false)
+memoryRecoveryJob = viewModelScope.launch {
+            val protectedEntryId = if (descriptor.action == MemoryRetryAction.HistoryUndo || descriptor.action == MemoryRetryAction.HistoryRedo) {
+                descriptor.targetEntryId
+            } else null
+            val reclaimed = performMemoryCleanup(strong = false, protectedEntryId = protectedEntryId)
             if (reclaimed && isMemoryRetryCurrent(descriptor) && BitmapMemoryBudget.canAllocate(requiredBytes)) {
                 pendingMemoryRetry = null
                 updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, message = "메모리를 자동으로 정리했습니다. 작업을 다시 시도합니다.") }
@@ -196,11 +214,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun retryPendingMemoryRecovery(token: Long) {
+fun retryPendingMemoryRecovery(token: Long) {
         val descriptor = pendingMemoryRetry?.takeIf { it.token == token } ?: return
+        // Validate staleness BEFORE any destructive cleanup
+        if (!isMemoryRetryCurrent(descriptor)) {
+            // Stale request: clear dialog state without destructive cleanup
+            pendingMemoryRetry = null
+            updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null) }
+            return
+        }
         if (memoryRecoveryJob?.isActive == true) return
+        val protectedEntryId = when (descriptor.action) {
+            MemoryRetryAction.HistoryUndo, MemoryRetryAction.HistoryRedo -> descriptor.targetEntryId
+            else -> null
+        }
         memoryRecoveryJob = viewModelScope.launch {
-            val reclaimed = performMemoryCleanup(strong = true)
+            val reclaimed = performMemoryCleanup(strong = true, protectedEntryId = protectedEntryId)
+            // Revalidate after cleanup
             if (reclaimed && isMemoryRetryCurrent(descriptor) && BitmapMemoryBudget.canAllocate(descriptor.requiredBytes)) {
                 pendingMemoryRetry = null
                 updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, message = "메모리 정리를 완료했습니다. 작업을 다시 시도합니다.") }
@@ -227,7 +257,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun performMemoryCleanup(strong: Boolean): Boolean {
+private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: String? = null): Boolean {
         var reclaimed = false
         fun clearCompleted(job: Job?): Job? {
             if (job != null && !job.isActive) reclaimed = true
@@ -247,7 +277,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             releaseNativeSession()
             reclaimed = true
         }
-        if (historyCoordinator.recover(strong) > 0L) reclaimed = true
+        if (historyCoordinator.recover(strong, protectedEntryId) > 0L) reclaimed = true
         updateHistoryFlags()
         if (strong) withContext(Dispatchers.IO) {
             cleanupTemporarySourceFiles(getApplication<Application>(), _uiState.value.sourcePath)
@@ -257,8 +287,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun isMemoryRetryCurrent(descriptor: MemoryRetryDescriptor): Boolean {
         val state = _uiState.value
-        return !shuttingDown && pendingMemoryRetry == descriptor && state.sourcePath == descriptor.sourcePath &&
-            state.baseContentToken == descriptor.baseContentToken && state.revision == descriptor.revision
+        if (shuttingDown) return false
+        if (pendingMemoryRetry != descriptor) return false
+        if (state.sourcePath != descriptor.sourcePath) return false
+        if (state.baseContentToken != descriptor.baseContentToken) return false
+        if (state.revision != descriptor.revision) return false
+        val currentGen = historyCoordinator.currentGeneration()
+        if (descriptor.coordinatorGeneration != null && descriptor.coordinatorGeneration != currentGen) return false
+        // For navigation retries, also validate target still exists
+        if (descriptor.action == MemoryRetryAction.HistoryUndo || descriptor.action == MemoryRetryAction.HistoryRedo) {
+            val direction = descriptor.navigationDirection ?: return false
+            val targetId = descriptor.targetEntryId ?: return false
+            if (historyCoordinator.navigationTargetId(direction) != targetId) return false
+        }
+        return true
     }
 
     private fun performMemoryRetry(descriptor: MemoryRetryDescriptor) {
@@ -1685,7 +1727,25 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
             updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.") }
             requestAllocationRecovery(MemoryRetryAction.ExportPreview, estimateCleanExportPeakBytes(sourcePath, exportResolution))
             return
-        }
+    /** Validates that a navigation retry descriptor matches the current history state. */
+    private fun isNavigationRetryCurrent(descriptor: MemoryRetryDescriptor): Boolean {
+        val state = _uiState.value
+        if (shuttingDown) return false
+        if (pendingMemoryRetry != descriptor) return false
+        if (state.sourcePath != descriptor.sourcePath) return false
+        if (state.baseContentToken != descriptor.baseContentToken) return false
+        if (state.revision != descriptor.revision) return false
+        val currentGen = historyCoordinator.currentGeneration()
+        if (descriptor.coordinatorGeneration != null && descriptor.coordinatorGeneration != currentGen) return false
+        // Validate navigation target still exists in expected branch
+        val targetId = descriptor.targetEntryId ?: return false
+        val direction = descriptor.navigationDirection ?: return false
+        val sourceStack = if (direction) historyCoordinator.flags().canUndo else historyCoordinator.flags().canRedo
+        if (!sourceStack) return false
+        val targetExists = historyCoordinator.navigationTargetId(direction) == targetId
+        if (!targetExists) return false
+        return true
+    }
 
         invalidateExport()
         val token = exportToken
@@ -3178,9 +3238,10 @@ restoreStateAdopted = true
         releaseNativeSession()
         historyIoJob?.cancel()
         discardPendingParamUndoSnapshot()
-        historyCoordinator.close()
+historyCoordinator.close()
         super.onCleared()
     }
+
 }
 
 internal enum class MemoryRetryAction {
@@ -3208,7 +3269,13 @@ internal data class MemoryRetryDescriptor(
     val sourcePath: String?,
     val baseContentToken: String,
     val revision: Int,
-    val payload: String?
+    val payload: String?,
+    // Navigation-specific identity for target-aware recovery
+    val navigationDirection: Boolean? = null, // true = undo, false = redo
+    val targetEntryId: String? = null,
+    val coordinatorGeneration: String? = null,
+    val sourceBranchSize: Int = 0,
+    val destinationBranchSize: Int = 0
 )
 
 private fun MemoryRetryDescriptor?.matchesRetryFailure(action: MemoryRetryAction, state: EditorUiState): Boolean =

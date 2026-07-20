@@ -35,7 +35,7 @@ internal data class EditorHistoryEntry(
     var coldPayload: ColdHistoryPayload? = null,
     var payloadState: HistoryPayloadState = HistoryPayloadState.Hot
 ) {
-    fun bitmapBytes(): Long = hotSnapshot?.bitmapBytes() ?: 0L
+    fun bitmapBytes(): Long = hotSnapshot?.bitmapBytes() ?: coldPayload?.bytes ?: 0L
 }
 
 internal data class HistoryFlags(val canUndo: Boolean, val canRedo: Boolean, val busy: Boolean)
@@ -150,6 +150,39 @@ internal class EditorHistoryCoordinator(
         }
     }
 
+    /**
+     * Admit an oversized current-state snapshot directly to cold storage during navigation.
+     * The snapshot is published to disk, its bitmaps recycled, and a Cold entry is returned.
+     * Returns null if publication fails or operation becomes stale.
+     */
+    suspend fun admitOversizedCurrentSnapshot(
+        snapshot: EditorHistorySnapshot,
+        token: Long,
+        generation: String
+    ): EditorHistoryEntry? {
+        checkMainOwner()
+        if (snapshot.coordinatorGeneration != generation) {
+            snapshot.recycleBitmaps()
+            return null
+        }
+        val snapshotBytes = snapshot.bitmapBytes()
+        if (snapshotBytes <= BitmapMemoryBudget.historyBudgetBytes()) {
+            return null // not oversized
+        }
+        val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
+        val published = storage.publish(entry, snapshot)
+        if (published == null || !isOperationCurrent(token, generation)) {
+            published?.let { storage.delete(it) }
+            if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
+            return null
+        }
+        entry.coldPayload = published
+        entry.hotSnapshot = null
+        entry.payloadState = HistoryPayloadState.Cold
+        snapshot.recycleBitmaps()
+        return entry
+    }
+
     suspend fun clearRedoAfterAdoptedEdit(): HistoryFlags {
         checkMainOwner()
         if (!awaitIdle()) return visibleFlags
@@ -186,6 +219,7 @@ internal class EditorHistoryCoordinator(
         var loaded: EditorHistorySnapshot? = null
         var materialized: EditorHistorySnapshot? = null
         var currentSnapshot: EditorHistorySnapshot? = null
+        var currentEntry: EditorHistoryEntry? = null
         var adopted = false
         var maintenanceReserve = 0L
         val discarded = ArrayList<EditorHistoryEntry>()
@@ -218,7 +252,31 @@ internal class EditorHistoryCoordinator(
             val projectedRequired = (currentSnapshot!!.bitmapBytes() - targetResidentBytes).coerceAtLeast(0L)
             val protected = setOf(target.id)
             val moved = spillUntilFits(projectedRequired, protected, token, generation)
-            if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target || !fitsAfterReplacingTarget(currentSnapshot!!, target)) {
+
+            // Handle oversized current snapshot: publish directly to cold storage
+            var currentEntry: EditorHistoryEntry? = null
+            val currentSnapshotBytes = currentSnapshot!!.bitmapBytes()
+            if (currentSnapshotBytes > BitmapMemoryBudget.historyBudgetBytes()) {
+                currentEntry = admitOversizedCurrentSnapshot(currentSnapshot, token, generation)
+                if (currentEntry == null) {
+                    return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                }
+                currentSnapshot = null // ownership transferred to cold storage
+            }
+
+            // For oversized current snapshot, we only need target bytes to fit in hot (which they do, since target was hot)
+            // For normal case, check fitsAfterReplacingTarget
+            val fitsBudget = if (currentEntry != null) {
+                // Oversized current went to cold; target was hot so hot budget fits
+                true
+            } else {
+                fitsAfterReplacingTarget(currentSnapshot!!, target)
+            }
+
+            if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target || !fitsBudget) {
+                currentEntry?.let { entry ->
+                    entry.coldPayload?.let { storage.delete(it) }
+                }
                 return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
             }
 
@@ -227,8 +285,9 @@ internal class EditorHistoryCoordinator(
             val nextSource = if (undoDirection) nextUndo else nextRedo
             val nextDestination = if (undoDirection) nextRedo else nextUndo
             check(nextSource.removeLast().id == target.id)
-            nextDestination.addLast(EditorHistoryEntry(documentGeneration = generation, hotSnapshot = currentSnapshot))
-            val foregroundReserve = maxOf(targetForAdoption.bitmapBytes(), currentSnapshot!!.bitmapBytes())
+            val destinationEntry = currentEntry ?: EditorHistoryEntry(documentGeneration = generation, hotSnapshot = currentSnapshot!!)
+            nextDestination.addLast(destinationEntry)
+            val foregroundReserve = maxOf(targetForAdoption.bitmapBytes(), destinationEntry.bitmapBytes())
             maintenanceReserve = foregroundReserve
 
             adopted = adopt(targetForAdoption)
@@ -254,6 +313,10 @@ internal class EditorHistoryCoordinator(
                 materialized?.takeIf { it !== target.hotSnapshot }?.let(cleanup::add)
                 loaded?.takeIf { loadedFromDisk }?.let(cleanup::add)
                 cleanup.forEach { if (!it.resourcesReleased) it.recycleBitmaps() }
+                // Clean up oversized current entry if it was created but not adopted
+                currentEntry?.let { entry ->
+                    entry.coldPayload?.let { storage.delete(it) }
+                }
                 if (target.payloadState != HistoryPayloadState.Discarded) {
                     target.payloadState = if (target.hotSnapshot != null) HistoryPayloadState.Hot else HistoryPayloadState.Cold
                 }
@@ -263,7 +326,7 @@ internal class EditorHistoryCoordinator(
         }
     }
 
-    suspend fun recover(strong: Boolean): Long {
+    suspend fun recover(strong: Boolean, protectedEntryId: String? = null): Long {
         checkMainOwner()
         if (operationBusy) return 0L
         val token = beginOperation()
@@ -271,15 +334,36 @@ internal class EditorHistoryCoordinator(
         val before = hotBytes()
         val discarded = ArrayList<EditorHistoryEntry>()
         try {
+            val protectedSet = buildSet {
+                protectedEntryId?.let { add(it) }
+                // Always protect the most recent entry in each stack
+                undo.lastOrNull()?.id?.let { add(it) }
+                redo.lastOrNull()?.id?.let { add(it) }
+            }
             if (strong) {
-                discarded += redo
-                redo = ArrayDeque()
-                discardRam(discarded)
+                // Spill redo entries instead of clearing; preserve protected entries
+                val redoCandidates = redo.filter { it.hotSnapshot != null && it.id !in protectedSet }
+                for (entry in redoCandidates) {
+                    if (!isOperationCurrent(token, generation)) break
+                    if (spillEntry(entry, token, generation)) {
+                        discarded += entry
+                    }
+                }
+                // Rebuild redo with only cold entries and protected hot entries
+                val newRedo = ArrayDeque<EditorHistoryEntry>()
+                redo.forEach { entry ->
+                    if (entry.id in protectedSet || entry.payloadState != HistoryPayloadState.Hot) {
+                        newRedo.add(entry)
+                    } else {
+                        discarded += entry
+                    }
+                }
+                redo = newRedo
                 publishState()
             }
             val candidates = buildList {
-                addAll(redo.filter { it.hotSnapshot != null })
-                addAll(undo.toList().dropLast(1).filter { it.hotSnapshot != null })
+                addAll(redo.filter { it.hotSnapshot != null && it.id !in protectedSet })
+                addAll(undo.toList().dropLast(1).filter { it.hotSnapshot != null && it.id !in protectedSet })
             }
             for (entry in candidates) {
                 if (!isOperationCurrent(token, generation)) break
