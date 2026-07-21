@@ -16,6 +16,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -77,6 +78,8 @@ internal class EditorHistoryCoordinator(
     private var documentGeneration = UUID.randomUUID().toString()
     private var operationToken = 0L
     private val operationCompletions = HashMap<Long, CompletableDeferred<Unit>>()
+    /** Jobs that settle detached generations (from replaceDocument). close() awaits these. */
+    private val detachedGenerationJobs = ArrayList<Job>()
     private var operationBusy = true
     private var closed = false
     @Volatile private var visibleFlags = HistoryFlags(false, false, true)
@@ -495,20 +498,32 @@ internal class EditorHistoryCoordinator(
         }
         operationBusy = true
         publishState()
-        scope.launch {
-            runCatching {
-                storage.initializeSession(newGeneration)
-                pendingOperations.forEach { it.await() }
-                storage.deleteEntries(oldEntries)
-                storage.unregisterSession(oldGeneration)
-                storage.deleteSession(oldGeneration)
+        val settlementJob = scope.launch {
+            // Initialize new session first (may block on IO but must succeed before clearing old)
+            runCatching { storage.initializeSession(newGeneration) }
+            // Wait for any operations that captured the old generation
+            pendingOperations.forEach { it.await() }
+            // Settle old generation under NonCancellable so cancellation never orphans it
+            withContext(NonCancellable) {
+                try {
+                    storage.deleteEntries(oldEntries)
+                } finally {
+                    try {
+                        storage.unregisterSession(oldGeneration)
+                    } finally {
+                        storage.deleteSession(oldGeneration)
+                    }
+                }
             }
-            if (isMainOwner() && documentGeneration == newGeneration) {
+            // Only clear busy when the coordinator is alive, not closed, and this generation is still current
+            if (isMainOwner() && !closed && documentGeneration == newGeneration) {
                 operationBusy = false
                 publishState()
                 idleSignal.complete(Unit)
             }
         }
+        detachedGenerationJobs.removeAll { !it.isActive }
+        detachedGenerationJobs.add(settlementJob)
     }
 
     fun close() {
@@ -518,6 +533,8 @@ internal class EditorHistoryCoordinator(
         val generation = documentGeneration
         val entries = (undo + redo).toList()
         val pendingOperations = operationCompletions.values.toList()
+        val pendingDetached = ArrayList(detachedGenerationJobs)
+        detachedGenerationJobs.clear()
         undo = ArrayDeque()
         redo = ArrayDeque()
         entries.forEach { entry ->
@@ -531,6 +548,8 @@ internal class EditorHistoryCoordinator(
         publishState()
         scope.launch(NonCancellable) {
             pendingOperations.forEach { it.await() }
+            // Await all detached-generation settlement jobs first
+            pendingDetached.forEach { it.join() }
             storage.deleteEntries(entries)
             storage.unregisterSession(generation)
             storage.deleteSession(generation)

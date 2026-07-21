@@ -293,8 +293,11 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
         val recoveryResult = historyCoordinator.recover(strong, protectedEntryId)
         if (recoveryResult.reclaimedRamBytes > 0L) reclaimedResources = true
         updateHistoryFlags()
-        if (strong) withContext(Dispatchers.IO) {
-            cleanupTemporarySourceFiles(getApplication<Application>(), _uiState.value.sourcePath)
+        // Only perform destructive file cleanup for current, non-superseded strong recovery
+        if (strong && !recoveryResult.superseded && !shuttingDown) {
+            withContext(Dispatchers.IO) {
+                cleanupTemporarySourceFiles(getApplication<Application>(), _uiState.value.sourcePath)
+            }
         }
         return MemoryCleanupResult(
             reclaimedResources = reclaimedResources,
