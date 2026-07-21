@@ -1726,27 +1726,8 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
         } else if (!canPreflightCleanExport(sourcePath, exportResolution)) {
             updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.") }
             requestAllocationRecovery(MemoryRetryAction.ExportPreview, estimateCleanExportPeakBytes(sourcePath, exportResolution))
-            return
-    /** Validates that a navigation retry descriptor matches the current history state. */
-    private fun isNavigationRetryCurrent(descriptor: MemoryRetryDescriptor): Boolean {
-        val state = _uiState.value
-        if (shuttingDown) return false
-        if (pendingMemoryRetry != descriptor) return false
-        if (state.sourcePath != descriptor.sourcePath) return false
-        if (state.baseContentToken != descriptor.baseContentToken) return false
-        if (state.revision != descriptor.revision) return false
-        val currentGen = historyCoordinator.currentGeneration()
-        if (descriptor.coordinatorGeneration != null && descriptor.coordinatorGeneration != currentGen) return false
-        // Validate navigation target still exists in expected branch
-        val targetId = descriptor.targetEntryId ?: return false
-        val direction = descriptor.navigationDirection ?: return false
-        val sourceStack = if (direction) historyCoordinator.flags().canUndo else historyCoordinator.flags().canRedo
-        if (!sourceStack) return false
-        val targetExists = historyCoordinator.navigationTargetId(direction) == targetId
-        if (!targetExists) return false
-        return true
-    }
-
+return
+        }
         invalidateExport()
         val token = exportToken
         val fileName = "KeplerStudio_${exportTimestamp()}.${exportFormat.extension}"

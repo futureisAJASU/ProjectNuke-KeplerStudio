@@ -26,7 +26,11 @@ internal enum class HistorySnapshotStorage { Exact, MetadataOnly }
 
 internal enum class HistoryPayloadState { Hot, Cold, Loading, Spilling, Adopting, Discarded }
 
-internal data class ColdHistoryPayload(val directory: File, val bytes: Long)
+internal data class ColdHistoryPayload(
+    val directory: File,
+    val bytes: Long,
+    val decodedBytes: Long
+)
 
 internal data class EditorHistoryEntry(
     val id: String = UUID.randomUUID().toString(),
@@ -35,7 +39,14 @@ internal data class EditorHistoryEntry(
     var coldPayload: ColdHistoryPayload? = null,
     var payloadState: HistoryPayloadState = HistoryPayloadState.Hot
 ) {
-    fun bitmapBytes(): Long = hotSnapshot?.bitmapBytes() ?: coldPayload?.bytes ?: 0L
+    /** Resident bitmap bytes in RAM (hot snapshots only). */
+    fun hotResidentBytes(): Long = hotSnapshot?.bitmapBytes() ?: 0L
+
+    /** Total decoded bitmap bytes this entry would require if loaded (hot or cold). */
+    fun decodedBytes(): Long = hotSnapshot?.bitmapBytes() ?: coldPayload?.decodedBytes ?: 0L
+
+    /** Compressed disk bytes for cold entries. */
+    fun coldDiskBytes(): Long = coldPayload?.bytes ?: 0L
 }
 
 internal data class HistoryFlags(val canUndo: Boolean, val canRedo: Boolean, val busy: Boolean)
@@ -248,13 +259,12 @@ internal class EditorHistoryCoordinator(
             currentSnapshot = captureCurrent(targetForAdoption.storage, targetForAdoption.baseContentToken)
                 ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
 
-            val targetResidentBytes = target.hotSnapshot?.bitmapBytes() ?: 0L
+            val targetResidentBytes = target.hotResidentBytes()
             val projectedRequired = (currentSnapshot!!.bitmapBytes() - targetResidentBytes).coerceAtLeast(0L)
             val protected = setOf(target.id)
             val moved = spillUntilFits(projectedRequired, protected, token, generation)
 
             // Handle oversized current snapshot: publish directly to cold storage
-            var currentEntry: EditorHistoryEntry? = null
             val currentSnapshotBytes = currentSnapshot!!.bitmapBytes()
             if (currentSnapshotBytes > BitmapMemoryBudget.historyBudgetBytes()) {
                 currentEntry = admitOversizedCurrentSnapshot(currentSnapshot, token, generation)
@@ -287,7 +297,7 @@ internal class EditorHistoryCoordinator(
             check(nextSource.removeLast().id == target.id)
             val destinationEntry = currentEntry ?: EditorHistoryEntry(documentGeneration = generation, hotSnapshot = currentSnapshot!!)
             nextDestination.addLast(destinationEntry)
-            val foregroundReserve = maxOf(targetForAdoption.bitmapBytes(), destinationEntry.bitmapBytes())
+            val foregroundReserve = maxOf(targetForAdoption.bitmapBytes(), destinationEntry.hotResidentBytes())
             maintenanceReserve = foregroundReserve
 
             adopted = adopt(targetForAdoption)
@@ -345,9 +355,8 @@ internal class EditorHistoryCoordinator(
                 val redoCandidates = redo.filter { it.hotSnapshot != null && it.id !in protectedSet }
                 for (entry in redoCandidates) {
                     if (!isOperationCurrent(token, generation)) break
-                    if (spillEntry(entry, token, generation)) {
-                        discarded += entry
-                    }
+                    spillEntry(entry, token, generation)
+                    // Do NOT add to discarded - spilled entries remain in the stack
                 }
                 // Rebuild redo with only cold entries and protected hot entries
                 val newRedo = ArrayDeque<EditorHistoryEntry>()
@@ -355,6 +364,7 @@ internal class EditorHistoryCoordinator(
                     if (entry.id in protectedSet || entry.payloadState != HistoryPayloadState.Hot) {
                         newRedo.add(entry)
                     } else {
+                        // This hot entry was not protected and not spilled - it's being removed
                         discarded += entry
                     }
                 }
@@ -564,12 +574,12 @@ internal class EditorHistoryCoordinator(
             BitmapMemoryBudget.saturatingAdd(hotBytes(), requiredBytes) <= BitmapMemoryBudget.historyBudgetBytes()
 
     private fun fitsAfterReplacingTarget(snapshot: EditorHistorySnapshot, target: EditorHistoryEntry): Boolean {
-        val withoutTarget = (hotBytes() - target.bitmapBytes()).coerceAtLeast(0L)
+        val withoutTarget = (hotBytes() - target.hotResidentBytes()).coerceAtLeast(0L)
         return BitmapMemoryBudget.saturatingAdd(withoutTarget, snapshot.bitmapBytes()) <= BitmapMemoryBudget.historyBudgetBytes()
     }
 
     private fun hotBytes(): Long = BitmapMemoryBudget.saturatingAdd(
-        *(undo + redo).map(EditorHistoryEntry::bitmapBytes).toLongArray()
+        *(undo + redo).map(EditorHistoryEntry::hotResidentBytes).toLongArray()
     )
 
     private fun beginOperation(): Long {
@@ -653,7 +663,7 @@ private class EditorHistoryStorage(context: Context) {
             if (published.exists()) published.deleteRecursively()
             check(staging.renameTo(published))
             syncDirectory(session)
-            ColdHistoryPayload(published, published.directoryBytes())
+            ColdHistoryPayload(published, published.directoryBytes(), snapshot.bitmapBytes())
         } catch (ce: CancellationException) {
             staging.deleteRecursively()
             published.takeIf { isOwnedEntryDirectory(it, entry.documentGeneration, entry.id) }?.deleteRecursively()
