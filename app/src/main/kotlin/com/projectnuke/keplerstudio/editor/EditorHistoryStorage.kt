@@ -403,6 +403,7 @@ internal class EditorHistoryCoordinator(
                 }
             }
             // Spill remaining candidates (undo except tip, remaining redo hot)
+            // Only strong recovery may discard failed spills; non-strong preserves them as Hot.
             if (!superseded) {
                 val candidates = buildList {
                     addAll(redo.filter { it.hotSnapshot != null && it.id !in protectedSet })
@@ -420,12 +421,22 @@ internal class EditorHistoryCoordinator(
                             reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBefore)
                         }
                         SpillResult.CurrentFailure -> {
-                            if (!isOperationCurrent(token, generation)) {
-                                superseded = true
+                            // Non-strong or candidate spill: entry already restored to Hot by spillEntry.
+                            // Do NOT discard — preserve as Hot. Stop spilling on transient failure.
+                            if (strong) {
+                                // Strong recovery: current-operation publish failure intentionally evicts.
+                                if (!isOperationCurrent(token, generation)) {
+                                    superseded = true
+                                    break
+                                }
+                                // Remove from owning deque first
+                                if (!undo.remove(entry)) redo.remove(entry)
+                                val actuallyReleased = settleSingleDiscarded(entry, discarded)
+                                reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, actuallyReleased)
+                            } else {
+                                // Automatic recovery: transient disk failure preserves entry as Hot; stop.
                                 break
                             }
-                            val actuallyReleased = settleSingleDiscarded(entry, discarded)
-                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, actuallyReleased)
                         }
                         SpillResult.Superseded -> {
                             superseded = true
@@ -438,6 +449,10 @@ internal class EditorHistoryCoordinator(
             if (!superseded && isOperationCurrent(token, generation)) {
                 diskBudgetSatisfied = trimDiskBudget(discarded, protectedSet)
                 deleteEntries(discarded)
+                // Recheck after suspending deletion — replacement/close may supersede during IO
+                if (!isOperationCurrent(token, generation) || closed) {
+                    superseded = true
+                }
             }
             return RecoverResult(reclaimed, diskBudgetSatisfied, superseded)
         } finally {
@@ -624,12 +639,15 @@ internal class EditorHistoryCoordinator(
             val discarded = ArrayList<EditorHistoryEntry>()
             try {
                 rebalanceHot(foregroundReserveBytes, token, generation)
+                if (!isOperationCurrent(token, generation)) return@launch
                 val protectedSet = buildSet {
                     undo.lastOrNull()?.id?.let { add(it) }
                     redo.lastOrNull()?.id?.let { add(it) }
                 }
                 trimDiskBudget(discarded, protectedSet)
                 deleteEntries(discarded)
+                // Recheck after suspending deletion — old operation must not act on replacement generation
+                if (isOperationCurrent(token, generation)) publishState()
             } finally {
                 finishOperation(token)
             }
