@@ -336,14 +336,19 @@ internal class EditorHistoryCoordinator(
         }
     }
 
-    suspend fun recover(strong: Boolean, protectedEntryId: String? = null): Long {
+    internal data class RecoverResult(
+        val reclaimedRamBytes: Long,
+        val diskBudgetSatisfied: Boolean
+    )
+
+    suspend fun recover(strong: Boolean, protectedEntryId: String? = null): RecoverResult {
         checkMainOwner()
-        if (operationBusy) return 0L
+        if (operationBusy) return RecoverResult(0L, true)
         val token = beginOperation()
         val generation = documentGeneration
-        val before = hotBytes()
         val discarded = ArrayList<EditorHistoryEntry>()
         var reclaimed = 0L
+        var diskBudgetSatisfied = true
         try {
             val protectedSet = buildSet {
                 protectedEntryId?.let { add(it) }
@@ -352,35 +357,28 @@ internal class EditorHistoryCoordinator(
                 redo.lastOrNull()?.id?.let { add(it) }
             }
             if (strong) {
-                // Spill redo entries instead of clearing; preserve protected entries
-                val redoCandidates = redo.filter { it.hotSnapshot != null && it.id !in protectedSet }
-                for (entry in redoCandidates) {
-                    if (!isOperationCurrent(token, generation)) break
-                    val wasHot = entry.payloadState == HistoryPayloadState.Hot
-                    val hotBytesBefore = if (wasHot) entry.hotResidentBytes() else 0L
-                    if (spillEntry(entry, token, generation)) {
-                        // Successfully spilled - remains in stack as Cold, hot bytes released
-                        reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBytesBefore)
-                    } else {
-                        // Spill failed (e.g., operation stale, publish failed) - remove from stack
-                        if (wasHot) {
-                            entry.hotSnapshot?.recycleBitmaps()
-                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBytesBefore)
-                        }
-                        discarded += entry
-                    }
-                }
-                // Rebuild redo with only cold entries and protected hot entries
+                // Single-pass Redo rebuild with authoritative settlement
                 val newRedo = ArrayDeque<EditorHistoryEntry>()
                 redo.forEach { entry ->
+                    if (!isOperationCurrent(token, generation)) {
+                        newRedo.add(entry)
+                        return@forEach
+                    }
                     if (entry.id in protectedSet || entry.payloadState != HistoryPayloadState.Hot) {
+                        // Protected or already Cold - keep as-is
                         newRedo.add(entry)
                     } else {
-                        // This hot entry was not protected and not spilled - it's being removed
+                        // Unprotected hot entry - attempt spill
                         val hotBytesBefore = entry.hotResidentBytes()
-                        entry.hotSnapshot?.recycleBitmaps()
-                        reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBytesBefore)
-                        discarded += entry
+                        if (spillEntry(entry, token, generation)) {
+                            // Successfully spilled - remains in stack as Cold, hot bytes released
+                            newRedo.add(entry)
+                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBytesBefore)
+                        } else {
+                            // Spill failed (stale operation or publish failed) - settle once and discard
+                            settleDiscarded(entry, hotBytesBefore, discarded)
+                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBytesBefore)
+                        }
                     }
                 }
                 redo = newRedo
@@ -397,12 +395,26 @@ internal class EditorHistoryCoordinator(
                     reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBytesBefore)
                 }
             }
-            trimDiskBudget(discarded, protectedSet)
+            // trimDiskBudget now returns whether budget was satisfied
+            diskBudgetSatisfied = trimDiskBudget(discarded, protectedSet)
             deleteEntries(discarded)
-            return reclaimed
+            return RecoverResult(reclaimed, diskBudgetSatisfied)
         } finally {
             finishOperation(token)
         }
+    }
+
+    /** Settles an entry being discarded from a stack: recycles hot snapshot, clears state, adds to discarded list once. */
+    private fun settleDiscarded(entry: EditorHistoryEntry, hotBytesBefore: Long, discarded: MutableList<EditorHistoryEntry>) {
+        // Only recycle if hot snapshot exists and hasn't been released
+        if (entry.hotSnapshot != null && !entry.hotSnapshot!!.resourcesReleased) {
+            entry.hotSnapshot!!.recycleBitmaps()
+            // Only count bytes if we actually released resident resources
+            // hotBytesBefore > 0 implies there was something to release
+        }
+        entry.hotSnapshot = null
+        entry.payloadState = HistoryPayloadState.Discarded
+        discarded.add(entry)
     }
 
     fun replaceDocument() {
@@ -536,12 +548,12 @@ internal class EditorHistoryCoordinator(
         publishState()
     }
 
-    private suspend fun trimDiskBudget(discarded: MutableList<EditorHistoryEntry>, protectedSet: Set<String> = emptySet()) {
+    private suspend fun trimDiskBudget(discarded: MutableList<EditorHistoryEntry>, protectedSet: Set<String> = emptySet()): Boolean {
         var total = (undo + redo).fold(0L) { bytes, entry ->
             BitmapMemoryBudget.saturatingAdd(bytes, entry.coldPayload?.bytes ?: 0L)
         }
         val budget = BitmapMemoryBudget.historyDiskBudgetBytes()
-        if (total <= budget) return
+        if (total <= budget) return true
         val coldEntries = (undo + redo).filter { it.coldPayload != null && it.id !in protectedSet }
         for (entry in coldEntries) {
             if (total <= budget) break
@@ -552,6 +564,7 @@ internal class EditorHistoryCoordinator(
             discarded += entry
         }
         publishState()
+        return total <= budget
     }
 
     private fun scheduleMaintenance(foregroundReserveBytes: Long) {
