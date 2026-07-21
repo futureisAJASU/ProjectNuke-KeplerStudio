@@ -107,7 +107,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var memoryRecoveryJob: Job? = null
 private var automaticRetryAttempt: MemoryRetryDescriptor? = null
     private var strongRetryAttempt: MemoryRetryDescriptor? = null
-    private var lastHistoryRecoveryRetrySafe: Boolean = true
 
     init {
         BitmapMemoryBudget.initialize(app.applicationContext)
@@ -200,8 +199,15 @@ memoryRecoveryJob = viewModelScope.launch {
             val protectedEntryId = if (descriptor.action == MemoryRetryAction.HistoryUndo || descriptor.action == MemoryRetryAction.HistoryRedo) {
                 descriptor.targetEntryId
             } else null
-            val reclaimed = performMemoryCleanup(strong = false, protectedEntryId = protectedEntryId)
-            if (reclaimed && isMemoryRetryCurrent(descriptor) && BitmapMemoryBudget.canAllocate(requiredBytes)) {
+            val cleanupResult = performMemoryCleanup(strong = false, protectedEntryId = protectedEntryId)
+            val isHistoryAction = descriptor.action == MemoryRetryAction.HistoryUndo || descriptor.action == MemoryRetryAction.HistoryRedo
+            val generalRetryOk = cleanupResult.reclaimedResources && isMemoryRetryCurrent(descriptor) && BitmapMemoryBudget.canAllocate(requiredBytes)
+            val historyRetryOk = isHistoryAction && cleanupResult.reclaimedResources &&
+                isMemoryRetryCurrent(descriptor) && BitmapMemoryBudget.canAllocate(requiredBytes) &&
+                cleanupResult.historyRecoveryCompleted && !cleanupResult.historyRecoverySuperseded &&
+                cleanupResult.historyDiskBudgetSatisfied
+            val retryOk = if (isHistoryAction) historyRetryOk else generalRetryOk
+            if (retryOk) {
                 pendingMemoryRetry = null
                 updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, message = "메모리를 자동으로 정리했습니다. 작업을 다시 시도합니다.") }
                 automaticRetryAttempt = descriptor
@@ -230,13 +236,15 @@ fun retryPendingMemoryRecovery(token: Long) {
             else -> null
         }
         memoryRecoveryJob = viewModelScope.launch {
-            val reclaimed = performMemoryCleanup(strong = true, protectedEntryId = protectedEntryId)
-            // Revalidate after cleanup
-            // For history retries, also check if history recovery was retry-safe (disk budget satisfied)
-            val retrySafe = isMemoryRetryCurrent(descriptor) &&
-                BitmapMemoryBudget.canAllocate(descriptor.requiredBytes) &&
-                (descriptor.action != MemoryRetryAction.HistoryUndo && descriptor.action != MemoryRetryAction.HistoryRedo || lastHistoryRecoveryRetrySafe)
-            if (reclaimed && retrySafe) {
+            val cleanupResult = performMemoryCleanup(strong = true, protectedEntryId = protectedEntryId)
+            val isHistoryAction = descriptor.action == MemoryRetryAction.HistoryUndo || descriptor.action == MemoryRetryAction.HistoryRedo
+            val generalRetryOk = cleanupResult.reclaimedResources && isMemoryRetryCurrent(descriptor) && BitmapMemoryBudget.canAllocate(descriptor.requiredBytes)
+            val historyRetryOk = isHistoryAction && cleanupResult.reclaimedResources &&
+                isMemoryRetryCurrent(descriptor) && BitmapMemoryBudget.canAllocate(descriptor.requiredBytes) &&
+                cleanupResult.historyRecoveryCompleted && !cleanupResult.historyRecoverySuperseded &&
+                cleanupResult.historyDiskBudgetSatisfied
+            val retryOk = if (isHistoryAction) historyRetryOk else generalRetryOk
+            if (retryOk) {
                 pendingMemoryRetry = null
                 updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, message = "메모리 정리를 완료했습니다. 작업을 다시 시도합니다.") }
                 strongRetryAttempt = descriptor
@@ -262,10 +270,10 @@ fun retryPendingMemoryRecovery(token: Long) {
         }
     }
 
-private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: String? = null): Boolean {
-        var reclaimed = false
+private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: String? = null): MemoryCleanupResult {
+        var reclaimedResources = false
         fun clearCompleted(job: Job?): Job? {
-            if (job != null && !job.isActive) reclaimed = true
+            if (job != null && !job.isActive) reclaimedResources = true
             return job?.takeIf { it.isActive }
         }
         renderJob = clearCompleted(renderJob)
@@ -276,23 +284,24 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
         draftSaveJob = clearCompleted(draftSaveJob)
         transactionFinishJob = clearCompleted(transactionFinishJob)
         historyIoJob = clearCompleted(historyIoJob)
-        if (ThumbnailBitmapCache.evictUnleased() > 0L) reclaimed = true
-        if (RemasterModelSession.unloadIdleNow()) reclaimed = true
+        if (ThumbnailBitmapCache.evictUnleased() > 0L) reclaimedResources = true
+        if (RemasterModelSession.unloadIdleNow()) reclaimedResources = true
         if (!_uiState.value.isBusy && renderJob?.isActive != true && exportJob?.isActive != true && nativeSession != 0L) {
             releaseNativeSession()
-            reclaimed = true
+            reclaimedResources = true
         }
         val recoveryResult = historyCoordinator.recover(strong, protectedEntryId)
-        if (recoveryResult.reclaimedRamBytes > 0L) reclaimed = true
-        // Disk budget failure during strong recovery means history recovery is not retry-safe
-        val historyRecoveryRetrySafe = !strong || recoveryResult.diskBudgetSatisfied
+        if (recoveryResult.reclaimedRamBytes > 0L) reclaimedResources = true
         updateHistoryFlags()
         if (strong) withContext(Dispatchers.IO) {
             cleanupTemporarySourceFiles(getApplication<Application>(), _uiState.value.sourcePath)
         }
-        // Store whether history recovery is retry-safe for the retry logic
-        lastHistoryRecoveryRetrySafe = historyRecoveryRetrySafe
-        return reclaimed
+        return MemoryCleanupResult(
+            reclaimedResources = reclaimedResources,
+            historyRecoveryCompleted = !recoveryResult.superseded,
+            historyDiskBudgetSatisfied = recoveryResult.diskBudgetSatisfied,
+            historyRecoverySuperseded = recoveryResult.superseded
+        )
     }
 
     private fun isMemoryRetryCurrent(descriptor: MemoryRetryDescriptor): Boolean {
@@ -3267,6 +3276,17 @@ internal data class MemoryRetryDescriptor(
     val coordinatorGeneration: String? = null,
     val sourceBranchSize: Int = 0,
     val destinationBranchSize: Int = 0
+)
+
+internal data class MemoryCleanupResult(
+    /** Whether any RAM/resource was released anywhere in the cleanup path. */
+    val reclaimedResources: Boolean,
+    /** Whether history recovery completed (not busy/superseded) for the requested transaction. */
+    val historyRecoveryCompleted: Boolean,
+    /** Whether the protected disk budget was satisfied after eligible eviction. */
+    val historyDiskBudgetSatisfied: Boolean,
+    /** True when the history operation was busy or superseded — result is not retry-safe. */
+    val historyRecoverySuperseded: Boolean
 )
 
 private fun MemoryRetryDescriptor?.matchesRetryFailure(action: MemoryRetryAction, state: EditorUiState): Boolean =

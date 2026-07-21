@@ -26,6 +26,8 @@ internal enum class HistorySnapshotStorage { Exact, MetadataOnly }
 
 internal enum class HistoryPayloadState { Hot, Cold, Loading, Spilling, Adopting, Discarded }
 
+internal enum class SpillResult { Success, CurrentFailure, Superseded }
+
 internal data class ColdHistoryPayload(
     val directory: File,
     val bytes: Long,
@@ -338,83 +340,122 @@ internal class EditorHistoryCoordinator(
 
     internal data class RecoverResult(
         val reclaimedRamBytes: Long,
-        val diskBudgetSatisfied: Boolean
+        val diskBudgetSatisfied: Boolean,
+        val superseded: Boolean
     )
 
     suspend fun recover(strong: Boolean, protectedEntryId: String? = null): RecoverResult {
         checkMainOwner()
-        if (operationBusy) return RecoverResult(0L, true)
+        if (operationBusy) return RecoverResult(0L, true, superseded = true)
         val token = beginOperation()
         val generation = documentGeneration
         val discarded = ArrayList<EditorHistoryEntry>()
         var reclaimed = 0L
         var diskBudgetSatisfied = true
+        var superseded = false
         try {
             val protectedSet = buildSet {
                 protectedEntryId?.let { add(it) }
-                // Always protect the most recent entry in each stack
                 undo.lastOrNull()?.id?.let { add(it) }
                 redo.lastOrNull()?.id?.let { add(it) }
             }
-            if (strong) {
-                // Single-pass Redo rebuild with authoritative settlement
+            if (strong && !superseded) {
                 val newRedo = ArrayDeque<EditorHistoryEntry>()
-                redo.forEach { entry ->
+                for (entry in redo) {
                     if (!isOperationCurrent(token, generation)) {
-                        newRedo.add(entry)
-                        return@forEach
+                        superseded = true
+                        break
                     }
                     if (entry.id in protectedSet || entry.payloadState != HistoryPayloadState.Hot) {
-                        // Protected or already Cold - keep as-is
                         newRedo.add(entry)
-                    } else {
-                        // Unprotected hot entry - attempt spill
-                        val hotBytesBefore = entry.hotResidentBytes()
-                        if (spillEntry(entry, token, generation)) {
-                            // Successfully spilled - remains in stack as Cold, hot bytes released
+                        continue
+                    }
+                    // Unprotected hot entry — attempt spill
+                    val hotBefore = entry.hotResidentBytes()
+                    val result = spillEntry(entry, token, generation)
+                    when (result) {
+                        SpillResult.Success -> {
                             newRedo.add(entry)
-                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBytesBefore)
-                        } else {
-                            // Spill failed (stale operation or publish failed) - settle once and discard
-                            settleDiscarded(entry, hotBytesBefore, discarded)
-                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBytesBefore)
+                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBefore)
+                        }
+                        SpillResult.CurrentFailure -> {
+                            // Current-operation publish failure: intentionally discard.
+                            // spillEntry already restored payloadState to Hot on publish-null,
+                            // or threw. Settle from this operation.
+                            if (!isOperationCurrent(token, generation)) {
+                                superseded = true
+                                break
+                            }
+                            val actuallyReleased = settleSingleDiscarded(entry, discarded)
+                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, actuallyReleased)
+                        }
+                        SpillResult.Superseded -> {
+                            // Stale or closed during spill — replacement/close owns settlement.
+                            superseded = true
+                            break
                         }
                     }
                 }
-                redo = newRedo
-                publishState()
-            }
-            val candidates = buildList {
-                addAll(redo.filter { it.hotSnapshot != null && it.id !in protectedSet })
-                addAll(undo.toList().dropLast(1).filter { it.hotSnapshot != null && it.id !in protectedSet })
-            }
-            for (entry in candidates) {
-                if (!isOperationCurrent(token, generation)) break
-                val hotBytesBefore = entry.hotResidentBytes()
-                if (spillEntry(entry, token, generation)) {
-                    reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBytesBefore)
+                // Commit rebuilt redo only while current
+                if (!superseded && isOperationCurrent(token, generation)) {
+                    redo = newRedo
+                    publishState()
                 }
             }
-            // trimDiskBudget now returns whether budget was satisfied
-            diskBudgetSatisfied = trimDiskBudget(discarded, protectedSet)
-            deleteEntries(discarded)
-            return RecoverResult(reclaimed, diskBudgetSatisfied)
+            // Spill remaining candidates (undo except tip, remaining redo hot)
+            if (!superseded) {
+                val candidates = buildList {
+                    addAll(redo.filter { it.hotSnapshot != null && it.id !in protectedSet })
+                    addAll(undo.toList().dropLast(1).filter { it.hotSnapshot != null && it.id !in protectedSet })
+                }
+                for (entry in candidates) {
+                    if (!isOperationCurrent(token, generation)) {
+                        superseded = true
+                        break
+                    }
+                    val hotBefore = entry.hotResidentBytes()
+                    val result = spillEntry(entry, token, generation)
+                    when (result) {
+                        SpillResult.Success -> {
+                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBefore)
+                        }
+                        SpillResult.CurrentFailure -> {
+                            if (!isOperationCurrent(token, generation)) {
+                                superseded = true
+                                break
+                            }
+                            val actuallyReleased = settleSingleDiscarded(entry, discarded)
+                            reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, actuallyReleased)
+                        }
+                        SpillResult.Superseded -> {
+                            superseded = true
+                            break
+                        }
+                    }
+                }
+            }
+            // Disk trim and delete only if still current
+            if (!superseded && isOperationCurrent(token, generation)) {
+                diskBudgetSatisfied = trimDiskBudget(discarded, protectedSet)
+                deleteEntries(discarded)
+            }
+            return RecoverResult(reclaimed, diskBudgetSatisfied, superseded)
         } finally {
             finishOperation(token)
         }
     }
 
-    /** Settles an entry being discarded from a stack: recycles hot snapshot, clears state, adds to discarded list once. */
-    private fun settleDiscarded(entry: EditorHistoryEntry, hotBytesBefore: Long, discarded: MutableList<EditorHistoryEntry>) {
-        // Only recycle if hot snapshot exists and hasn't been released
-        if (entry.hotSnapshot != null && !entry.hotSnapshot!!.resourcesReleased) {
+    /** Recycles resident hot snapshot if unreleased, clears state, adds to discarded list, returns actually-released bytes. */
+    private fun settleSingleDiscarded(entry: EditorHistoryEntry, discarded: MutableList<EditorHistoryEntry>): Long {
+        val released = if (entry.hotSnapshot != null && !entry.hotSnapshot!!.resourcesReleased) {
+            val bytes = entry.hotSnapshot!!.bitmapBytes()
             entry.hotSnapshot!!.recycleBitmaps()
-            // Only count bytes if we actually released resident resources
-            // hotBytesBefore > 0 implies there was something to release
-        }
+            bytes
+        } else 0L
         entry.hotSnapshot = null
         entry.payloadState = HistoryPayloadState.Discarded
         discarded.add(entry)
+        return released
     }
 
     fun replaceDocument() {
@@ -487,7 +528,7 @@ internal class EditorHistoryCoordinator(
             val candidate = (undo + redo).firstOrNull {
                 it.id !in protected && it.payloadState == HistoryPayloadState.Hot && it.hotSnapshot != null
             } ?: break
-            if (!spillEntry(candidate, token, generation)) break
+            if (spillEntry(candidate, token, generation) != SpillResult.Success) break
             moved = true
         }
         return moved
@@ -502,43 +543,51 @@ internal class EditorHistoryCoordinator(
             val candidate = (undo + redo).firstOrNull {
                 it.payloadState == HistoryPayloadState.Hot && it.hotSnapshot != null && it.id != recentUndo && it.id != recentRedo
             } ?: (undo + redo).firstOrNull { it.payloadState == HistoryPayloadState.Hot && it.hotSnapshot != null }
-            if (candidate == null || !spillEntry(candidate, token, generation)) break
+            if (candidate == null || spillEntry(candidate, token, generation) != SpillResult.Success) break
             moved = true
         }
         return moved
     }
 
-    private suspend fun spillEntry(entry: EditorHistoryEntry, token: Long, generation: String): Boolean {
-        val snapshot = entry.hotSnapshot ?: return entry.coldPayload != null
-        if (entry.payloadState != HistoryPayloadState.Hot) return false
+    /** Returns SpillResult.Success when entry is now Cold with confirmed publication.
+     *  Returns SpillResult.CurrentFailure when the current operation's publish failed;
+     *  caller may discard the entry. Returns SpillResult.Superseded when the operation
+     *  is stale/closed; caller must NOT discard or reclaim — replacement/close owns settlement. */
+    private suspend fun spillEntry(entry: EditorHistoryEntry, token: Long, generation: String): SpillResult {
+        val snapshot = entry.hotSnapshot ?: return if (entry.coldPayload != null) SpillResult.Success else SpillResult.CurrentFailure
+        if (entry.payloadState != HistoryPayloadState.Hot) return SpillResult.CurrentFailure
         entry.payloadState = HistoryPayloadState.Spilling
         val published = try {
             storage.publish(entry, snapshot)
         } catch (t: Throwable) {
             if (!isOperationCurrent(token, generation) || entry.payloadState == HistoryPayloadState.Discarded) {
+                // Superseded: replacement/close already recycled & settled in its own finalizer.
+                // Only release if they didn't (unreleased snapshot).
                 if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
                 entry.hotSnapshot = null
+                return SpillResult.Superseded
             } else {
                 entry.payloadState = HistoryPayloadState.Hot
+                throw t
             }
-            throw t
         }
         if (!isOperationCurrent(token, generation) || entry.payloadState == HistoryPayloadState.Discarded) {
+            // Stale or closed during publication — replacement/close owns settlement.
             published?.let { storage.delete(it) }
             if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
             entry.hotSnapshot = null
-            return false
+            return SpillResult.Superseded
         }
         if (published == null) {
             entry.payloadState = HistoryPayloadState.Hot
-            return false
+            return SpillResult.CurrentFailure
         }
         entry.coldPayload = published
         entry.hotSnapshot = null
         entry.payloadState = HistoryPayloadState.Cold
         snapshot.recycleBitmaps()
         publishState()
-        return true
+        return SpillResult.Success
     }
 
     private fun trimEntryCount(discarded: MutableList<EditorHistoryEntry>) {
