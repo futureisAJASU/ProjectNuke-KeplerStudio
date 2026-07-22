@@ -18,6 +18,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -73,6 +74,8 @@ internal class EditorHistoryCoordinator(
     private val scope: CoroutineScope
 ) {
     private val storage = EditorHistoryStorage(context.applicationContext)
+    /** Detached settlement survives viewModelScope cancellation and owns all lifecycle IO. */
+    private val settlementScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var undo = ArrayDeque<EditorHistoryEntry>()
     private var redo = ArrayDeque<EditorHistoryEntry>()
     private var documentGeneration = UUID.randomUUID().toString()
@@ -88,9 +91,11 @@ internal class EditorHistoryCoordinator(
     init {
         val initialGeneration = documentGeneration
         storage.registerSession(initialGeneration)
-        scope.launch {
-            runCatching { storage.initializeSession(initialGeneration) }
-            if (isMainOwner() && documentGeneration == initialGeneration && operationBusy) {
+        settlementScope.launch {
+            withContext(NonCancellable) {
+                runCatching { storage.initializeSession(initialGeneration) }
+            }
+            if (isMainOwner() && documentGeneration == initialGeneration && !closed && operationBusy) {
                 operationBusy = false
                 publishState()
                 idleSignal.complete(Unit)
@@ -498,13 +503,11 @@ internal class EditorHistoryCoordinator(
         }
         operationBusy = true
         publishState()
-        val settlementJob = scope.launch {
-            // Initialize new session first (may block on IO but must succeed before clearing old)
-            runCatching { storage.initializeSession(newGeneration) }
-            // Wait for any operations that captured the old generation
-            pendingOperations.forEach { it.await() }
-            // Settle old generation under NonCancellable so cancellation never orphans it
+        val settlementJob = settlementScope.launch {
             withContext(NonCancellable) {
+                // This owner orders initialization, operation completion, and deletion.
+                runCatching { storage.initializeSession(newGeneration) }
+                pendingOperations.forEach { it.await() }
                 try {
                     storage.deleteEntries(oldEntries)
                 } finally {
@@ -515,19 +518,19 @@ internal class EditorHistoryCoordinator(
                     }
                 }
             }
-            // Only clear busy when the coordinator is alive, not closed, and this generation is still current
+            // Busy settlement is independent of optional old-file deletion success.
             if (isMainOwner() && !closed && documentGeneration == newGeneration) {
                 operationBusy = false
                 publishState()
                 idleSignal.complete(Unit)
             }
         }
-        detachedGenerationJobs.removeAll { !it.isActive }
         detachedGenerationJobs.add(settlementJob)
     }
 
     fun close() {
         checkMainOwner()
+        if (closed) return
         closed = true
         operationToken += 1L
         val generation = documentGeneration
@@ -546,13 +549,19 @@ internal class EditorHistoryCoordinator(
         operationBusy = true
         idleSignal.complete(Unit)
         publishState()
-        scope.launch(NonCancellable) {
+        settlementScope.launch(NonCancellable) {
             pendingOperations.forEach { it.await() }
             // Await all detached-generation settlement jobs first
             pendingDetached.forEach { it.join() }
-            storage.deleteEntries(entries)
-            storage.unregisterSession(generation)
-            storage.deleteSession(generation)
+            try {
+                storage.deleteEntries(entries)
+            } finally {
+                try {
+                    storage.unregisterSession(generation)
+                } finally {
+                    storage.deleteSession(generation)
+                }
+            }
         }
     }
 

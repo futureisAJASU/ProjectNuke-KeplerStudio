@@ -294,9 +294,15 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
         if (recoveryResult.reclaimedRamBytes > 0L) reclaimedResources = true
         updateHistoryFlags()
         // Only perform destructive file cleanup for current, non-superseded strong recovery
-        if (strong && !recoveryResult.superseded && !shuttingDown) {
+        val historyAction = protectedEntryId != null
+        val cleanupIdentity = if (strong && !historyAction && !recoveryResult.superseded && !shuttingDown) {
+            Triple(_uiState.value.sourcePath, _uiState.value.baseContentToken, _uiState.value.revision)
+        } else null
+        if (cleanupIdentity != null && isDocumentIdentityCurrent(cleanupIdentity.first, cleanupIdentity.second, cleanupIdentity.third)) {
             withContext(Dispatchers.IO) {
-                cleanupTemporarySourceFiles(getApplication<Application>(), _uiState.value.sourcePath)
+                if (isDocumentIdentityCurrent(cleanupIdentity.first, cleanupIdentity.second, cleanupIdentity.third)) {
+                    cleanupTemporarySourceFiles(getApplication<Application>(), cleanupIdentity.first)
+                }
             }
         }
         return MemoryCleanupResult(
@@ -355,6 +361,12 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
     private fun isDocumentIdentityCurrent(descriptor: MemoryRetryDescriptor): Boolean {
         val state = _uiState.value
         return state.sourcePath == descriptor.sourcePath && state.baseContentToken == descriptor.baseContentToken && state.revision == descriptor.revision
+    }
+
+    private fun isDocumentIdentityCurrent(sourcePath: String?, baseContentToken: String?, revision: Int): Boolean {
+        val state = _uiState.value
+        return !shuttingDown && state.sourcePath == sourcePath &&
+            state.baseContentToken == baseContentToken && state.revision == revision
     }
 
     internal fun markMemoryRetrySucceeded(action: MemoryRetryAction) {
