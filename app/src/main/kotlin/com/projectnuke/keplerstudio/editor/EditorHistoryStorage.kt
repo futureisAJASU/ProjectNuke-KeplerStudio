@@ -32,7 +32,14 @@ internal enum class SpillResult { Success, CurrentFailure, Superseded }
 internal data class ColdHistoryPayload(
     val directory: File,
     val bytes: Long,
-    val decodedBytes: Long
+    val decodedBytes: Long,
+    val generation: String
+)
+
+/** Result of a batch cold-payload deletion attempt. */
+internal data class DeletionResult(
+    val allConfirmedAbsent: Boolean,
+    val failedPayloads: List<ColdHistoryPayload>
 )
 
 internal data class EditorHistoryEntry(
@@ -115,22 +122,45 @@ internal class EditorHistoryCoordinator(
         pendingDeletionDebt.fold(0L) { sum, p -> BitmapMemoryBudget.saturatingAdd(sum, p.bytes) }
     )
 
-    /** Record cold payloads whose directories still exist after a failed deletion attempt. */
-    private fun trackFailedDeletions(entries: Collection<EditorHistoryEntry>) {
-        for (entry in entries) {
-            val payload = entry.coldPayload ?: continue
-            val dir = payload.directory
-            if (dir.exists() && pendingDeletionDebt.none { it.directory == dir }) {
+    /**
+     * Delete cold entries on IO, then record any confirmed-failed payloads as pending debt.
+     * All existence checking runs on Dispatchers.IO via storage.deleteEntries.
+     * Duplicate directories are not re-tracked.
+     */
+    private suspend fun settleColdEntries(discarded: Collection<EditorHistoryEntry>) {
+        if (discarded.isEmpty()) return
+        val result = storage.deleteEntries(discarded)
+        for (payload in result.failedPayloads) {
+            if (pendingDeletionDebt.none { it.directory == payload.directory }) {
                 pendingDeletionDebt.add(payload)
             }
         }
     }
 
-    /** Retry all pending deletion debt. Successful deletion removes the debt exactly once. */
+    /**
+     * Delete cold payloads directly (not from stacks) on IO, then record failures as debt.
+     */
+    private suspend fun settleColdPayloads(payloads: Collection<ColdHistoryPayload>) {
+        if (payloads.isEmpty()) return
+        val result = storage.deletePayloads(payloads)
+        for (payload in result.failedPayloads) {
+            if (pendingDeletionDebt.none { it.directory == payload.directory }) {
+                pendingDeletionDebt.add(payload)
+            }
+        }
+    }
+
+    /** Remove all deletion debt whose generation matches [generation]. */
+    private fun clearGenerationDebt(generation: String) {
+        pendingDeletionDebt.removeAll { it.generation == generation }
+    }
+
+    /** Retry all pending deletion debt. Successful retry removes the debt exactly once. */
     private suspend fun retryPendingDeletions() {
         if (pendingDeletionDebt.isEmpty()) return
         val iterator = pendingDeletionDebt.iterator()
-        for (debt in pendingDeletionDebt) {
+        while (iterator.hasNext()) {
+            val debt = iterator.next()
             if (storage.delete(debt)) iterator.remove()
         }
     }
@@ -182,7 +212,7 @@ internal class EditorHistoryCoordinator(
                         snapshot.recycleBitmaps()
                         moved = true
                     } else {
-                        published?.let { storage.delete(it) }
+                        published?.let { settleColdPayloads(listOf(it)) }
                     }
                 }
                 if (admittedEntry.hotSnapshot == null || fitsWith(snapshotBytes)) {
@@ -196,7 +226,7 @@ internal class EditorHistoryCoordinator(
                 }
             }
             // Admission is already committed; track any physical deletion failure.
-            if (!deleteEntries(discarded)) trackFailedDeletions(discarded)
+            settleColdEntries(discarded)
             return HistoryAdmissionResult(retained, moved, visibleFlags.copy(busy = false))
         } finally {
             if (!retained && !snapshot.resourcesReleased) snapshot.recycleBitmaps()
@@ -226,7 +256,7 @@ internal class EditorHistoryCoordinator(
         val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
         val published = storage.publish(entry, snapshot)
         if (published == null || !isOperationCurrent(token, generation)) {
-            published?.let { storage.delete(it) }
+            published?.let { settleColdPayloads(listOf(it)) }
             if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
             return null
         }
@@ -246,7 +276,7 @@ internal class EditorHistoryCoordinator(
         discardRam(discarded)
         publishState()
         return try {
-            if (!deleteEntries(discarded)) trackFailedDeletions(discarded)
+            settleColdEntries(discarded)
             visibleFlags.copy(busy = false)
         } finally {
             finishOperation(token)
@@ -328,7 +358,7 @@ internal class EditorHistoryCoordinator(
 
             if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target || !fitsBudget) {
                 currentEntry?.let { entry ->
-                    entry.coldPayload?.let { storage.delete(it) }
+                    entry.coldPayload?.let { settleColdPayloads(listOf(it)) }
                 }
                 return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
             }
@@ -353,9 +383,7 @@ internal class EditorHistoryCoordinator(
             discarded += target
             publishState()
             trimEntryCount(discarded)
-            withContext(NonCancellable) {
-                runCatching { deleteEntries(discarded) }
-            }
+            settleColdEntries(discarded)
             return HistoryNavigationResult.Adopted(visibleFlags.copy(busy = false), moved)
         } catch (failure: BitmapAllocationRejectedException) {
             return HistoryNavigationResult.MemoryRejected(failure.requiredBytes, visibleFlags.copy(busy = false))
@@ -368,7 +396,7 @@ internal class EditorHistoryCoordinator(
                 cleanup.forEach { if (!it.resourcesReleased) it.recycleBitmaps() }
                 // Clean up oversized current entry if it was created but not adopted
                 currentEntry?.let { entry ->
-                    entry.coldPayload?.let { storage.delete(it) }
+                    entry.coldPayload?.let { settleColdPayloads(listOf(it)) }
                 }
                 if (target.payloadState != HistoryPayloadState.Discarded) {
                     target.payloadState = if (target.hotSnapshot != null) HistoryPayloadState.Hot else HistoryPayloadState.Cold
@@ -488,15 +516,15 @@ internal class EditorHistoryCoordinator(
             }
             // Disk trim and delete only if still current
             if (!superseded && isOperationCurrent(token, generation)) {
+                // trimDiskBudget retries existing debt first, then evicts unprotected entries.
                 trimDiskBudget(discarded, protectedSet)
-                if (!deleteEntries(discarded)) trackFailedDeletions(discarded)
-                // Retry pending debt from prior failures.
-                retryPendingDeletions()
+                // Delete evicted entries on IO; track any failures as new debt.
+                settleColdEntries(discarded)
                 // Recheck after suspending deletion — replacement/close may supersede during IO
                 if (!isOperationCurrent(token, generation) || closed) {
                     superseded = true
                 } else {
-                    // Include pending-deletion debt in budget accounting.
+                    // Physical disk budget includes retained stack cold bytes + remaining debt.
                     diskBudgetSatisfied = totalColdDiskBytes() <= BitmapMemoryBudget.historyDiskBudgetBytes()
                 }
             }
@@ -553,8 +581,22 @@ internal class EditorHistoryCoordinator(
                 withContext(NonCancellable) {
                     runCatching { storage.initializeSession(newGeneration) }
                     pendingOperations.forEach { it.await() }
-                    // Old entry deletion is best-effort; failure must not block busy clear.
-                    runCatching { storage.deleteEntries(oldEntries) }
+                    // Delete old entries on IO; failures tracked as debt after session check.
+                    val entryResult = runCatching { storage.deleteEntries(oldEntries) }.getOrNull()
+                    // Continue holding for session-level check in finally.
+                    runCatching { storage.unregisterSession(oldGeneration) }
+                    val sessionOk = runCatching { storage.deleteSession(oldGeneration) }.getOrDefault(false)
+                    if (sessionOk) {
+                        // Whole session confirmed absent — clear all debt for this generation.
+                        clearGenerationDebt(oldGeneration)
+                    } else if (entryResult != null) {
+                        // Session deletion failed — record individual failures as debt.
+                        for (payload in entryResult.failedPayloads) {
+                            if (pendingDeletionDebt.none { it.directory == payload.directory }) {
+                                pendingDeletionDebt.add(payload)
+                            }
+                        }
+                    }
                 }
                 // Busy release: only when this replacement still owns the handoff.
                 if (isMainOwner() && !closed && documentGeneration == newGeneration) {
@@ -564,11 +606,6 @@ internal class EditorHistoryCoordinator(
             } finally {
                 // Always wake waiters, even if we were superseded.
                 handoffSignal.complete(Unit)
-                // Old-generation cleanup always runs, regardless of busy-release outcome.
-                withContext(NonCancellable) {
-                    runCatching { storage.unregisterSession(oldGeneration) }
-                    runCatching { storage.deleteSession(oldGeneration) }
-                }
                 // Remove our record immediately; do not wait for next replacement.
                 detachedGenerationSettlements.remove(settlementDeferred)
                 settlementDeferred.complete(Unit)
@@ -610,12 +647,16 @@ internal class EditorHistoryCoordinator(
                 pendingOperations.forEach { it.await() }
                 pendingDetached.forEach { it.await() }
             } finally {
-                // Best-effort final entry deletion and pending-debt cleanup.
-                runCatching { storage.deleteEntries(entries) }
-                runCatching { retryPendingDeletions() }
-                // Current-generation unregister always runs before final completion.
+                // Final entry deletion with full debt tracking.
+                settleColdEntries(entries)
+                // Retry any pending deletion debt from prior failures.
+                retryPendingDeletions()
+                // Current-generation unregister and session deletion.
                 runCatching { storage.unregisterSession(generation) }
-                runCatching { storage.deleteSession(generation) }
+                val sessionOk = runCatching { storage.deleteSession(generation) }.getOrDefault(false)
+                if (sessionOk) {
+                    clearGenerationDebt(generation)
+                }
                 deferred.complete(Unit)
             }
         }
@@ -696,11 +737,19 @@ internal class EditorHistoryCoordinator(
         publishState()
     }
 
+    /**
+     * Evict unprotected cold entries from stacks until the physical disk budget is satisfied.
+     * Starting total includes both retained stack cold bytes AND pending deletion debt.
+     * Returns true when the physical target can be met.
+     * Does NOT treat logical deque removal as physical reclamation.
+     */
     private suspend fun trimDiskBudget(discarded: MutableList<EditorHistoryEntry>, protectedSet: Set<String> = emptySet()): Boolean {
-        var total = (undo + redo).fold(0L) { bytes, entry ->
-            BitmapMemoryBudget.saturatingAdd(bytes, entry.coldPayload?.bytes ?: 0L)
-        }
+        var total = totalColdDiskBytes()
         val budget = BitmapMemoryBudget.historyDiskBudgetBytes()
+        if (total <= budget) return true
+        // Retry existing debt first; may reduce physical accounted bytes.
+        retryPendingDeletions()
+        total = totalColdDiskBytes()
         if (total <= budget) return true
         val coldEntries = (undo + redo).filter { it.coldPayload != null && it.id !in protectedSet }
         for (entry in coldEntries) {
@@ -728,22 +777,16 @@ internal class EditorHistoryCoordinator(
                     undo.lastOrNull()?.id?.let { add(it) }
                     redo.lastOrNull()?.id?.let { add(it) }
                 }
+                // trimDiskBudget retries existing debt first, then evicts unprotected entries.
                 trimDiskBudget(discarded, protectedSet)
-                if (!deleteEntries(discarded)) trackFailedDeletions(discarded)
-                // Retry any pending deletion debt from prior failures.
-                retryPendingDeletions()
+                // Delete evicted entries on IO; track any failures as new debt.
+                settleColdEntries(discarded)
                 // Recheck after suspending deletion — old operation must not act on replacement generation
                 if (isOperationCurrent(token, generation)) publishState()
             } finally {
                 finishOperation(token)
             }
         }
-    }
-
-    /** Returns true when all owned cold payloads were confirmed deleted. Empty is trivially success. */
-    private suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): Boolean {
-        if (entries.isEmpty()) return true
-        return storage.deleteEntries(entries)
     }
 
     private fun discardRam(entries: Collection<EditorHistoryEntry>) {
@@ -853,7 +896,7 @@ private class EditorHistoryStorage(context: Context) {
             if (published.exists()) published.deleteRecursively()
             check(staging.renameTo(published))
             syncDirectory(session)
-            ColdHistoryPayload(published, published.directoryBytes(), snapshot.bitmapBytes())
+            ColdHistoryPayload(published, published.directoryBytes(), snapshot.bitmapBytes(), entry.documentGeneration)
         } catch (ce: CancellationException) {
             staging.deleteRecursively()
             published.takeIf { isOwnedEntryDirectory(it, entry.documentGeneration, entry.id) }?.deleteRecursively()
@@ -945,18 +988,33 @@ private class EditorHistoryStorage(context: Context) {
         }.getOrNull()
     }
 
-    /** Returns true when all owned cold-payload directories were confirmed deleted or absent.
-     *  Every entry is attempted independently — a single failure does not skip remaining entries. */
-    suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): Boolean = withContext(Dispatchers.IO) {
-        var allOk = true
+    /** Returns the result of batch cold-payload deletion.
+     *  Every entry is attempted independently — a single failure does not skip remaining entries.
+     *  Ownership-validation failure returns the payload as failed without deleting the path. */
+    suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): DeletionResult = withContext(Dispatchers.IO) {
+        val failed = ArrayList<ColdHistoryPayload>()
         for (entry in entries) {
             val payload = entry.coldPayload ?: continue
-            if (!deleteInternal(payload)) allOk = false
+            if (!deleteInternal(payload)) failed.add(payload)
         }
-        allOk
+        DeletionResult(failed.isEmpty(), failed)
+    }
+
+    suspend fun delete(entry: EditorHistoryEntry): Boolean = withContext(Dispatchers.IO) {
+        val payload = entry.coldPayload ?: return@withContext true
+        deleteInternal(payload)
     }
 
     suspend fun delete(payload: ColdHistoryPayload): Boolean = withContext(Dispatchers.IO) { deleteInternal(payload) }
+
+    /** Returns the result of batch cold-payload deletion by payload reference. */
+    suspend fun deletePayloads(payloads: Collection<ColdHistoryPayload>): DeletionResult = withContext(Dispatchers.IO) {
+        val failed = ArrayList<ColdHistoryPayload>()
+        for (payload in payloads) {
+            if (!deleteInternal(payload)) failed.add(payload)
+        }
+        DeletionResult(failed.isEmpty(), failed)
+    }
 
     /** Returns true when the session directory is confirmed deleted or absent. */
     suspend fun deleteSession(sessionId: String): Boolean = withContext(Dispatchers.IO) {
