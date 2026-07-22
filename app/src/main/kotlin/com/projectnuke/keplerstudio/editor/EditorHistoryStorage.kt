@@ -16,7 +16,6 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -81,8 +80,10 @@ internal class EditorHistoryCoordinator(
     private var documentGeneration = UUID.randomUUID().toString()
     private var operationToken = 0L
     private val operationCompletions = HashMap<Long, CompletableDeferred<Unit>>()
-    /** Jobs that settle detached generations (from replaceDocument). close() awaits these. */
-    private val detachedGenerationJobs = ArrayList<Job>()
+    /** Pending generation-settlement completions (from replaceDocument). close() awaits these. */
+    private val detachedGenerationSettlements = ArrayList<CompletableDeferred<Unit>>()
+    /** Final close-settlement deferred, completed when the close finalizer finishes. */
+    private var closeSettlement: CompletableDeferred<Unit>? = null
     private var operationBusy = true
     private var closed = false
     @Volatile private var visibleFlags = HistoryFlags(false, false, true)
@@ -503,29 +504,33 @@ internal class EditorHistoryCoordinator(
         }
         operationBusy = true
         publishState()
-        val settlementJob = settlementScope.launch {
-            withContext(NonCancellable) {
-                // This owner orders initialization, operation completion, and deletion.
-                runCatching { storage.initializeSession(newGeneration) }
-                pendingOperations.forEach { it.await() }
-                try {
-                    storage.deleteEntries(oldEntries)
-                } finally {
-                    try {
-                        storage.unregisterSession(oldGeneration)
-                    } finally {
-                        storage.deleteSession(oldGeneration)
-                    }
+        // Sweep completed settlements before tracking the new one
+        detachedGenerationSettlements.removeAll { it.isCompleted }
+        val settlementDeferred = CompletableDeferred<Unit>()
+        detachedGenerationSettlements.add(settlementDeferred)
+        settlementScope.launch {
+            try {
+                withContext(NonCancellable) {
+                    runCatching { storage.initializeSession(newGeneration) }
+                    pendingOperations.forEach { it.await() }
+                    // Old entry deletion is best-effort; failure must not block busy clear.
+                    runCatching { storage.deleteEntries(oldEntries) }
                 }
-            }
-            // Busy settlement is independent of optional old-file deletion success.
-            if (isMainOwner() && !closed && documentGeneration == newGeneration) {
-                operationBusy = false
-                publishState()
-                idleSignal.complete(Unit)
+                // Busy release: only when this replacement still owns the handoff.
+                if (isMainOwner() && !closed && documentGeneration == newGeneration) {
+                    operationBusy = false
+                    publishState()
+                    runCatching { idleSignal.complete(Unit) }
+                }
+            } finally {
+                // Old-generation cleanup always runs, regardless of busy-release outcome.
+                withContext(NonCancellable) {
+                    runCatching { storage.unregisterSession(oldGeneration) }
+                    runCatching { storage.deleteSession(oldGeneration) }
+                }
+                settlementDeferred.complete(Unit)
             }
         }
-        detachedGenerationJobs.add(settlementJob)
     }
 
     fun close() {
@@ -536,8 +541,8 @@ internal class EditorHistoryCoordinator(
         val generation = documentGeneration
         val entries = (undo + redo).toList()
         val pendingOperations = operationCompletions.values.toList()
-        val pendingDetached = ArrayList(detachedGenerationJobs)
-        detachedGenerationJobs.clear()
+        val pendingDetached = detachedGenerationSettlements.toList()
+        detachedGenerationSettlements.clear()
         undo = ArrayDeque()
         redo = ArrayDeque()
         entries.forEach { entry ->
@@ -547,12 +552,14 @@ internal class EditorHistoryCoordinator(
             entry.payloadState = HistoryPayloadState.Discarded
         }
         operationBusy = true
-        idleSignal.complete(Unit)
+        runCatching { idleSignal.complete(Unit) }
         publishState()
+        val deferred = CompletableDeferred<Unit>()
+        closeSettlement = deferred
         settlementScope.launch(NonCancellable) {
             pendingOperations.forEach { it.await() }
-            // Await all detached-generation settlement jobs first
-            pendingDetached.forEach { it.join() }
+            // Await all prior generation settlements before final cleanup
+            pendingDetached.forEach { it.await() }
             try {
                 storage.deleteEntries(entries)
             } finally {
@@ -560,6 +567,7 @@ internal class EditorHistoryCoordinator(
                     storage.unregisterSession(generation)
                 } finally {
                     storage.deleteSession(generation)
+                    deferred.complete(Unit)
                 }
             }
         }
