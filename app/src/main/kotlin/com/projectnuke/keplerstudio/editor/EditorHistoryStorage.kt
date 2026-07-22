@@ -83,7 +83,9 @@ internal class EditorHistoryCoordinator(
     /** Pending generation-settlement completions (from replaceDocument). close() awaits these. */
     private val detachedGenerationSettlements = ArrayList<CompletableDeferred<Unit>>()
     /** Final close-settlement deferred, completed when the close finalizer finishes. */
-    private var closeSettlement: CompletableDeferred<Unit>? = null
+    @PublishedApi internal var closeSettlement: CompletableDeferred<Unit>? = null
+    /** Cold payloads whose physical deletion has not been confirmed. */
+    private val pendingDeletionDebt = ArrayList<ColdHistoryPayload>()
     private var operationBusy = true
     private var closed = false
     @Volatile private var visibleFlags = HistoryFlags(false, false, true)
@@ -91,6 +93,8 @@ internal class EditorHistoryCoordinator(
 
     init {
         val initialGeneration = documentGeneration
+        val initialSignal = CompletableDeferred<Unit>()
+        idleSignal = initialSignal
         storage.registerSession(initialGeneration)
         settlementScope.launch {
             withContext(NonCancellable) {
@@ -99,8 +103,35 @@ internal class EditorHistoryCoordinator(
             if (isMainOwner() && documentGeneration == initialGeneration && !closed && operationBusy) {
                 operationBusy = false
                 publishState()
-                idleSignal.complete(Unit)
             }
+            // Always complete: wakes waiters even if a replacement superseded us.
+            initialSignal.complete(Unit)
+        }
+    }
+
+    /** Combined cold-bytes still on disk: entries still in stacks + pending deletion debt. */
+    private fun totalColdDiskBytes(): Long = BitmapMemoryBudget.saturatingAdd(
+        (undo + redo).fold(0L) { sum, e -> BitmapMemoryBudget.saturatingAdd(sum, e.coldPayload?.bytes ?: 0L) },
+        pendingDeletionDebt.fold(0L) { sum, p -> BitmapMemoryBudget.saturatingAdd(sum, p.bytes) }
+    )
+
+    /** Record cold payloads whose directories still exist after a failed deletion attempt. */
+    private fun trackFailedDeletions(entries: Collection<EditorHistoryEntry>) {
+        for (entry in entries) {
+            val payload = entry.coldPayload ?: continue
+            val dir = payload.directory
+            if (dir.exists() && pendingDeletionDebt.none { it.directory == dir }) {
+                pendingDeletionDebt.add(payload)
+            }
+        }
+    }
+
+    /** Retry all pending deletion debt. Successful deletion removes the debt exactly once. */
+    private suspend fun retryPendingDeletions() {
+        if (pendingDeletionDebt.isEmpty()) return
+        val iterator = pendingDeletionDebt.iterator()
+        for (debt in pendingDeletionDebt) {
+            if (storage.delete(debt)) iterator.remove()
         }
     }
 
@@ -164,8 +195,8 @@ internal class EditorHistoryCoordinator(
                 retained = undo.contains(admittedEntry)
                 }
             }
-            // Deletion result is informative only — admission is already committed.
-            deleteEntries(discarded)
+            // Admission is already committed; track any physical deletion failure.
+            if (!deleteEntries(discarded)) trackFailedDeletions(discarded)
             return HistoryAdmissionResult(retained, moved, visibleFlags.copy(busy = false))
         } finally {
             if (!retained && !snapshot.resourcesReleased) snapshot.recycleBitmaps()
@@ -215,7 +246,7 @@ internal class EditorHistoryCoordinator(
         discardRam(discarded)
         publishState()
         return try {
-            deleteEntries(discarded)
+            if (!deleteEntries(discarded)) trackFailedDeletions(discarded)
             visibleFlags.copy(busy = false)
         } finally {
             finishOperation(token)
@@ -457,14 +488,16 @@ internal class EditorHistoryCoordinator(
             }
             // Disk trim and delete only if still current
             if (!superseded && isOperationCurrent(token, generation)) {
-                diskBudgetSatisfied = trimDiskBudget(discarded, protectedSet)
-                val deletionOk = deleteEntries(discarded)
+                trimDiskBudget(discarded, protectedSet)
+                if (!deleteEntries(discarded)) trackFailedDeletions(discarded)
+                // Retry pending debt from prior failures.
+                retryPendingDeletions()
                 // Recheck after suspending deletion — replacement/close may supersede during IO
                 if (!isOperationCurrent(token, generation) || closed) {
                     superseded = true
-                } else if (!deletionOk) {
-                    // Physical deletion failure: must not authorize a retry.
-                    diskBudgetSatisfied = false
+                } else {
+                    // Include pending-deletion debt in budget accounting.
+                    diskBudgetSatisfied = totalColdDiskBytes() <= BitmapMemoryBudget.historyDiskBudgetBytes()
                 }
             }
             return RecoverResult(reclaimed, diskBudgetSatisfied, superseded)
@@ -506,9 +539,11 @@ internal class EditorHistoryCoordinator(
                 entry.payloadState = HistoryPayloadState.Discarded
             }
         }
-        // Create a fresh incomplete signal so awaitIdle() suspends during handoff.
+        // Wake any waiter still on the previous signal, then install a fresh incomplete signal.
+        val prevSignal = idleSignal
         val handoffSignal = CompletableDeferred<Unit>()
         idleSignal = handoffSignal
+        prevSignal.complete(Unit)
         operationBusy = true
         publishState()
         val settlementDeferred = CompletableDeferred<Unit>()
@@ -525,9 +560,10 @@ internal class EditorHistoryCoordinator(
                 if (isMainOwner() && !closed && documentGeneration == newGeneration) {
                     operationBusy = false
                     publishState()
-                    handoffSignal.complete(Unit)
                 }
             } finally {
+                // Always wake waiters, even if we were superseded.
+                handoffSignal.complete(Unit)
                 // Old-generation cleanup always runs, regardless of busy-release outcome.
                 withContext(NonCancellable) {
                     runCatching { storage.unregisterSession(oldGeneration) }
@@ -558,11 +594,14 @@ internal class EditorHistoryCoordinator(
             entry.hotSnapshot = null
             entry.payloadState = HistoryPayloadState.Discarded
         }
-        // Release any waiters; create a new completed signal so awaitIdle() exits via closed check.
+        // Wake the current signal's waiters, then install a pre-completed signal.
+        // Waiters will loop, detect closed == true, and return false from awaitIdle().
         operationBusy = true
+        val prevSignal = idleSignal
         val finalSignal = CompletableDeferred<Unit>()
         finalSignal.complete(Unit)
         idleSignal = finalSignal
+        prevSignal.complete(Unit)
         publishState()
         val deferred = CompletableDeferred<Unit>()
         closeSettlement = deferred
@@ -571,8 +610,9 @@ internal class EditorHistoryCoordinator(
                 pendingOperations.forEach { it.await() }
                 pendingDetached.forEach { it.await() }
             } finally {
-                // Best-effort final entry deletion.
+                // Best-effort final entry deletion and pending-debt cleanup.
                 runCatching { storage.deleteEntries(entries) }
+                runCatching { retryPendingDeletions() }
                 // Current-generation unregister always runs before final completion.
                 runCatching { storage.unregisterSession(generation) }
                 runCatching { storage.deleteSession(generation) }
@@ -689,7 +729,9 @@ internal class EditorHistoryCoordinator(
                     redo.lastOrNull()?.id?.let { add(it) }
                 }
                 trimDiskBudget(discarded, protectedSet)
-                deleteEntries(discarded)
+                if (!deleteEntries(discarded)) trackFailedDeletions(discarded)
+                // Retry any pending deletion debt from prior failures.
+                retryPendingDeletions()
                 // Recheck after suspending deletion — old operation must not act on replacement generation
                 if (isOperationCurrent(token, generation)) publishState()
             } finally {
@@ -730,7 +772,10 @@ internal class EditorHistoryCoordinator(
     private fun beginOperation(): Long {
         checkMainOwner()
         operationBusy = true
+        // Complete the previous signal so its waiters loop to the new one.
+        val prevSignal = idleSignal
         idleSignal = CompletableDeferred()
+        prevSignal.complete(Unit)
         val token = ++operationToken
         operationCompletions[token] = CompletableDeferred()
         publishState()
@@ -900,9 +945,15 @@ private class EditorHistoryStorage(context: Context) {
         }.getOrNull()
     }
 
-    /** Returns true when all owned cold-payload directories were confirmed deleted or absent. */
+    /** Returns true when all owned cold-payload directories were confirmed deleted or absent.
+     *  Every entry is attempted independently — a single failure does not skip remaining entries. */
     suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): Boolean = withContext(Dispatchers.IO) {
-        entries.mapNotNull(EditorHistoryEntry::coldPayload).all { deleteInternal(it) }
+        var allOk = true
+        for (entry in entries) {
+            val payload = entry.coldPayload ?: continue
+            if (!deleteInternal(payload)) allOk = false
+        }
+        allOk
     }
 
     suspend fun delete(payload: ColdHistoryPayload): Boolean = withContext(Dispatchers.IO) { deleteInternal(payload) }
@@ -1090,9 +1141,11 @@ private class EditorHistoryStorage(context: Context) {
         }
     }
 
-    /** Returns true when the payload directory is confirmed absent after deletion. */
+    /** Returns true when the payload directory is confirmed absent after deletion.
+     *  Ownership/canonical-path validation failure returns false — never delete an unowned path. */
     private fun deleteInternal(payload: ColdHistoryPayload): Boolean {
-        val dir = payload.directory.takeIf { isOwnedDirectory(it) } ?: return true
+        val dir = payload.directory
+        if (!isOwnedDirectory(dir)) return false
         return dir.deleteRecursively() || !dir.exists()
     }
 
