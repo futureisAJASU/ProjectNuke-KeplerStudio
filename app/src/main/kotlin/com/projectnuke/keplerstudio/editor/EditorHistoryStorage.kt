@@ -164,6 +164,7 @@ internal class EditorHistoryCoordinator(
                 retained = undo.contains(admittedEntry)
                 }
             }
+            // Deletion result is informative only — admission is already committed.
             deleteEntries(discarded)
             return HistoryAdmissionResult(retained, moved, visibleFlags.copy(busy = false))
         } finally {
@@ -457,10 +458,13 @@ internal class EditorHistoryCoordinator(
             // Disk trim and delete only if still current
             if (!superseded && isOperationCurrent(token, generation)) {
                 diskBudgetSatisfied = trimDiskBudget(discarded, protectedSet)
-                deleteEntries(discarded)
+                val deletionOk = deleteEntries(discarded)
                 // Recheck after suspending deletion — replacement/close may supersede during IO
                 if (!isOperationCurrent(token, generation) || closed) {
                     superseded = true
+                } else if (!deletionOk) {
+                    // Physical deletion failure: must not authorize a retry.
+                    diskBudgetSatisfied = false
                 }
             }
             return RecoverResult(reclaimed, diskBudgetSatisfied, superseded)
@@ -502,10 +506,11 @@ internal class EditorHistoryCoordinator(
                 entry.payloadState = HistoryPayloadState.Discarded
             }
         }
+        // Create a fresh incomplete signal so awaitIdle() suspends during handoff.
+        val handoffSignal = CompletableDeferred<Unit>()
+        idleSignal = handoffSignal
         operationBusy = true
         publishState()
-        // Sweep completed settlements before tracking the new one
-        detachedGenerationSettlements.removeAll { it.isCompleted }
         val settlementDeferred = CompletableDeferred<Unit>()
         detachedGenerationSettlements.add(settlementDeferred)
         settlementScope.launch {
@@ -520,7 +525,7 @@ internal class EditorHistoryCoordinator(
                 if (isMainOwner() && !closed && documentGeneration == newGeneration) {
                     operationBusy = false
                     publishState()
-                    runCatching { idleSignal.complete(Unit) }
+                    handoffSignal.complete(Unit)
                 }
             } finally {
                 // Old-generation cleanup always runs, regardless of busy-release outcome.
@@ -528,6 +533,8 @@ internal class EditorHistoryCoordinator(
                     runCatching { storage.unregisterSession(oldGeneration) }
                     runCatching { storage.deleteSession(oldGeneration) }
                 }
+                // Remove our record immediately; do not wait for next replacement.
+                detachedGenerationSettlements.remove(settlementDeferred)
                 settlementDeferred.complete(Unit)
             }
         }
@@ -551,24 +558,25 @@ internal class EditorHistoryCoordinator(
             entry.hotSnapshot = null
             entry.payloadState = HistoryPayloadState.Discarded
         }
+        // Release any waiters; create a new completed signal so awaitIdle() exits via closed check.
         operationBusy = true
-        runCatching { idleSignal.complete(Unit) }
+        val finalSignal = CompletableDeferred<Unit>()
+        finalSignal.complete(Unit)
+        idleSignal = finalSignal
         publishState()
         val deferred = CompletableDeferred<Unit>()
         closeSettlement = deferred
         settlementScope.launch(NonCancellable) {
-            pendingOperations.forEach { it.await() }
-            // Await all prior generation settlements before final cleanup
-            pendingDetached.forEach { it.await() }
             try {
-                storage.deleteEntries(entries)
+                pendingOperations.forEach { it.await() }
+                pendingDetached.forEach { it.await() }
             } finally {
-                try {
-                    storage.unregisterSession(generation)
-                } finally {
-                    storage.deleteSession(generation)
-                    deferred.complete(Unit)
-                }
+                // Best-effort final entry deletion.
+                runCatching { storage.deleteEntries(entries) }
+                // Current-generation unregister always runs before final completion.
+                runCatching { storage.unregisterSession(generation) }
+                runCatching { storage.deleteSession(generation) }
+                deferred.complete(Unit)
             }
         }
     }
@@ -690,9 +698,10 @@ internal class EditorHistoryCoordinator(
         }
     }
 
-    private suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>) {
-        if (entries.isEmpty()) return
-        storage.deleteEntries(entries)
+    /** Returns true when all owned cold payloads were confirmed deleted. Empty is trivially success. */
+    private suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): Boolean {
+        if (entries.isEmpty()) return true
+        return storage.deleteEntries(entries)
     }
 
     private fun discardRam(entries: Collection<EditorHistoryEntry>) {
@@ -891,14 +900,17 @@ private class EditorHistoryStorage(context: Context) {
         }.getOrNull()
     }
 
-    suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>) = withContext(Dispatchers.IO) {
-        entries.mapNotNull(EditorHistoryEntry::coldPayload).forEach { deleteInternal(it) }
+    /** Returns true when all owned cold-payload directories were confirmed deleted or absent. */
+    suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): Boolean = withContext(Dispatchers.IO) {
+        entries.mapNotNull(EditorHistoryEntry::coldPayload).all { deleteInternal(it) }
     }
 
-    suspend fun delete(payload: ColdHistoryPayload) = withContext(Dispatchers.IO) { deleteInternal(payload) }
+    suspend fun delete(payload: ColdHistoryPayload): Boolean = withContext(Dispatchers.IO) { deleteInternal(payload) }
 
-    suspend fun deleteSession(sessionId: String) = withContext(Dispatchers.IO) {
-        sessionDirectory(sessionId).takeIf { isOwnedSessionDirectory(it, sessionId) }?.deleteRecursively()
+    /** Returns true when the session directory is confirmed deleted or absent. */
+    suspend fun deleteSession(sessionId: String): Boolean = withContext(Dispatchers.IO) {
+        val dir = sessionDirectory(sessionId).takeIf { isOwnedSessionDirectory(it, sessionId) } ?: return@withContext true
+        dir.deleteRecursively() || !dir.exists()
     }
 
     private fun snapshotManifest(entry: EditorHistoryEntry, snapshot: EditorHistorySnapshot, staging: File): JSONObject {
@@ -1078,8 +1090,10 @@ private class EditorHistoryStorage(context: Context) {
         }
     }
 
-    private fun deleteInternal(payload: ColdHistoryPayload) {
-        payload.directory.takeIf { isOwnedDirectory(it) }?.deleteRecursively()
+    /** Returns true when the payload directory is confirmed absent after deletion. */
+    private fun deleteInternal(payload: ColdHistoryPayload): Boolean {
+        val dir = payload.directory.takeIf { isOwnedDirectory(it) } ?: return true
+        return dir.deleteRecursively() || !dir.exists()
     }
 
     private fun sessionDirectory(sessionId: String): File = File(root, "$SESSION_PREFIX$sessionId")
