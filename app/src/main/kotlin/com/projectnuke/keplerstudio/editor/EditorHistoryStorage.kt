@@ -28,6 +28,7 @@ internal enum class HistorySnapshotStorage { Exact, MetadataOnly }
 internal enum class HistoryPayloadState { Hot, Cold, Loading, Spilling, Adopting, Discarded }
 
 internal enum class SpillResult { Success, CurrentFailure, Superseded }
+internal enum class TrimResult { Satisfied, Superseded }
 
 internal data class ColdHistoryPayload(
     val directory: File,
@@ -155,14 +156,20 @@ internal class EditorHistoryCoordinator(
         pendingDeletionDebt.removeAll { it.generation == generation }
     }
 
-    /** Retry all pending deletion debt. Successful retry removes the debt exactly once. */
+    /**
+     * Retry all pending deletion debt.
+     * Snapshot the debt list on Main, delete all via one IO batch, then reconcile on Main.
+     * No iterator is held across a suspend boundary.
+     * Debt added by a concurrent replacement/close during IO is preserved.
+     */
     private suspend fun retryPendingDeletions() {
         if (pendingDeletionDebt.isEmpty()) return
-        val iterator = pendingDeletionDebt.iterator()
-        while (iterator.hasNext()) {
-            val debt = iterator.next()
-            if (storage.delete(debt)) iterator.remove()
-        }
+        val snapshot = pendingDeletionDebt.toList()
+        val result = runCatching { storage.deletePayloads(snapshot) }.getOrNull() ?: return
+        val snapshotDirs = snapshot.map { it.directory }.toSet()
+        val failedDirs = result.failedPayloads.map { it.directory }.toSet()
+        // Remove only debt that was in the snapshot AND was confirmed absent.
+        pendingDeletionDebt.removeAll { it.directory in snapshotDirs && it.directory !in failedDirs }
     }
 
     fun flags(): HistoryFlags = visibleFlags
@@ -221,8 +228,15 @@ internal class EditorHistoryCoordinator(
                 publishState()
                 trimEntryCount(discarded)
                 moved = rebalanceHot(foregroundReserveBytes, token, generation) || moved
-                trimDiskBudget(discarded)
-                retained = undo.contains(admittedEntry)
+                // Recheck after rebalanceHot suspension — cannot trim a superseded document.
+                if (isOperationCurrent(token, generation)) {
+                    if (trimDiskBudget(discarded, emptySet(), token, generation) == TrimResult.Superseded) {
+                        retained = false
+                    }
+                } else {
+                    retained = false
+                }
+                if (retained) retained = undo.contains(admittedEntry)
                 }
             }
             // Admission is already committed; track any physical deletion failure.
@@ -516,16 +530,19 @@ internal class EditorHistoryCoordinator(
             }
             // Disk trim and delete only if still current
             if (!superseded && isOperationCurrent(token, generation)) {
-                // trimDiskBudget retries existing debt first, then evicts unprotected entries.
-                trimDiskBudget(discarded, protectedSet)
-                // Delete evicted entries on IO; track any failures as new debt.
-                settleColdEntries(discarded)
-                // Recheck after suspending deletion — replacement/close may supersede during IO
-                if (!isOperationCurrent(token, generation) || closed) {
+                val trimResult = trimDiskBudget(discarded, protectedSet, token, generation)
+                if (trimResult == TrimResult.Superseded) {
                     superseded = true
                 } else {
-                    // Physical disk budget includes retained stack cold bytes + remaining debt.
-                    diskBudgetSatisfied = totalColdDiskBytes() <= BitmapMemoryBudget.historyDiskBudgetBytes()
+                    // Delete evicted entries on IO; track any failures as new debt.
+                    settleColdEntries(discarded)
+                    // Recheck after suspending deletion — replacement/close may supersede during IO
+                    if (!isOperationCurrent(token, generation) || closed) {
+                        superseded = true
+                    } else {
+                        // Physical disk budget includes retained stack cold bytes + remaining debt.
+                        diskBudgetSatisfied = totalColdDiskBytes() <= BitmapMemoryBudget.historyDiskBudgetBytes()
+                    }
                 }
             }
             return RecoverResult(reclaimed, diskBudgetSatisfied, superseded)
@@ -647,16 +664,19 @@ internal class EditorHistoryCoordinator(
                 pendingOperations.forEach { it.await() }
                 pendingDetached.forEach { it.await() }
             } finally {
-                // Final entry deletion with full debt tracking.
-                settleColdEntries(entries)
-                // Retry any pending deletion debt from prior failures.
-                retryPendingDeletions()
-                // Current-generation unregister and session deletion.
+                // Every step wrapped individually: failure must not skip remaining steps.
+                // Entry deletion uses exception-safe storage methods; all per-payload failures
+                // are caught and returned in DeletionResult.
+                runCatching { settleColdEntries(entries) }
+                runCatching { retryPendingDeletions() }
+                // Current-generation unregister always attempted.
                 runCatching { storage.unregisterSession(generation) }
-                val sessionOk = runCatching { storage.deleteSession(generation) }.getOrDefault(false)
-                if (sessionOk) {
-                    clearGenerationDebt(generation)
+                runCatching {
+                    if (storage.deleteSession(generation)) {
+                        clearGenerationDebt(generation)
+                    }
                 }
+                // closeSettlement MUST complete in every case.
                 deferred.complete(Unit)
             }
         }
@@ -740,28 +760,37 @@ internal class EditorHistoryCoordinator(
     /**
      * Evict unprotected cold entries from stacks until the physical disk budget is satisfied.
      * Starting total includes both retained stack cold bytes AND pending deletion debt.
-     * Returns true when the physical target can be met.
-     * Does NOT treat logical deque removal as physical reclamation.
+     * Rechecks token/generation after every suspend boundary.
+     * Never mutates a superseding document's deques.
      */
-    private suspend fun trimDiskBudget(discarded: MutableList<EditorHistoryEntry>, protectedSet: Set<String> = emptySet()): Boolean {
+    private suspend fun trimDiskBudget(
+        discarded: MutableList<EditorHistoryEntry>,
+        protectedSet: Set<String> = emptySet(),
+        token: Long,
+        generation: String
+    ): TrimResult {
         var total = totalColdDiskBytes()
         val budget = BitmapMemoryBudget.historyDiskBudgetBytes()
-        if (total <= budget) return true
-        // Retry existing debt first; may reduce physical accounted bytes.
+        if (total <= budget) return TrimResult.Satisfied
         retryPendingDeletions()
+        // Recheck after suspension — replacement may have superseded.
+        if (!isOperationCurrent(token, generation)) return TrimResult.Superseded
         total = totalColdDiskBytes()
-        if (total <= budget) return true
+        if (total <= budget) return TrimResult.Satisfied
         val coldEntries = (undo + redo).filter { it.coldPayload != null && it.id !in protectedSet }
         for (entry in coldEntries) {
             if (total <= budget) break
+            // Recheck immediately before deque mutation.
+            if (!isOperationCurrent(token, generation)) return TrimResult.Superseded
             total = (total - (entry.coldPayload?.bytes ?: 0L)).coerceAtLeast(0L)
             undo.remove(entry)
             redo.remove(entry)
             entry.payloadState = HistoryPayloadState.Discarded
             discarded += entry
         }
+        if (!isOperationCurrent(token, generation)) return TrimResult.Superseded
         publishState()
-        return total <= budget
+        return TrimResult.Satisfied
     }
 
     private fun scheduleMaintenance(foregroundReserveBytes: Long) {
@@ -777,8 +806,8 @@ internal class EditorHistoryCoordinator(
                     undo.lastOrNull()?.id?.let { add(it) }
                     redo.lastOrNull()?.id?.let { add(it) }
                 }
-                // trimDiskBudget retries existing debt first, then evicts unprotected entries.
-                trimDiskBudget(discarded, protectedSet)
+                val trimResult = trimDiskBudget(discarded, protectedSet, token, generation)
+                if (trimResult == TrimResult.Superseded) return@launch
                 // Delete evicted entries on IO; track any failures as new debt.
                 settleColdEntries(discarded)
                 // Recheck after suspending deletion — old operation must not act on replacement generation
@@ -990,28 +1019,40 @@ private class EditorHistoryStorage(context: Context) {
 
     /** Returns the result of batch cold-payload deletion.
      *  Every entry is attempted independently — a single failure does not skip remaining entries.
-     *  Ownership-validation failure returns the payload as failed without deleting the path. */
+     *  Ownership-validation failure returns the payload as failed without deleting the path.
+     *  Per-payload exceptions are caught and returned as deletion failures; all entries are attempted. */
     suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): DeletionResult = withContext(Dispatchers.IO) {
         val failed = ArrayList<ColdHistoryPayload>()
         for (entry in entries) {
             val payload = entry.coldPayload ?: continue
-            if (!deleteInternal(payload)) failed.add(payload)
+            try {
+                if (!deleteInternal(payload)) failed.add(payload)
+            } catch (_: Throwable) {
+                failed.add(payload)
+            }
         }
         DeletionResult(failed.isEmpty(), failed)
     }
 
     suspend fun delete(entry: EditorHistoryEntry): Boolean = withContext(Dispatchers.IO) {
         val payload = entry.coldPayload ?: return@withContext true
-        deleteInternal(payload)
+        try { deleteInternal(payload) } catch (_: Throwable) { false }
     }
 
-    suspend fun delete(payload: ColdHistoryPayload): Boolean = withContext(Dispatchers.IO) { deleteInternal(payload) }
+    suspend fun delete(payload: ColdHistoryPayload): Boolean = withContext(Dispatchers.IO) {
+        try { deleteInternal(payload) } catch (_: Throwable) { false }
+    }
 
-    /** Returns the result of batch cold-payload deletion by payload reference. */
+    /** Returns the result of batch cold-payload deletion by payload reference.
+     *  Per-payload exceptions are caught and returned as deletion failures; all payloads are attempted. */
     suspend fun deletePayloads(payloads: Collection<ColdHistoryPayload>): DeletionResult = withContext(Dispatchers.IO) {
         val failed = ArrayList<ColdHistoryPayload>()
         for (payload in payloads) {
-            if (!deleteInternal(payload)) failed.add(payload)
+            try {
+                if (!deleteInternal(payload)) failed.add(payload)
+            } catch (_: Throwable) {
+                failed.add(payload)
+            }
         }
         DeletionResult(failed.isEmpty(), failed)
     }
