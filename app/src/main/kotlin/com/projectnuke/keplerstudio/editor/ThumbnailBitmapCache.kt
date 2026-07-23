@@ -180,9 +180,22 @@ internal object ThumbnailBitmapCache {
     }
 
     private fun lease(entry: Entry): ThumbnailBitmapLease =
-        ThumbnailBitmapLease(entry.bitmap) { release(entry) }
+        ThumbnailBitmapLease(entry.bitmap) { release(entry) }.also {
+            if (DebugMemoryTracker.isEnabled()) {
+                DebugMemoryTracker.registerBitmap(
+                    bitmap = entry.bitmap,
+                    owner = "ThumbnailBitmapCache:leased",
+                    operation = "thumbnail",
+                    token = 0L,
+                    documentGeneration = ""
+                )
+            }
+        }
 
     private fun release(entry: Entry) {
+        if (DebugMemoryTracker.isEnabled()) {
+            DebugMemoryTracker.unregisterBitmap(entry.bitmap)
+        }
         synchronized(lock) { releaseLocked(entry) }
     }
 
