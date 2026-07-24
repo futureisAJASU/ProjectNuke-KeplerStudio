@@ -1,20 +1,23 @@
 package com.projectnuke.keplerstudio.editor
 
 import android.graphics.Bitmap
+import java.util.IdentityHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 internal class MemoryTrackerScope(
     val name: String,
-    val token: Long,
     val documentGeneration: String,
     val baseContentToken: String,
     val revision: Int,
     val snapshotState: String,
     private val transientReserveBytes: Long
 ) {
+    private val operationToken: Long
+    private val ended = AtomicBoolean(false)
     private val trackedBitmaps = ArrayDeque<Pair<Bitmap, String>>(8)
 
     init {
-        DebugMemoryTracker.beginOperation(
+        operationToken = DebugMemoryTracker.beginOperation(
             name = name,
             documentGeneration = documentGeneration,
             baseContentToken = baseContentToken,
@@ -24,13 +27,15 @@ internal class MemoryTrackerScope(
         )
     }
 
+    val token: Long get() = operationToken
+
     fun track(bitmap: Bitmap, owner: String) {
         if (bitmap.isRecycled) return
         DebugMemoryTracker.registerBitmap(
             bitmap = bitmap,
             owner = owner,
             operation = name,
-            token = token,
+            token = operationToken,
             documentGeneration = documentGeneration
         )
         trackedBitmaps.addLast(bitmap to owner)
@@ -40,19 +45,23 @@ internal class MemoryTrackerScope(
         bitmaps.forEach { track(it, owner) }
     }
 
-    fun release(bitmap: Bitmap) {
-        DebugMemoryTracker.unregisterBitmap(bitmap)
+    fun release(bitmap: Bitmap, owner: String? = null) {
+        DebugMemoryTracker.unregisterBitmap(bitmap, owner)
         trackedBitmaps.removeIf { it.first === bitmap }
     }
 
     fun releaseAll() {
-        trackedBitmaps.forEach { DebugMemoryTracker.unregisterBitmap(it.first) }
+        trackedBitmaps.forEach { (bitmap, owner) ->
+            DebugMemoryTracker.unregisterBitmap(bitmap, owner)
+        }
         trackedBitmaps.clear()
     }
 
     fun end() {
-        releaseAll()
-        DebugMemoryTracker.endOperation(name, token)
+        if (ended.compareAndSet(false, true)) {
+            releaseAll()
+            DebugMemoryTracker.endOperation(name, operationToken)
+        }
     }
 }
 
@@ -63,10 +72,8 @@ internal fun EditorViewModel.beginMemoryTracking(
 ): MemoryTrackerScope? {
     if (!DebugMemoryTracker.isEnabled()) return null
     val state = uiState.value
-    val token = DebugMemoryTracker.newDocumentToken()
     return MemoryTrackerScope(
         name = name,
-        token = token,
         documentGeneration = historyCoordinator.currentGeneration(),
         baseContentToken = state.baseContentToken,
         revision = state.revision,

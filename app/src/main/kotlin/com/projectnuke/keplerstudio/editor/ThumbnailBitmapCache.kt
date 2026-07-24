@@ -32,6 +32,7 @@ internal object ThumbnailBitmapCache {
     private class Entry(val bitmap: Bitmap, val bytes: Long) {
         var leases = 0
         var removed = false
+        var trackedAsLeased = false
     }
 
     private class Flight(val key: String, val decode: () -> Bitmap?) {
@@ -59,6 +60,9 @@ internal object ThumbnailBitmapCache {
                     iterator.remove()
                     residentBytes -= entry.bytes
                     entry.removed = true
+                    if (DebugMemoryTracker.isEnabled()) {
+                        DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:resident")
+                    }
                     recycleIfUnusedLocked(entry)
                 }
             }
@@ -98,6 +102,9 @@ internal object ThumbnailBitmapCache {
             entries.remove(key)?.let { entry ->
                 residentBytes -= entry.bytes
                 entry.removed = true
+                if (DebugMemoryTracker.isEnabled()) {
+                    DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:resident")
+                }
                 recycleIfUnusedLocked(entry)
             }
         }
@@ -114,6 +121,13 @@ internal object ThumbnailBitmapCache {
             inFlight.clear()
             entries.values.forEach { entry ->
                 entry.removed = true
+                if (DebugMemoryTracker.isEnabled()) {
+                    DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:resident")
+                    if (entry.trackedAsLeased) {
+                        entry.trackedAsLeased = false
+                        DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:leased")
+                    }
+                }
                 recycleIfUnusedLocked(entry)
             }
             entries.clear()
@@ -136,6 +150,15 @@ internal object ThumbnailBitmapCache {
                         if (entry.bytes <= maxBytes) {
                             entries[flight.key] = entry
                             residentBytes += entry.bytes
+                            if (DebugMemoryTracker.isEnabled()) {
+                                DebugMemoryTracker.registerBitmap(
+                                    bitmap = entry.bitmap,
+                                    owner = "ThumbnailBitmapCache:resident",
+                                    operation = "thumbnail",
+                                    token = 0L,
+                                    documentGeneration = ""
+                                )
+                            }
                             evictLocked()
                         } else {
                             entry.removed = true
@@ -181,7 +204,8 @@ internal object ThumbnailBitmapCache {
 
     private fun lease(entry: Entry): ThumbnailBitmapLease =
         ThumbnailBitmapLease(entry.bitmap) { release(entry) }.also {
-            if (DebugMemoryTracker.isEnabled()) {
+            if (DebugMemoryTracker.isEnabled() && !entry.trackedAsLeased) {
+                entry.trackedAsLeased = true
                 DebugMemoryTracker.registerBitmap(
                     bitmap = entry.bitmap,
                     owner = "ThumbnailBitmapCache:leased",
@@ -193,8 +217,13 @@ internal object ThumbnailBitmapCache {
         }
 
     private fun release(entry: Entry) {
-        if (DebugMemoryTracker.isEnabled()) {
-            DebugMemoryTracker.unregisterBitmap(entry.bitmap)
+        if (DebugMemoryTracker.isEnabled() && entry.trackedAsLeased) {
+            synchronized(lock) {
+                if (entry.leases <= 0) {
+                    entry.trackedAsLeased = false
+                    DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:leased")
+                }
+            }
         }
         synchronized(lock) { releaseLocked(entry) }
     }
@@ -210,6 +239,9 @@ internal object ThumbnailBitmapCache {
             entries.remove(eldest.key)
             residentBytes -= eldest.value.bytes
             eldest.value.removed = true
+            if (DebugMemoryTracker.isEnabled()) {
+                DebugMemoryTracker.unregisterBitmap(eldest.value.bitmap, "ThumbnailBitmapCache:resident")
+            }
             recycleIfUnusedLocked(eldest.value)
         }
     }
