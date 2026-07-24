@@ -78,7 +78,8 @@ internal sealed class HistoryNavigationResult {
 
 internal class EditorHistoryCoordinator(
     context: Context,
-    private val scope: CoroutineScope
+    private val scope: CoroutineScope,
+    private val tracker: TrackerSession? = null
 ) {
     private val storage = EditorHistoryStorage(context.applicationContext)
     /** Detached settlement survives viewModelScope cancellation and owns all lifecycle IO. */
@@ -332,7 +333,10 @@ internal class EditorHistoryCoordinator(
                     return HistoryNavigationResult.MemoryRejected(transientRequired, visibleFlags.copy(busy = false))
                 }
             }
-            loaded = if (loadedFromDisk) storage.load(target, generation) { loaded = it } else target.hotSnapshot
+              loaded = if (loadedFromDisk) storage.load(target, generation) { loaded = it } else target.hotSnapshot
+              if (loadedFromDisk) {
+                  tracker?.setColdLoadDecodedTransient(target.decodedBytes())
+              }
             val baseTarget = loaded ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
             if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target) {
                 return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
@@ -873,6 +877,44 @@ internal class EditorHistoryCoordinator(
 
     private fun publishState() {
         visibleFlags = HistoryFlags(undo.isNotEmpty(), redo.isNotEmpty(), operationBusy)
+        reportHistoryMetrics()
+    }
+
+    private fun reportHistoryMetrics() {
+        tracker ?: return
+        try {
+            val hot = hotBytes()
+            val entryCount = (undo + redo).count { it.hotSnapshot != null }
+            val coldBytes = (undo + redo).fold(0L) { sum, e -> BitmapMemoryBudget.saturatingAdd(sum, e.coldPayload?.bytes ?: 0L) }
+            val debtBytes = pendingDeletionDebt.fold(0L) { sum, p -> BitmapMemoryBudget.saturatingAdd(sum, p.bytes) }
+            val coldDecoded = (undo + redo).fold(0L) { sum, e -> BitmapMemoryBudget.saturatingAdd(sum, e.decodedBytes()) }
+            val isSpilling = undo.any { it.payloadState == HistoryPayloadState.Spilling } ||
+                redo.any { it.payloadState == HistoryPayloadState.Spilling }
+            val isAdopting = undo.any { it.payloadState == HistoryPayloadState.Adopting } ||
+                redo.any { it.payloadState == HistoryPayloadState.Adopting }
+            val isLoading = undo.any { it.payloadState == HistoryPayloadState.Loading } ||
+                redo.any { it.payloadState == HistoryPayloadState.Loading }
+            tracker.setHistoryHotResident(hot, entryCount)
+            tracker.setHistoryColdCompressed(coldBytes)
+            tracker.setDeletionDebt(debtBytes)
+            tracker.setColdLoadDecodedTransient(coldDecoded)
+            tracker.setHistoryMetricsSnapshot(TrackerSession.HistoryMetricsSnapshot(
+                editorInstanceId = tracker.editorInstanceId,
+                coordinatorGeneration = documentGeneration,
+                hotEntryCount = entryCount,
+                hotResidentBytes = hot,
+                retainedColdCompressedBytes = coldBytes,
+                pendingDeletionDebtBytes = debtBytes,
+                activeColdLoadDecodedBytes = coldDecoded,
+                operationActive = operationBusy,
+                loading = isLoading,
+                spilling = isSpilling,
+                adopting = isAdopting,
+                protectedTargetId = undo.lastOrNull()?.id,
+                timestamp = System.currentTimeMillis()
+            ))
+        } catch (_: Throwable) {
+        }
     }
 
     private fun checkMainOwner() = check(isMainOwner()) { "history coordinator must be called on Main" }

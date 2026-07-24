@@ -62,4 +62,11 @@ dependencies {
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
     implementation("org.tensorflow:tensorflow-lite:2.17.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlin:kotlin-test-junit")
+    testImplementation("io.mockk:mockk:1.13.17")
+    testImplementation("org.robolectric:robolectric:4.16.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.1")
 }

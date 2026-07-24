@@ -21,6 +21,15 @@ internal class ThumbnailBitmapLease internal constructor(
     }
 }
 
+internal interface ThumbnailCacheDiagnostics {
+    fun onAcquire(bytes: Long) {}
+    fun onRelease(bytes: Long) {}
+    fun onEvictResident(bytes: Long) {}
+    fun onRemoveButLease(bytes: Long) {}
+    fun onResidentAcquire(bytes: Long) {}
+    fun onResidentRelease(bytes: Long) {}
+}
+
 internal object ThumbnailBitmapCache {
     @Volatile private var maxBytes = 24L * 1024L * 1024L
     private val lock = Any()
@@ -60,9 +69,7 @@ internal object ThumbnailBitmapCache {
                     iterator.remove()
                     residentBytes -= entry.bytes
                     entry.removed = true
-                    if (DebugMemoryTracker.isEnabled()) {
-                        DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:resident")
-                    }
+                    diagnostics?.onResidentRelease(entry.bytes)
                     recycleIfUnusedLocked(entry)
                 }
             }
@@ -102,9 +109,7 @@ internal object ThumbnailBitmapCache {
             entries.remove(key)?.let { entry ->
                 residentBytes -= entry.bytes
                 entry.removed = true
-                if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:resident")
-                }
+                diagnostics?.onResidentRelease(entry.bytes)
                 recycleIfUnusedLocked(entry)
             }
         }
@@ -121,12 +126,10 @@ internal object ThumbnailBitmapCache {
             inFlight.clear()
             entries.values.forEach { entry ->
                 entry.removed = true
-                if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:resident")
-                    if (entry.trackedAsLeased) {
-                        entry.trackedAsLeased = false
-                        DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:leased")
-                    }
+                diagnostics?.onEvictResident(entry.bytes)
+                if (entry.trackedAsLeased) {
+                    entry.trackedAsLeased = false
+                    diagnostics?.onRelease(entry.bytes)
                 }
                 recycleIfUnusedLocked(entry)
             }
@@ -150,15 +153,7 @@ internal object ThumbnailBitmapCache {
                         if (entry.bytes <= maxBytes) {
                             entries[flight.key] = entry
                             residentBytes += entry.bytes
-                            if (DebugMemoryTracker.isEnabled()) {
-                                DebugMemoryTracker.registerBitmap(
-                                    bitmap = entry.bitmap,
-                                    owner = "ThumbnailBitmapCache:resident",
-                                    operation = "thumbnail",
-                                    token = 0L,
-                                    documentGeneration = ""
-                                )
-                            }
+                            diagnostics?.onResidentAcquire(entry.bytes)
                             evictLocked()
                         } else {
                             entry.removed = true
@@ -204,24 +199,18 @@ internal object ThumbnailBitmapCache {
 
     private fun lease(entry: Entry): ThumbnailBitmapLease =
         ThumbnailBitmapLease(entry.bitmap) { release(entry) }.also {
-            if (DebugMemoryTracker.isEnabled() && !entry.trackedAsLeased) {
+            if (!entry.trackedAsLeased) {
                 entry.trackedAsLeased = true
-                DebugMemoryTracker.registerBitmap(
-                    bitmap = entry.bitmap,
-                    owner = "ThumbnailBitmapCache:leased",
-                    operation = "thumbnail",
-                    token = 0L,
-                    documentGeneration = ""
-                )
+                diagnostics?.onAcquire(entry.bytes)
             }
         }
 
     private fun release(entry: Entry) {
-        if (DebugMemoryTracker.isEnabled() && entry.trackedAsLeased) {
+        if (entry.trackedAsLeased) {
             synchronized(lock) {
                 if (entry.leases <= 0) {
                     entry.trackedAsLeased = false
-                    DebugMemoryTracker.unregisterBitmap(entry.bitmap, "ThumbnailBitmapCache:leased")
+                    diagnostics?.onRelease(entry.bytes)
                 }
             }
         }
@@ -239,9 +228,7 @@ internal object ThumbnailBitmapCache {
             entries.remove(eldest.key)
             residentBytes -= eldest.value.bytes
             eldest.value.removed = true
-            if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.unregisterBitmap(eldest.value.bitmap, "ThumbnailBitmapCache:resident")
-            }
+            diagnostics?.onEvictResident(eldest.value.bytes)
             recycleIfUnusedLocked(eldest.value)
         }
     }
@@ -249,4 +236,39 @@ internal object ThumbnailBitmapCache {
     private fun recycleIfUnusedLocked(entry: Entry) {
         if (entry.removed && entry.leases == 0 && !entry.bitmap.isRecycled) entry.bitmap.recycle()
     }
+
+    private var diagnostics: ThumbnailCacheDiagnostics? = null
+
+    fun attachDiagnostics(d: ThumbnailCacheDiagnostics) {
+        diagnostics = d
+    }
+
+    fun detachDiagnostics() {
+        diagnostics = null
+    }
+
+    fun thumbnailCacheSnapshot(): TrackerSession.ThumbnailCacheSnapshot {
+        synchronized(lock) {
+            var residentCount = 0
+            var residentBytes = 0L
+            var leases = 0
+            var removedButLeased = 0
+            for (entry in entries.values) {
+                if (!entry.removed) {
+                    residentCount++
+                    residentBytes += entry.bytes
+                }
+                leases += entry.leases
+                if (entry.removed && entry.leases > 0) removedButLeased++
+            }
+            return TrackerSession.ThumbnailCacheSnapshot(
+                residentEntryCount = residentCount,
+                residentBytes = residentBytes,
+                totalActiveLeases = leases,
+                removedButLeasedEntryCount = removedButLeased
+            )
+        }
+    }
 }
+
+

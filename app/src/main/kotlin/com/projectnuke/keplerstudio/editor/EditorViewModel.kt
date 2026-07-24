@@ -107,12 +107,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var memoryRecoveryJob: Job? = null
 private var automaticRetryAttempt: MemoryRetryDescriptor? = null
     private var strongRetryAttempt: MemoryRetryDescriptor? = null
+    internal val tracker: TrackerSession = DebugMemoryTracker.createSession("editor-${System.identityHashCode(this)}")
 
     init {
         BitmapMemoryBudget.initialize(app.applicationContext)
         ThumbnailBitmapCache.setByteBudget(BitmapMemoryBudget.thumbnailBudgetBytes())
         if (DebugMemoryTracker.isEnabled()) {
-            DebugMemoryTracker.registerDocument(historyCoordinator.currentGeneration())
+            tracker.registerDocument(historyCoordinator.currentGeneration())
         }
     }
 
@@ -134,7 +135,7 @@ private var automaticRetryAttempt: MemoryRetryDescriptor? = null
             return
         }
         if (DebugMemoryTracker.isEnabled()) {
-            DebugMemoryTracker.registerBitmap(
+            tracker.registerBitmap(
                 bitmap = mask,
                 owner = "createBrushSelection:mask",
                 operation = "createBrushSelection",
@@ -146,7 +147,7 @@ private var automaticRetryAttempt: MemoryRetryDescriptor? = null
         val preparedBase = prepared.originalPreviewBitmap ?: prepared.previewBitmap
         if (preparedBase !== base || base.isRecycled) {
             if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.unregisterBitmap(mask, "createBrushSelection:mask")
+                tracker.unregisterBitmap(mask, "createBrushSelection:mask")
             }
             mask.recycle()
             return
@@ -162,13 +163,13 @@ private var automaticRetryAttempt: MemoryRetryDescriptor? = null
         }
         if (!adopted) {
             if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.unregisterBitmap(mask, "createBrushSelection:mask")
+                tracker.unregisterBitmap(mask, "createBrushSelection:mask")
             }
             if (!mask.isRecycled) mask.recycle()
             return
         }
         if (DebugMemoryTracker.isEnabled()) {
-            DebugMemoryTracker.registerBitmap(
+            tracker.registerBitmap(
                 bitmap = mask,
                 owner = "EditorUiState:selectionLayer",
                 operation = "createBrushSelection:adopted",
@@ -1027,9 +1028,9 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
         if (committed == null) {
             payload.recycleOwnedBitmaps()
             if (DebugMemoryTracker.isEnabled()) {
-                payload.dirtyBitmapCopy?.let { DebugMemoryTracker.unregisterBitmap(it) }
-                payload.editedPreviewCopy?.let { DebugMemoryTracker.unregisterBitmap(it) }
-                payload.selectionLayers.forEach { DebugMemoryTracker.unregisterBitmap(it.bitmap) }
+                payload.dirtyBitmapCopy?.let { tracker.unregisterBitmap(it) }
+                payload.editedPreviewCopy?.let { tracker.unregisterBitmap(it) }
+                payload.selectionLayers.forEach { tracker.unregisterBitmap(it.bitmap) }
             }
             updateUiStateAndRecycleReplaced {
                 if (owningJob?.isActive != false && isDraftPayloadDocumentCurrent(payload)) {
@@ -1040,9 +1041,9 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
         }
         payload.recycleOwnedBitmaps()
         if (DebugMemoryTracker.isEnabled()) {
-            payload.dirtyBitmapCopy?.let { DebugMemoryTracker.unregisterBitmap(it) }
-            payload.editedPreviewCopy?.let { DebugMemoryTracker.unregisterBitmap(it) }
-            payload.selectionLayers.forEach { DebugMemoryTracker.unregisterBitmap(it.bitmap) }
+            payload.dirtyBitmapCopy?.let { tracker.unregisterBitmap(it) }
+            payload.editedPreviewCopy?.let { tracker.unregisterBitmap(it) }
+            payload.selectionLayers.forEach { tracker.unregisterBitmap(it.bitmap) }
         }
         return settled
     }
@@ -1109,7 +1110,7 @@ private suspend fun settleCommittedDraft(
         sb.append("selectionParamTransaction=${selectionParamTransaction?.gestureId}\n")
         sb.append("brushingSnapshot=${brushingSnapshot != null}\n")
         sb.append("ThumbnailBitmapCache resident: see DebugMemoryTracker\n")
-        sb.append(DebugMemoryTracker.debugString())
+        sb.append(tracker.debugString())
         return sb.toString()
     }
 
@@ -1176,7 +1177,7 @@ private suspend fun settleCommittedDraft(
             var preview: Bitmap? = null
             var createdSession = 0L
             var sourceFile: File? = null
-            val tracker = beginMemoryTracking("openImage", snapshotState = "decoding")
+            val opTracker = beginMemoryTracking("openImage", snapshotState = "decoding")
             try {
                 val context = getApplication<Application>()
                 withContext(Dispatchers.IO) {
@@ -1185,12 +1186,12 @@ private suspend fun settleCommittedDraft(
                     val decoded = decodeSampledMutableBitmapWithExif(copiedSource.absolutePath, maxSide = 2048)
                     preview = decoded
                     if (DebugMemoryTracker.isEnabled()) {
-                        DebugMemoryTracker.registerBitmap(
+                        tracker.registerBitmap(
                             bitmap = decoded,
                             owner = "openImage:decodedPreview",
                             operation = "openImage",
-                            token = tracker?.token ?: 0L,
-                            documentGeneration = tracker?.documentGeneration ?: ""
+                            token = opTracker?.token ?: 0L,
+                            documentGeneration = opTracker?.documentGeneration ?: ""
                         )
                     }
                 }
@@ -1206,7 +1207,7 @@ private suspend fun settleCommittedDraft(
 
                 createdSession = NativePhotoCore.nativeCreateSession(openedSource.absolutePath)
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.registerNativeSession(
+                    tracker.registerNativeSession(
                         handle = createdSession,
                         documentGeneration = historyCoordinator.currentGeneration(),
                         sourceIdentity = decodedPreview.hashCode().toString(),
@@ -1262,13 +1263,13 @@ private suspend fun settleCommittedDraft(
                 }
                 createdSession = 0L
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.updateNativeSession(nativeSession, "active")
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.updateNativeSession(nativeSession, "active")
+                    tracker.registerBitmap(
                         bitmap = decodedPreview,
                         owner = "EditorUiState:originalPreviewBitmap",
                         operation = "openImage:adopted",
-                        token = tracker?.token ?: 0L,
-                        documentGeneration = tracker?.documentGeneration ?: ""
+                        token = opTracker?.token ?: 0L,
+                        documentGeneration = opTracker?.documentGeneration ?: ""
                     )
                 }
                 lastSuccessfullyRenderedParams = EditParams()
@@ -1279,21 +1280,21 @@ private suspend fun settleCommittedDraft(
                 deleteOwnedWorkingSource(context, previousState.sourcePath)
                 forceDraftSaveAsync()
             } catch (ce: CancellationException) {
-                preview?.let { DebugMemoryTracker.unregisterBitmap(it, "openImage:decodedPreview") }
+                preview?.let { tracker.unregisterBitmap(it, "openImage:decodedPreview") }
                 preview?.recycle()
                 releaseNativeSessionHandle(createdSession)
                 sourceFile?.delete()
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.unregisterNativeSession(createdSession)
+                    tracker.unregisterNativeSession(createdSession)
                 }
                 throw ce
             } catch (t: Throwable) {
-                preview?.let { DebugMemoryTracker.unregisterBitmap(it, "openImage:decodedPreview") }
+                preview?.let { tracker.unregisterBitmap(it, "openImage:decodedPreview") }
                 preview?.recycle()
                 releaseNativeSessionHandle(createdSession)
                 sourceFile?.delete()
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.unregisterNativeSession(createdSession)
+                    tracker.unregisterNativeSession(createdSession)
                 }
                 if (!shuttingDown && openToken == restoreDraftToken && _uiState.value.revision == invalidateRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC774\uBBF8\uC9C0\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
@@ -1302,7 +1303,7 @@ private suspend fun settleCommittedDraft(
                     }
                 }
             } finally {
-                tracker?.end()
+                opTracker?.end()
             }
         }
     }
@@ -1361,7 +1362,7 @@ private suspend fun settleCommittedDraft(
                     renderEditedPreview(ownedBase, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
                 }
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.registerBitmap(
                         bitmap = rendered!!,
                         owner = "updateParams:rendered",
                         operation = "updateParams",
@@ -1383,21 +1384,21 @@ private suspend fun settleCommittedDraft(
                     if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     rendered?.recycle()
                     if (DebugMemoryTracker.isEnabled()) {
-                        rendered?.let { DebugMemoryTracker.unregisterBitmap(it) }
+                        rendered?.let { tracker.unregisterBitmap(it) }
                     }
                     rendered = null
                 }
             } catch (ce: CancellationException) {
                 rendered?.recycle()
                 if (DebugMemoryTracker.isEnabled()) {
-                    rendered?.let { DebugMemoryTracker.unregisterBitmap(it) }
+                    rendered?.let { tracker.unregisterBitmap(it) }
                 }
                 if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 throw ce
             } catch (t: Throwable) {
                 rendered?.recycle()
                 if (DebugMemoryTracker.isEnabled()) {
-                    rendered?.let { DebugMemoryTracker.unregisterBitmap(it) }
+                    rendered?.let { tracker.unregisterBitmap(it) }
                 }
                 if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
@@ -1416,7 +1417,7 @@ private suspend fun settleCommittedDraft(
             } finally {
                 ownedBase.recycle()
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.unregisterBitmap(ownedBase)
+                    tracker.unregisterBitmap(ownedBase)
                 }
                 paramTracker?.end()
             }
@@ -1461,7 +1462,7 @@ private suspend fun settleCommittedDraft(
                     rendered = renderEditedPreview(ownedBase, nextParams, engines, nextRevision, presetLook, quickEffects)
                 }
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.registerBitmap(
                         bitmap = rendered!!,
                         owner = "applyAutoEnhance:rendered",
                         operation = "applyAutoEnhance",
@@ -1503,7 +1504,7 @@ private suspend fun settleCommittedDraft(
             } finally {
                 rendered?.takeIf { !it.isRecycled }?.recycle()
                 if (DebugMemoryTracker.isEnabled()) {
-                    rendered?.let { DebugMemoryTracker.unregisterBitmap(it) }
+                    rendered?.let { tracker.unregisterBitmap(it) }
                 }
                 ownedBase.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
@@ -1743,7 +1744,7 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
                     rendered = result
                 }
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.registerBitmap(
                         bitmap = rendered!!,
                         owner = "applyPresetLook:rendered",
                         operation = "applyPresetLook",
@@ -1785,7 +1786,7 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
             } finally {
                 rendered?.takeIf { !it.isRecycled }?.recycle()
                 if (DebugMemoryTracker.isEnabled()) {
-                    rendered?.let { DebugMemoryTracker.unregisterBitmap(it) }
+                    rendered?.let { tracker.unregisterBitmap(it) }
                 }
                 ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
@@ -2039,8 +2040,8 @@ return
                 ownedDirtyBase?.let(owned::add)
                 owned.forEach { if (!it.isRecycled) it.recycle() }
                 if (DebugMemoryTracker.isEnabled()) {
-                    ownedExportResult?.let { DebugMemoryTracker.unregisterBitmap(it) }
-                    ownedDirtyBase?.let { DebugMemoryTracker.unregisterBitmap(it) }
+                    ownedExportResult?.let { tracker.unregisterBitmap(it) }
+                    ownedDirtyBase?.let { tracker.unregisterBitmap(it) }
                 }
                 if (exportJob === currentCoroutineContext()[Job]) exportJob = null
                 exportTracker?.end()
@@ -2414,7 +2415,7 @@ fun clearDraft() {
         try {
             rotatedPreview = rotateBitmap90(preview)
             if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.registerBitmap(
+                tracker.registerBitmap(
                     bitmap = rotatedPreview!!,
                     owner = "rotatePreview90:rotatedPreview",
                     operation = "rotatePreview90",
@@ -2428,7 +2429,7 @@ fun clearDraft() {
                 else -> rotateBitmap90(current.originalPreviewBitmap)
             }
             if (DebugMemoryTracker.isEnabled() && rotatedOriginal != null && rotatedOriginal !== rotatedPreview) {
-                DebugMemoryTracker.registerBitmap(
+                tracker.registerBitmap(
                     bitmap = rotatedOriginal!!,
                     owner = "rotatePreview90:rotatedOriginal",
                     operation = "rotatePreview90",
@@ -2440,7 +2441,7 @@ fun clearDraft() {
                 val rotated = rotateBitmap90(it.bitmap)
                 rotatedMasks += rotated
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.registerBitmap(
                         bitmap = rotated,
                         owner = "rotatePreview90:rotatedMask",
                         operation = "rotatePreview90",
@@ -2478,8 +2479,8 @@ fun clearDraft() {
             if (rotatedOriginal !== adoptedPreview) rotatedOriginal = null
             rotatedMasks.clear()
             if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.unregisterBitmap(adoptedPreview, "rotatePreview90:rotatedPreview")
-                DebugMemoryTracker.registerBitmap(
+                tracker.unregisterBitmap(adoptedPreview, "rotatePreview90:rotatedPreview")
+                tracker.registerBitmap(
                     bitmap = adoptedPreview,
                     owner = "EditorUiState:previewBitmap",
                     operation = "rotatePreview90:adopted",
@@ -2487,8 +2488,8 @@ fun clearDraft() {
                     documentGeneration = rotateTracker?.documentGeneration ?: ""
                 )
                 if (adoptedOriginal != null && adoptedOriginal !== adoptedPreview) {
-                    DebugMemoryTracker.unregisterBitmap(adoptedOriginal, "rotatePreview90:rotatedOriginal")
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.unregisterBitmap(adoptedOriginal, "rotatePreview90:rotatedOriginal")
+                    tracker.registerBitmap(
                         bitmap = adoptedOriginal,
                         owner = "EditorUiState:originalPreviewBitmap",
                         operation = "rotatePreview90:adopted",
@@ -2497,8 +2498,8 @@ fun clearDraft() {
                     )
                 }
                 adoptedMasks.forEach { mask ->
-                    DebugMemoryTracker.unregisterBitmap(mask, "rotatePreview90:rotatedMask")
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.unregisterBitmap(mask, "rotatePreview90:rotatedMask")
+                    tracker.registerBitmap(
                         bitmap = mask,
                         owner = "EditorUiState:selectionLayer",
                         operation = "rotatePreview90:adopted",
@@ -2516,7 +2517,7 @@ fun clearDraft() {
             rotatedMasks.forEach(cleanup::add)
             cleanup.forEach { if (!it.isRecycled) it.recycle() }
             if (DebugMemoryTracker.isEnabled()) {
-                cleanup.forEach { DebugMemoryTracker.unregisterBitmap(it) }
+                cleanup.forEach { tracker.unregisterBitmap(it) }
             }
             undoSnapshot?.let(::recycleHistorySnapshot)
             updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 회전에 실패했습니다.") }
@@ -2626,7 +2627,7 @@ fun clearDraft() {
                     renderedPreview = result
                 }
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.registerBitmap(
                         bitmap = renderedPreview!!,
                         owner = "applyNativeSpecialEffects:rendered",
                         operation = "applyNativeSpecialEffects",
@@ -2671,7 +2672,7 @@ fun clearDraft() {
             } finally {
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
                 if (DebugMemoryTracker.isEnabled()) {
-                    renderedPreview?.let { DebugMemoryTracker.unregisterBitmap(it) }
+                    renderedPreview?.let { tracker.unregisterBitmap(it) }
                 }
                 ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
@@ -2739,7 +2740,7 @@ fun clearDraft() {
                     r
                 }
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.registerBitmap(
                         bitmap = flareGuardBitmap!!,
                         owner = "applyFlareGuard:flareGuardBitmap",
                         operation = "applyFlareGuard",
@@ -2761,7 +2762,7 @@ fun clearDraft() {
                     p
                 }
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.registerBitmap(
+                    tracker.registerBitmap(
                         bitmap = renderedPreview!!,
                         owner = "applyFlareGuard:renderedPreview",
                         operation = "applyFlareGuard",
@@ -2824,11 +2825,11 @@ fun clearDraft() {
             } finally {
                 flareGuardBitmap?.takeIf { !it.isRecycled }?.recycle()
                 if (DebugMemoryTracker.isEnabled()) {
-                    flareGuardBitmap?.let { DebugMemoryTracker.unregisterBitmap(it) }
+                    flareGuardBitmap?.let { tracker.unregisterBitmap(it) }
                 }
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
                 if (DebugMemoryTracker.isEnabled()) {
-                    renderedPreview?.let { DebugMemoryTracker.unregisterBitmap(it) }
+                    renderedPreview?.let { tracker.unregisterBitmap(it) }
                 }
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
@@ -3064,7 +3065,7 @@ restoreStateAdopted = true
             ownedWorkingSource?.delete()
             releaseNativeSessionHandle(createdSession)
             if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.unregisterNativeSession(createdSession)
+                tracker.unregisterNativeSession(createdSession)
             }
         }
     }
@@ -3218,7 +3219,7 @@ restoreStateAdopted = true
             }
             createdSession = NativePhotoCore.nativeCreateSession(sourcePath)
             if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.registerNativeSession(
+                tracker.registerNativeSession(
                     handle = createdSession,
                     documentGeneration = historyCoordinator.currentGeneration(),
                     sourceIdentity = sourcePath.hashCode().toString(),
@@ -3229,7 +3230,7 @@ restoreStateAdopted = true
                 recycleOwnedRestoreBitmaps()
                 releaseNativeSessionHandle(createdSession)
                 if (DebugMemoryTracker.isEnabled()) {
-                    DebugMemoryTracker.unregisterNativeSession(createdSession)
+                    tracker.unregisterNativeSession(createdSession)
                 }
                 createdSession = 0L
                 return
@@ -3286,14 +3287,14 @@ restoreStateAdopted = true
             recycleOwnedRestoreBitmaps()
             releaseNativeSessionHandle(createdSession)
             if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.unregisterNativeSession(createdSession)
+                tracker.unregisterNativeSession(createdSession)
             }
             throw ce
         } catch (t: Throwable) {
             recycleOwnedRestoreBitmaps()
             releaseNativeSessionHandle(createdSession)
             if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.unregisterNativeSession(createdSession)
+                tracker.unregisterNativeSession(createdSession)
             }
             val currentRevision = _uiState.value.revision
             val isRestoreStillCurrent = !shuttingDown && restoreToken == restoreDraftToken &&
@@ -3490,7 +3491,7 @@ restoreStateAdopted = true
     private fun releaseNativeSessionHandle(session: Long) {
         if (session != 0L) {
             if (DebugMemoryTracker.isEnabled()) {
-                DebugMemoryTracker.unregisterNativeSession(session)
+                tracker.unregisterNativeSession(session)
             }
             runCatching { NativePhotoCore.nativeReleaseSession(session) }
         }
@@ -3506,8 +3507,8 @@ restoreStateAdopted = true
     override fun onCleared() {
         shuttingDown = true
         if (DebugMemoryTracker.isEnabled()) {
-            DebugMemoryTracker.logSnapshot("onCleared")
-            DebugMemoryTracker.clear()
+            tracker.logSnapshot("onCleared")
+            tracker.clear()
         }
         managedEditToken += 1L
         invalidateManagedEdits()
