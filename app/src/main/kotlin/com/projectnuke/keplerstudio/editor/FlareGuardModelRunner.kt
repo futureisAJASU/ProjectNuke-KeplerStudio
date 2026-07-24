@@ -44,6 +44,7 @@ class FlareGuardModelRunner private constructor(
     )
 
     fun predictMaskOrNull(source: Bitmap): MaskResult? = try {
+        GlobalModelDiagnostics.publish("FlareGuardModelRunner", "inferring")
         val resized = if (source.width == inputWidth && source.height == inputHeight) {
             source
         } else {
@@ -74,6 +75,8 @@ class FlareGuardModelRunner private constructor(
     } catch (t: Throwable) {
         if (t is BitmapAllocationRejectedException) throw t
         null
+    } finally {
+        GlobalModelDiagnostics.publish("FlareGuardModelRunner", "loaded")
     }
 
     private fun writeInput(buffer: ByteBuffer, pixels: IntArray) {
@@ -179,34 +182,46 @@ class FlareGuardModelRunner private constructor(
     }
 
     override fun close() {
-        interpreter.close()
+        GlobalModelDiagnostics.publish("FlareGuardModelRunner", "closing")
+        try {
+            interpreter.close()
+        } finally {
+            GlobalModelDiagnostics.publish("FlareGuardModelRunner", "unloaded")
+        }
     }
 
     companion object {
-        fun createOrNull(context: Context): FlareGuardModelRunner? = runCatching {
-            val options = Interpreter.Options().apply {
-                setNumThreads(2)
-                setUseXNNPACK(true)
-            }
-            val interpreter = Interpreter(loadMappedAsset(context, FLARE_MASKER_MODEL_ASSET), options)
-            val inputTensor = interpreter.getInputTensor(0)
-            val outputTensor = interpreter.getOutputTensor(0)
-            val inputShape = parseInputShape(inputTensor.shape())
-            val outputShape = parseOutputShape(outputTensor.shape(), inputShape.width, inputShape.height)
+        fun createOrNull(context: Context): FlareGuardModelRunner? {
+            GlobalModelDiagnostics.publish("FlareGuardModelRunner", "loading")
+            return runCatching {
+                val options = Interpreter.Options().apply {
+                    setNumThreads(2)
+                    setUseXNNPACK(true)
+                }
+                val interpreter = Interpreter(loadMappedAsset(context, FLARE_MASKER_MODEL_ASSET), options)
+                val inputTensor = interpreter.getInputTensor(0)
+                val outputTensor = interpreter.getOutputTensor(0)
+                val inputShape = parseInputShape(inputTensor.shape())
+                val outputShape = parseOutputShape(outputTensor.shape(), inputShape.width, inputShape.height)
 
-            FlareGuardModelRunner(
-                interpreter = interpreter,
-                inputWidth = inputShape.width,
-                inputHeight = inputShape.height,
-                inputLayout = inputShape.layout,
-                inputType = inputTensor.dataType(),
-                outputWidth = outputShape.width,
-                outputHeight = outputShape.height,
-                outputChannels = outputShape.channels,
-                outputLayout = outputShape.layout,
-                outputType = outputTensor.dataType()
-            )
-        }.getOrNull()
+                FlareGuardModelRunner(
+                    interpreter = interpreter,
+                    inputWidth = inputShape.width,
+                    inputHeight = inputShape.height,
+                    inputLayout = inputShape.layout,
+                    inputType = inputTensor.dataType(),
+                    outputWidth = outputShape.width,
+                    outputHeight = outputShape.height,
+                    outputChannels = outputShape.channels,
+                    outputLayout = outputShape.layout,
+                    outputType = outputTensor.dataType()
+                )
+            }.onSuccess {
+                GlobalModelDiagnostics.publish("FlareGuardModelRunner", "loaded")
+            }.onFailure {
+                GlobalModelDiagnostics.publish("FlareGuardModelRunner", "unloaded")
+            }.getOrNull()
+        }
 
         private fun loadMappedAsset(context: Context, assetPath: String): MappedByteBuffer {
             try {

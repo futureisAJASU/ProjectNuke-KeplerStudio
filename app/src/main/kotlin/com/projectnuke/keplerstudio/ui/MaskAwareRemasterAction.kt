@@ -7,7 +7,9 @@ import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
@@ -35,16 +37,23 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         return
     }
 
+    val remasterPrepareTracker = beginMemoryTracking(
+        "applyMaskAwareRemaster:prepare",
+        snapshotState = "copying",
+        transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+    )
     var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
     var ownedBase: Bitmap? = null
     try {
         ownedBase = basePreview.copyOrThrow()
+        remasterPrepareTracker?.track(checkNotNull(ownedBase), "remaster:ownedBase")
     } catch (t: Throwable) {
         ownedBase = null
         undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         updateUiState { it.copy(message = "모델 마스크 보조 준비에 실패했습니다.") }
         if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
+        remasterPrepareTracker?.end()
         return
     }
 
@@ -70,6 +79,13 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         var renderedPreview: Bitmap? = null
         var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
         var ownedBaseOwned: Bitmap? = ownedBase
+        val remasterTracker = beginMemoryTracking(
+            "applyMaskAwareRemaster",
+            snapshotState = "inferring",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+        )
+        ownedBaseOwned?.let { remasterTracker?.track(it, "remaster:ownedBase") }
+        remasterPrepareTracker?.end()
         undoSnapshot = null
         ownedBase = null
         try {
@@ -77,6 +93,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 val createdBase = checkNotNull(ownedBaseOwned)
                 val mask = RemasterModelSession.createForegroundMask(createdBase) ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
                 modelMask = mask
+                remasterTracker?.track(mask, "remaster:modelMask")
                 val created = renderMaskAwareRemaster(
                     basePreview = createdBase,
                     mask = mask,
@@ -84,6 +101,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     revision = nextRevision
                 )
                 remasteredOriginal = created
+                remasterTracker?.track(created, "remaster:original")
             }
 
             withContext(Dispatchers.Default) {
@@ -97,6 +115,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     quickEffects = quickEffects
                 )
                 renderedPreview = created
+                remasterTracker?.track(created, "remaster:preview")
             }
 
             val adoptionIdentityUnchanged = !isShuttingDown() &&
@@ -173,6 +192,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             modelMask?.takeIf { !it.isRecycled }?.recycle()
             ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
             undoSnapshotOwned?.let(::recycleHistorySnapshot)
+            remasterTracker?.end()
         }
     }
 }

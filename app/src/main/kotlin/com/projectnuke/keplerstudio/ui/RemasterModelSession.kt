@@ -11,6 +11,7 @@ import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
+import com.projectnuke.keplerstudio.editor.GlobalModelDiagnostics
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.max
@@ -45,6 +46,7 @@ object RemasterModelSession {
         val generation = ++commandGeneration
         isModelLoading = true
         isModelLoaded = false
+        GlobalModelDiagnostics.publish("RemasterModelSession", "loading")
         modelScope.launch {
             modelMutex.withLock {
                 if (generation != commandGeneration) return@withLock
@@ -53,6 +55,7 @@ object RemasterModelSession {
                 activeModel = candidate
                 if (!hasModelAsset(context, candidate.assetPath)) {
                     isModelLoading = false
+                    GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                     statusText = "${candidate.title}: 모델 파일 없음"
                     return@withLock
                 }
@@ -70,11 +73,16 @@ object RemasterModelSession {
                 }.onSuccess {
                     isModelLoaded = closeableModel != null
                     isModelLoading = false
+                    GlobalModelDiagnostics.publish(
+                        "RemasterModelSession",
+                        if (closeableModel != null) "loaded" else "unloaded"
+                    )
                     statusText = if (closeableModel != null) "${candidate.title}: 사용 가능" else "${candidate.title}: 실행 경로를 준비하는 중입니다."
                 }.onFailure {
                     closeableModel = null
                     isModelLoaded = false
                     isModelLoading = false
+                    GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                     statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
                 }
             }
@@ -85,16 +93,19 @@ object RemasterModelSession {
         if (activeModel?.id != "edge_masker" || !isModelLoaded) return@withLock null
         val model = closeableModel ?: return@withLock null
         isInferring = true
+        GlobalModelDiagnostics.publish("RemasterModelSession", "inferring")
         try {
             runCatching { createForegroundMaskFromSegmenter(model, bitmap) }.getOrNull()
         } finally {
             isInferring = false
+            GlobalModelDiagnostics.publish("RemasterModelSession", if (isModelLoaded) "loaded" else "unloaded")
         }
     }
 
     fun unload() {
         val generation = ++commandGeneration
         isModelLoading = true
+        GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
         modelScope.launch {
             modelMutex.withLock {
                 if (generation != commandGeneration) return@withLock
@@ -103,6 +114,7 @@ object RemasterModelSession {
                 activeModel = null
                 isModelLoaded = false
                 isModelLoading = false
+                GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                 statusText = "로드된 모델이 없습니다."
             }
         }
@@ -111,11 +123,13 @@ object RemasterModelSession {
     suspend fun unloadIdleNow(): Boolean = modelMutex.withLock {
         if (isModelLoading || isInferring) return@withLock false
         ++commandGeneration
+        GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
         runCatching { closeableModel?.close() }
         closeableModel = null
         activeModel = null
         isModelLoaded = false
         isModelLoading = false
+        GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
         statusText = "로드된 모델이 없습니다."
         true
     }

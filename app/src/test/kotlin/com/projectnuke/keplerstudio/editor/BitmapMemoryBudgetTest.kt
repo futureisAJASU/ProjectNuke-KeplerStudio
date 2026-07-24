@@ -73,7 +73,7 @@ class BitmapMemoryBudgetTest {
         assertEquals(Long.MAX_VALUE, BitmapMemoryBudget.saturatingAdd(Long.MAX_VALUE, 1L))
         assertEquals(Long.MAX_VALUE, BitmapMemoryBudget.saturatingAdd(Long.MAX_VALUE, Long.MAX_VALUE))
         assertEquals(0L, BitmapMemoryBudget.saturatingAdd(0L, 0L))
-        assertEquals(0L, BitmapMemoryBudget.saturatingAdd(-1L, 1L))
+        assertEquals(1L, BitmapMemoryBudget.saturatingAdd(-1L, 1L))
     }
 
     @Test

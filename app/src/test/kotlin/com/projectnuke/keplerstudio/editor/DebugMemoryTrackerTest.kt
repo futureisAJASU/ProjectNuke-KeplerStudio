@@ -11,6 +11,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -21,11 +25,12 @@ class DebugMemoryTrackerTest {
     @Before
     fun setUp() {
         tracker = TrackerSession("test")
+        tracker.activateDocument("gen1")
     }
 
     @After
     fun tearDown() {
-        tracker.clear()
+        tracker.close()
     }
 
     @Test
@@ -104,7 +109,7 @@ class DebugMemoryTrackerTest {
 
     @Test
     fun testHistoryHotResidentMetrics() {
-        tracker.setHistoryHotResident(1024L, 2)
+        publishHistory(hotBytes = 1024L, hotCount = 2)
         val snap = tracker.snapshot()
         assertEquals(1024L, snap.historyHotResidentBytes)
         assertEquals(2, snap.historyHotEntryCount)
@@ -112,21 +117,21 @@ class DebugMemoryTrackerTest {
 
     @Test
     fun testHistoryColdCompressedMetrics() {
-        tracker.setHistoryColdCompressed(4096L)
+        publishHistory(coldBytes = 4096L)
         val snap = tracker.snapshot()
         assertEquals(4096L, snap.historyColdCompressedBytes)
     }
 
     @Test
     fun testColdLoadDecodedTransientMetrics() {
-        tracker.setColdLoadDecodedTransient(2048L)
+        publishHistory(coldLoadBytes = 2048L)
         val snap = tracker.snapshot()
         assertEquals(2048L, snap.coldLoadDecodedTransientBytes)
     }
 
     @Test
     fun testDeletionDebtMetrics() {
-        tracker.setDeletionDebt(512L)
+        publishHistory(deletionDebtBytes = 512L)
         val snap = tracker.snapshot()
         assertEquals(512L, snap.deletionDebtBytes)
     }
@@ -213,12 +218,9 @@ class DebugMemoryTrackerTest {
     }
 
     @Test
-    fun testClearResetsAllState() {
-        tracker.registerDocument("gen1")
-        tracker.setHistoryHotResident(1024L, 2)
-        tracker.setHistoryColdCompressed(4096L)
-        tracker.setDeletionDebt(512L)
-        tracker.clear()
+    fun clearForTestResetsAllStateWithoutClosing() {
+        publishHistory(hotBytes = 1024L, hotCount = 2, coldBytes = 4096L, deletionDebtBytes = 512L)
+        tracker.clearForTest()
         val snap = tracker.snapshot()
         assertEquals(0L, snap.historyHotResidentBytes)
         assertEquals(0L, snap.historyColdCompressedBytes)
@@ -281,12 +283,12 @@ class DebugMemoryTrackerTest {
     @Test
     fun testTwoIndependentAcquisitionsSameOwner() {
         val bitmap1 = createMockBitmap(100, 100)
-        val bitmap2 = createMockBitmap(100, 100)
         tracker.registerBitmap(bitmap1, "owner", "op", 0L, "gen1")
-        tracker.registerBitmap(bitmap2, "owner", "op", 0L, "gen1")
+        tracker.registerBitmap(bitmap1, "owner", "op", 0L, "gen1")
         val snap = tracker.snapshot()
-        assertEquals(2, snap.bitmapCount)
-        assertEquals(bitmap1.allocationByteCount.toLong() * 2, snap.totalBytes)
+        assertEquals(1, snap.bitmapCount)
+        assertEquals(2, snap.acquisitionCount)
+        assertEquals(2, snap.byOwnerAcquisitionCount["owner"])
     }
 
     @Test
@@ -302,12 +304,20 @@ class DebugMemoryTrackerTest {
 
     @Test
     fun testIdentityHashCodeCollisionWithDistinctLiveObjects() {
-        val bitmap1 = createMockBitmap(100, 100, identity = 42)
-        val bitmap2 = createMockBitmap(100, 100, identity = 42)
-        tracker.registerBitmap(bitmap1, "ownerA", "op", 0L, "gen1")
-        tracker.registerBitmap(bitmap2, "ownerB", "op", 0L, "gen1")
-        val snap = tracker.snapshot()
-        assertEquals(2, snap.bitmapCount)
+        val collisionTracker = TrackerSession("collision") { 42 }
+        try {
+            collisionTracker.activateDocument("gen1")
+            val bitmap1 = createMockBitmap(100, 100)
+            val bitmap2 = createMockBitmap(100, 100)
+            val handle1 = collisionTracker.registerBitmap(bitmap1, "ownerA", "op", 0L, "gen1")
+            val handle2 = collisionTracker.registerBitmap(bitmap2, "ownerB", "op", 0L, "gen1")
+            assertEquals(2, collisionTracker.snapshot().bitmapCount)
+            assertTrue(collisionTracker.releaseEdge(handle1))
+            assertEquals(1, collisionTracker.snapshot().bitmapCount)
+            assertTrue(collisionTracker.releaseEdge(handle2))
+        } finally {
+            collisionTracker.close()
+        }
     }
 
     @Test
@@ -334,21 +344,35 @@ class DebugMemoryTrackerTest {
     fun testStaleTrackerSessionIgnoresLaterEvents() {
         val gen1 = tracker.currentDocumentGeneration()
         tracker.registerBitmap(createMockBitmap(100, 100), "test", "op", 0L, gen1)
-        tracker.clear()
+        tracker.close()
         val snap = tracker.snapshot()
         assertTrue(snap.activeOperations.isEmpty())
         assertEquals(0, snap.bitmapCount)
     }
 
     @Test
-    fun testMonotonicConcurrentPeakUpdate() {
-        tracker.registerDocument("gen1")
-        tracker.registerNativeSession(1L, "gen1", "src", "active", knownEstimateBytes = 1000L)
-        val snap1 = tracker.snapshot()
-        tracker.registerNativeSession(2L, "gen1", "src", "active", knownEstimateBytes = 5000L)
-        val snap2 = tracker.snapshot()
-        assertTrue(snap2.estimatedPeakBytes >= snap1.estimatedPeakBytes)
-        assertTrue(snap2.nativeEstimateBytes >= snap1.nativeEstimateBytes)
+    fun concurrentPeakUpdateIsMonotonic() {
+        val barrier = CyclicBarrier(3)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val smaller = executor.submit {
+                barrier.await()
+                tracker.registerNativeSession(1L, "gen1", "small", "active", knownEstimateBytes = 1_000L)
+                barrier.await()
+            }
+            val larger = executor.submit {
+                barrier.await()
+                tracker.registerNativeSession(2L, "gen1", "large", "active", knownEstimateBytes = 5_000L)
+                barrier.await()
+            }
+            barrier.await()
+            barrier.await()
+            smaller.get(5, TimeUnit.SECONDS)
+            larger.get(5, TimeUnit.SECONDS)
+            assertTrue(tracker.snapshot().estimatedPeakBytes >= 6_000L)
+        } finally {
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -356,8 +380,9 @@ class DebugMemoryTrackerTest {
         tracker.registerDocument("gen1")
         tracker.registerNativeSession(1L, "gen1", "src", "created", knownEstimateBytes = -1L)
         val snap = tracker.snapshot()
-        assertEquals(1L, snap.unknownNativeBytes)
-        assertTrue(snap.combinedKnownEstimatedBytes > 0L || snap.unknownNativeBytes > 0L)
+        assertEquals(1L, snap.unknownNativeContributorCount)
+        assertTrue(snap.combinedHasUnknownContributors)
+        assertEquals(null, snap.combinedCompleteEstimatedBytes)
     }
 
     @Test
@@ -377,7 +402,7 @@ class DebugMemoryTrackerTest {
             protectedTargetId = null,
             timestamp = 12345L
         )
-        tracker.setHistoryMetricsSnapshot(metrics)
+        tracker.publishHistoryMetrics(metrics)
         assertEquals(metrics, tracker.historySnapshot())
     }
 
@@ -398,7 +423,136 @@ class DebugMemoryTrackerTest {
         assertFalse(TrackerSessionHolder.sessions.containsKey(id))
     }
 
-    private fun createMockBitmap(width: Int, height: Int, identity: Int = -1): Bitmap {
+    @Test
+    fun lastReleaseRacingNewAcquisitionPreservesLedgerInvariants() {
+        val bitmap = createMockBitmap(100, 100)
+        val first = tracker.registerBitmap(bitmap, "owner", "op", 0L, "gen1")
+        val start = CountDownLatch(1)
+        val done = CountDownLatch(2)
+        val executor = Executors.newFixedThreadPool(2)
+        var second = 0L
+        try {
+            executor.execute {
+                start.await()
+                tracker.releaseEdge(first)
+                done.countDown()
+            }
+            executor.execute {
+                start.await()
+                second = tracker.registerBitmap(bitmap, "owner", "op", 0L, "gen1")
+                done.countDown()
+            }
+            start.countDown()
+            assertTrue(done.await(5, TimeUnit.SECONDS))
+            assertTrue(second > 0L)
+            assertTrue(tracker.ledgerInvariantViolations().isEmpty())
+            assertEquals(1, tracker.snapshot().bitmapCount)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun closeRacingRegistrationCannotRepopulateSession() {
+        val bitmap = createMockBitmap(100, 100)
+        val start = CountDownLatch(1)
+        val done = CountDownLatch(2)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            executor.execute {
+                start.await()
+                tracker.close()
+                done.countDown()
+            }
+            executor.execute {
+                start.await()
+                repeat(100) { tracker.registerBitmap(bitmap, "race", "race", 0L, "gen1") }
+                done.countDown()
+            }
+            start.countDown()
+            assertTrue(done.await(5, TimeUnit.SECONDS))
+            assertEquals(0, tracker.snapshot().bitmapCount)
+            assertTrue(tracker.ledgerInvariantViolations().isEmpty())
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun holderRemovalIsConditionalOnExactInstance() {
+        val older = TrackerSession("same-id")
+        val newer = TrackerSession("same-id")
+        older.close()
+        assertTrue(TrackerSessionHolder.sessions["same-id"] === newer)
+        newer.close()
+        assertFalse(TrackerSessionHolder.sessions.containsKey("same-id"))
+    }
+
+    @Test
+    fun diskMetricsDoNotContributeToCombinedRam() {
+        val before = tracker.snapshot().combinedKnownEstimatedBytes
+        publishHistory(coldBytes = 50_000L, deletionDebtBytes = 25_000L)
+        assertEquals(before, tracker.snapshot().combinedKnownEstimatedBytes)
+    }
+
+    @Test
+    fun staleHistoryPublicationIsIgnoredAfterReplacement() {
+        tracker.activateDocument("gen2", "gen1")
+        publishHistory(generation = "gen2", hotBytes = 200L, hotCount = 1)
+        publishHistory(generation = "gen1", hotBytes = 999L, hotCount = 9)
+        assertEquals(200L, tracker.historySnapshot()!!.hotResidentBytes)
+    }
+
+    @Test
+    fun nullableReleasePathCreatesNoSessionOrOperationToken() {
+        val holderBefore = TrackerSessionHolder.sessions.toMap()
+        val diagnostics = DebugMemoryTracker.diagnostics(null)
+        assertEquals(0L, diagnostics.beginOperation("noop", "gen", "base", 1, 1_000L, "allocating"))
+        assertEquals(0L, diagnostics.registerBitmap(createMockBitmap(1, 1), "noop", "noop", 0L, "gen"))
+        assertEquals(holderBefore, TrackerSessionHolder.sessions.toMap())
+    }
+
+    @Test
+    fun globalModelUnknownContributorHasExplicitStateAndCount() {
+        try {
+            GlobalModelDiagnostics.publish("test-model", "inferring")
+            val snapshot = tracker.snapshot()
+            assertTrue(snapshot.globalModelContributors.any { it.name == "test-model" && it.state == "inferring" })
+            assertEquals(1L, snapshot.unknownNativeContributorCount)
+            assertEquals(null, snapshot.combinedCompleteEstimatedBytes)
+        } finally {
+            GlobalModelDiagnostics.publish("test-model", "unloaded")
+        }
+    }
+
+    private fun publishHistory(
+        generation: String = "gen1",
+        hotBytes: Long = 0L,
+        hotCount: Int = 0,
+        coldBytes: Long = 0L,
+        deletionDebtBytes: Long = 0L,
+        coldLoadBytes: Long = 0L
+    ) {
+        tracker.publishHistoryMetrics(
+            TrackerSession.HistoryMetricsSnapshot(
+                editorInstanceId = tracker.editorInstanceId,
+                coordinatorGeneration = generation,
+                hotEntryCount = hotCount,
+                hotResidentBytes = hotBytes,
+                retainedColdCompressedBytes = coldBytes,
+                pendingDeletionDebtBytes = deletionDebtBytes,
+                activeColdLoadDecodedBytes = coldLoadBytes,
+                operationActive = coldLoadBytes > 0L,
+                loading = coldLoadBytes > 0L,
+                spilling = false,
+                adopting = false,
+                protectedTargetId = null,
+                timestamp = System.currentTimeMillis()
+            )
+        )
+    }
+
+    private fun createMockBitmap(width: Int, height: Int): Bitmap {
         return Bitmap.createBitmap(width, height, BitmapConfig.ARGB_8888)
     }
 }

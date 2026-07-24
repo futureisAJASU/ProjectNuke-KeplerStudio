@@ -16,20 +16,15 @@ import org.robolectric.annotation.Config
 @Config(sdk = [29])
 class ThumbnailBitmapCacheTest {
 
-    private lateinit var tracker: TrackerSession
-
     @Before
     fun setUp() {
-        tracker = TrackerSession("test")
-        ThumbnailBitmapCache.attachDiagnostics(tracker)
+        ThumbnailBitmapCache.clear()
         ThumbnailBitmapCache.setByteBudget(64L * 1024L * 1024L)
     }
 
     @After
     fun tearDown() {
-        ThumbnailBitmapCache.detachDiagnostics()
         ThumbnailBitmapCache.clear()
-        tracker.clear()
     }
 
     @Test
@@ -89,7 +84,6 @@ class ThumbnailBitmapCacheTest {
         assertTrue(lease != null)
         lease!!.close()
         ThumbnailBitmapCache.clear()
-        tracker.clear()
     }
 
     @Test
@@ -114,8 +108,10 @@ class ThumbnailBitmapCacheTest {
         val bitmap = createMockBitmap(100, 100)
         val lease = ThumbnailBitmapCache.acquire("key1") { bitmap }
         assertTrue(lease != null)
-        val snap = ThumbnailBitmapCache.thumbnailCacheSnapshot()
+        val snap = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
         assertEquals(1, snap.totalActiveLeases)
+        assertEquals(1, snap.residentEntryCount)
+        assertEquals(bitmap.allocationByteCount.toLong(), snap.residentBytes)
         lease!!.close()
     }
 
@@ -126,7 +122,7 @@ class ThumbnailBitmapCacheTest {
         val lease2 = ThumbnailBitmapCache.acquire("key1") { bitmap }
         assertTrue(lease1 != null)
         assertTrue(lease2 != null)
-        val snap = ThumbnailBitmapCache.thumbnailCacheSnapshot()
+        val snap = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
         assertEquals(2, snap.totalActiveLeases)
         lease1!!.close()
         lease2!!.close()
@@ -138,7 +134,7 @@ class ThumbnailBitmapCacheTest {
         val lease1 = ThumbnailBitmapCache.acquire("key1") { bitmap }
         val lease2 = ThumbnailBitmapCache.acquire("key1") { bitmap }
         lease1!!.close()
-        val snap = ThumbnailBitmapCache.thumbnailCacheSnapshot()
+        val snap = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
         assertEquals(1, snap.totalActiveLeases)
         lease2!!.close()
     }
@@ -148,19 +144,25 @@ class ThumbnailBitmapCacheTest {
         val bitmap = createMockBitmap(100, 100)
         val lease = ThumbnailBitmapCache.acquire("key1") { bitmap }
         lease!!.close()
-        val snap = ThumbnailBitmapCache.thumbnailCacheSnapshot()
+        val snap = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
         assertEquals(0, snap.totalActiveLeases)
     }
 
     @Test
     fun testEvictionWithActiveLease() = runBlocking {
-        val bitmap = createMockBitmap(100, 100, forceAllocationBytes = 1024L * 1024L)
+        val bitmap = createMockBitmap(100, 100)
         ThumbnailBitmapCache.setByteBudget(1L)
         val lease = ThumbnailBitmapCache.acquire("key1") { bitmap }
         assertTrue(lease != null)
-        val snap = ThumbnailBitmapCache.thumbnailCacheSnapshot()
+        val snap = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
         assertEquals(0, snap.residentEntryCount)
+        assertEquals(1, snap.removedButLeasedEntryCount)
+        assertEquals(bitmap.allocationByteCount.toLong(), snap.removedButLeasedBytes)
+        assertEquals(bitmap.allocationByteCount.toLong(), snap.oversizedUncachedLeasedBytes)
         lease!!.close()
+        val released = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
+        assertEquals(0, released.removedButLeasedEntryCount)
+        assertEquals(0L, released.removedButLeasedBytes)
     }
 
     @Test
@@ -169,12 +171,15 @@ class ThumbnailBitmapCacheTest {
         val lease = ThumbnailBitmapCache.acquire("key1") { bitmap }
         assertTrue(lease != null)
         ThumbnailBitmapCache.clear()
-        val snap = ThumbnailBitmapCache.thumbnailCacheSnapshot()
+        val snap = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
         assertEquals(0, snap.residentEntryCount)
+        assertEquals(1, snap.removedButLeasedEntryCount)
+        assertEquals(bitmap.allocationByteCount.toLong(), snap.removedButLeasedBytes)
         lease!!.close()
+        assertEquals(0, ThumbnailBitmapCache.globalDiagnosticsSnapshot().removedButLeasedEntryCount)
     }
 
-    private fun createMockBitmap(width: Int, height: Int, forceAllocationBytes: Long = -1L): Bitmap {
+    private fun createMockBitmap(width: Int, height: Int): Bitmap {
         return Bitmap.createBitmap(width, height, BitmapConfig.ARGB_8888)
     }
 }

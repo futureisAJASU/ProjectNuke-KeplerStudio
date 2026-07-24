@@ -96,6 +96,10 @@ internal class EditorHistoryCoordinator(
     /** Cold payloads whose physical deletion has not been confirmed. */
     private val pendingDeletionDebt = ArrayList<ColdHistoryPayload>()
     private var operationBusy = true
+    private var diagnosticOperationKind = TrackerSession.HistoryOperationKind.Idle
+    private var diagnosticNavigationDirection: String? = null
+    private var diagnosticProtectedTargetId: String? = null
+    private var activeColdLoadDecodedBytes = 0L
     private var closed = false
     @Volatile private var visibleFlags = HistoryFlags(false, false, true)
     private var idleSignal = CompletableDeferred<Unit>()
@@ -119,10 +123,13 @@ internal class EditorHistoryCoordinator(
     }
 
     /** Combined cold-bytes still on disk: entries still in stacks + pending deletion debt. */
-    private fun totalColdDiskBytes(): Long = BitmapMemoryBudget.saturatingAdd(
-        (undo + redo).fold(0L) { sum, e -> BitmapMemoryBudget.saturatingAdd(sum, e.coldPayload?.bytes ?: 0L) },
-        pendingDeletionDebt.fold(0L) { sum, p -> BitmapMemoryBudget.saturatingAdd(sum, p.bytes) }
-    )
+    private fun totalColdDiskBytes(): Long {
+        var total = 0L
+        undo.forEach { total = BitmapMemoryBudget.saturatingAdd(total, it.coldPayload?.bytes ?: 0L) }
+        redo.forEach { total = BitmapMemoryBudget.saturatingAdd(total, it.coldPayload?.bytes ?: 0L) }
+        pendingDeletionDebt.forEach { total = BitmapMemoryBudget.saturatingAdd(total, it.bytes) }
+        return total
+    }
 
     /**
      * Delete cold entries on IO, then record any confirmed-failed payloads as pending debt.
@@ -269,6 +276,8 @@ internal class EditorHistoryCoordinator(
             return null // not oversized
         }
         val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
+        diagnosticOperationKind = TrackerSession.HistoryOperationKind.DirectToCold
+        publishState()
         val published = storage.publish(entry, snapshot)
         if (published == null || !isOperationCurrent(token, generation)) {
             published?.let { settleColdPayloads(listOf(it)) }
@@ -322,6 +331,10 @@ internal class EditorHistoryCoordinator(
         var adopted = false
         var maintenanceReserve = 0L
         val discarded = ArrayList<EditorHistoryEntry>()
+        diagnosticOperationKind = if (loadedFromDisk) TrackerSession.HistoryOperationKind.Loading else TrackerSession.HistoryOperationKind.Adopting
+        diagnosticNavigationDirection = if (undoDirection) "undo" else "redo"
+        diagnosticProtectedTargetId = target.id
+        publishState()
         try {
             target.payloadState = if (loadedFromDisk) HistoryPayloadState.Loading else HistoryPayloadState.Adopting
             if (loadedFromDisk) {
@@ -336,7 +349,10 @@ internal class EditorHistoryCoordinator(
             loaded = if (loadedFromDisk) {
                 storage.load(target, generation) { decoded ->
                     loaded = decoded
-                    tracker?.setColdLoadDecodedTransient(decoded.bitmapBytes())
+                    if (isOperationCurrent(token, generation)) {
+                        activeColdLoadDecodedBytes = decoded.bitmapBytes()
+                        publishState()
+                    }
                 }
             } else target.hotSnapshot
             val baseTarget = loaded ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
@@ -349,6 +365,8 @@ internal class EditorHistoryCoordinator(
                 return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
             }
             val targetForAdoption = checkNotNull(materialized)
+            diagnosticOperationKind = TrackerSession.HistoryOperationKind.Adopting
+            publishState()
             currentSnapshot = captureCurrent(targetForAdoption.storage, targetForAdoption.baseContentToken)
                 ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
 
@@ -409,7 +427,10 @@ internal class EditorHistoryCoordinator(
             return HistoryNavigationResult.MemoryRejected(failure.requiredBytes, visibleFlags.copy(busy = false))
         } finally {
             // This value represents only a decoded object still owned by this navigation.
-            if (loadedFromDisk) tracker?.setColdLoadDecodedTransient(0L)
+            if (loadedFromDisk && isOperationCurrent(token, generation)) {
+                activeColdLoadDecodedBytes = 0L
+                publishState()
+            }
             if (!adopted) {
                 val cleanup = Collections.newSetFromMap(IdentityHashMap<EditorHistorySnapshot, Boolean>())
                 currentSnapshot?.let(cleanup::add)
@@ -575,6 +596,10 @@ internal class EditorHistoryCoordinator(
     fun replaceDocument() {
         checkMainOwner()
         operationToken += 1L
+        activeColdLoadDecodedBytes = 0L
+        diagnosticOperationKind = TrackerSession.HistoryOperationKind.Maintenance
+        diagnosticNavigationDirection = null
+        diagnosticProtectedTargetId = null
         val oldGeneration = documentGeneration
         val oldEntries = (undo + redo).toList()
         val pendingOperations = operationCompletions.values.toList()
@@ -725,6 +750,8 @@ internal class EditorHistoryCoordinator(
         val snapshot = entry.hotSnapshot ?: return if (entry.coldPayload != null) SpillResult.Success else SpillResult.CurrentFailure
         if (entry.payloadState != HistoryPayloadState.Hot) return SpillResult.CurrentFailure
         entry.payloadState = HistoryPayloadState.Spilling
+        diagnosticOperationKind = TrackerSession.HistoryOperationKind.Spilling
+        publishState()
         val published = try {
             storage.publish(entry, snapshot)
         } catch (t: Throwable) {
@@ -780,6 +807,8 @@ internal class EditorHistoryCoordinator(
         var total = totalColdDiskBytes()
         val budget = BitmapMemoryBudget.historyDiskBudgetBytes()
         if (total <= budget) return TrimResult.Satisfied
+        diagnosticOperationKind = TrackerSession.HistoryOperationKind.Trimming
+        publishState()
         retryPendingDeletions()
         // Recheck after suspension — replacement may have superseded.
         if (!isOperationCurrent(token, generation)) return TrimResult.Superseded
@@ -805,6 +834,8 @@ internal class EditorHistoryCoordinator(
         scope.launch {
             if (operationBusy) return@launch
             val token = beginOperation()
+            diagnosticOperationKind = TrackerSession.HistoryOperationKind.Maintenance
+            publishState()
             val generation = documentGeneration
             val discarded = ArrayList<EditorHistoryEntry>()
             try {
@@ -845,9 +876,12 @@ internal class EditorHistoryCoordinator(
         return BitmapMemoryBudget.saturatingAdd(withoutTarget, snapshot.bitmapBytes()) <= BitmapMemoryBudget.historyBudgetBytes()
     }
 
-    private fun hotBytes(): Long = BitmapMemoryBudget.saturatingAdd(
-        *(undo + redo).map(EditorHistoryEntry::hotResidentBytes).toLongArray()
-    )
+    private fun hotBytes(): Long {
+        var total = 0L
+        undo.forEach { total = BitmapMemoryBudget.saturatingAdd(total, it.hotResidentBytes()) }
+        redo.forEach { total = BitmapMemoryBudget.saturatingAdd(total, it.hotResidentBytes()) }
+        return total
+    }
 
     private fun beginOperation(): Long {
         checkMainOwner()
@@ -866,6 +900,10 @@ internal class EditorHistoryCoordinator(
         operationCompletions.remove(token)?.complete(Unit)
         if (operationToken == token) {
             operationBusy = false
+            diagnosticOperationKind = TrackerSession.HistoryOperationKind.Idle
+            diagnosticNavigationDirection = null
+            diagnosticProtectedTargetId = null
+            activeColdLoadDecodedBytes = 0L
             publishState()
             idleSignal.complete(Unit)
         }
@@ -884,25 +922,34 @@ internal class EditorHistoryCoordinator(
         reportHistoryMetrics()
     }
 
+    fun refreshDiagnostics() {
+        checkMainOwner()
+        publishState()
+    }
+
     private fun reportHistoryMetrics() {
         tracker ?: return
         try {
             val hot = hotBytes()
-            val entryCount = (undo + redo).count { it.hotSnapshot != null }
-            val coldBytes = (undo + redo).fold(0L) { sum, e -> BitmapMemoryBudget.saturatingAdd(sum, e.coldPayload?.bytes ?: 0L) }
+            var entryCount = 0
+            var coldBytes = 0L
+            undo.forEach {
+                if (it.hotSnapshot != null) entryCount++
+                coldBytes = BitmapMemoryBudget.saturatingAdd(coldBytes, it.coldPayload?.bytes ?: 0L)
+            }
+            redo.forEach {
+                if (it.hotSnapshot != null) entryCount++
+                coldBytes = BitmapMemoryBudget.saturatingAdd(coldBytes, it.coldPayload?.bytes ?: 0L)
+            }
             val debtBytes = pendingDeletionDebt.fold(0L) { sum, p -> BitmapMemoryBudget.saturatingAdd(sum, p.bytes) }
-            val coldDecoded = 0L // updated by navigate only while the decoded object is alive
+            val coldDecoded = activeColdLoadDecodedBytes
             val isSpilling = undo.any { it.payloadState == HistoryPayloadState.Spilling } ||
                 redo.any { it.payloadState == HistoryPayloadState.Spilling }
             val isAdopting = undo.any { it.payloadState == HistoryPayloadState.Adopting } ||
                 redo.any { it.payloadState == HistoryPayloadState.Adopting }
             val isLoading = undo.any { it.payloadState == HistoryPayloadState.Loading } ||
                 redo.any { it.payloadState == HistoryPayloadState.Loading }
-            tracker.setHistoryHotResident(hot, entryCount)
-            tracker.setHistoryColdCompressed(coldBytes)
-            tracker.setDeletionDebt(debtBytes)
-            tracker.setColdLoadDecodedTransient(coldDecoded)
-            tracker.setHistoryMetricsSnapshot(TrackerSession.HistoryMetricsSnapshot(
+            tracker.publishHistoryMetrics(TrackerSession.HistoryMetricsSnapshot(
                 editorInstanceId = tracker.editorInstanceId,
                 coordinatorGeneration = documentGeneration,
                 hotEntryCount = entryCount,
@@ -914,8 +961,11 @@ internal class EditorHistoryCoordinator(
                 loading = isLoading,
                 spilling = isSpilling,
                 adopting = isAdopting,
-                protectedTargetId = undo.lastOrNull()?.id,
-                timestamp = System.currentTimeMillis()
+                protectedTargetId = diagnosticProtectedTargetId,
+                timestamp = System.currentTimeMillis(),
+                operationKind = diagnosticOperationKind,
+                navigationDirection = diagnosticNavigationDirection,
+                operationToken = operationToken
             ))
         } catch (_: Throwable) {
         }

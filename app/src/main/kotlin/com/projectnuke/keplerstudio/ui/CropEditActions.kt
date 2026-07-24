@@ -9,7 +9,9 @@ import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.centeredCropForAspect
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.estimateAutoStraightenDegreesV0
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.normalized
@@ -46,11 +48,14 @@ fun EditorViewModel.autoStraightenCrop() {
     val state = uiState.value
     val bitmap = state.previewBitmap ?: state.originalPreviewBitmap ?: return
     val cropToken = beginCropOperation()
+    val cropTracker = beginMemoryTracking("autoStraightenCrop", snapshotState = "analyzing")
     val input = runCatching { bitmap.copyOrThrow(mutable = false) }.getOrElse { failure ->
+        cropTracker?.end()
         updateUiState { it.copy(message = if (failure is BitmapAllocationRejectedException) "메모리가 부족하여 기울기 보정 이미지를 준비하지 못했습니다." else "기울기 보정용 이미지를 준비하지 못했습니다.") }
         if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.AutoStraightenCrop, failure.requiredBytes)
         return
     }
+    cropTracker?.track(input, "autoStraightenCrop:input")
     cropJob?.cancel()
     cropJob = viewModelScope.launch {
         try {
@@ -65,6 +70,7 @@ fun EditorViewModel.autoStraightenCrop() {
             if (isCropResultCurrent(cropToken, state.revision)) updateUiState { it.copy(message = "기울기 보정에 실패했습니다: ${t.message}") }
         } finally {
             input.recycle()
+            cropTracker?.end()
         }
     }
 }
@@ -93,14 +99,23 @@ fun EditorViewModel.applyCropTransform() {
     var previewInput: Bitmap? = null
     var originalInput: Bitmap? = null
     val maskInputs = ArrayList<SelectionLayer>(state.selectionLayers.size)
+    val cropPrepareTracker = beginMemoryTracking(
+        "applyCropTransform:prepare",
+        snapshotState = "copying",
+        transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+    )
 
     try {
         previewInput = preview?.copyOrThrow()
+        previewInput?.let { cropPrepareTracker?.track(it, "crop:previewInput") }
         originalInput = if (original == null || original === preview) previewInput else original.copyOrThrow()
+        originalInput?.takeIf { it !== previewInput }?.let { cropPrepareTracker?.track(it, "crop:originalInput") }
 
         state.selectionLayers.forEach { layer ->
             try {
-                maskInputs += layer.copy(bitmap = layer.bitmap.copyOrThrow())
+                maskInputs += layer.copy(bitmap = layer.bitmap.copyOrThrow().also {
+                    cropPrepareTracker?.track(it, "crop:maskInput:${layer.id}")
+                })
             } catch (t: Throwable) {
                 maskInputs.forEach { created -> created.bitmap.takeIf { !it.isRecycled }?.recycle() }
                 throw t
@@ -111,6 +126,7 @@ fun EditorViewModel.applyCropTransform() {
         if (originalInput !== previewInput) originalInput?.takeIf { !it.isRecycled }?.recycle()
         maskInputs.forEach { it.bitmap.takeIf { !it.isRecycled }?.recycle() }
         undoSnapshot?.let(::recycleHistorySnapshot)
+        cropPrepareTracker?.end()
         updateUiState { it.copy(message = "자르기 준비에 실패했습니다. 기존 편집 상태를 유지합니다.") }
         return
     }
@@ -134,6 +150,15 @@ fun EditorViewModel.applyCropTransform() {
         var previewInputOwned: Bitmap? = previewInput
         var originalInputOwned: Bitmap? = originalInput
         val maskInputsOwned = maskInputs.toList()
+        val cropTracker = beginMemoryTracking(
+            "applyCropTransform",
+            snapshotState = "rendering",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+        )
+        previewInputOwned?.let { cropTracker?.track(it, "crop:previewInput") }
+        originalInputOwned?.takeIf { it !== previewInputOwned }?.let { cropTracker?.track(it, "crop:originalInput") }
+        maskInputsOwned.forEach { cropTracker?.track(it.bitmap, "crop:maskInput:${it.id}") }
+        cropPrepareTracker?.end()
         undoSnapshot = null
         previewInput = null
         originalInput = null
@@ -142,6 +167,7 @@ fun EditorViewModel.applyCropTransform() {
             withContext(Dispatchers.Default) {
                 val o = originalInputOwned?.let { renderCropTransform(it, crop) }
                 transformedOriginal = o
+                o?.let { cropTracker?.track(it, "crop:transformedOriginal") }
             }
 
             withContext(Dispatchers.Default) {
@@ -151,13 +177,16 @@ fun EditorViewModel.applyCropTransform() {
                     previewInputOwned?.let { renderCropTransform(it, crop) }
                 }
                 transformedPreview = p
+                p?.takeIf { it !== transformedOriginal }?.let { cropTracker?.track(it, "crop:transformedPreview") }
             }
 
             withContext(Dispatchers.Default) {
                 val transformed = ArrayList<SelectionLayer>(maskInputsOwned.size)
                 try {
                     maskInputsOwned.forEach { layer ->
-                        transformed += layer.copy(bitmap = renderCropTransform(layer.bitmap, crop))
+                        transformed += layer.copy(bitmap = renderCropTransform(layer.bitmap, crop).also {
+                            cropTracker?.track(it, "crop:transformedMask:${layer.id}")
+                        })
                     }
                     transformedMasks = transformed
                 } catch (t: Throwable) {
@@ -260,6 +289,7 @@ fun EditorViewModel.applyCropTransform() {
             if (originalInputOwned !== previewInputOwned) originalInputOwned?.takeIf { !it.isRecycled }?.recycle()
             maskInputsOwned.forEach { it.bitmap.takeIf { !it.isRecycled }?.recycle() }
             if (!adoptionConfirmed) undoSnapshotOwned?.let(::recycleHistorySnapshot)
+            cropTracker?.end()
         }
     }
 }

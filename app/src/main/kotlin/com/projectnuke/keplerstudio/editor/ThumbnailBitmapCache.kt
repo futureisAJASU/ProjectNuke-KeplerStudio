@@ -22,21 +22,13 @@ internal class ThumbnailBitmapLease internal constructor(
     }
 }
 
-internal interface ThumbnailCacheDiagnostics {
-    fun onAcquire(bytes: Long) {}
-    fun onRelease(bytes: Long) {}
-    fun onEvictResident(bytes: Long) {}
-    fun onRemoveButLease(bytes: Long) {}
-    fun onResidentAcquire(bytes: Long) {}
-    fun onResidentRelease(bytes: Long) {}
-}
-
 internal data class ThumbnailGlobalDiagnosticsSnapshot(
     val residentEntryCount: Int,
     val residentBytes: Long,
     val totalActiveLeases: Int,
     val removedButLeasedEntryCount: Int,
-    val removedButLeasedBytes: Long
+    val removedButLeasedBytes: Long,
+    val oversizedUncachedLeasedBytes: Long
 )
 
 internal object ThumbnailBitmapCache {
@@ -52,7 +44,7 @@ internal object ThumbnailBitmapCache {
     private class Entry(val bitmap: Bitmap, val bytes: Long) {
         var leases = 0
         var removed = false
-        var trackedAsLeased = false
+        var oversizedUncached = false
     }
 
     private class Flight(val key: String, val decode: () -> Bitmap?) {
@@ -68,10 +60,11 @@ internal object ThumbnailBitmapCache {
             maxBytes = bytes.coerceAtLeast(1L)
             evictLocked()
         }
+        DebugMemoryTracker.onGlobalThumbnailMemoryChanged()
     }
 
     fun evictUnleased(): Long {
-        synchronized(lock) {
+        val evicted = synchronized(lock) {
             val before = residentBytes
             val iterator = entries.entries.iterator()
             while (iterator.hasNext()) {
@@ -84,24 +77,34 @@ internal object ThumbnailBitmapCache {
                     recycleIfUnusedLocked(entry)
                 }
             }
-            return (before - residentBytes).coerceAtLeast(0L)
+            (before - residentBytes).coerceAtLeast(0L)
         }
+        DebugMemoryTracker.onGlobalThumbnailMemoryChanged()
+        return evicted
     }
 
     suspend fun acquire(key: String, decode: () -> Bitmap?): ThumbnailBitmapLease? {
         var startFlight = false
-        val flight: Flight
+        var cached: Entry? = null
+        var selectedFlight: Flight? = null
         synchronized(lock) {
             entries[key]?.takeIf { !it.removed && !it.bitmap.isRecycled }?.let { entry ->
                 entry.leases += 1
-                return lease(entry)
+                cached = entry
             }
-            flight = inFlight[key] ?: Flight(key, decode).also {
-                inFlight[key] = it
-                startFlight = true
+            if (cached == null) {
+                selectedFlight = inFlight[key] ?: Flight(key, decode).also {
+                    inFlight[key] = it
+                    startFlight = true
+                }
+                selectedFlight!!.waiters += 1
             }
-            flight.waiters += 1
         }
+        cached?.let {
+            DebugMemoryTracker.onGlobalThumbnailMemoryChanged()
+            return lease(it)
+        }
+        val flight = selectedFlight ?: return null
         if (startFlight) startDecode(flight)
         return try {
             flight.result.await()?.let(::lease)
@@ -125,6 +128,7 @@ internal object ThumbnailBitmapCache {
             }
         }
         job?.cancel()
+        DebugMemoryTracker.onGlobalThumbnailMemoryChanged()
     }
 
     fun clear() {
@@ -144,6 +148,7 @@ internal object ThumbnailBitmapCache {
             residentBytes = 0L
         }
         jobs.forEach(Job::cancel)
+        DebugMemoryTracker.onGlobalThumbnailMemoryChanged()
     }
 
     private fun startDecode(flight: Flight) {
@@ -163,6 +168,7 @@ internal object ThumbnailBitmapCache {
                             evictLocked()
                         } else {
                             entry.removed = true
+                            entry.oversizedUncached = true
                             recordRemovedLocked(entry)
                         }
                         decoded = null
@@ -171,6 +177,7 @@ internal object ThumbnailBitmapCache {
                         flight.result.complete(null)
                     }
                 }
+                DebugMemoryTracker.onGlobalThumbnailMemoryChanged()
             } catch (_: Throwable) {
                 synchronized(lock) {
                     inFlight.remove(flight.key, flight)
@@ -202,6 +209,7 @@ internal object ThumbnailBitmapCache {
             }
         }
         cancelJob?.cancel()
+        DebugMemoryTracker.onGlobalThumbnailMemoryChanged()
     }
 
     private fun lease(entry: Entry): ThumbnailBitmapLease =
@@ -209,6 +217,7 @@ internal object ThumbnailBitmapCache {
 
     private fun release(entry: Entry) {
         synchronized(lock) { releaseLocked(entry) }
+        DebugMemoryTracker.onGlobalThumbnailMemoryChanged()
     }
 
     private fun releaseLocked(entry: Entry) {
@@ -237,10 +246,6 @@ internal object ThumbnailBitmapCache {
             if (!entry.bitmap.isRecycled) entry.bitmap.recycle()
         }
     }
-
-    /** Kept source-compatible for old debug callers. Cache accounting is now cache-owned. */
-    @Deprecated("Read globalDiagnosticsSnapshot()") fun attachDiagnostics(d: ThumbnailCacheDiagnostics) = Unit
-    @Deprecated("Read globalDiagnosticsSnapshot()") fun detachDiagnostics() = Unit
 
     fun thumbnailCacheSnapshot(): TrackerSession.ThumbnailCacheSnapshot {
         synchronized(lock) {
@@ -275,7 +280,8 @@ internal object ThumbnailBitmapCache {
             residentBytes = residentBytes,
             totalActiveLeases = leases,
             removedButLeasedEntryCount = removedButLeased.size,
-            removedButLeasedBytes = removedButLeased.keys.sumOf { it.bytes }
+            removedButLeasedBytes = removedButLeased.keys.sumOf { it.bytes },
+            oversizedUncachedLeasedBytes = removedButLeased.keys.filter { it.oversizedUncached }.sumOf { it.bytes }
         )
     }
 }

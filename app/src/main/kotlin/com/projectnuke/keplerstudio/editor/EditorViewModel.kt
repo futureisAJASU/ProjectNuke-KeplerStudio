@@ -100,13 +100,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var lastSuccessfullyRenderedParams: EditParams = EditParams()
     private var activeParamRenderRevision: Int? = null
     private var restoreDraftToken: Long = 0L
-    internal val tracker: TrackerDiagnostics = DebugMemoryTracker.createEditorDiagnostics(this)
+    internal val trackerSession: TrackerSession? = DebugMemoryTracker.createEditorSession(this)
+    internal val tracker: TrackerDiagnostics = DebugMemoryTracker.diagnostics(trackerSession)
     internal val historyCoordinator = EditorHistoryCoordinator(
         app.applicationContext,
         viewModelScope,
-        tracker as? TrackerSession
+        trackerSession
     )
-    private val uiStateOwnership = UiStateOwnershipReconciler(tracker)
+    private val uiStateOwnership: UiStateOwnershipReconciler? = trackerSession?.let(::UiStateOwnershipReconciler)
     private var historyIoJob: Job? = null
     private var memoryRecoveryToken: Long = 0L
     private var pendingMemoryRetry: MemoryRetryDescriptor? = null
@@ -127,9 +128,11 @@ private var automaticRetryAttempt: MemoryRetryDescriptor? = null
             updateUiState { it.copy(message = "브러시 마스크를 만들 이미지가 없습니다.") }
             return
         }
+        val brushTracker = beginMemoryTracking("createBrushSelection", snapshotState = "allocating")
         val mask = try {
             createBitmapOrThrow(base.width, base.height, Bitmap.Config.ARGB_8888)
         } catch (t: Throwable) {
+            brushTracker?.end()
             if (allowRecovery && t is BitmapAllocationRejectedException) {
                 requestAllocationRecovery(MemoryRetryAction.CreateBrushSelection, t.requiredBytes)
             } else {
@@ -137,22 +140,12 @@ private var automaticRetryAttempt: MemoryRetryDescriptor? = null
             }
             return
         }
-        if (DebugMemoryTracker.isEnabled()) {
-            tracker.registerBitmap(
-                bitmap = mask,
-                owner = "createBrushSelection:mask",
-                operation = "createBrushSelection",
-                token = 0L,
-                documentGeneration = historyCoordinator.currentGeneration()
-            )
-        }
+        brushTracker?.track(mask, "createBrushSelection:mask")
         val prepared = prepareForExternalEdit()
         val preparedBase = prepared.originalPreviewBitmap ?: prepared.previewBitmap
         if (preparedBase !== base || base.isRecycled) {
-            if (DebugMemoryTracker.isEnabled()) {
-                tracker.unregisterBitmap(mask, "createBrushSelection:mask")
-            }
             mask.recycle()
+            brushTracker?.end()
             return
         }
         val layer = SelectionLayer(
@@ -165,21 +158,11 @@ private var automaticRetryAttempt: MemoryRetryDescriptor? = null
             it.copy(selectionLayers = it.selectionLayers + layer, activeSelectionLayerId = layer.id, message = "브러시 마스크를 만들었습니다.")
         }
         if (!adopted) {
-            if (DebugMemoryTracker.isEnabled()) {
-                tracker.unregisterBitmap(mask, "createBrushSelection:mask")
-            }
             if (!mask.isRecycled) mask.recycle()
+            brushTracker?.end()
             return
         }
-        if (DebugMemoryTracker.isEnabled()) {
-            tracker.registerBitmap(
-                bitmap = mask,
-                owner = "EditorUiState:selectionLayer",
-                operation = "createBrushSelection:adopted",
-                token = 0L,
-                documentGeneration = historyCoordinator.currentGeneration()
-            )
-        }
+        brushTracker?.end()
         markMemoryRetrySucceeded(MemoryRetryAction.CreateBrushSelection)
         persistDraftSnapshot()
     }
@@ -408,8 +391,32 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
         val prev = previousState ?: return
         val next = nextState ?: return
         // Register destination ownership before this helper recycles displaced UI resources.
-        uiStateOwnership.reconcile(prev, next, historyCoordinator.currentGeneration())
+        uiStateOwnership?.reconcile(prev, next, historyCoordinator.currentGeneration())
         releaseOrphanedBitmaps(prev, next)
+    }
+
+    /** Authoritative direct adoption path for state replacements that cannot use flow update. */
+    private fun commitUiState(
+        expected: EditorUiState,
+        next: EditorUiState,
+        replaceDocument: Boolean = false,
+        adoptedNativeSession: Long = 0L
+    ): Boolean {
+        if (!_uiState.compareAndSet(expected, next)) return false
+        val generation = if (replaceDocument) {
+            val oldGeneration = historyCoordinator.currentGeneration()
+            historyCoordinator.replaceDocument()
+            val newGeneration = historyCoordinator.currentGeneration()
+            tracker.activateDocument(newGeneration, oldGeneration)
+            historyCoordinator.refreshDiagnostics()
+            newGeneration
+        } else {
+            historyCoordinator.currentGeneration()
+        }
+        uiStateOwnership?.reconcile(expected, next, generation)
+        if (adoptedNativeSession != 0L) tracker.rebindNativeSessionGeneration(adoptedNativeSession, generation)
+        releaseOrphanedBitmaps(expected, next)
+        return true
     }
 
     private fun releaseOrphanedBitmaps(previous: EditorUiState, next: EditorUiState) {
@@ -996,11 +1003,18 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
             }
         } ?: return false
         val draftState = _uiState.value
+        val draftTracker = beginMemoryTracking(
+            "persistDraftSnapshot",
+            snapshotState = "copying",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+        )
         val payload = try {
             createDraftSavePayload(context, draftState, draftEpoch, expectedPointer.generationId)
         } catch (ce: CancellationException) {
+            draftTracker?.end()
             throw ce
         } catch (t: Throwable) {
+            draftTracker?.end()
             logDraftSaveFailure(t)
             updateUiStateAndRecycleReplaced {
                 if (draftEpoch == draftOperationEpoch && it.revision == draftState.revision &&
@@ -1009,6 +1023,9 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
             }
             return false
         }
+        payload.dirtyBitmapCopy?.let { draftTracker?.track(it, "persistDraftSnapshot:dirtyCopy") }
+        payload.editedPreviewCopy?.let { draftTracker?.track(it, "persistDraftSnapshot:previewCopy") }
+        payload.selectionLayers.forEach { draftTracker?.track(it.bitmap, "persistDraftSnapshot:selectionCopy:${it.id}") }
         val owningJob = currentCoroutineContext()[Job]
         var committed: DraftSaveResult? = null
         var settled = false
@@ -1032,11 +1049,7 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
         }
         if (committed == null) {
             payload.recycleOwnedBitmaps()
-            if (DebugMemoryTracker.isEnabled()) {
-                payload.dirtyBitmapCopy?.let { tracker.unregisterBitmap(it) }
-                payload.editedPreviewCopy?.let { tracker.unregisterBitmap(it) }
-                payload.selectionLayers.forEach { tracker.unregisterBitmap(it.bitmap) }
-            }
+            draftTracker?.end()
             updateUiStateAndRecycleReplaced {
                 if (owningJob?.isActive != false && isDraftPayloadDocumentCurrent(payload)) {
                     it.copy(message = "\uc784\uc2dc \uc800\uc7a5\uc5d0 \uc2e4\ud328\ud588\uc2b5\ub2c8\ub2e4. \ud3b8\uc9d1\uc740 \uacc4\uc18d\ud560 \uc218 \uc788\uc2b5\ub2c8\ub2e4.")
@@ -1045,11 +1058,7 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
             return false
         }
         payload.recycleOwnedBitmaps()
-        if (DebugMemoryTracker.isEnabled()) {
-            payload.dirtyBitmapCopy?.let { tracker.unregisterBitmap(it) }
-            payload.editedPreviewCopy?.let { tracker.unregisterBitmap(it) }
-            payload.selectionLayers.forEach { tracker.unregisterBitmap(it.bitmap) }
-        }
+        draftTracker?.end()
         return settled
     }
 
@@ -1083,7 +1092,7 @@ private suspend fun settleCommittedDraft(
                 draftGenerationSourcePath = saved.sourcePath,
                 draftGenerationThumbnailPath = saved.thumbnailPath
             )
-            adopted = _uiState.compareAndSet(expected, next)
+            adopted = commitUiState(expected, next)
         }
 
         saved.expectedPointerGenerationId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
@@ -1180,6 +1189,7 @@ private suspend fun settleCommittedDraft(
 
         viewModelScope.launch {
             var preview: Bitmap? = null
+            var previewEdge = 0L
             var createdSession = 0L
             var sourceFile: File? = null
             val opTracker = beginMemoryTracking("openImage", snapshotState = "decoding")
@@ -1190,15 +1200,7 @@ private suspend fun settleCommittedDraft(
                     sourceFile = copiedSource
                     val decoded = decodeSampledMutableBitmapWithExif(copiedSource.absolutePath, maxSide = 2048)
                     preview = decoded
-                    if (DebugMemoryTracker.isEnabled()) {
-                        tracker.registerBitmap(
-                            bitmap = decoded,
-                            owner = "openImage:decodedPreview",
-                            operation = "openImage",
-                            token = opTracker?.token ?: 0L,
-                            documentGeneration = opTracker?.documentGeneration ?: ""
-                        )
-                    }
+                    previewEdge = opTracker?.track(decoded, "openImage:decodedPreview") ?: 0L
                 }
                 if (shuttingDown || openToken != restoreDraftToken) {
                     preview?.recycle()
@@ -1211,14 +1213,12 @@ private suspend fun settleCommittedDraft(
                 Log.i(FLARE_GUARD_AI_TAG, "Opened image with EXIF orientation: ${openedSource.name} preview=${decodedPreview.width}x${decodedPreview.height}")
 
                 createdSession = NativePhotoCore.nativeCreateSession(openedSource.absolutePath)
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.registerNativeSession(
-                        handle = createdSession,
-                        documentGeneration = historyCoordinator.currentGeneration(),
-                        sourceIdentity = decodedPreview.hashCode().toString(),
-                        state = "created"
-                    )
-                }
+                tracker.registerNativeSession(
+                    handle = createdSession,
+                    documentGeneration = historyCoordinator.currentGeneration(),
+                    sourceIdentity = decodedPreview.hashCode().toString(),
+                    state = "created"
+                )
                 if (shuttingDown || openToken != restoreDraftToken || _uiState.value.revision != invalidateRevision) {
                     preview?.recycle()
                     preview = null
@@ -1260,47 +1260,28 @@ private suspend fun settleCommittedDraft(
                     message = "\uC6D0\uBCF8 \uCE90\uC2DC\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4: ${decodedPreview.width}x${decodedPreview.height} preview"
                 )
                 nativeSession = createdSession
-                try {
-                    _uiState.value = nextState
-                } catch (t: Throwable) {
+                if (!commitUiState(previousState, nextState, replaceDocument = true, adoptedNativeSession = createdSession)) {
                     nativeSession = previousSession
-                    throw t
+                    error("open image adoption superseded")
                 }
                 createdSession = 0L
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.updateNativeSession(nativeSession, "active")
-                    tracker.registerBitmap(
-                        bitmap = decodedPreview,
-                        owner = "EditorUiState:originalPreviewBitmap",
-                        operation = "openImage:adopted",
-                        token = opTracker?.token ?: 0L,
-                        documentGeneration = opTracker?.documentGeneration ?: ""
-                    )
-                }
+                tracker.updateNativeSession(nativeSession, "active")
                 lastSuccessfullyRenderedParams = EditParams()
-                clearEditHistory()
+                opTracker?.release(previewEdge)
+                previewEdge = 0L
                 preview = null
-                runCatching { releaseOrphanedBitmaps(previousState, _uiState.value) }
                 releaseNativeSessionHandle(previousSession)
                 deleteOwnedWorkingSource(context, previousState.sourcePath)
                 forceDraftSaveAsync()
             } catch (ce: CancellationException) {
-                preview?.let { tracker.unregisterBitmap(it, "openImage:decodedPreview") }
                 preview?.recycle()
                 releaseNativeSessionHandle(createdSession)
                 sourceFile?.delete()
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.unregisterNativeSession(createdSession)
-                }
                 throw ce
             } catch (t: Throwable) {
-                preview?.let { tracker.unregisterBitmap(it, "openImage:decodedPreview") }
                 preview?.recycle()
                 releaseNativeSessionHandle(createdSession)
                 sourceFile?.delete()
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.unregisterNativeSession(createdSession)
-                }
                 if (!shuttingDown && openToken == restoreDraftToken && _uiState.value.revision == invalidateRevision) {
                     updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "\uC774\uBBF8\uC9C0\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}") }
                     if (t is BitmapAllocationRejectedException) {
@@ -1338,10 +1319,13 @@ private suspend fun settleCommittedDraft(
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap ?: return
         val nextParams = transform(current.params)
         if (nextParams == current.params) return
+        val paramTracker = beginMemoryTracking("updateParams", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
         val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+            paramTracker?.end()
             updateUiStateAndRecycleReplaced { it.copy(message = "미리보기 입력 이미지를 준비하지 못했습니다.") }
             return
         }
+        paramTracker?.track(ownedBase, "updateParams:ownedBase")
 
         if (!windowWasOpen) {
             val snapshot = captureCurrentHistorySnapshot(HistorySnapshotStorage.MetadataOnly)
@@ -1359,22 +1343,13 @@ private suspend fun settleCommittedDraft(
         updateUiStateAndRecycleReplaced { it.copy(revision = nextRevision, isBusy = true, message = "미리보기를 렌더링하는 중입니다") }
         renderJob?.cancel()
         activeParamRenderRevision = nextRevision
-        val paramTracker = beginMemoryTracking("updateParams", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
         renderJob = launchManagedEdit { operationToken ->
             var rendered: Bitmap? = null
             try {
                 rendered = withContext(Dispatchers.Default) {
                     renderEditedPreview(ownedBase, nextParams, current.engineSelection(), nextRevision, current.presetLook, current.activeQuickEffects)
                 }
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.registerBitmap(
-                        bitmap = rendered!!,
-                        owner = "updateParams:rendered",
-                        operation = "updateParams",
-                        token = paramTracker?.token ?: 0L,
-                        documentGeneration = paramTracker?.documentGeneration ?: ""
-                    )
-                }
+                paramTracker?.track(rendered!!, "updateParams:rendered")
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
                     val adopted = rendered!!
                     lastSuccessfullyRenderedParams = nextParams
@@ -1388,23 +1363,14 @@ private suspend fun settleCommittedDraft(
                 } else {
                     if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     rendered?.recycle()
-                    if (DebugMemoryTracker.isEnabled()) {
-                        rendered?.let { tracker.unregisterBitmap(it) }
-                    }
                     rendered = null
                 }
             } catch (ce: CancellationException) {
                 rendered?.recycle()
-                if (DebugMemoryTracker.isEnabled()) {
-                    rendered?.let { tracker.unregisterBitmap(it) }
-                }
                 if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 throw ce
             } catch (t: Throwable) {
                 rendered?.recycle()
-                if (DebugMemoryTracker.isEnabled()) {
-                    rendered?.let { tracker.unregisterBitmap(it) }
-                }
                 if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
                     if (paramUndoSnapshotCommitted) {
@@ -1421,9 +1387,6 @@ private suspend fun settleCommittedDraft(
                 }
             } finally {
                 ownedBase.recycle()
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.unregisterBitmap(ownedBase)
-                }
                 paramTracker?.end()
             }
         }
@@ -1446,19 +1409,21 @@ private suspend fun settleCommittedDraft(
         val quickEffects = current.activeQuickEffects
         val startRevision = current.revision
 
+        val autoEnhanceTracker = beginMemoryTracking("applyAutoEnhance", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.MetadataOnly)
         val ownedBase = runCatching { basePreview.copyOrThrow() }.getOrElse {
+            autoEnhanceTracker?.end()
             undoSnapshot?.let(::recycleHistorySnapshot)
             undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정 준비에 실패했습니다.") }
             return
         }
+        autoEnhanceTracker?.track(ownedBase, "applyAutoEnhance:ownedBase")
 
         val nextRevision = startRevision + 1
         renderJob?.cancel()
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다") }
 
-        val autoEnhanceTracker = beginMemoryTracking("applyAutoEnhance", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
         launchManagedEdit { operationToken ->
             var rendered: Bitmap? = null
             try {
@@ -1466,15 +1431,7 @@ private suspend fun settleCommittedDraft(
                 withContext(Dispatchers.Default) {
                     rendered = renderEditedPreview(ownedBase, nextParams, engines, nextRevision, presetLook, quickEffects)
                 }
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.registerBitmap(
-                        bitmap = rendered!!,
-                        owner = "applyAutoEnhance:rendered",
-                        operation = "applyAutoEnhance",
-                        token = autoEnhanceTracker?.token ?: 0L,
-                        documentGeneration = autoEnhanceTracker?.documentGeneration ?: ""
-                    )
-                }
+                autoEnhanceTracker?.track(rendered!!, "applyAutoEnhance:rendered")
                 if (isManagedEditCurrent(operationToken, nextRevision) &&
                     uiState.value.sourcePath == sourcePath &&
                     uiState.value.baseContentToken == baseContentToken &&
@@ -1508,9 +1465,6 @@ private suspend fun settleCommittedDraft(
                 }
             } finally {
                 rendered?.takeIf { !it.isRecycled }?.recycle()
-                if (DebugMemoryTracker.isEnabled()) {
-                    rendered?.let { tracker.unregisterBitmap(it) }
-                }
                 ownedBase.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
                 autoEnhanceTracker?.end()
@@ -1568,13 +1522,16 @@ private suspend fun settleCommittedDraft(
             return
         }
 
+        val engineTracker = beginMemoryTracking("applyEngineChange", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.MetadataOnly)
         var ownedBase: Bitmap? = runCatching { basePreview.copyOrThrow() }.getOrElse {
+            engineTracker?.end()
             undoSnapshot?.let(::recycleHistorySnapshot)
             undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = "처리 엔진 변경 준비에 실패했습니다.") }
             return
         }
+        engineTracker?.track(checkNotNull(ownedBase), "applyEngineChange:ownedBase")
 
         val sourcePath = current.sourcePath
         val baseContentToken = current.baseContentToken
@@ -1598,6 +1555,7 @@ private suspend fun settleCommittedDraft(
                     val result = renderEditedPreview(checkNotNull(ownedBase), params, nextEngines, nextRevision, presetLook, quickEffects)
                     rendered = result
                 }
+                engineTracker?.track(rendered!!, "applyEngineChange:rendered")
                 val identityUnchanged = uiState.value.sourcePath == sourcePath &&
                     uiState.value.baseContentToken == baseContentToken
                 if (isManagedEditCurrent(operationToken, nextRevision) && identityUnchanged) {
@@ -1635,6 +1593,7 @@ private suspend fun settleCommittedDraft(
                 rendered?.takeIf { !it.isRecycled }?.recycle()
                 ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
+                engineTracker?.end()
             }
         }
     }
@@ -1650,6 +1609,7 @@ private suspend fun settleCommittedDraft(
         }
         val baseContentToken = current.baseContentToken
         val startRevision = current.revision
+        val resetTracker = beginMemoryTracking("resetAdjustments", snapshotState = "decoding", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
         val nextRevision = startRevision + 1
         renderJob?.cancel()
@@ -1661,6 +1621,7 @@ private suspend fun settleCommittedDraft(
                 withContext(Dispatchers.IO) {
                     val result = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048)
                     decoded = result
+                    resetTracker?.track(result, "resetAdjustments:decoded")
                 }
                 val identityUnchanged = uiState.value.sourcePath == sourcePath &&
                     uiState.value.baseContentToken == baseContentToken
@@ -1706,6 +1667,7 @@ private suspend fun settleCommittedDraft(
             } finally {
                 decoded?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
+                resetTracker?.end()
             }
         }
     }
@@ -1724,13 +1686,16 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
             return PresetApplyResult.AlreadyApplied
         }
 
+        val presetTracker = beginMemoryTracking("applyPresetLook", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.MetadataOnly)
         var ownedBase: Bitmap? = runCatching { basePreview.copyOrThrow() }.getOrElse {
+            presetTracker?.end()
             undoSnapshot?.let(::recycleHistorySnapshot)
             undoSnapshot = null
             updateUiStateAndRecycleReplaced { it.copy(message = "프리셋 적용 준비에 실패했습니다.") }
             return PresetApplyResult.Rejected
         }
+        presetTracker?.track(checkNotNull(ownedBase), "applyPresetLook:ownedBase")
         val sourcePath = current.sourcePath
         val baseContentToken = current.baseContentToken
         val engines = current.engineSelection()
@@ -1740,7 +1705,6 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
         renderJob?.cancel()
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, revision = nextRevision, message = message) }
 
-        val presetTracker = beginMemoryTracking("applyPresetLook", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
         renderJob = launchManagedEdit { operationToken ->
             var rendered: Bitmap? = null
             try {
@@ -1748,15 +1712,7 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
                     val result = renderEditedPreview(checkNotNull(ownedBase), params, engines, nextRevision, look, quickEffects)
                     rendered = result
                 }
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.registerBitmap(
-                        bitmap = rendered!!,
-                        owner = "applyPresetLook:rendered",
-                        operation = "applyPresetLook",
-                        token = presetTracker?.token ?: 0L,
-                        documentGeneration = presetTracker?.documentGeneration ?: ""
-                    )
-                }
+                presetTracker?.track(rendered!!, "applyPresetLook:rendered")
                 val identityUnchanged = uiState.value.sourcePath == sourcePath &&
                     uiState.value.baseContentToken == baseContentToken
                 if (isManagedEditCurrent(operationToken, nextRevision) && identityUnchanged) {
@@ -1790,9 +1746,6 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
                 }
             } finally {
                 rendered?.takeIf { !it.isRecycled }?.recycle()
-                if (DebugMemoryTracker.isEnabled()) {
-                    rendered?.let { tracker.unregisterBitmap(it) }
-                }
                 ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
                 presetTracker?.end()
@@ -1867,6 +1820,8 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
         val exportRetention = state.exportHistoryRetention
 
         var ownedDirtyBase: Bitmap? = null
+        var exportPrepareTracker: MemoryTrackerScope? = null
+        var dirtyBaseEdge = 0L
         if (exportDirty) {
             val liveBase = state.originalPreviewBitmap ?: state.previewBitmap
             val dirtyPeakBytes = liveBase?.let { bitmap ->
@@ -1885,11 +1840,14 @@ fun applyPresetLook(params: EditParams, look: PresetColorLook?, message: String)
                 requestAllocationRecovery(MemoryRetryAction.ExportPreview, dirtyPeakBytes)
                 return
             }
+            exportPrepareTracker = beginMemoryTracking("exportPreview:prepare", snapshotState = "copying")
             ownedDirtyBase = runCatching { liveBase.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
+                exportPrepareTracker?.end()
                 updateUiStateAndRecycleReplaced { it.copy(message = "메모리가 부족하여 내보내기를 준비하지 못했습니다.") }
                 if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.ExportPreview, failure.requiredBytes)
                 return
             }
+            dirtyBaseEdge = exportPrepareTracker?.track(checkNotNull(ownedDirtyBase), "exportPreview:dirtyBase") ?: 0L
             if (ownedDirtyBase == null) {
                 updateUiStateAndRecycleReplaced { it.copy(message = "\uB0B4\uBCF4\uB0B4\uAE30 \uC900\uBE44\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4") }
                 return
@@ -1905,8 +1863,14 @@ return
 
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = exportBusyMessage) }
 
-        val exportTracker = beginMemoryTracking("exportPreview", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
         val launchedJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val exportTracker = beginMemoryTracking("exportPreview", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
+            ownedDirtyBase?.let {
+                exportTracker?.track(it, "exportPreview:dirtyBase")
+                exportPrepareTracker?.release(dirtyBaseEdge)
+            }
+            exportPrepareTracker?.end()
+            exportPrepareTracker = null
             val exportCoroutine = currentCoroutineContext()[Job] ?: return@launch
             var ownedExportResult: Bitmap? = null
             var pendingUri: Uri? = null
@@ -1949,6 +1913,7 @@ return
                 val exportResult = ownedExportResult ?: run {
                     return@launch
                 }
+                exportTracker?.track(exportResult, "exportPreview:result")
                 markMemoryRetrySucceeded(MemoryRetryAction.ExportPreview)
                 val exportedResolutionLabel = "${exportResult.width}x${exportResult.height}"
 
@@ -2044,10 +2009,6 @@ return
                 ownedExportResult?.let(owned::add)
                 ownedDirtyBase?.let(owned::add)
                 owned.forEach { if (!it.isRecycled) it.recycle() }
-                if (DebugMemoryTracker.isEnabled()) {
-                    ownedExportResult?.let { tracker.unregisterBitmap(it) }
-                    ownedDirtyBase?.let { tracker.unregisterBitmap(it) }
-                }
                 if (exportJob === currentCoroutineContext()[Job]) exportJob = null
                 exportTracker?.end()
             }
@@ -2161,7 +2122,7 @@ fun clearDraft() {
                                     recoveryDebugInfo = null,
                                     showRecoveryDebugCard = false
                                 )
-                                adopted = _uiState.compareAndSet(state, updated)
+                                adopted = commitUiState(state, updated)
                             } else {
                                 // State changed - rollback
                                 val prefsRestored = restoreDraftPreferencesOrThrow(prefs, prevPrefs, IllegalStateException("clear superseded"))
@@ -2419,41 +2380,19 @@ fun clearDraft() {
         val rotateTracker = beginMemoryTracking("rotatePreview90", snapshotState = "rotating")
         try {
             rotatedPreview = rotateBitmap90(preview)
-            if (DebugMemoryTracker.isEnabled()) {
-                tracker.registerBitmap(
-                    bitmap = rotatedPreview!!,
-                    owner = "rotatePreview90:rotatedPreview",
-                    operation = "rotatePreview90",
-                    token = rotateTracker?.token ?: 0L,
-                    documentGeneration = rotateTracker?.documentGeneration ?: ""
-                )
-            }
+            rotateTracker?.track(rotatedPreview!!, "rotatePreview90:rotatedPreview")
             rotatedOriginal = when {
                 current.originalPreviewBitmap == null -> null
                 current.originalPreviewBitmap === preview -> rotatedPreview
                 else -> rotateBitmap90(current.originalPreviewBitmap)
             }
-            if (DebugMemoryTracker.isEnabled() && rotatedOriginal != null && rotatedOriginal !== rotatedPreview) {
-                tracker.registerBitmap(
-                    bitmap = rotatedOriginal!!,
-                    owner = "rotatePreview90:rotatedOriginal",
-                    operation = "rotatePreview90",
-                    token = rotateTracker?.token ?: 0L,
-                    documentGeneration = rotateTracker?.documentGeneration ?: ""
-                )
+            if (rotatedOriginal != null && rotatedOriginal !== rotatedPreview) {
+                rotateTracker?.track(rotatedOriginal!!, "rotatePreview90:rotatedOriginal")
             }
             current.selectionLayers.forEach {
                 val rotated = rotateBitmap90(it.bitmap)
                 rotatedMasks += rotated
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.registerBitmap(
-                        bitmap = rotated,
-                        owner = "rotatePreview90:rotatedMask",
-                        operation = "rotatePreview90",
-                        token = rotateTracker?.token ?: 0L,
-                        documentGeneration = rotateTracker?.documentGeneration ?: ""
-                    )
-                }
+                rotateTracker?.track(rotated, "rotatePreview90:rotatedMask")
             }
             val crop = current.cropState
             val nextCrop = crop.copy(
@@ -2483,36 +2422,6 @@ fun clearDraft() {
             rotatedPreview = null
             if (rotatedOriginal !== adoptedPreview) rotatedOriginal = null
             rotatedMasks.clear()
-            if (DebugMemoryTracker.isEnabled()) {
-                tracker.unregisterBitmap(adoptedPreview, "rotatePreview90:rotatedPreview")
-                tracker.registerBitmap(
-                    bitmap = adoptedPreview,
-                    owner = "EditorUiState:previewBitmap",
-                    operation = "rotatePreview90:adopted",
-                    token = rotateTracker?.token ?: 0L,
-                    documentGeneration = rotateTracker?.documentGeneration ?: ""
-                )
-                if (adoptedOriginal != null && adoptedOriginal !== adoptedPreview) {
-                    tracker.unregisterBitmap(adoptedOriginal, "rotatePreview90:rotatedOriginal")
-                    tracker.registerBitmap(
-                        bitmap = adoptedOriginal,
-                        owner = "EditorUiState:originalPreviewBitmap",
-                        operation = "rotatePreview90:adopted",
-                        token = rotateTracker?.token ?: 0L,
-                        documentGeneration = rotateTracker?.documentGeneration ?: ""
-                    )
-                }
-                adoptedMasks.forEach { mask ->
-                    tracker.unregisterBitmap(mask, "rotatePreview90:rotatedMask")
-                    tracker.registerBitmap(
-                        bitmap = mask,
-                        owner = "EditorUiState:selectionLayer",
-                        operation = "rotatePreview90:adopted",
-                        token = rotateTracker?.token ?: 0L,
-                        documentGeneration = rotateTracker?.documentGeneration ?: ""
-                    )
-                }
-            }
             settleAdoptedEditHistory(undoSnapshot)
             forceDraftSaveAsync()
             Log.i(FLARE_GUARD_AI_TAG, "Rotated preview manually: ${preview.width}x${preview.height} -> ${adoptedPreview.width}x${adoptedPreview.height}")
@@ -2521,9 +2430,6 @@ fun clearDraft() {
             listOf(rotatedPreview, rotatedOriginal).forEach { it?.let(cleanup::add) }
             rotatedMasks.forEach(cleanup::add)
             cleanup.forEach { if (!it.isRecycled) it.recycle() }
-            if (DebugMemoryTracker.isEnabled()) {
-                cleanup.forEach { tracker.unregisterBitmap(it) }
-            }
             undoSnapshot?.let(::recycleHistorySnapshot)
             updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "미리보기 회전에 실패했습니다.") }
             if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.RotatePreview, t.requiredBytes)
@@ -2593,12 +2499,7 @@ fun clearDraft() {
         val nextActiveQuickEffects = currentQuickEffects.toggle(effect)
         if (nextActiveQuickEffects == currentQuickEffects) return
         var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-        var ownedBase: Bitmap? = try { baseOriginal.copyOrThrow() } catch (t: Throwable) {
-            undoSnapshot?.let(::recycleHistorySnapshot)
-            undoSnapshot = null
-            updateUiStateAndRecycleReplaced { it.copy(message = failureMessage) }
-            return
-        }
+        var ownedBase: Bitmap? = null
         val sourcePath = current.sourcePath
         val baseContentToken = current.baseContentToken
         val params = current.params
@@ -2620,6 +2521,8 @@ fun clearDraft() {
             var renderedPreview: Bitmap? = null
             val effectsTracker = beginMemoryTracking("applyNativeSpecialEffects:$title", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
             try {
+                ownedBase = baseOriginal.copyOrThrow()
+                effectsTracker?.track(checkNotNull(ownedBase), "applyNativeSpecialEffects:ownedBase")
                 withContext(Dispatchers.Default) {
                     val result = renderEditedPreview(
                         checkNotNull(ownedBase),
@@ -2631,15 +2534,7 @@ fun clearDraft() {
                     )
                     renderedPreview = result
                 }
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.registerBitmap(
-                        bitmap = renderedPreview!!,
-                        owner = "applyNativeSpecialEffects:rendered",
-                        operation = "applyNativeSpecialEffects",
-                        token = effectsTracker?.token ?: 0L,
-                        documentGeneration = effectsTracker?.documentGeneration ?: ""
-                    )
-                }
+                effectsTracker?.track(renderedPreview!!, "applyNativeSpecialEffects:rendered")
                 val identityUnchanged = uiState.value.sourcePath == sourcePath &&
                     uiState.value.baseContentToken == baseContentToken
                 if (isManagedEditCurrent(operationToken, nextRevision) && identityUnchanged) {
@@ -2676,9 +2571,6 @@ fun clearDraft() {
                 }
             } finally {
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
-                if (DebugMemoryTracker.isEnabled()) {
-                    renderedPreview?.let { tracker.unregisterBitmap(it) }
-                }
                 ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshot?.let(::recycleHistorySnapshot)
                 effectsTracker?.end()
@@ -2705,11 +2597,6 @@ fun clearDraft() {
         val nextRevision = current.revision + 1
 
         val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-        val ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse {
-            undoSnapshot?.let(::recycleHistorySnapshot)
-            updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화 준비에 실패했습니다.") }
-            return
-        }
 
         val sourcePath = current.sourcePath
         val baseContentToken = current.baseContentToken
@@ -2734,25 +2621,19 @@ fun clearDraft() {
             var flareGuardBitmap: Bitmap? = null
             var renderedPreview: Bitmap? = null
             var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
-            var ownedBaseOwned: Bitmap? = ownedBase
+            var ownedBaseOwned: Bitmap? = null
             val flareTracker = beginMemoryTracking("applyFlareGuardAiOrRulePreview", snapshotState = "rendering", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
 
             try {
+                ownedBaseOwned = baseOriginal.copyOrThrow()
+                flareTracker?.track(checkNotNull(ownedBaseOwned), "applyFlareGuard:ownedBase")
                 val result = withContext(Dispatchers.Default) {
                     val r = applyFlareGuardModelOrRuleResultV0(appContext, checkNotNull(ownedBaseOwned), mode, allowRuleFallback = true)
                     flareGuardResult = r
                     flareGuardBitmap = r.bitmap
                     r
                 }
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.registerBitmap(
-                        bitmap = flareGuardBitmap!!,
-                        owner = "applyFlareGuard:flareGuardBitmap",
-                        operation = "applyFlareGuard",
-                        token = flareTracker?.token ?: 0L,
-                        documentGeneration = flareTracker?.documentGeneration ?: ""
-                    )
-                }
+                flareTracker?.track(flareGuardBitmap!!, "applyFlareGuard:flareGuardBitmap")
 
                 renderedPreview = withContext(Dispatchers.Default) {
                     val p = renderEditedPreview(
@@ -2766,15 +2647,7 @@ fun clearDraft() {
                     renderedPreview = p
                     p
                 }
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.registerBitmap(
-                        bitmap = renderedPreview!!,
-                        owner = "applyFlareGuard:renderedPreview",
-                        operation = "applyFlareGuard",
-                        token = flareTracker?.token ?: 0L,
-                        documentGeneration = flareTracker?.documentGeneration ?: ""
-                    )
-                }
+                flareTracker?.track(renderedPreview!!, "applyFlareGuard:renderedPreview")
 
                 val adoptionIdentityUnchanged = !shuttingDown &&
                     _uiState.value.sourcePath == sourcePath &&
@@ -2829,13 +2702,7 @@ fun clearDraft() {
                 }
             } finally {
                 flareGuardBitmap?.takeIf { !it.isRecycled }?.recycle()
-                if (DebugMemoryTracker.isEnabled()) {
-                    flareGuardBitmap?.let { tracker.unregisterBitmap(it) }
-                }
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
-                if (DebugMemoryTracker.isEnabled()) {
-                    renderedPreview?.let { tracker.unregisterBitmap(it) }
-                }
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 flareTracker?.end()
@@ -2885,16 +2752,23 @@ fun clearDraft() {
         var restorePreviousBaseline: String? = null
         var restoreBaselineChanged = false
         var restoreStateAdopted = false
+        val restoreTracker = beginMemoryTracking(
+            "restoreCurrentDraftGeneration",
+            snapshotState = "decoding",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+        )
         try {
             withContext(Dispatchers.IO) {
                 val workingSource = copyGenerationSourceToWorkingFile(context, validated.sourceFile)
                 ownedWorkingSource = workingSource
                 val decodedBase = decodeSampledMutableBitmapWithExif(workingSource.absolutePath, maxSide = 2048)
                 ownedBase = decodedBase
+                restoreTracker?.track(decodedBase, "restoreDraft:base")
                 validated.maskFiles.forEach { file ->
                     val mask = decodeMutableBitmapOrThrow(file.absolutePath)
                     try {
                         ownedMasks += mask
+                        restoreTracker?.track(mask, "restoreDraft:selection:${file.name}")
                     } catch (t: Throwable) {
                         if (!mask.isRecycled) mask.recycle()
                         throw t
@@ -2940,6 +2814,7 @@ fun clearDraft() {
                     )
                 }
                 ownedRendered = result
+                restoreTracker?.track(result, "restoreDraft:rendered")
             }
             withContext(Dispatchers.IO) {
                 val session = NativePhotoCore.nativeCreateSession(checkNotNull(ownedWorkingSource).absolutePath)
@@ -2994,38 +2869,20 @@ fun clearDraft() {
             draftPointerBaseline = pointer
             restoreBaselineChanged = true
             nativeSession = createdSession
-            try {
-                _uiState.value = nextState
-            } catch (t: Throwable) {
+            tracker.registerNativeSession(createdSession, historyCoordinator.currentGeneration(),
+                nextState.sourcePath.orEmpty(), "restored")
+            if (!commitUiState(previousState, nextState, replaceDocument = true, adoptedNativeSession = createdSession)) {
                 nativeSession = previousSession
-                draftPointerBaseline = restorePreviousBaseline
-                throw t
-            }
-            val adoptedState = _uiState.value
-            val fullyAdopted = nativeSession == createdSession &&
-                adoptedState.sourcePath == nextState.sourcePath &&
-                adoptedState.originalPreviewBitmap === base &&
-                adoptedState.previewBitmap === ownedRendered &&
-                adoptedState.selectionLayers.size == layers.size &&
-                adoptedState.selectionLayers.zip(layers).all { (live, expected) ->
-                    live.id == expected.id && live.bitmap === expected.bitmap
-                } &&
-                adoptedState.baseContentToken == manifest.baseContentToken &&
-                adoptedState.revision == nextRevision
-            if (!fullyAdopted) {
-                if (nativeSession == createdSession) nativeSession = previousSession
                 draftPointerBaseline = restorePreviousBaseline
                 error("draft generation adoption was not confirmed")
             }
-restoreStateAdopted = true
+            restoreStateAdopted = true
             createdSession = 0L
             ownedBase = null
             ownedRendered = null
             ownedMasks.clear()
             ownedWorkingSource = null
             lastSuccessfullyRenderedParams = manifest.params
-            runCatching { clearEditHistory() }.onFailure { logDraftSaveFailure(it) }
-            runCatching { releaseOrphanedBitmaps(previousState, nextState) }.onFailure { logDraftSaveFailure(it) }
             runCatching { releaseNativeSessionHandle(previousSession) }.onFailure { logDraftSaveFailure(it) }
             runCatching { deleteOwnedWorkingSource(context, previousState.sourcePath) }.onFailure { logDraftSaveFailure(it) }
             return GenerationRestoreOutcome.Restored
@@ -3069,9 +2926,7 @@ restoreStateAdopted = true
             cleanup.forEach { if (!it.isRecycled) it.recycle() }
             ownedWorkingSource?.delete()
             releaseNativeSessionHandle(createdSession)
-            if (DebugMemoryTracker.isEnabled()) {
-                tracker.unregisterNativeSession(createdSession)
-            }
+            restoreTracker?.end()
         }
     }
 
@@ -3198,6 +3053,11 @@ restoreStateAdopted = true
         var rendered: Bitmap? = null
         var createdSession = 0L
         var expectedRestoreRevision: Int? = null
+        val restoreTracker = beginMemoryTracking(
+            "restoreLegacyDraft",
+            snapshotState = "decoding",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+        )
         fun recycleOwnedRestoreBitmaps() {
             val owned = identityBitmapSet()
             preview?.let(owned::add)
@@ -3210,6 +3070,7 @@ restoreStateAdopted = true
             withContext(Dispatchers.IO) {
                 val decoded = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048)
                 preview = decoded
+                restoreTracker?.track(decoded, "restoreLegacyDraft:base")
             }
             val nextRevision = _uiState.value.revision + 1
             expectedRestoreRevision = nextRevision
@@ -3217,26 +3078,22 @@ restoreStateAdopted = true
             withContext(Dispatchers.Default) {
                 val result = renderEditedPreview(preview!!, params, engines, nextRevision, presetLook, activeQuickEffects)
                 rendered = result
+                restoreTracker?.track(result, "restoreLegacyDraft:rendered")
             }
             if (shuttingDown || restoreToken != restoreDraftToken || _uiState.value.revision != restoreStartRevision) {
                 recycleOwnedRestoreBitmaps()
                 return
             }
             createdSession = NativePhotoCore.nativeCreateSession(sourcePath)
-            if (DebugMemoryTracker.isEnabled()) {
-                tracker.registerNativeSession(
-                    handle = createdSession,
-                    documentGeneration = historyCoordinator.currentGeneration(),
-                    sourceIdentity = sourcePath.hashCode().toString(),
-                    state = "restored"
-                )
-            }
+            tracker.registerNativeSession(
+                handle = createdSession,
+                documentGeneration = historyCoordinator.currentGeneration(),
+                sourceIdentity = sourcePath.hashCode().toString(),
+                state = "restored"
+            )
             if (shuttingDown || restoreToken != restoreDraftToken || _uiState.value.revision != restoreStartRevision) {
                 recycleOwnedRestoreBitmaps()
                 releaseNativeSessionHandle(createdSession)
-                if (DebugMemoryTracker.isEnabled()) {
-                    tracker.unregisterNativeSession(createdSession)
-                }
                 createdSession = 0L
                 return
             }
@@ -3273,34 +3130,24 @@ restoreStateAdopted = true
                     message = "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4"
             )
             nativeSession = createdSession
-            try {
-                _uiState.value = nextState
-            } catch (t: Throwable) {
+            if (!commitUiState(previousState, nextState, replaceDocument = true, adoptedNativeSession = createdSession)) {
                 nativeSession = previousSession
-                throw t
+                error("legacy draft adoption superseded")
             }
             createdSession = 0L
             preview = null
             rendered = null
             lastSuccessfullyRenderedParams = params
-            clearEditHistory()
-            runCatching { releaseOrphanedBitmaps(previousState, nextState) }
             releaseNativeSessionHandle(previousSession)
             deleteOwnedWorkingSource(context, previousState.sourcePath)
             forceDraftSaveAsync()
         } catch (ce: CancellationException) {
             recycleOwnedRestoreBitmaps()
             releaseNativeSessionHandle(createdSession)
-            if (DebugMemoryTracker.isEnabled()) {
-                tracker.unregisterNativeSession(createdSession)
-            }
             throw ce
         } catch (t: Throwable) {
             recycleOwnedRestoreBitmaps()
             releaseNativeSessionHandle(createdSession)
-            if (DebugMemoryTracker.isEnabled()) {
-                tracker.unregisterNativeSession(createdSession)
-            }
             val currentRevision = _uiState.value.revision
             val isRestoreStillCurrent = !shuttingDown && restoreToken == restoreDraftToken &&
                 (currentRevision == restoreStartRevision || currentRevision == expectedRestoreRevision)
@@ -3310,6 +3157,8 @@ restoreStateAdopted = true
                     requestAllocationRecovery(MemoryRetryAction.RestoreDraft, t.requiredBytes)
                 }
             }
+        } finally {
+            restoreTracker?.end()
         }
     }
 
@@ -3490,15 +3339,14 @@ restoreStateAdopted = true
         discardPendingParamUndoSnapshot()
         historyCoordinator.replaceDocument()
         tracker.activateDocument(historyCoordinator.currentGeneration(), tracker.currentDocumentGeneration().ifEmpty { null })
+        historyCoordinator.refreshDiagnostics()
         if (!shuttingDown) updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null) }
         updateHistoryFlags()
     }
 
     private fun releaseNativeSessionHandle(session: Long) {
         if (session != 0L) {
-            if (DebugMemoryTracker.isEnabled()) {
-                tracker.unregisterNativeSession(session)
-            }
+            tracker.unregisterNativeSession(session)
             runCatching { NativePhotoCore.nativeReleaseSession(session) }
         }
     }
@@ -3528,7 +3376,7 @@ restoreStateAdopted = true
         historyIoJob?.cancel()
         discardPendingParamUndoSnapshot()
         historyCoordinator.close()
-        uiStateOwnership.releaseAll()
+        uiStateOwnership?.releaseAll()
         tracker.logSnapshot("preTrackerClose")
         tracker.close()
         super.onCleared()

@@ -8,6 +8,8 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
+import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -35,19 +37,24 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         }
     }
     if (nextLayers == current.selectionLayers) return
+    val prepareTracker = beginMemoryTracking("selectionLivePreview:prepare", snapshotState = "copying")
     val ownedBase = runCatching { base.copyOrThrow() }.getOrElse { failure ->
+        prepareTracker?.end()
         invalidateSelectionPreview()
         updateUiState { it.copy(message = if (failure is BitmapAllocationRejectedException) "메모리가 부족하여 선택 마스크 미리보기를 준비하지 못했습니다." else "선택 마스크 미리보기용 이미지를 준비하지 못했습니다.") }
         return
     }
+    prepareTracker?.track(ownedBase, "selectionPreview:base")
     val ownedLayers = runCatching {
         nextLayers.copyBitmapsOwned()
     }.getOrElse { failure ->
         ownedBase.recycle()
+        prepareTracker?.end()
         invalidateSelectionPreview()
         updateUiState { it.copy(message = if (failure is BitmapAllocationRejectedException) "메모리가 부족하여 선택 마스크 미리보기를 준비하지 못했습니다." else "선택 마스크 미리보기를 준비하지 못했습니다.") }
         return
     }
+    ownedLayers.forEach { prepareTracker?.track(it.bitmap, "selectionPreview:layer:${it.id}") }
 
     val baseToken = current.baseContentToken
     val nextRevision = current.revision + 1
@@ -62,11 +69,20 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
     val previewToken = beginSelectionPreview(transaction)
     val previewJob = viewModelScope.launch {
         var preview: Bitmap? = null
+        val previewTracker = beginMemoryTracking(
+            "selectionLivePreview",
+            snapshotState = "rendering",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+        )
+        previewTracker?.track(ownedBase, "selectionPreview:base")
+        ownedLayers.forEach { previewTracker?.track(it.bitmap, "selectionPreview:layer:${it.id}") }
+        prepareTracker?.end()
         try {
             delay(120L)
             preview = withContext(Dispatchers.Default) {
                 renderLiveSelectionPreview(ownedBase, nextState.copy(selectionLayers = ownedLayers), nextRevision)
             }
+            previewTracker?.track(checkNotNull(preview), "selectionPreview:result")
             if (isSelectionPreviewCurrent(transaction, previewToken, nextRevision, baseToken, activeId)) {
                 val adopted = preview ?: error("missing selection live preview")
                 updateUiState {
@@ -99,6 +115,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         } finally {
             ownedBase.recycle()
             ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+            previewTracker?.end()
         }
     }
     bindSelectionPreviewJob(transaction, previewJob, nextRevision, baseToken, activeId)

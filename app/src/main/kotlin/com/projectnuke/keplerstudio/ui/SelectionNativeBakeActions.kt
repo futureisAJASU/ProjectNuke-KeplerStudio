@@ -11,7 +11,9 @@ import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -41,25 +43,30 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     val baseContentToken = current.baseContentToken
 
     var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+    val prepareTracker = beginMemoryTracking("selectionNativeBake:prepare", snapshotState = "copying")
 
     var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse { failure ->
+        prepareTracker?.end()
         undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
         if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.ApplySelectionNative, failure.requiredBytes)
         return
     }
+    prepareTracker?.track(checkNotNull(ownedBase), "selectionBake:base")
     var ownedLayers: List<com.projectnuke.keplerstudio.editor.SelectionLayer> = runCatching {
         enabledLayers.copyBitmapsOwned()
     }.getOrElse { failure ->
         ownedBase?.takeIf { !it.isRecycled }?.recycle()
         ownedBase = null
+        prepareTracker?.end()
         undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
         if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.ApplySelectionNative, failure.requiredBytes)
         return
     }
+    ownedLayers.forEach { prepareTracker?.track(it.bitmap, "selectionBake:layer:${it.id}") }
     val nextRevision = current.revision + 1
     updateUiState {
         it.copy(
@@ -72,6 +79,14 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     launchManagedEdit { operationToken ->
         var bakedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
+        val bakeTracker = beginMemoryTracking(
+            "selectionNativeBake",
+            snapshotState = "rendering",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+        )
+        ownedBase?.let { bakeTracker?.track(it, "selectionBake:base") }
+        ownedLayers.forEach { bakeTracker?.track(it.bitmap, "selectionBake:layer:${it.id}") }
+        prepareTracker?.end()
         try {
             withContext(Dispatchers.Default) {
                 val localOnlyState = current.copy(
@@ -80,6 +95,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 )
                 val result = renderBitmapWithSelectionLayers(checkNotNull(ownedBase), localOnlyState.copy(selectionLayers = ownedLayers), nextRevision)
                 bakedOriginal = result
+                bakeTracker?.track(result, "selectionBake:original")
             }
             withContext(Dispatchers.Default) {
                 val result = renderEditedPreview(
@@ -91,6 +107,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                     quickEffects = quickEffects
                 )
                 renderedPreview = result
+                bakeTracker?.track(result, "selectionBake:preview")
             }
             val adoptedOriginal = bakedOriginal ?: error("missing baked original")
             val adoptedPreview = renderedPreview ?: error("missing rendered preview")
@@ -145,6 +162,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
             bakedOriginal?.takeIf { !it.isRecycled }?.recycle()
             renderedPreview?.takeIf { !it.isRecycled }?.recycle()
             undoSnapshot?.let(::recycleHistorySnapshot)
+            bakeTracker?.end()
         }
     }
 }

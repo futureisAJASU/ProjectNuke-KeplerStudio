@@ -1,10 +1,7 @@
 package com.projectnuke.keplerstudio.editor
 
 import android.graphics.Bitmap
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
 internal object TrackerOwners {
@@ -19,7 +16,6 @@ internal object TrackerOwners {
     const val DOCUMENT_GENERATION = "DocumentGeneration"
     const val NATIVE_SESSION = "NativeSession"
 }
-
 internal class MemoryTrackerScope private constructor(
     val tracker: TrackerDiagnostics,
     val name: String,
@@ -101,7 +97,8 @@ internal class UiStateOwnershipReconciler(
 ) {
     private val lock = ReentrantLock()
     /** Only edge handles are retained: UI ownership never pins a Bitmap. */
-    private val handles = HashMap<String, Long>()
+    private data class OwnedSlot(val handle: Long, val generation: String)
+    private val handles = HashMap<String, OwnedSlot>()
 
     fun reconcile(prev: EditorUiState?, next: EditorUiState, documentGeneration: String) {
         try {
@@ -112,11 +109,12 @@ internal class UiStateOwnershipReconciler(
                 (before.keys + after.keys).forEach { slot ->
                     val old = before[slot]
                     val replacement = after[slot]
-                    if (old === replacement) return@forEach
-                    handles.remove(slot)?.let(tracker::releaseEdge)
+                    val existing = handles[slot]
+                    if (old === replacement && replacement != null && existing?.generation == documentGeneration) return@forEach
+                    handles.remove(slot)?.let { tracker.releaseEdge(it.handle) }
                     replacement?.takeIf { !it.isRecycled }?.let { bitmap ->
                         val handle = tracker.registerBitmap(bitmap, slot, TrackerOwners.UI_STATE, 0L, documentGeneration)
-                        if (handle != 0L) handles[slot] = handle
+                        if (handle != 0L) handles[slot] = OwnedSlot(handle, documentGeneration)
                     }
                 }
             } finally {
@@ -130,7 +128,7 @@ internal class UiStateOwnershipReconciler(
         try {
             lock.lock()
             try {
-                handles.values.forEach(tracker::releaseEdge)
+                handles.values.forEach { tracker.releaseEdge(it.handle) }
                 handles.clear()
             } finally {
                 lock.unlock()
@@ -153,10 +151,11 @@ internal fun EditorViewModel.beginMemoryTracking(
     snapshotState: String = "hot",
     transientReserveBytes: Long = 0L
 ): MemoryTrackerScope? {
+    val realTracker = trackerSession ?: return null
     if (isShuttingDown()) return null
     val state = uiState.value
     return MemoryTrackerScope.create(
-        tracker = tracker,
+        tracker = realTracker,
         name = name,
         documentGeneration = historyCoordinator.currentGeneration(),
         baseContentToken = state.baseContentToken,
@@ -164,32 +163,4 @@ internal fun EditorViewModel.beginMemoryTracking(
         snapshotState = snapshotState,
         transientReserveBytes = transientReserveBytes
     )
-}
-
-internal fun EditorViewModel.registerDocumentGeneration(generation: String?) {
-    if (isShuttingDown()) return
-    if (generation != null) tracker.activateDocument(generation, tracker.currentDocumentGeneration().ifEmpty { null })
-}
-
-internal fun EditorViewModel.unregisterDocumentGeneration(generation: String?) {
-    if (isShuttingDown()) return
-    if (generation != null) tracker.unregisterDocument(generation)
-}
-
-internal fun EditorViewModel.registerUiStateBitmap(bitmap: Bitmap, owner: String) {
-    if (isShuttingDown()) return
-    if (bitmap.isRecycled) return
-    val gen = historyCoordinator.currentGeneration()
-    tracker.registerBitmap(
-        bitmap = bitmap,
-        owner = owner,
-        operation = TrackerOwners.UI_STATE,
-        token = 0L,
-        documentGeneration = gen
-    )
-}
-
-internal fun EditorViewModel.unregisterUiStateBitmap(bitmap: Bitmap, owner: String? = null) {
-    if (isShuttingDown()) return
-    tracker.unregisterBitmap(bitmap, owner)
 }

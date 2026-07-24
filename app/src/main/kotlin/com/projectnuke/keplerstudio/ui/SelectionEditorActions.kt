@@ -8,7 +8,9 @@ import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
@@ -44,12 +46,18 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         return
     }
 
+    val selectionTracker = beginMemoryTracking(
+        "addSubjectSelection",
+        snapshotState = "inferring",
+        transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+    )
     var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
     val ownedBase = try {
-        base.copyOrThrow(mutable = false)
+        base.copyOrThrow(mutable = false).also { selectionTracker?.track(it, "subjectSelection:base") }
     } catch (t: Throwable) {
         undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
+        selectionTracker?.end()
         updateUiState { it.copy(message = "마스크 입력 이미지를 준비하지 못했습니다.") }
         if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.SubjectSelection, t.requiredBytes)
         return
@@ -71,6 +79,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                     return@withContext null
                 }
                 pendingLayerBitmap = ownedMask
+                selectionTracker?.track(ownedMask, "subjectSelection:mask")
                 SelectionLayer(
                     id = newSelectionId(),
                     name = "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C",
@@ -133,6 +142,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             }
         } finally {
             ownedBase.recycle()
+            selectionTracker?.end()
         }
     }
 }
@@ -266,10 +276,16 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
     launchManagedEdit { operationToken ->
         var renderedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
+        val selectionTracker = beginMemoryTracking(
+            "applyActiveSelectionLocalEdit",
+            snapshotState = "rendering",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
+        )
         try {
             renderedOriginal = withContext(Dispatchers.Default) {
                 renderSelectionLocalEdit(base, state, layer, nextRevision)
             }
+            selectionTracker?.track(checkNotNull(renderedOriginal), "selectionEdit:original")
             renderedPreview = withContext(Dispatchers.Default) {
                 renderEditedPreview(
                     basePreview = renderedOriginal ?: error("missing selection render"),
@@ -280,6 +296,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                     quickEffects = state.activeQuickEffects
                 )
             }
+            selectionTracker?.track(checkNotNull(renderedPreview), "selectionEdit:preview")
             if (isManagedEditCurrent(operationToken, nextRevision)) {
                 val adoptedOriginal = renderedOriginal ?: error("missing selection original")
                 val adoptedPreview = renderedPreview ?: error("missing selection preview")
@@ -319,6 +336,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
             }
         } finally {
             undoSnapshot?.let(::recycleHistorySnapshot)
+            selectionTracker?.end()
         }
     }
 }

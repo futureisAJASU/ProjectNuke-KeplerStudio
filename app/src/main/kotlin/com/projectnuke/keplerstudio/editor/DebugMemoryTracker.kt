@@ -3,13 +3,13 @@ package com.projectnuke.keplerstudio.editor
 import android.graphics.Bitmap
 import android.util.Log
 import com.projectnuke.keplerstudio.BuildConfig
-import java.lang.ref.Reference
 import java.lang.ref.ReferenceQueue
 import java.lang.ref.WeakReference
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 internal object DebugMemoryTracker {
     @JvmStatic
@@ -17,8 +17,15 @@ internal object DebugMemoryTracker {
 
     @JvmStatic
     /** The only release branch.  No session, registry entry, lock or ledger is allocated there. */
-    fun createEditorDiagnostics(editor: Any): TrackerDiagnostics =
-        if (isEnabled()) TrackerSession("editor-${System.identityHashCode(editor)}") else NoopTrackerDiagnostics
+    fun createEditorSession(editor: Any): TrackerSession? =
+        if (isEnabled()) TrackerSession("editor-${System.identityHashCode(editor)}") else null
+
+    fun diagnostics(session: TrackerSession?): TrackerDiagnostics = session ?: NoopTrackerDiagnostics
+
+    fun onGlobalThumbnailMemoryChanged() {
+        if (!isEnabled()) return
+        TrackerSessionHolder.sessions.values.toList().forEach { it.considerCurrentPeak() }
+    }
 
     @JvmStatic
     fun thumbnailCacheSnapshot(): TrackerSession.ThumbnailCacheSnapshot {
@@ -44,6 +51,35 @@ internal object TrackerSessionHolder {
     internal val sessions = ConcurrentHashMap<String, TrackerSession>()
 }
 
+internal data class GlobalModelContributor(
+    val name: String,
+    val state: String,
+    val knownEstimateBytes: Long?
+)
+
+/** Process-global model state; it stores numeric/state data and never tracker sessions. */
+internal object GlobalModelDiagnostics {
+    private val contributors = AtomicReference<Map<String, GlobalModelContributor>>(emptyMap())
+
+    fun publish(name: String, state: String, knownEstimateBytes: Long? = null) {
+        try {
+            while (true) {
+                val current = contributors.get()
+                val next = if (state == "unloaded") {
+                    current - name
+                } else {
+                    current + (name to GlobalModelContributor(name, state, knownEstimateBytes?.takeIf { it >= 0L }))
+                }
+                if (contributors.compareAndSet(current, next)) break
+            }
+            DebugMemoryTracker.onGlobalThumbnailMemoryChanged()
+        } catch (_: Throwable) {
+        }
+    }
+
+    fun snapshot(): List<GlobalModelContributor> = contributors.get().values.toList()
+}
+
 /** Narrow diagnostics seam.  The release implementation is a stateless singleton. */
 internal interface TrackerDiagnostics {
     fun registerDocument(generation: String)
@@ -55,6 +91,7 @@ internal interface TrackerDiagnostics {
     fun unregisterBitmap(bitmap: Bitmap, owner: String? = null)
     fun registerNativeSession(handle: Long, documentGeneration: String, sourceIdentity: String, state: String, knownEstimateBytes: Long = -1L)
     fun updateNativeSession(handle: Long, state: String)
+    fun rebindNativeSessionGeneration(handle: Long, generation: String)
     fun unregisterNativeSession(handle: Long)
     fun beginOperation(name: String, documentGeneration: String, baseContentToken: String, revision: Int, transientReserveBytes: Long, snapshotState: String): Long
     fun endOperation(name: String, token: Long)
@@ -73,6 +110,7 @@ private object NoopTrackerDiagnostics : TrackerDiagnostics {
     override fun unregisterBitmap(bitmap: Bitmap, owner: String?) = Unit
     override fun registerNativeSession(handle: Long, documentGeneration: String, sourceIdentity: String, state: String, knownEstimateBytes: Long) = Unit
     override fun updateNativeSession(handle: Long, state: String) = Unit
+    override fun rebindNativeSessionGeneration(handle: Long, generation: String) = Unit
     override fun unregisterNativeSession(handle: Long) = Unit
     override fun beginOperation(name: String, documentGeneration: String, baseContentToken: String, revision: Int, transientReserveBytes: Long, snapshotState: String) = 0L
     override fun endOperation(name: String, token: Long) = Unit
@@ -82,8 +120,9 @@ private object NoopTrackerDiagnostics : TrackerDiagnostics {
 }
 
 internal class TrackerSession(
-    val editorInstanceId: String
-) : TrackerDiagnostics, ThumbnailCacheDiagnostics {
+    val editorInstanceId: String,
+    private val identityHashProvider: (Bitmap) -> Int = { System.identityHashCode(it) }
+) : TrackerDiagnostics {
     private val lock = ReentrantLock()
     private val tag = "KeplerDebugMem:$editorInstanceId"
 
@@ -91,9 +130,10 @@ internal class TrackerSession(
 
     private class WeakIdentityKey(
         bitmap: Bitmap,
-        queue: ReferenceQueue<Bitmap>
+        queue: ReferenceQueue<Bitmap>,
+        identityHashCode: Int
     ) : WeakReference<Bitmap>(bitmap, queue) {
-        private val identityHashCode: Int = System.identityHashCode(bitmap)
+        private val identityHashCode: Int = identityHashCode
 
         override fun hashCode(): Int = identityHashCode
 
@@ -168,7 +208,7 @@ internal class TrackerSession(
         val historyColdCompressedBytes: Long,
         val deletionDebtBytes: Long,
         val combinedKnownEstimatedPeakBytes: Long,
-        val combinedEstimatedPeakBytes: Long,
+        val combinedCompleteEstimatedPeakBytes: Long?,
         val combinedHasUnknownContributors: Boolean = false,
         val documentGeneration: String,
         val timestamp: Long
@@ -180,6 +220,9 @@ internal class TrackerSession(
         val bitmapCount: Int,
         val byOwner: Map<String, Long>,
         val byOperation: Map<String, Long>,
+        val acquisitionCount: Int = 0,
+        val byOwnerAcquisitionCount: Map<String, Int> = emptyMap(),
+        val byOperationAcquisitionCount: Map<String, Int> = emptyMap(),
         val nativeSessions: List<NativeSessionRecord>,
         val activeOperations: List<OperationRecord>,
         val estimatedPeakBytes: Long,
@@ -191,15 +234,18 @@ internal class TrackerSession(
         val deletionDebtBytes: Long,
         val activeTransientReserveBytes: Long,
         val nativeEstimateBytes: Long,
-        val unknownNativeBytes: Long,
+        val unknownNativeContributorCount: Long,
         val combinedKnownEstimatedBytes: Long,
         val combinedHasUnknownContributors: Boolean = false,
+        val combinedCompleteEstimatedBytes: Long? = null,
         val timestamp: Long,
         val ownerByteTotalsNonAdditive: Boolean = true,
         val activeThumbnailEntryCount: Int = 0,
         val activeThumbnailLeases: Int = 0,
         val thumbnailRemovedButLeased: Int = 0,
-        val thumbnailResidentBytes: Long = 0L
+        val thumbnailResidentBytes: Long = 0L,
+        val thumbnailRemovedButLeasedBytes: Long = 0L,
+        val globalModelContributors: List<GlobalModelContributor> = emptyList()
     )
 
     data class HistoryMetricsSnapshot(
@@ -215,6 +261,18 @@ internal class TrackerSession(
         val spilling: Boolean,
         val adopting: Boolean,
         val protectedTargetId: String?,
+        val timestamp: Long,
+        val operationKind: HistoryOperationKind = HistoryOperationKind.Idle,
+        val navigationDirection: String? = null,
+        val operationToken: Long = 0L
+    )
+
+    enum class HistoryOperationKind { Idle, Loading, Spilling, Adopting, Trimming, Maintenance, DirectToCold, Recovery }
+
+    data class CompletedGenerationPeakSummary(
+        val documentGeneration: String,
+        val combinedKnownPeakBytes: Long,
+        val hadUnknownContributors: Boolean,
         val timestamp: Long
     )
 
@@ -226,7 +284,7 @@ internal class TrackerSession(
     )
 
     private val nodes = ConcurrentHashMap<WeakIdentityKey, NodeEntry>()
-    private val edgeIndex = ConcurrentHashMap<Long, WeakIdentityKey>()
+    private val edgeIndex = ConcurrentHashMap<Long, NodeEntry>()
     private val operations = ConcurrentHashMap<String, OperationRecord>()
 
     private val documentGenerations = ConcurrentHashMap<String, Long>()
@@ -245,12 +303,8 @@ internal class TrackerSession(
 
     private val nativeSessions = ConcurrentHashMap<Long, NativeSessionRecord>()
 
-    private val thumbnailResidentEntryCount = AtomicLong(0L)
-    private val thumbnailResidentBytes = AtomicLong(0L)
-    private val thumbnailTotalLeases = AtomicLong(0L)
-    private val thumbnailRemovedButLeased = AtomicLong(0L)
-
-    private val boundedHistorySummaries = ArrayDeque<HistoryMetricsSnapshot>(MAX_HISTORY_SUMMARIES)
+    private val completedGenerationPeaks = ArrayDeque<CompletedGenerationPeakSummary>(MAX_HISTORY_SUMMARIES)
+    private val latestHistoryMetrics = AtomicReference<HistoryMetricsSnapshot?>(null)
 
     init {
         TrackerSessionHolder.sessions[editorInstanceId] = this
@@ -264,34 +318,38 @@ internal class TrackerSession(
     private fun acceptingEvents(): Boolean = lifecycle.get() == Lifecycle.Active
 
     override fun registerDocument(generation: String) {
-        if (!acceptingEvents()) return
         try {
-            documentGenerations[generation] = System.currentTimeMillis()
-            documentPeaks.putIfAbsent(generation, AtomicReference(PeakSnapshot(
-                editorInstanceId = editorInstanceId,
-                residentBitmapBytes = 0L,
-                nativeEstimateBytes = 0L,
-                activeTransientReserveBytes = 0L,
-                historyHotResidentBytes = 0L,
-                coldLoadDecodedTransientBytes = 0L,
-                historyColdCompressedBytes = 0L,
-                deletionDebtBytes = 0L,
-                combinedKnownEstimatedPeakBytes = 0L,
-                combinedEstimatedPeakBytes = 0L,
-                documentGeneration = generation,
-                timestamp = System.currentTimeMillis()
-            )))
-            if (documentGenerations.size == 1) {
-                currentGeneration.set(generation)
+            lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active) return
+                documentGenerations[generation] = System.currentTimeMillis()
+                documentPeaks.putIfAbsent(generation, AtomicReference(PeakSnapshot(
+                    editorInstanceId = editorInstanceId,
+                    residentBitmapBytes = 0L,
+                    nativeEstimateBytes = 0L,
+                    activeTransientReserveBytes = 0L,
+                    historyHotResidentBytes = 0L,
+                    coldLoadDecodedTransientBytes = 0L,
+                    historyColdCompressedBytes = 0L,
+                    deletionDebtBytes = 0L,
+                    combinedKnownEstimatedPeakBytes = 0L,
+                    combinedCompleteEstimatedPeakBytes = 0L,
+                    documentGeneration = generation,
+                    timestamp = System.currentTimeMillis()
+                )))
+                if (documentGenerations.size == 1) {
+                    currentGeneration.set(generation)
+                }
             }
         } catch (_: Throwable) {
         }
     }
 
     fun setCurrentDocumentGeneration(generation: String) {
-        if (!acceptingEvents()) return
         try {
-            currentGeneration.set(generation)
+            lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active) return
+                currentGeneration.set(generation)
+            }
         } catch (_: Throwable) {
         }
     }
@@ -299,15 +357,22 @@ internal class TrackerSession(
     override fun currentDocumentGeneration(): String = currentGeneration.get()
 
     override fun unregisterDocument(generation: String) {
-        if (!acceptingEvents()) return
         try {
-            documentGenerations.remove(generation)
-            val peakRef = documentPeaks.remove(generation)
-            if (peakRef != null) {
-                val snap = peakRef.get()
-                synchronized(boundedHistorySummaries) {
-                    boundedHistorySummaries.addLast(snap.toHistorySummary())
-                    while (boundedHistorySummaries.size > MAX_HISTORY_SUMMARIES) boundedHistorySummaries.removeFirst()
+            lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active) return
+                documentGenerations.remove(generation)
+                val peakRef = documentPeaks.remove(generation)
+                if (peakRef != null) {
+                    val snap = peakRef.get()
+                    synchronized(completedGenerationPeaks) {
+                        completedGenerationPeaks.addLast(CompletedGenerationPeakSummary(
+                            generation,
+                            snap.combinedKnownEstimatedPeakBytes,
+                            snap.combinedHasUnknownContributors,
+                            snap.timestamp
+                        ))
+                        while (completedGenerationPeaks.size > MAX_HISTORY_SUMMARIES) completedGenerationPeaks.removeFirst()
+                    }
                 }
             }
         } catch (_: Throwable) {
@@ -316,13 +381,13 @@ internal class TrackerSession(
 
     /** One ordered document handoff prevents a tracker generation from drifting from history. */
     override fun activateDocument(newGeneration: String, previousGeneration: String?) {
-        if (!acceptingEvents()) return
-        try {
+        try { lock.withLock {
+            if (lifecycle.get() != Lifecycle.Active) return
             registerDocument(newGeneration)
             currentGeneration.set(newGeneration)
+            latestHistoryMetrics.set(null)
             previousGeneration?.takeIf { it != newGeneration }?.let(::unregisterDocument)
-        } catch (_: Throwable) {
-        }
+        } } catch (_: Throwable) { }
     }
 
     override fun registerBitmap(
@@ -333,50 +398,36 @@ internal class TrackerSession(
         documentGeneration: String,
         isOwnerCounted: Boolean
     ): Long {
-        if (!acceptingEvents() || bitmap.isRecycled) return 0L
-        try {
-            purgeClearedReferences()
-            val key = WeakIdentityKey(bitmap, referenceQueue)
-            val existing = nodes[key]
-            val node = if (existing != null) {
-                existing.node
-            } else {
-                BitmapNode(
-                    identity = System.identityHashCode(bitmap),
-                    width = bitmap.width,
-                    height = bitmap.height,
-                    config = bitmap.config,
-                    bytes = BitmapMemoryBudget.bytes(bitmap)
-                )
+        if (bitmap.isRecycled) return 0L
+        return try {
+            val handle = lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active || bitmap.isRecycled) return@withLock 0L
+                purgeClearedReferencesLocked()
+                val identity = identityHashProvider(bitmap)
+                val lookup = WeakIdentityKey(bitmap, referenceQueue, identity)
+                val entry = nodes[lookup] ?: NodeEntry(
+                    key = lookup,
+                    node = BitmapNode(
+                        identity = identity,
+                        width = bitmap.width,
+                        height = bitmap.height,
+                        config = bitmap.config,
+                        bytes = BitmapMemoryBudget.bytes(bitmap)
+                    ),
+                    edges = mutableListOf(),
+                    edgesByOwner = mutableMapOf()
+                ).also { nodes[it.key] = it }
+                val nextHandle = currentToken.incrementAndGet()
+                val edge = EdgeRecord(nextHandle, owner, operation, token, documentGeneration,
+                    System.currentTimeMillis(), isOwnerCounted)
+                entry.edges.add(edge)
+                entry.edgesByOwner.getOrPut(owner) { mutableListOf() }.add(edge)
+                edgeIndex[nextHandle] = entry
+                nextHandle
             }
-            val edges = mutableListOf<EdgeRecord>()
-            val edgesByOwner = mutableMapOf<String, MutableList<EdgeRecord>>()
-            val entry = NodeEntry(key, node, edges, edgesByOwner)
-            nodes.putIfAbsent(key, entry)
-            val actualEntry = nodes[key] ?: entry
-            val handle = currentToken.incrementAndGet()
-            val edge = EdgeRecord(
-                handle = handle,
-                owner = owner,
-                operation = operation,
-                token = token,
-                documentGeneration = documentGeneration,
-                acquiredAt = System.currentTimeMillis(),
-                isOwnerCounted = isOwnerCounted
-            )
-            lock.lock()
-            try {
-                actualEntry.edges.add(edge)
-                actualEntry.edgesByOwner.getOrPut(owner) { mutableListOf() }.add(edge)
-            } finally {
-                lock.unlock()
-            }
-            edgeIndex[handle] = key
-            considerPeak(documentGeneration)
-            return handle
-        } catch (_: Throwable) {
-            return 0L
-        }
+            if (handle != 0L) considerPeak(documentGeneration)
+            handle
+        } catch (_: Throwable) { 0L }
     }
 
     fun registerBitmap(bitmap: Bitmap, owner: String, operation: String, token: Long, documentGeneration: String): Long =
@@ -384,40 +435,32 @@ internal class TrackerSession(
 
     override fun releaseEdge(handle: Long): Boolean {
         if (handle == 0L) return false
-        try {
-            val key = edgeIndex.remove(handle) ?: return false
-            val entry = nodes[key] ?: return false
-            lock.lock()
-            try {
-                val edge = entry.edges.find { it.handle == handle && !it.released }
-                if (edge == null) return false
+        return try {
+            val released = lock.withLock {
+                val entry = edgeIndex.remove(handle) ?: return@withLock false
+                val edge = entry.edges.firstOrNull { it.handle == handle && !it.released }
+                    ?: return@withLock false
                 edge.released = true
                 entry.edges.remove(edge)
                 entry.edgesByOwner[edge.owner]?.remove(edge)
-                if (entry.edgesByOwner[edge.owner]?.isEmpty() == true) {
-                    entry.edgesByOwner.remove(edge.owner)
+                if (entry.edgesByOwner[edge.owner].isNullOrEmpty()) entry.edgesByOwner.remove(edge.owner)
+                if (entry.edges.isEmpty()) {
+                    entry.closed = true
+                    nodes.remove(entry.key, entry)
                 }
-            } finally {
-                lock.unlock()
+                true
             }
-            if (entry.closed) {
-                maybeRemoveEntry(entry)
-            }
-            considerPeak(currentGeneration.get())
-            return true
-        } catch (_: Throwable) {
-            return false
-        }
+            released
+        } catch (_: Throwable) { false }
     }
 
     override fun unregisterBitmap(bitmap: Bitmap, owner: String?) {
-        if (!acceptingEvents()) return
         try {
-            purgeClearedReferences()
-            val key = WeakIdentityKey(bitmap, referenceQueue)
-            val entry = nodes[key] ?: return
-            lock.lock()
-            try {
+            lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active) return@withLock
+                purgeClearedReferencesLocked()
+                val key = WeakIdentityKey(bitmap, referenceQueue, identityHashProvider(bitmap))
+                val entry = nodes[key] ?: return@withLock
                 if (owner != null) {
                     val ownerEdges = entry.edgesByOwner[owner]
                     if (ownerEdges != null) {
@@ -437,22 +480,15 @@ internal class TrackerSession(
                     entry.edges.clear()
                     entry.edgesByOwner.clear()
                 }
-            } finally {
-                lock.unlock()
+                if (entry.edges.isEmpty()) {
+                    entry.closed = true
+                    nodes.remove(entry.key, entry)
+                }
             }
-            maybeRemoveEntry(entry)
-        } catch (_: Throwable) {
-        }
+        } catch (_: Throwable) { }
     }
 
     fun unregisterBitmap(bitmap: Bitmap) = unregisterBitmap(bitmap, null)
-
-    private fun maybeRemoveEntry(entry: NodeEntry) {
-        if (entry.edges.isEmpty()) {
-            entry.closed = true
-            nodes.remove(entry.key)
-        }
-    }
 
     override fun registerNativeSession(
         handle: Long,
@@ -461,16 +497,13 @@ internal class TrackerSession(
         state: String,
         knownEstimateBytes: Long
     ) {
-        if (!acceptingEvents() || handle == 0L) return
+        if (handle == 0L) return
         try {
-            nativeSessions[handle] = NativeSessionRecord(
-                handle = handle,
-                documentGeneration = documentGeneration,
-                sourceIdentity = sourceIdentity,
-                state = state,
-                knownEstimateBytes = knownEstimateBytes,
-                createdAt = System.currentTimeMillis()
-            )
+            lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active) return
+                nativeSessions[handle] = NativeSessionRecord(handle, documentGeneration, sourceIdentity, state,
+                    knownEstimateBytes, System.currentTimeMillis())
+            }
             considerPeak(documentGeneration)
         } catch (_: Throwable) {
         }
@@ -480,78 +513,48 @@ internal class TrackerSession(
         registerNativeSession(handle, documentGeneration, sourceIdentity, state, -1L)
 
     override fun updateNativeSession(handle: Long, state: String) {
-        if (!acceptingEvents() || handle == 0L) return
+        if (handle == 0L) return
         try {
-            nativeSessions[handle]?.let { existing ->
-                nativeSessions[handle] = existing.copy(state = state)
+            lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active) return
+                nativeSessions[handle]?.let { nativeSessions[handle] = it.copy(state = state) }
             }
         } catch (_: Throwable) {
         }
+    }
+
+    override fun rebindNativeSessionGeneration(handle: Long, generation: String) {
+        if (handle == 0L) return
+        try { lock.withLock {
+            if (lifecycle.get() != Lifecycle.Active || currentGeneration.get() != generation) return
+            nativeSessions[handle]?.let { nativeSessions[handle] = it.copy(documentGeneration = generation) }
+        } } catch (_: Throwable) { }
     }
 
     override fun unregisterNativeSession(handle: Long) {
-        if (!acceptingEvents() || handle == 0L) return
+        if (handle == 0L) return
         try {
-            nativeSessions.remove(handle)
-        } catch (_: Throwable) {
-        }
-    }
-
-    fun setHistoryHotResident(bytes: Long, count: Int) {
-        if (!acceptingEvents()) return
-        try {
-            historyHotResidentBytes.set(bytes)
-            historyHotEntryCount.set(count.toLong())
-            considerPeak(currentGeneration.get())
-        } catch (_: Throwable) {
-        }
-    }
-
-    fun setHistoryColdCompressed(bytes: Long) {
-        if (!acceptingEvents()) return
-        try {
-            historyColdCompressedBytes.set(bytes)
-        } catch (_: Throwable) {
-        }
-    }
-
-    fun setColdLoadDecodedTransient(bytes: Long) {
-        if (!acceptingEvents()) return
-        try {
-            coldLoadDecodedTransientBytes.set(bytes)
-            considerPeak(currentGeneration.get())
-        } catch (_: Throwable) {
-        }
-    }
-
-    fun setDeletionDebt(bytes: Long) {
-        if (!acceptingEvents()) return
-        try {
-            deletionDebtBytes.set(bytes)
-        } catch (_: Throwable) {
-        }
-    }
-
-    fun setHistoryMetricsSnapshot(metrics: HistoryMetricsSnapshot) {
-        if (!acceptingEvents()) return
-        try {
-            synchronized(boundedHistorySummaries) {
-                boundedHistorySummaries.addLast(metrics)
-                while (boundedHistorySummaries.size > MAX_HISTORY_SUMMARIES) boundedHistorySummaries.removeFirst()
+            lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active) return
+                nativeSessions.remove(handle)
             }
         } catch (_: Throwable) {
         }
     }
 
-    fun setThumbnailCacheSnapshot(snap: ThumbnailCacheSnapshot) {
-        if (!acceptingEvents()) return
+    fun publishHistoryMetrics(metrics: HistoryMetricsSnapshot) {
         try {
-            thumbnailResidentEntryCount.set(snap.residentEntryCount.toLong())
-            thumbnailResidentBytes.set(snap.residentBytes)
-            thumbnailTotalLeases.set(snap.totalActiveLeases.toLong())
-            thumbnailRemovedButLeased.set(snap.removedButLeasedEntryCount.toLong())
-        } catch (_: Throwable) {
-        }
+            lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active || metrics.coordinatorGeneration != currentGeneration.get()) return
+                historyHotResidentBytes.set(metrics.hotResidentBytes.coerceAtLeast(0L))
+                historyHotEntryCount.set(metrics.hotEntryCount.coerceAtLeast(0).toLong())
+                historyColdCompressedBytes.set(metrics.retainedColdCompressedBytes.coerceAtLeast(0L))
+                coldLoadDecodedTransientBytes.set(metrics.activeColdLoadDecodedBytes.coerceAtLeast(0L))
+                deletionDebtBytes.set(metrics.pendingDeletionDebtBytes.coerceAtLeast(0L))
+                latestHistoryMetrics.set(metrics)
+            }
+            considerPeak(metrics.coordinatorGeneration)
+        } catch (_: Throwable) { }
     }
 
     override fun beginOperation(
@@ -562,12 +565,13 @@ internal class TrackerSession(
         transientReserveBytes: Long,
         snapshotState: String
     ): Long {
-        if (!acceptingEvents()) return 0L
-        try {
-            val token = currentToken.incrementAndGet()
-            val record = OperationRecord(
+        return try {
+            val token = lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active) return@withLock 0L
+                val next = currentToken.incrementAndGet()
+                val record = OperationRecord(
                 name = name,
-                token = token,
+                token = next,
                 documentGeneration = documentGeneration,
                 baseContentToken = baseContentToken,
                 revision = revision,
@@ -575,34 +579,39 @@ internal class TrackerSession(
                 transientReserveBytes = transientReserveBytes,
                 snapshotState = snapshotState
             )
-            operations["$name:$token"] = record
-            considerPeak(documentGeneration)
-            return token
-        } catch (_: Throwable) {
-            return 0L
-        }
+                operations["$name:$next"] = record
+                next
+            }
+            if (token != 0L) considerPeak(documentGeneration)
+            token
+        } catch (_: Throwable) { 0L }
     }
 
     override fun endOperation(name: String, token: Long) {
         if (token == 0L) return
         try {
-            operations.remove("$name:$token")
+            lock.withLock {
+                if (lifecycle.get() == Lifecycle.Closed) return
+                operations.remove("$name:$token")
+            }
         } catch (_: Throwable) {
         }
     }
 
-    private fun getActiveTransientReserve(): Long {
+    private fun getActiveTransientReserve(documentGeneration: String = currentGeneration.get()): Long {
         var total = 0L
         for (op in operations.values) {
+            if (op.documentGeneration != documentGeneration) continue
             total = BitmapMemoryBudget.saturatingAdd(total, op.transientReserveBytes)
         }
         return total
     }
 
-    private fun getNativeEstimateAndUnknown(): Pair<Long, Long> {
+    private fun getNativeEstimateAndUnknown(documentGeneration: String = currentGeneration.get()): Pair<Long, Long> {
         var estimate = 0L
         var unknown = 0L
         for (session in nativeSessions.values) {
+            if (session.documentGeneration != documentGeneration) continue
             if (session.isUnknown) {
                 unknown++
             } else {
@@ -612,43 +621,73 @@ internal class TrackerSession(
         return estimate to unknown
     }
 
-    private fun computeResidentBytes(): Pair<Long, Int> {
-        purgeClearedReferences()
-        var total = 0L
+    private data class LedgerSummary(
+        val bytes: Long,
+        val bitmapCount: Int,
+        val acquisitionCount: Int,
+        val byOwner: Map<String, Long>,
+        val byOperation: Map<String, Long>,
+        val byOwnerAcquisitions: Map<String, Int>,
+        val byOperationAcquisitions: Map<String, Int>
+    )
+
+    private fun captureLedgerSummary(documentGeneration: String = currentGeneration.get()): LedgerSummary = lock.withLock {
+        purgeClearedReferencesLocked()
+        var bytes = 0L
         var count = 0
-        for ((key, entry) in nodes) {
-            lock.lock()
-            try {
-                if (entry.edges.isNotEmpty()) {
-                    val bitmap = key.get()
-                    if (bitmap != null && !bitmap.isRecycled) {
-                        total = BitmapMemoryBudget.saturatingAdd(total, entry.node.bytes)
-                        count++
-                    }
-                }
-            } finally {
-                lock.unlock()
+        var acquisitions = 0
+        val byOwner = HashMap<String, Long>()
+        val byOperation = HashMap<String, Long>()
+        val ownerCounts = HashMap<String, Int>()
+        val operationCounts = HashMap<String, Int>()
+        nodes.values.forEach { entry ->
+            val bitmap = entry.key.get()
+            val generationEdges = entry.edges.filter { it.documentGeneration == documentGeneration }
+            if (generationEdges.isEmpty() || bitmap == null || bitmap.isRecycled) return@forEach
+            bytes = BitmapMemoryBudget.saturatingAdd(bytes, entry.node.bytes)
+            count++
+            acquisitions += generationEdges.size
+            generationEdges.groupingBy { it.owner }.eachCount().forEach { (label, n) ->
+                if (generationEdges.any { it.owner == label && it.isOwnerCounted })
+                    byOwner[label] = BitmapMemoryBudget.saturatingAdd(byOwner[label] ?: 0L, entry.node.bytes)
+                ownerCounts[label] = (ownerCounts[label] ?: 0) + n
+            }
+            generationEdges.groupingBy { it.operation }.eachCount().forEach { (label, n) ->
+                byOperation[label] = BitmapMemoryBudget.saturatingAdd(byOperation[label] ?: 0L, entry.node.bytes)
+                operationCounts[label] = (operationCounts[label] ?: 0) + n
             }
         }
-        return total to count
+        LedgerSummary(bytes, count, acquisitions, byOwner, byOperation, ownerCounts, operationCounts)
     }
+
+    internal fun considerCurrentPeak() = considerPeak(currentGeneration.get())
 
     private fun considerPeak(documentGeneration: String) {
         try {
-            val snap = computeResidentBytes()
-            val (nativeEstimate, unknownNative) = getNativeEstimateAndUnknown()
-            val activeTransient = getActiveTransientReserve()
+            val snap = captureLedgerSummary(documentGeneration)
+            val (sessionNativeEstimate, sessionUnknownNative) = getNativeEstimateAndUnknown(documentGeneration)
+            val globalModels = GlobalModelDiagnostics.snapshot()
+            val modelEstimate = globalModels.fold(0L) { total, model ->
+                BitmapMemoryBudget.saturatingAdd(total, model.knownEstimateBytes ?: 0L)
+            }
+            val nativeEstimate = BitmapMemoryBudget.saturatingAdd(sessionNativeEstimate, modelEstimate)
+            val unknownNative = sessionUnknownNative + globalModels.count { it.knownEstimateBytes == null }
+            val activeTransient = getActiveTransientReserve(documentGeneration)
             val historyHot = historyHotResidentBytes.get()
             val coldLoad = coldLoadDecodedTransientBytes.get()
             val historyCold = historyColdCompressedBytes.get()
             val deletionDebt = deletionDebtBytes.get()
+            val thumbnails = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
             val combinedKnown = BitmapMemoryBudget.saturatingAdd(
-                snap.first,
+                snap.bytes,
                 BitmapMemoryBudget.saturatingAdd(
                     nativeEstimate,
                     BitmapMemoryBudget.saturatingAdd(
                         historyHot,
-                        BitmapMemoryBudget.saturatingAdd(coldLoad, activeTransient)
+                        BitmapMemoryBudget.saturatingAdd(coldLoad, BitmapMemoryBudget.saturatingAdd(activeTransient,
+                            BitmapMemoryBudget.saturatingAdd(
+                                thumbnails.residentBytes,
+                                thumbnails.removedButLeasedBytes)))
                     )
                 )
             )
@@ -661,7 +700,7 @@ internal class TrackerSession(
                     if (combinedKnown <= current.combinedKnownEstimatedPeakBytes) break
                     val updated = PeakSnapshot(
                         editorInstanceId = editorInstanceId,
-                        residentBitmapBytes = snap.first,
+                        residentBitmapBytes = snap.bytes,
                         nativeEstimateBytes = nativeEstimate,
                         activeTransientReserveBytes = activeTransient,
                         historyHotResidentBytes = historyHot,
@@ -669,7 +708,7 @@ internal class TrackerSession(
                         historyColdCompressedBytes = historyCold,
                         deletionDebtBytes = deletionDebt,
                         combinedKnownEstimatedPeakBytes = combinedKnown,
-                        combinedEstimatedPeakBytes = combinedWithUnknown,
+                        combinedCompleteEstimatedPeakBytes = if (unknownNative == 0L) combinedWithUnknown else null,
                         combinedHasUnknownContributors = unknownNative > 0L,
                         documentGeneration = documentGeneration,
                         timestamp = System.currentTimeMillis()
@@ -682,108 +721,68 @@ internal class TrackerSession(
         }
     }
 
-    private fun PeakSnapshot.toHistorySummary(): HistoryMetricsSnapshot = HistoryMetricsSnapshot(
-        editorInstanceId = editorInstanceId,
-        coordinatorGeneration = documentGeneration,
-        hotEntryCount = 0,
-        hotResidentBytes = residentBitmapBytes,
-        retainedColdCompressedBytes = historyColdCompressedBytes,
-        pendingDeletionDebtBytes = deletionDebtBytes,
-        activeColdLoadDecodedBytes = coldLoadDecodedTransientBytes,
-        operationActive = false,
-        loading = false,
-        spilling = false,
-        adopting = false,
-        protectedTargetId = null,
-        timestamp = timestamp
-    )
-
     internal fun purgeClearedReferences() {
-        try {
-            var cleared: Reference<*>?
-            while (referenceQueue.poll().also { cleared = it } != null) {
-                val key = cleared as WeakIdentityKey
-                val entry = nodes.remove(key)
-                if (entry != null) {
-                    lock.lock()
-                    try {
-                        for (edge in entry.edges) {
-                            edge.released = true
-                            edgeIndex.remove(edge.handle)
-                        }
-                        entry.edges.clear()
-                        entry.edgesByOwner.clear()
-                    } finally {
-                        lock.unlock()
-                    }
-                }
+        try { lock.withLock { purgeClearedReferencesLocked() } } catch (_: Throwable) { }
+    }
+
+    private fun purgeClearedReferencesLocked() {
+        while (true) {
+            val key = referenceQueue.poll() as? WeakIdentityKey ?: break
+            val entry = nodes[key] ?: continue
+            if (entry.key !== key) continue
+            entry.edges.forEach { edge ->
+                edge.released = true
+                edgeIndex.remove(edge.handle, entry)
             }
-        } catch (_: Throwable) {
+            entry.edges.clear()
+            entry.edgesByOwner.clear()
+            entry.closed = true
+            nodes.remove(key, entry)
         }
     }
 
     fun snapshot(): ResidentSnapshot {
         try {
-            purgeClearedReferences()
-            val byOwner = ConcurrentHashMap<String, Long>()
-            val byOperation = ConcurrentHashMap<String, Long>()
-            var total = 0L
-            var count = 0
-            for ((key, entry) in nodes) {
-                lock.lock()
-                try {
-                    if (entry.edges.isEmpty()) {
-                    } else {
-                        val bitmap = key.get()
-                        if (bitmap == null || bitmap.isRecycled) {
-                        } else {
-                            total = BitmapMemoryBudget.saturatingAdd(total, entry.node.bytes)
-                            count++
-                            for (edge in entry.edges) {
-                                if (edge.isOwnerCounted) {
-                                    byOwner[edge.owner] = BitmapMemoryBudget.saturatingAdd(
-                                        byOwner.getOrDefault(edge.owner, 0L), entry.node.bytes
-                                    )
-                                }
-                                byOperation[edge.operation] = BitmapMemoryBudget.saturatingAdd(
-                                    byOperation.getOrDefault(edge.operation, 0L), entry.node.bytes
-                                )
-                            }
-                        }
-                    }
-                } finally {
-                    lock.unlock()
-                }
-            }
-            val activeOps = operations.values.toList()
-            val sessions = nativeSessions.values.toList()
+            val generation = currentGeneration.get()
+            val ledger = captureLedgerSummary(generation)
+            val (activeOps, sessions) = lock.withLock { operations.values.toList() to nativeSessions.values.toList() }
             val activeTransient = getActiveTransientReserve()
-            val (nativeEstimate, unknownNative) = getNativeEstimateAndUnknown()
+            val (sessionNativeEstimate, sessionUnknownNative) = getNativeEstimateAndUnknown()
+            val globalModels = GlobalModelDiagnostics.snapshot()
+            val nativeEstimate = globalModels.fold(sessionNativeEstimate) { total, model ->
+                BitmapMemoryBudget.saturatingAdd(total, model.knownEstimateBytes ?: 0L)
+            }
+            val unknownNative = sessionUnknownNative + globalModels.count { it.knownEstimateBytes == null }
             val historyHot = historyHotResidentBytes.get()
             val historyCold = historyColdCompressedBytes.get()
             val coldLoad = coldLoadDecodedTransientBytes.get()
             val deletionDebt = deletionDebtBytes.get()
+            val thumbnails = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
             val combinedKnown = BitmapMemoryBudget.saturatingAdd(
-                total,
+                ledger.bytes,
                 BitmapMemoryBudget.saturatingAdd(
                     nativeEstimate,
                     BitmapMemoryBudget.saturatingAdd(
                         historyHot,
-                        BitmapMemoryBudget.saturatingAdd(coldLoad, activeTransient)
+                        BitmapMemoryBudget.saturatingAdd(coldLoad, BitmapMemoryBudget.saturatingAdd(activeTransient,
+                            BitmapMemoryBudget.saturatingAdd(thumbnails.residentBytes, thumbnails.removedButLeasedBytes)))
                     )
                 )
             )
-            val gen = currentGeneration.get()
+            val gen = generation
             val peakSnap = documentPeaks[gen]?.get()
             return ResidentSnapshot(
                 editorInstanceId = editorInstanceId,
-                totalBytes = total,
-                bitmapCount = count,
-                byOwner = byOwner.toMap(),
-                byOperation = byOperation.toMap(),
+                totalBytes = ledger.bytes,
+                bitmapCount = ledger.bitmapCount,
+                byOwner = ledger.byOwner,
+                byOperation = ledger.byOperation,
+                acquisitionCount = ledger.acquisitionCount,
+                byOwnerAcquisitionCount = ledger.byOwnerAcquisitions,
+                byOperationAcquisitionCount = ledger.byOperationAcquisitions,
                 nativeSessions = sessions,
                 activeOperations = activeOps,
-                estimatedPeakBytes = peakSnap?.combinedEstimatedPeakBytes ?: 0L,
+                estimatedPeakBytes = peakSnap?.combinedKnownEstimatedPeakBytes ?: 0L,
                 peakSnapshot = peakSnap,
                 historyHotResidentBytes = historyHot,
                 historyHotEntryCount = historyHotEntryCount.get().toInt(),
@@ -792,14 +791,17 @@ internal class TrackerSession(
                 deletionDebtBytes = deletionDebt,
                 activeTransientReserveBytes = activeTransient,
                 nativeEstimateBytes = nativeEstimate,
-                unknownNativeBytes = unknownNative,
+                unknownNativeContributorCount = unknownNative,
                 combinedKnownEstimatedBytes = combinedKnown,
                 combinedHasUnknownContributors = unknownNative > 0L,
+                combinedCompleteEstimatedBytes = if (unknownNative == 0L) combinedKnown else null,
                 timestamp = System.currentTimeMillis(),
-                activeThumbnailEntryCount = ThumbnailBitmapCache.globalDiagnosticsSnapshot().residentEntryCount,
-                activeThumbnailLeases = ThumbnailBitmapCache.globalDiagnosticsSnapshot().totalActiveLeases,
-                thumbnailRemovedButLeased = ThumbnailBitmapCache.globalDiagnosticsSnapshot().removedButLeasedEntryCount,
-                thumbnailResidentBytes = ThumbnailBitmapCache.globalDiagnosticsSnapshot().residentBytes
+                activeThumbnailEntryCount = thumbnails.residentEntryCount,
+                activeThumbnailLeases = thumbnails.totalActiveLeases,
+                thumbnailRemovedButLeased = thumbnails.removedButLeasedEntryCount,
+                thumbnailResidentBytes = thumbnails.residentBytes,
+                thumbnailRemovedButLeasedBytes = thumbnails.removedButLeasedBytes,
+                globalModelContributors = globalModels
             )
         } catch (_: Throwable) {
             return ResidentSnapshot(
@@ -819,7 +821,7 @@ internal class TrackerSession(
                 deletionDebtBytes = 0L,
                 activeTransientReserveBytes = 0L,
                 nativeEstimateBytes = 0L,
-                unknownNativeBytes = 0L,
+                unknownNativeContributorCount = 0L,
                 combinedKnownEstimatedBytes = 0L,
                 timestamp = System.currentTimeMillis()
             )
@@ -844,9 +846,9 @@ internal class TrackerSession(
             val sb = StringBuilder()
             sb.append("TrackerSession[$editorInstanceId] snapshot:\n")
             sb.append("  totalBytes=${snap.totalBytes} bitmapCount=${snap.bitmapCount} peak=${snap.estimatedPeakBytes}\n")
-            sb.append("  residentBitmapBytes=${snap.totalBytes} nativeEstimate=${snap.nativeEstimateBytes} unknownNative=${snap.unknownNativeBytes} combinedKnown=${snap.combinedKnownEstimatedBytes}\n")
+            sb.append("  residentBitmapBytes=${snap.totalBytes} nativeEstimate=${snap.nativeEstimateBytes} unknownNativeContributors=${snap.unknownNativeContributorCount} combinedKnown=${snap.combinedKnownEstimatedBytes}\n")
             sb.append("  activeTransientReserve=${snap.activeTransientReserveBytes}\n")
-            sb.append("  combinedEstimatedPeak=${snap.peakSnapshot?.combinedEstimatedPeakBytes ?: 0L}\n")
+            sb.append("  combinedKnownPeak=${snap.peakSnapshot?.combinedKnownEstimatedPeakBytes ?: 0L}\n")
             sb.append("  byOwner:\n")
             snap.byOwner.entries.sortedByDescending { it.value }.forEach { (owner, bytes) ->
                 sb.append("    $owner: $bytes\n")
@@ -898,16 +900,13 @@ internal class TrackerSession(
             nativeSessions.clear()
             documentGenerations.clear()
             documentPeaks.clear()
-            synchronized(boundedHistorySummaries) { boundedHistorySummaries.clear() }
+            synchronized(completedGenerationPeaks) { completedGenerationPeaks.clear() }
+            latestHistoryMetrics.set(null)
             historyHotResidentBytes.set(0L)
             historyHotEntryCount.set(0L)
             historyColdCompressedBytes.set(0L)
             coldLoadDecodedTransientBytes.set(0L)
             deletionDebtBytes.set(0L)
-            thumbnailResidentEntryCount.set(0L)
-            thumbnailResidentBytes.set(0L)
-            thumbnailTotalLeases.set(0L)
-            thumbnailRemovedButLeased.set(0L)
         } catch (_: Throwable) {
         }
     }
@@ -917,10 +916,12 @@ internal class TrackerSession(
      * conditional remove protects a newer session reusing the same test/editor identifier.
      */
     override fun close() {
-        if (!lifecycle.compareAndSet(Lifecycle.Active, Lifecycle.Closing)) return
+        var shouldRemove = false
         try {
-            lock.lock()
-            try {
+            lock.withLock {
+                if (lifecycle.get() != Lifecycle.Active) return
+                lifecycle.set(Lifecycle.Closing)
+                shouldRemove = true
                 nodes.values.forEach { entry -> entry.edges.forEach { it.released = true } }
                 nodes.clear()
                 edgeIndex.clear()
@@ -928,25 +929,20 @@ internal class TrackerSession(
                 nativeSessions.clear()
                 documentGenerations.clear()
                 documentPeaks.clear()
-                synchronized(boundedHistorySummaries) { boundedHistorySummaries.clear() }
+                synchronized(completedGenerationPeaks) { completedGenerationPeaks.clear() }
+                latestHistoryMetrics.set(null)
                 while (referenceQueue.poll() != null) Unit
-            } finally {
-                lock.unlock()
+                historyHotResidentBytes.set(0L)
+                historyHotEntryCount.set(0L)
+                historyColdCompressedBytes.set(0L)
+                coldLoadDecodedTransientBytes.set(0L)
+                deletionDebtBytes.set(0L)
+                currentGeneration.set("")
+                lifecycle.set(Lifecycle.Closed)
             }
-            historyHotResidentBytes.set(0L)
-            historyHotEntryCount.set(0L)
-            historyColdCompressedBytes.set(0L)
-            coldLoadDecodedTransientBytes.set(0L)
-            deletionDebtBytes.set(0L)
-            thumbnailResidentEntryCount.set(0L)
-            thumbnailResidentBytes.set(0L)
-            thumbnailTotalLeases.set(0L)
-            thumbnailRemovedButLeased.set(0L)
-            currentGeneration.set("")
         } catch (_: Throwable) {
         } finally {
-            TrackerSessionHolder.sessions.remove(editorInstanceId, this)
-            lifecycle.set(Lifecycle.Closed)
+            if (shouldRemove) TrackerSessionHolder.sessions.remove(editorInstanceId, this)
         }
     }
 
@@ -957,36 +953,22 @@ internal class TrackerSession(
         ThumbnailCacheSnapshot(it.residentEntryCount, it.residentBytes, it.totalActiveLeases, it.removedButLeasedEntryCount)
     }
 
-    override fun onAcquire(bytes: Long) {
-        thumbnailTotalLeases.incrementAndGet()
-    }
+    fun historySnapshot(): HistoryMetricsSnapshot? = latestHistoryMetrics.get()
 
-    override fun onRelease(bytes: Long) {
-        thumbnailTotalLeases.decrementAndGet()
-    }
+    fun completedGenerationPeakSummaries(): List<CompletedGenerationPeakSummary> =
+        synchronized(completedGenerationPeaks) { completedGenerationPeaks.toList() }
 
-    override fun onEvictResident(bytes: Long) {
-        thumbnailResidentEntryCount.decrementAndGet()
-        thumbnailResidentBytes.addAndGet(-bytes)
-    }
-
-    override fun onResidentAcquire(bytes: Long) {
-        thumbnailResidentEntryCount.incrementAndGet()
-        thumbnailResidentBytes.addAndGet(bytes)
-    }
-
-    override fun onResidentRelease(bytes: Long) {
-        thumbnailResidentEntryCount.decrementAndGet()
-        thumbnailResidentBytes.addAndGet(-bytes)
-    }
-
-    override fun onRemoveButLease(bytes: Long) {
-        thumbnailRemovedButLeased.incrementAndGet()
-    }
-
-    fun historySnapshot(): HistoryMetricsSnapshot? {
-        synchronized(boundedHistorySummaries) {
-            return boundedHistorySummaries.lastOrNull()
+    internal fun ledgerInvariantViolations(): List<String> = lock.withLock {
+        buildList {
+            edgeIndex.forEach { (handle, entry) ->
+                if (nodes[entry.key] !== entry) add("edge $handle references absent node")
+                if (entry.edges.none { it.handle == handle && !it.released }) add("edge $handle is not owned by node")
+            }
+            nodes.values.forEach { entry ->
+                entry.edges.filterNot { it.released }.forEach { edge ->
+                    if (edgeIndex[edge.handle] !== entry) add("node edge ${edge.handle} is not indexed")
+                }
+            }
         }
     }
 
