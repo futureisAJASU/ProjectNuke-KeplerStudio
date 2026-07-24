@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import android.graphics.Bitmap
 import java.util.LinkedHashMap
+import java.util.IdentityHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -30,12 +31,22 @@ internal interface ThumbnailCacheDiagnostics {
     fun onResidentRelease(bytes: Long) {}
 }
 
+internal data class ThumbnailGlobalDiagnosticsSnapshot(
+    val residentEntryCount: Int,
+    val residentBytes: Long,
+    val totalActiveLeases: Int,
+    val removedButLeasedEntryCount: Int,
+    val removedButLeasedBytes: Long
+)
+
 internal object ThumbnailBitmapCache {
     @Volatile private var maxBytes = 24L * 1024L * 1024L
     private val lock = Any()
     private val decodeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var residentBytes = 0L
     private val entries = LinkedHashMap<String, Entry>(16, 0.75f, true)
+    /** Entries no longer resident but still owned by one or more leases. */
+    private val removedButLeased = IdentityHashMap<Entry, Boolean>()
     private val inFlight = HashMap<String, Flight>()
 
     private class Entry(val bitmap: Bitmap, val bytes: Long) {
@@ -69,7 +80,7 @@ internal object ThumbnailBitmapCache {
                     iterator.remove()
                     residentBytes -= entry.bytes
                     entry.removed = true
-                    diagnostics?.onResidentRelease(entry.bytes)
+                    recordRemovedLocked(entry)
                     recycleIfUnusedLocked(entry)
                 }
             }
@@ -109,7 +120,7 @@ internal object ThumbnailBitmapCache {
             entries.remove(key)?.let { entry ->
                 residentBytes -= entry.bytes
                 entry.removed = true
-                diagnostics?.onResidentRelease(entry.bytes)
+                recordRemovedLocked(entry)
                 recycleIfUnusedLocked(entry)
             }
         }
@@ -126,11 +137,7 @@ internal object ThumbnailBitmapCache {
             inFlight.clear()
             entries.values.forEach { entry ->
                 entry.removed = true
-                diagnostics?.onEvictResident(entry.bytes)
-                if (entry.trackedAsLeased) {
-                    entry.trackedAsLeased = false
-                    diagnostics?.onRelease(entry.bytes)
-                }
+                recordRemovedLocked(entry)
                 recycleIfUnusedLocked(entry)
             }
             entries.clear()
@@ -153,10 +160,10 @@ internal object ThumbnailBitmapCache {
                         if (entry.bytes <= maxBytes) {
                             entries[flight.key] = entry
                             residentBytes += entry.bytes
-                            diagnostics?.onResidentAcquire(entry.bytes)
                             evictLocked()
                         } else {
                             entry.removed = true
+                            recordRemovedLocked(entry)
                         }
                         decoded = null
                         flight.result.complete(entry)
@@ -198,22 +205,9 @@ internal object ThumbnailBitmapCache {
     }
 
     private fun lease(entry: Entry): ThumbnailBitmapLease =
-        ThumbnailBitmapLease(entry.bitmap) { release(entry) }.also {
-            if (!entry.trackedAsLeased) {
-                entry.trackedAsLeased = true
-                diagnostics?.onAcquire(entry.bytes)
-            }
-        }
+        ThumbnailBitmapLease(entry.bitmap) { release(entry) }
 
     private fun release(entry: Entry) {
-        if (entry.trackedAsLeased) {
-            synchronized(lock) {
-                if (entry.leases <= 0) {
-                    entry.trackedAsLeased = false
-                    diagnostics?.onRelease(entry.bytes)
-                }
-            }
-        }
         synchronized(lock) { releaseLocked(entry) }
     }
 
@@ -228,46 +222,61 @@ internal object ThumbnailBitmapCache {
             entries.remove(eldest.key)
             residentBytes -= eldest.value.bytes
             eldest.value.removed = true
-            diagnostics?.onEvictResident(eldest.value.bytes)
+            recordRemovedLocked(eldest.value)
             recycleIfUnusedLocked(eldest.value)
         }
     }
 
+    private fun recordRemovedLocked(entry: Entry) {
+        if (entry.removed && entry.leases > 0) removedButLeased[entry] = true
+    }
+
     private fun recycleIfUnusedLocked(entry: Entry) {
-        if (entry.removed && entry.leases == 0 && !entry.bitmap.isRecycled) entry.bitmap.recycle()
+        if (entry.removed && entry.leases == 0) {
+            removedButLeased.remove(entry)
+            if (!entry.bitmap.isRecycled) entry.bitmap.recycle()
+        }
     }
 
-    private var diagnostics: ThumbnailCacheDiagnostics? = null
-
-    fun attachDiagnostics(d: ThumbnailCacheDiagnostics) {
-        diagnostics = d
-    }
-
-    fun detachDiagnostics() {
-        diagnostics = null
-    }
+    /** Kept source-compatible for old debug callers. Cache accounting is now cache-owned. */
+    @Deprecated("Read globalDiagnosticsSnapshot()") fun attachDiagnostics(d: ThumbnailCacheDiagnostics) = Unit
+    @Deprecated("Read globalDiagnosticsSnapshot()") fun detachDiagnostics() = Unit
 
     fun thumbnailCacheSnapshot(): TrackerSession.ThumbnailCacheSnapshot {
         synchronized(lock) {
             var residentCount = 0
             var residentBytes = 0L
             var leases = 0
-            var removedButLeased = 0
+            var removedCount = 0
             for (entry in entries.values) {
                 if (!entry.removed) {
                     residentCount++
                     residentBytes += entry.bytes
                 }
                 leases += entry.leases
-                if (entry.removed && entry.leases > 0) removedButLeased++
+            }
+            for (entry in removedButLeased.keys) {
+                leases += entry.leases
+                removedCount++
             }
             return TrackerSession.ThumbnailCacheSnapshot(
                 residentEntryCount = residentCount,
                 residentBytes = residentBytes,
                 totalActiveLeases = leases,
-                removedButLeasedEntryCount = removedButLeased
+                removedButLeasedEntryCount = removedCount
             )
         }
+    }
+
+    fun globalDiagnosticsSnapshot(): ThumbnailGlobalDiagnosticsSnapshot = synchronized(lock) {
+        val leases = entries.values.sumOf { it.leases } + removedButLeased.keys.sumOf { it.leases }
+        ThumbnailGlobalDiagnosticsSnapshot(
+            residentEntryCount = entries.size,
+            residentBytes = residentBytes,
+            totalActiveLeases = leases,
+            removedButLeasedEntryCount = removedButLeased.size,
+            removedButLeasedBytes = removedButLeased.keys.sumOf { it.bytes }
+        )
     }
 }
 

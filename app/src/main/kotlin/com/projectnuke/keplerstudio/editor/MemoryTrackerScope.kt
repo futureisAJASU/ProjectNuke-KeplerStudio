@@ -21,7 +21,7 @@ internal object TrackerOwners {
 }
 
 internal class MemoryTrackerScope private constructor(
-    val tracker: TrackerSession,
+    val tracker: TrackerDiagnostics,
     val name: String,
     val documentGeneration: String,
     val baseContentToken: String,
@@ -34,8 +34,7 @@ internal class MemoryTrackerScope private constructor(
     private val trackedEdges = ArrayDeque<Long>(8)
 
     init {
-        operationToken = if (DebugMemoryTracker.isEnabled()) {
-            tracker.beginOperation(
+        operationToken = tracker.beginOperation(
                 name = name,
                 documentGeneration = documentGeneration,
                 baseContentToken = baseContentToken,
@@ -43,15 +42,11 @@ internal class MemoryTrackerScope private constructor(
                 transientReserveBytes = transientReserveBytes,
                 snapshotState = snapshotState
             )
-        } else {
-            0L
-        }
     }
 
     val token: Long get() = operationToken
 
     fun track(bitmap: Bitmap, owner: String): Long {
-        if (!DebugMemoryTracker.isEnabled()) return 0L
         val handle = tracker.registerBitmap(
             bitmap = bitmap,
             owner = owner,
@@ -70,18 +65,19 @@ internal class MemoryTrackerScope private constructor(
     fun release(handle: Long) {
         if (handle == 0L) return
         tracker.releaseEdge(handle)
+        trackedEdges.remove(handle)
     }
 
     fun end() {
         if (ended.compareAndSet(false, true)) {
-            trackedEdges.forEach { tracker.releaseEdge(it) }
+            while (trackedEdges.isNotEmpty()) tracker.releaseEdge(trackedEdges.removeFirst())
             tracker.endOperation(name, operationToken)
         }
     }
 
     companion object {
         fun create(
-            tracker: TrackerSession,
+            tracker: TrackerDiagnostics,
             name: String,
             documentGeneration: String,
             baseContentToken: String,
@@ -101,68 +97,26 @@ internal class MemoryTrackerScope private constructor(
 }
 
 internal class UiStateOwnershipReconciler(
-    private val tracker: TrackerSession
+    private val tracker: TrackerDiagnostics
 ) {
-    private data class SlotKey(val owner: String)
-
     private val lock = ReentrantLock()
-    private val prevBitmaps = ConcurrentHashMap<String, Long>()
+    /** Only edge handles are retained: UI ownership never pins a Bitmap. */
+    private val handles = HashMap<String, Long>()
 
     fun reconcile(prev: EditorUiState?, next: EditorUiState, documentGeneration: String) {
-        if (!DebugMemoryTracker.isEnabled()) return
         try {
-            val nextOwners = mutableSetOf<String>()
-
-            next.previewBitmap?.let {
-                val handle = tracker.registerBitmap(
-                    bitmap = it,
-                    owner = TrackerOwners.UI_STATE_PREVIEW,
-                    operation = TrackerOwners.UI_STATE,
-                    token = 0L,
-                    documentGeneration = documentGeneration
-                )
-                nextOwners.add(TrackerOwners.UI_STATE_PREVIEW)
-            }
-
-            next.originalPreviewBitmap?.let {
-                if (it !== next.previewBitmap) {
-                    val handle = tracker.registerBitmap(
-                        bitmap = it,
-                        owner = TrackerOwners.UI_STATE_ORIGINAL,
-                        operation = TrackerOwners.UI_STATE,
-                        token = 0L,
-                        documentGeneration = documentGeneration
-                    )
-                    nextOwners.add(TrackerOwners.UI_STATE_ORIGINAL)
-                }
-            }
-
-            next.selectionLayers.forEach { layer ->
-                val handle = tracker.registerBitmap(
-                    bitmap = layer.bitmap,
-                    owner = TrackerOwners.selectionLayer(layer.id),
-                    operation = TrackerOwners.UI_STATE,
-                    token = 0L,
-                    documentGeneration = documentGeneration
-                )
-                nextOwners.add(TrackerOwners.selectionLayer(layer.id))
-            }
-
             lock.lock()
             try {
-                prev?.previewBitmap?.let {
-                    if (!nextOwners.contains(TrackerOwners.UI_STATE_PREVIEW)) {
-                        tracker.unregisterBitmap(it, TrackerOwners.UI_STATE_PREVIEW)
-                    }
-                }
-                prev?.originalPreviewBitmap?.let {
-                    if (it !== next.previewBitmap && !nextOwners.contains(TrackerOwners.UI_STATE_ORIGINAL)) {
-                        tracker.unregisterBitmap(it, TrackerOwners.UI_STATE_ORIGINAL)
-                    }
-                }
-                prev?.selectionLayers?.forEach { layer ->
-                    if (!nextOwners.contains(TrackerOwners.selectionLayer(layer.id))) {
-                        tracker.unregisterBitmap(layer.bitmap, TrackerOwners.selectionLayer(layer.id))
+                val before = slots(prev)
+                val after = slots(next)
+                (before.keys + after.keys).forEach { slot ->
+                    val old = before[slot]
+                    val replacement = after[slot]
+                    if (old === replacement) return@forEach
+                    handles.remove(slot)?.let(tracker::releaseEdge)
+                    replacement?.takeIf { !it.isRecycled }?.let { bitmap ->
+                        val handle = tracker.registerBitmap(bitmap, slot, TrackerOwners.UI_STATE, 0L, documentGeneration)
+                        if (handle != 0L) handles[slot] = handle
                     }
                 }
             } finally {
@@ -173,33 +127,33 @@ internal class UiStateOwnershipReconciler(
     }
 
     fun releaseAll() {
-        if (!DebugMemoryTracker.isEnabled()) return
         try {
             lock.lock()
             try {
-                prevBitmaps.keys.toList().forEach {
-                    tracker.unregisterBitmap(
-                        Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
-                        it
-                    )
-                }
+                handles.values.forEach(tracker::releaseEdge)
+                handles.clear()
             } finally {
                 lock.unlock()
             }
         } catch (_: Throwable) {
         }
     }
+
+    private fun slots(state: EditorUiState?): Map<String, Bitmap> = buildMap {
+        state?.previewBitmap?.let { put(TrackerOwners.UI_STATE_PREVIEW, it) }
+        state?.originalPreviewBitmap?.let { put(TrackerOwners.UI_STATE_ORIGINAL, it) }
+        state?.selectionLayers?.forEach { put(TrackerOwners.selectionLayer(it.id), it.bitmap) }
+    }
 }
 
-internal fun EditorViewModel.createTracker(): TrackerSession =
-    DebugMemoryTracker.createSession("editor-${System.identityHashCode(this)}")
+internal fun EditorViewModel.createTracker(): TrackerDiagnostics = tracker
 
 internal fun EditorViewModel.beginMemoryTracking(
     name: String,
     snapshotState: String = "hot",
     transientReserveBytes: Long = 0L
 ): MemoryTrackerScope? {
-    if (!DebugMemoryTracker.isEnabled() || isShuttingDown()) return null
+    if (isShuttingDown()) return null
     val state = uiState.value
     return MemoryTrackerScope.create(
         tracker = tracker,
@@ -213,17 +167,17 @@ internal fun EditorViewModel.beginMemoryTracking(
 }
 
 internal fun EditorViewModel.registerDocumentGeneration(generation: String?) {
-    if (!DebugMemoryTracker.isEnabled() || isShuttingDown()) return
-    if (generation != null) tracker.registerDocument(generation)
+    if (isShuttingDown()) return
+    if (generation != null) tracker.activateDocument(generation, tracker.currentDocumentGeneration().ifEmpty { null })
 }
 
 internal fun EditorViewModel.unregisterDocumentGeneration(generation: String?) {
-    if (!DebugMemoryTracker.isEnabled() || isShuttingDown()) return
+    if (isShuttingDown()) return
     if (generation != null) tracker.unregisterDocument(generation)
 }
 
 internal fun EditorViewModel.registerUiStateBitmap(bitmap: Bitmap, owner: String) {
-    if (!DebugMemoryTracker.isEnabled() || isShuttingDown()) return
+    if (isShuttingDown()) return
     if (bitmap.isRecycled) return
     val gen = historyCoordinator.currentGeneration()
     tracker.registerBitmap(
@@ -236,6 +190,6 @@ internal fun EditorViewModel.registerUiStateBitmap(bitmap: Bitmap, owner: String
 }
 
 internal fun EditorViewModel.unregisterUiStateBitmap(bitmap: Bitmap, owner: String? = null) {
-    if (!DebugMemoryTracker.isEnabled() || isShuttingDown()) return
+    if (isShuttingDown()) return
     tracker.unregisterBitmap(bitmap, owner)
 }

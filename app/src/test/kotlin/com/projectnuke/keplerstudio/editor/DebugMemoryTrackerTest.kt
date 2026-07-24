@@ -250,6 +250,7 @@ class DebugMemoryTrackerTest {
             token = 0L,
             documentGeneration = "gen1"
         )
+        mockBitmap.recycle()
         assertTrue(tracker.releaseEdge(handle))
     }
 
@@ -263,6 +264,7 @@ class DebugMemoryTrackerTest {
             token = 0L,
             documentGeneration = "gen1"
         )
+        mockBitmap.recycle()
         tracker.unregisterBitmap(mockBitmap, "test")
     }
 
@@ -377,6 +379,23 @@ class DebugMemoryTrackerTest {
         )
         tracker.setHistoryMetricsSnapshot(metrics)
         assertEquals(metrics, tracker.historySnapshot())
+    }
+
+    @Test
+    fun closeRejectsLateEventsAndRemovesOnlyItsHolderEntry() {
+        val id = tracker.editorInstanceId
+        tracker.activateDocument("gen-a")
+        tracker.close()
+
+        tracker.registerBitmap(createMockBitmap(10, 10), "late", "late", 0L, "gen-a")
+        tracker.beginOperation("late", "gen-a", "base", 1, 10L, "hot")
+        tracker.registerNativeSession(9L, "gen-a", "source", "late")
+
+        val snap = tracker.snapshot()
+        assertEquals(0, snap.bitmapCount)
+        assertTrue(snap.activeOperations.isEmpty())
+        assertTrue(snap.nativeSessions.isEmpty())
+        assertFalse(TrackerSessionHolder.sessions.containsKey(id))
     }
 
     private fun createMockBitmap(width: Int, height: Int, identity: Int = -1): Bitmap {

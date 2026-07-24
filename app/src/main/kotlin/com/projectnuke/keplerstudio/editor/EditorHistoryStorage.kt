@@ -333,10 +333,12 @@ internal class EditorHistoryCoordinator(
                     return HistoryNavigationResult.MemoryRejected(transientRequired, visibleFlags.copy(busy = false))
                 }
             }
-              loaded = if (loadedFromDisk) storage.load(target, generation) { loaded = it } else target.hotSnapshot
-              if (loadedFromDisk) {
-                  tracker?.setColdLoadDecodedTransient(target.decodedBytes())
-              }
+            loaded = if (loadedFromDisk) {
+                storage.load(target, generation) { decoded ->
+                    loaded = decoded
+                    tracker?.setColdLoadDecodedTransient(decoded.bitmapBytes())
+                }
+            } else target.hotSnapshot
             val baseTarget = loaded ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
             if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target) {
                 return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
@@ -406,6 +408,8 @@ internal class EditorHistoryCoordinator(
         } catch (failure: BitmapAllocationRejectedException) {
             return HistoryNavigationResult.MemoryRejected(failure.requiredBytes, visibleFlags.copy(busy = false))
         } finally {
+            // This value represents only a decoded object still owned by this navigation.
+            if (loadedFromDisk) tracker?.setColdLoadDecodedTransient(0L)
             if (!adopted) {
                 val cleanup = Collections.newSetFromMap(IdentityHashMap<EditorHistorySnapshot, Boolean>())
                 currentSnapshot?.let(cleanup::add)
@@ -887,7 +891,7 @@ internal class EditorHistoryCoordinator(
             val entryCount = (undo + redo).count { it.hotSnapshot != null }
             val coldBytes = (undo + redo).fold(0L) { sum, e -> BitmapMemoryBudget.saturatingAdd(sum, e.coldPayload?.bytes ?: 0L) }
             val debtBytes = pendingDeletionDebt.fold(0L) { sum, p -> BitmapMemoryBudget.saturatingAdd(sum, p.bytes) }
-            val coldDecoded = (undo + redo).fold(0L) { sum, e -> BitmapMemoryBudget.saturatingAdd(sum, e.decodedBytes()) }
+            val coldDecoded = 0L // updated by navigate only while the decoded object is alive
             val isSpilling = undo.any { it.payloadState == HistoryPayloadState.Spilling } ||
                 redo.any { it.payloadState == HistoryPayloadState.Spilling }
             val isAdopting = undo.any { it.payloadState == HistoryPayloadState.Adopting } ||

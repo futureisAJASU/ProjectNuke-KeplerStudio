@@ -100,21 +100,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var lastSuccessfullyRenderedParams: EditParams = EditParams()
     private var activeParamRenderRevision: Int? = null
     private var restoreDraftToken: Long = 0L
-    internal val historyCoordinator = EditorHistoryCoordinator(app.applicationContext, viewModelScope)
+    internal val tracker: TrackerDiagnostics = DebugMemoryTracker.createEditorDiagnostics(this)
+    internal val historyCoordinator = EditorHistoryCoordinator(
+        app.applicationContext,
+        viewModelScope,
+        tracker as? TrackerSession
+    )
+    private val uiStateOwnership = UiStateOwnershipReconciler(tracker)
     private var historyIoJob: Job? = null
     private var memoryRecoveryToken: Long = 0L
     private var pendingMemoryRetry: MemoryRetryDescriptor? = null
     private var memoryRecoveryJob: Job? = null
 private var automaticRetryAttempt: MemoryRetryDescriptor? = null
     private var strongRetryAttempt: MemoryRetryDescriptor? = null
-    internal val tracker: TrackerSession = DebugMemoryTracker.createSession("editor-${System.identityHashCode(this)}")
 
     init {
         BitmapMemoryBudget.initialize(app.applicationContext)
         ThumbnailBitmapCache.setByteBudget(BitmapMemoryBudget.thumbnailBudgetBytes())
-        if (DebugMemoryTracker.isEnabled()) {
-            tracker.registerDocument(historyCoordinator.currentGeneration())
-        }
+        tracker.activateDocument(historyCoordinator.currentGeneration())
     }
 
     internal fun createBrushSelectionInternal(allowRecovery: Boolean = true) {
@@ -404,6 +407,8 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
         }
         val prev = previousState ?: return
         val next = nextState ?: return
+        // Register destination ownership before this helper recycles displaced UI resources.
+        uiStateOwnership.reconcile(prev, next, historyCoordinator.currentGeneration())
         releaseOrphanedBitmaps(prev, next)
     }
 
@@ -3484,6 +3489,7 @@ restoreStateAdopted = true
         historyIoJob = null
         discardPendingParamUndoSnapshot()
         historyCoordinator.replaceDocument()
+        tracker.activateDocument(historyCoordinator.currentGeneration(), tracker.currentDocumentGeneration().ifEmpty { null })
         if (!shuttingDown) updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null) }
         updateHistoryFlags()
     }
@@ -3506,10 +3512,6 @@ restoreStateAdopted = true
 
     override fun onCleared() {
         shuttingDown = true
-        if (DebugMemoryTracker.isEnabled()) {
-            tracker.logSnapshot("onCleared")
-            tracker.clear()
-        }
         managedEditToken += 1L
         invalidateManagedEdits()
         invalidateDraftOperations()
@@ -3522,11 +3524,13 @@ restoreStateAdopted = true
         transactionFinishJob?.cancel()
         memoryRecoveryJob?.cancel()
         pendingMemoryRetry = null
-        ThumbnailBitmapCache.clear()
         releaseNativeSession()
         historyIoJob?.cancel()
         discardPendingParamUndoSnapshot()
-historyCoordinator.close()
+        historyCoordinator.close()
+        uiStateOwnership.releaseAll()
+        tracker.logSnapshot("preTrackerClose")
+        tracker.close()
         super.onCleared()
     }
 
