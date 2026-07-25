@@ -2,33 +2,31 @@ package com.projectnuke.keplerstudio.editor
 
 import java.util.concurrent.atomic.AtomicReference
 
-internal class PreparedResourceHandoff private constructor(
-    private val cleanup: () -> Unit,
-) {
-    private enum class Phase { PENDING, CLAIMED, DONE }
-    private val phase = AtomicReference(Phase.PENDING)
+internal class PreparedResourceHandoff private constructor(private val cleanup: () -> Unit) {
+    private enum class Ownership {
+        CallerOwned,
+        ChildOwned,
+        Settled,
+    }
 
-    fun tryAcquire(): Boolean = phase.compareAndSet(Phase.PENDING, Phase.CLAIMED)
+    private val ownership = AtomicReference(Ownership.CallerOwned)
 
-    fun settle(): Boolean = phase.compareAndSet(Phase.CLAIMED, Phase.DONE)
+    fun claimForChild(): Boolean =
+        ownership.compareAndSet(Ownership.CallerOwned, Ownership.ChildOwned)
 
-    fun isClaimed(): Boolean = phase.get() == Phase.CLAIMED
+    fun settleCallerOwned(): Boolean = settle(Ownership.CallerOwned)
 
-    fun isSettled(): Boolean = phase.get() == Phase.DONE
+    fun settleChildOwned(): Boolean = settle(Ownership.ChildOwned)
 
-    fun fireCallerCleanupIfUnclaimed(): Boolean {
-        return when (val current = phase.get()) {
-            Phase.SETTLED -> false
-            Phase.CLAIMED -> false
-            Phase.PENDING -> {
-                val moved = phase.compareAndSet(Phase.PENDING, Phase.DONE)
-                if (moved) cleanup() else false
-            }
+    private fun settle(expected: Ownership): Boolean {
+        if (!ownership.compareAndSet(expected, Ownership.Settled)) {
+            return false
         }
+        runCatching(cleanup)
+        return true
     }
 
     companion object {
-        fun create(cleanup: () -> Unit): PreparedResourceHandoff =
-            PreparedResourceHandoff(cleanup)
+        fun create(cleanup: () -> Unit): PreparedResourceHandoff = PreparedResourceHandoff(cleanup)
     }
 }

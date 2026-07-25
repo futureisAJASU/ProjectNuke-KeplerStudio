@@ -2,14 +2,14 @@ package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
-import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
-import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
-import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
@@ -26,7 +26,9 @@ import kotlinx.coroutines.withContext
 fun EditorViewModel.applyMaskAwareRemaster() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-    if (RemasterModelSession.activeModel?.id != "edge_masker" || !RemasterModelSession.isModelLoaded) {
+    if (
+        RemasterModelSession.activeModel?.id != "edge_masker" || !RemasterModelSession.isModelLoaded
+    ) {
         updateUiState { it.copy(message = "Edge Masker 모델 파일과 런타임이 준비된 뒤 사용할 수 있습니다.") }
         return
     }
@@ -38,11 +40,12 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         return
     }
 
-    val remasterPrepareTracker = beginMemoryTracking(
-        "applyMaskAwareRemaster:prepare",
-        snapshotState = "copying",
-        transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
-    )
+    val remasterPrepareTracker =
+        beginMemoryTracking(
+            "applyMaskAwareRemaster:prepare",
+            snapshotState = "copying",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
+        )
     var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
     var ownedBase: Bitmap? = null
     try {
@@ -53,7 +56,8 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         updateUiState { it.copy(message = "모델 마스크 보조 준비에 실패했습니다.") }
-        if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
+        if (t is BitmapAllocationRejectedException)
+            requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
         remasterPrepareTracker?.end()
         return
     }
@@ -67,145 +71,152 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     val nextRevision = startRevision + 1
 
     updateUiState {
-        it.copy(
-            isBusy = true,
-            revision = nextRevision,
-            message = "Edge Masker로 마스크를 분석하는 중입니다."
-        )
+        it.copy(isBusy = true, revision = nextRevision, message = "Edge Masker로 마스크를 분석하는 중입니다.")
     }
 
-    launchManagedEditWithPreparedResources({ operationToken ->
-        var modelMask: Bitmap? = null
-        var modelMaskEdge = 0L
-        var remasteredOriginal: Bitmap? = null
-        var renderedPreview: Bitmap? = null
-        var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
-        var ownedBaseOwned: Bitmap? = ownedBase
-        val remasterTracker = beginMemoryTracking(
-            "applyMaskAwareRemaster",
-            snapshotState = "inferring",
-            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
-        )
-        ownedBaseOwned?.let { remasterTracker?.track(it, "remaster:ownedBase") }
-        remasterPrepareTracker?.end()
-        undoSnapshot = null
-        ownedBase = null
-        try {
-            withContext(Dispatchers.Default) {
-                val createdBase = checkNotNull(ownedBaseOwned)
-                val mask = RemasterModelSession.createForegroundMask(createdBase, remasterTracker) { modelMaskEdge = it }
-                    ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
-                modelMask = mask
-                val created = renderMaskAwareRemaster(
-                    basePreview = createdBase,
-                    mask = mask,
-                    state = current,
-                    revision = nextRevision,
-                    diagnostics = remasterTracker
+    launchManagedEditWithPreparedResources(
+        { operationToken ->
+            var modelMask: Bitmap? = null
+            var modelMaskEdge = 0L
+            var remasteredOriginal: Bitmap? = null
+            var renderedPreview: Bitmap? = null
+            var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
+            var ownedBaseOwned: Bitmap? = ownedBase
+            val remasterTracker =
+                beginMemoryTracking(
+                    "applyMaskAwareRemaster",
+                    snapshotState = "inferring",
+                    transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
                 )
-                remasteredOriginal = created
-            }
+            ownedBaseOwned?.let { remasterTracker?.track(it, "remaster:ownedBase") }
+            remasterPrepareTracker?.end()
+            undoSnapshot = null
+            ownedBase = null
+            try {
+                withContext(Dispatchers.Default) {
+                    val createdBase = checkNotNull(ownedBaseOwned)
+                    val mask =
+                        RemasterModelSession.createForegroundMask(createdBase, remasterTracker) {
+                            modelMaskEdge = it
+                        } ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
+                    modelMask = mask
+                    val created =
+                        renderMaskAwareRemaster(
+                            basePreview = createdBase,
+                            mask = mask,
+                            state = current,
+                            revision = nextRevision,
+                            diagnostics = remasterTracker,
+                        )
+                    remasteredOriginal = created
+                }
 
-            withContext(Dispatchers.Default) {
-                val base = remasteredOriginal ?: error("missing mask-aware render")
-                val created = renderEditedPreview(
-                    basePreview = base,
-                    params = EditParams(),
-                    engines = engines,
-                    revision = nextRevision,
-                    look = presetLook,
-                    quickEffects = quickEffects
-                )
-                renderedPreview = created
-                remasterTracker?.track(created, "remaster:preview")
-            }
-
-            val adoptionIdentityUnchanged = !isShuttingDown() &&
-                uiState.value.sourcePath == sourcePath &&
-                uiState.value.baseContentToken == baseContentToken &&
-                uiState.value.revision == nextRevision &&
-                isManagedEditTokenCurrent(operationToken)
-            if (isManagedEditCurrent(operationToken, nextRevision) && adoptionIdentityUnchanged) {
-                val adoptedOriginal = remasteredOriginal ?: error("missing mask-aware original")
-                val adoptedPreview = renderedPreview ?: error("missing mask-aware preview")
-                var adoptionAttempted = false
-                var adoptionThrowable: Throwable? = null
-                try {
-                    adoptionAttempted = true
-                    updateUiStateAndRecycleReplaced {
-                        it.copy(
+                withContext(Dispatchers.Default) {
+                    val base = remasteredOriginal ?: error("missing mask-aware render")
+                    val created =
+                        renderEditedPreview(
+                            basePreview = base,
                             params = EditParams(),
-                            originalPreviewBitmap = adoptedOriginal,
-                            previewBitmap = adoptedPreview,
-                            baseBitmapDirty = true,
-                            baseContentToken = newBaseContentToken(),
+                            engines = engines,
+                            revision = nextRevision,
+                            look = presetLook,
+                            quickEffects = quickEffects,
+                        )
+                    renderedPreview = created
+                    remasterTracker?.track(created, "remaster:preview")
+                }
+
+                val adoptionIdentityUnchanged =
+                    !isShuttingDown() &&
+                        uiState.value.sourcePath == sourcePath &&
+                        uiState.value.baseContentToken == baseContentToken &&
+                        uiState.value.revision == nextRevision &&
+                        isManagedEditTokenCurrent(operationToken)
+                if (
+                    isManagedEditCurrent(operationToken, nextRevision) && adoptionIdentityUnchanged
+                ) {
+                    val adoptedOriginal = remasteredOriginal ?: error("missing mask-aware original")
+                    val adoptedPreview = renderedPreview ?: error("missing mask-aware preview")
+                    var adoptionAttempted = false
+                    var adoptionThrowable: Throwable? = null
+                    try {
+                        adoptionAttempted = true
+                        updateUiStateAndRecycleReplaced {
+                            it.copy(
+                                params = EditParams(),
+                                originalPreviewBitmap = adoptedOriginal,
+                                previewBitmap = adoptedPreview,
+                                baseBitmapDirty = true,
+                                baseContentToken = newBaseContentToken(),
+                                isBusy = false,
+                                message = "Edge Masker 기반 마스크 보정을 적용했습니다.",
+                            )
+                        }
+                    } catch (t: Throwable) {
+                        if (t is CancellationException) throw t
+                        adoptionThrowable = t
+                    }
+                    if (adoptionAttempted) {
+                        val liveState = uiState.value
+                        val originalAdopted = liveState.originalPreviewBitmap === adoptedOriginal
+                        val previewAdopted = liveState.previewBitmap === adoptedPreview
+                        if (originalAdopted && previewAdopted) {
+                            remasteredOriginal = null
+                            renderedPreview = null
+                            markParamsSuccessfullyRendered(EditParams())
+                            settleAdoptedEditHistory(undoSnapshotOwned)
+                            undoSnapshotOwned = null
+                            persistDraftSnapshot()
+                        } else {
+                            if (originalAdopted) remasteredOriginal = null
+                            if (previewAdopted) renderedPreview = null
+                            if (adoptionThrowable != null) throw adoptionThrowable
+                        }
+                    }
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                val failureIdentityUnchanged =
+                    !isShuttingDown() &&
+                        uiState.value.sourcePath == sourcePath &&
+                        uiState.value.baseContentToken == baseContentToken &&
+                        uiState.value.revision == nextRevision &&
+                        isManagedEditTokenCurrent(operationToken)
+                if (
+                    isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged
+                ) {
+                    updateUiState {
+                        it.copy(
                             isBusy = false,
-                            message = "Edge Masker 기반 마스크 보정을 적용했습니다."
+                            message = "Edge Masker 기반 마스크 보정 적용에 실패했습니다: ${t.message}",
                         )
                     }
-                } catch (t: Throwable) {
-                    if (t is CancellationException) throw t
-                    adoptionThrowable = t
+                } else if (isManagedEditTokenCurrent(operationToken)) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
-                if (adoptionAttempted) {
-                    val liveState = uiState.value
-                    val originalAdopted = liveState.originalPreviewBitmap === adoptedOriginal
-                    val previewAdopted = liveState.previewBitmap === adoptedPreview
-                    if (originalAdopted && previewAdopted) {
-                        remasteredOriginal = null
-                        renderedPreview = null
-                        markParamsSuccessfullyRendered(EditParams())
-                        settleAdoptedEditHistory(undoSnapshotOwned)
-                        undoSnapshotOwned = null
-                        persistDraftSnapshot()
-                    } else {
-                        if (originalAdopted) remasteredOriginal = null
-                        if (previewAdopted) renderedPreview = null
-                        if (adoptionThrowable != null) throw adoptionThrowable
-                    }
+                if (t is BitmapAllocationRejectedException && failureIdentityUnchanged) {
+                    requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
                 }
-            } else if (isManagedEditTokenCurrent(operationToken)) {
-                updateUiState { it.copy(isBusy = false) }
+            } finally {
+                renderedPreview?.takeIf { !it.isRecycled }?.recycle()
+                remasteredOriginal?.takeIf { !it.isRecycled }?.recycle()
+                modelMask?.takeIf { !it.isRecycled }?.recycle()
+                remasterTracker?.release(modelMaskEdge)
+                ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
+                undoSnapshotOwned?.let(::recycleHistorySnapshot)
+                remasterTracker?.end()
             }
-        } catch (ce: CancellationException) {
-            throw ce
-        } catch (t: Throwable) {
-            val failureIdentityUnchanged = !isShuttingDown() &&
-                uiState.value.sourcePath == sourcePath &&
-                uiState.value.baseContentToken == baseContentToken &&
-                uiState.value.revision == nextRevision &&
-                isManagedEditTokenCurrent(operationToken)
-            if (isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged) {
-                updateUiState {
-                    it.copy(
-                        isBusy = false,
-                        message = "Edge Masker 기반 마스크 보정 적용에 실패했습니다: ${t.message}"
-                    )
-                }
-            } else if (isManagedEditTokenCurrent(operationToken)) {
-                updateUiState { it.copy(isBusy = false) }
-            }
-            if (t is BitmapAllocationRejectedException && failureIdentityUnchanged) {
-                requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
-            }
-        } finally {
-            renderedPreview?.takeIf { !it.isRecycled }?.recycle()
-            remasteredOriginal?.takeIf { !it.isRecycled }?.recycle()
-            modelMask?.takeIf { !it.isRecycled }?.recycle()
-            remasterTracker?.release(modelMaskEdge)
-            ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
-            undoSnapshotOwned?.let(::recycleHistorySnapshot)
-            remasterTracker?.end()
-        }
-}, handoff = PreparedResourceHandoff.create(
-    token = nextRevision.toLong(),
-    prepareTracker = remasterPrepareTracker,
-    undoSnapshot = undoSnapshot
-  ) {
-    ownedBase?.takeIf { !it.isRecycled }?.recycle()
-    undoSnapshot?.let(::recycleHistorySnapshot)
-    remasterPrepareTracker?.end()
-  })
+        },
+        handoff =
+            PreparedResourceHandoff.create {
+                ownedBase?.takeIf { !it.isRecycled }?.recycle()
+                undoSnapshot?.let(::recycleHistorySnapshot)
+                remasterPrepareTracker?.end()
+            },
+    )
 }
 
 private fun renderMaskAwareRemaster(
@@ -213,26 +224,28 @@ private fun renderMaskAwareRemaster(
     mask: Bitmap,
     state: EditorUiState,
     revision: Int,
-    diagnostics: com.projectnuke.keplerstudio.editor.MemoryTrackerScope?
+    diagnostics: com.projectnuke.keplerstudio.editor.MemoryTrackerScope?,
 ): Bitmap {
     val baseParams = computeMaskAwareBaseParams(basePreview)
-    val foregroundParams = baseParams.copy(
-        contrast = (baseParams.contrast * 0.60f).coerceIn(-1f, 1f),
-        saturation = (baseParams.saturation * 0.70f).coerceIn(-1f, 1f),
-        vibrance = (baseParams.vibrance * 0.65f).coerceIn(-1f, 1f),
-        clarity = (baseParams.clarity * 0.45f).coerceIn(-1f, 1f),
-        dehaze = (baseParams.dehaze * 0.35f).coerceIn(-1f, 1f),
-        sharpness = (baseParams.sharpness * 0.55f).coerceIn(0f, 1f),
-        noiseReduction = (baseParams.noiseReduction + 0.03f).coerceIn(0f, 1f)
-    )
-    val backgroundParams = baseParams.copy(
-        contrast = (baseParams.contrast + 0.12f).coerceIn(-1f, 1f),
-        saturation = (baseParams.saturation + 0.04f).coerceIn(-1f, 1f),
-        vibrance = (baseParams.vibrance + 0.08f).coerceIn(-1f, 1f),
-        clarity = (baseParams.clarity + 0.12f).coerceIn(-1f, 1f),
-        dehaze = (baseParams.dehaze + 0.10f).coerceIn(-1f, 1f),
-        sharpness = (baseParams.sharpness + 0.08f).coerceIn(0f, 1f)
-    )
+    val foregroundParams =
+        baseParams.copy(
+            contrast = (baseParams.contrast * 0.60f).coerceIn(-1f, 1f),
+            saturation = (baseParams.saturation * 0.70f).coerceIn(-1f, 1f),
+            vibrance = (baseParams.vibrance * 0.65f).coerceIn(-1f, 1f),
+            clarity = (baseParams.clarity * 0.45f).coerceIn(-1f, 1f),
+            dehaze = (baseParams.dehaze * 0.35f).coerceIn(-1f, 1f),
+            sharpness = (baseParams.sharpness * 0.55f).coerceIn(0f, 1f),
+            noiseReduction = (baseParams.noiseReduction + 0.03f).coerceIn(0f, 1f),
+        )
+    val backgroundParams =
+        baseParams.copy(
+            contrast = (baseParams.contrast + 0.12f).coerceIn(-1f, 1f),
+            saturation = (baseParams.saturation + 0.04f).coerceIn(-1f, 1f),
+            vibrance = (baseParams.vibrance + 0.08f).coerceIn(-1f, 1f),
+            clarity = (baseParams.clarity + 0.12f).coerceIn(-1f, 1f),
+            dehaze = (baseParams.dehaze + 0.10f).coerceIn(-1f, 1f),
+            sharpness = (baseParams.sharpness + 0.08f).coerceIn(0f, 1f),
+        )
 
     var foreground: Bitmap? = null
     var background: Bitmap? = null
@@ -282,36 +295,37 @@ private fun renderWithState(
     basePreview: Bitmap,
     params: EditParams,
     state: EditorUiState,
-    revision: Int
+    revision: Int,
 ): Bitmap {
     var out: Bitmap? = null
     try {
         out = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-        val result = NativePhotoCore.nativeRenderPreviewInPlace(
-            out,
-            params.exposure,
-            params.contrast,
-            params.shadows,
-            params.highlights,
-            params.whites,
-            params.blacks,
-            params.temperature,
-            params.tint,
-            params.saturation,
-            params.vibrance,
-            params.clarity,
-            params.dehaze,
-            params.sharpness,
-            params.noiseReduction,
-            params.luminanceNoiseReduction,
-            params.colorNoiseReduction,
-            params.noiseDetailProtection,
-            state.noiseEngine.nativeId,
-            state.detailEngine.nativeId,
-            state.toneEngine.nativeId,
-            state.hazeEngine.nativeId,
-            revision
-        )
+        val result =
+            NativePhotoCore.nativeRenderPreviewInPlace(
+                out,
+                params.exposure,
+                params.contrast,
+                params.shadows,
+                params.highlights,
+                params.whites,
+                params.blacks,
+                params.temperature,
+                params.tint,
+                params.saturation,
+                params.vibrance,
+                params.clarity,
+                params.dehaze,
+                params.sharpness,
+                params.noiseReduction,
+                params.luminanceNoiseReduction,
+                params.colorNoiseReduction,
+                params.noiseDetailProtection,
+                state.noiseEngine.nativeId,
+                state.detailEngine.nativeId,
+                state.toneEngine.nativeId,
+                state.hazeEngine.nativeId,
+                revision,
+            )
         if (result < 0) {
             out.recycle()
             out = null
@@ -329,18 +343,19 @@ private fun renderWithState(
 private fun blendForegroundOverBackground(
     foreground: Bitmap,
     background: Bitmap,
-    mask: Bitmap
+    mask: Bitmap,
 ): Bitmap {
     val width = foreground.width
     val height = foreground.height
     var scaledMaskOwned: Bitmap? = null
     val output = background
     try {
-        val scaledMask = if (mask.width == width && mask.height == height) {
-            mask
-        } else {
-            createScaledBitmapOrThrow(mask, width, height, true).also { scaledMaskOwned = it }
-        }
+        val scaledMask =
+            if (mask.width == width && mask.height == height) {
+                mask
+            } else {
+                createScaledBitmapOrThrow(mask, width, height, true).also { scaledMaskOwned = it }
+            }
         val fgRow = IntArray(width)
         val bgRow = IntArray(width)
         val prevMaskRow = IntArray(width)
@@ -365,12 +380,25 @@ private fun blendForegroundOverBackground(
     return output
 }
 
-private fun featheredMaskAlpha(prev: IntArray, curr: IntArray, next: IntArray, x: Int, width: Int): Float {
+private fun featheredMaskAlpha(
+    prev: IntArray,
+    curr: IntArray,
+    next: IntArray,
+    x: Int,
+    width: Int,
+): Float {
     val xm = max(0, x - 1)
     val xp = min(width - 1, x + 1)
-    val sum = maskValue(prev[xm]) + maskValue(prev[x]) + maskValue(prev[xp]) +
-        maskValue(curr[xm]) + maskValue(curr[x]) + maskValue(curr[xp]) +
-        maskValue(next[xm]) + maskValue(next[x]) + maskValue(next[xp])
+    val sum =
+        maskValue(prev[xm]) +
+            maskValue(prev[x]) +
+            maskValue(prev[xp]) +
+            maskValue(curr[xm]) +
+            maskValue(curr[x]) +
+            maskValue(curr[xp]) +
+            maskValue(next[xm]) +
+            maskValue(next[x]) +
+            maskValue(next[xp])
     return (sum / (9f * 255f)).coerceIn(0f, 1f)
 }
 
@@ -384,9 +412,16 @@ private fun maskValue(pixel: Int): Int {
 private fun blendArgb(foreground: Int, background: Int, alpha: Float): Int {
     val inv = 1f - alpha
     val a = 0xff
-    val r = (((foreground ushr 16) and 0xff) * alpha + ((background ushr 16) and 0xff) * inv).roundToInt().coerceIn(0, 255)
-    val g = (((foreground ushr 8) and 0xff) * alpha + ((background ushr 8) and 0xff) * inv).roundToInt().coerceIn(0, 255)
-    val b = ((foreground and 0xff) * alpha + (background and 0xff) * inv).roundToInt().coerceIn(0, 255)
+    val r =
+        (((foreground ushr 16) and 0xff) * alpha + ((background ushr 16) and 0xff) * inv)
+            .roundToInt()
+            .coerceIn(0, 255)
+    val g =
+        (((foreground ushr 8) and 0xff) * alpha + ((background ushr 8) and 0xff) * inv)
+            .roundToInt()
+            .coerceIn(0, 255)
+    val b =
+        ((foreground and 0xff) * alpha + (background and 0xff) * inv).roundToInt().coerceIn(0, 255)
     return (a shl 24) or (r shl 16) or (g shl 8) or b
 }
 
@@ -414,7 +449,7 @@ private fun computeMaskAwareBaseParams(bitmap: Bitmap): EditParams {
         clarity = clarity,
         dehaze = dehaze,
         sharpness = 0.14f,
-        noiseReduction = noise
+        noiseReduction = noise,
     )
 }
 
@@ -423,7 +458,7 @@ private data class QuickStats(
     val dark: Float,
     val bright: Float,
     val range: Float,
-    val chroma: Float
+    val chroma: Float,
 )
 
 private fun sampleStats(bitmap: Bitmap): QuickStats {
@@ -461,6 +496,6 @@ private fun sampleStats(bitmap: Bitmap): QuickStats {
         dark = dark,
         bright = bright,
         range = (bright - dark).coerceIn(0f, 1f),
-        chroma = chromaSum / count
+        chroma = chromaSum / count,
     )
 }

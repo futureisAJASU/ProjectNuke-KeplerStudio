@@ -8,21 +8,21 @@ import androidx.compose.runtime.setValue
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
+import com.projectnuke.keplerstudio.editor.GlobalModelDiagnostics
+import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
-import com.projectnuke.keplerstudio.editor.GlobalModelDiagnostics
-import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.max
-import org.tensorflow.lite.Interpreter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.tensorflow.lite.Interpreter
 
 object RemasterModelSession {
     var activeModel by mutableStateOf<RemasterModelCandidate?>(null)
@@ -40,6 +40,7 @@ object RemasterModelSession {
     private var commandGeneration: Long = 0L
     var isModelLoading by mutableStateOf(false)
         private set
+
     var isInferring by mutableStateOf(false)
         private set
 
@@ -61,31 +62,40 @@ object RemasterModelSession {
                     return@withLock
                 }
                 runCatching {
-                    val created = when (candidate.id) {
-                        "edge_masker" -> createImageSegmenter(context, candidate.assetPath)
-                        "universal_balancer", "flare_masker" -> TfliteModelHandle(createTfliteInterpreter(context, candidate.assetPath))
-                        else -> null
+                        val created =
+                            when (candidate.id) {
+                                "edge_masker" -> createImageSegmenter(context, candidate.assetPath)
+                                "universal_balancer",
+                                "flare_masker" ->
+                                    TfliteModelHandle(
+                                        createTfliteInterpreter(context, candidate.assetPath)
+                                    )
+                                else -> null
+                            }
+                        if (generation != commandGeneration) {
+                            runCatching { created?.close() }
+                            return@withLock
+                        }
+                        closeableModel = created
                     }
-                    if (generation != commandGeneration) {
-                        runCatching { created?.close() }
-                        return@withLock
+                    .onSuccess {
+                        isModelLoaded = closeableModel != null
+                        isModelLoading = false
+                        GlobalModelDiagnostics.publish(
+                            "RemasterModelSession",
+                            if (closeableModel != null) "loaded" else "unloaded",
+                        )
+                        statusText =
+                            if (closeableModel != null) "${candidate.title}: 사용 가능"
+                            else "${candidate.title}: 실행 경로를 준비하는 중입니다."
                     }
-                    closeableModel = created
-                }.onSuccess {
-                    isModelLoaded = closeableModel != null
-                    isModelLoading = false
-                    GlobalModelDiagnostics.publish(
-                        "RemasterModelSession",
-                        if (closeableModel != null) "loaded" else "unloaded"
-                    )
-                    statusText = if (closeableModel != null) "${candidate.title}: 사용 가능" else "${candidate.title}: 실행 경로를 준비하는 중입니다."
-                }.onFailure {
-                    closeableModel = null
-                    isModelLoaded = false
-                    isModelLoading = false
-                    GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
-                    statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
-                }
+                    .onFailure {
+                        closeableModel = null
+                        isModelLoaded = false
+                        isModelLoading = false
+                        GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
+                        statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
+                    }
             }
         }
     }
@@ -93,19 +103,26 @@ object RemasterModelSession {
     internal suspend fun createForegroundMask(
         bitmap: Bitmap,
         diagnostics: MemoryTrackerScope? = null,
-        onOwnedEdge: (Long) -> Unit = {}
-    ): Bitmap? = modelMutex.withLock {
-        if (activeModel?.id != "edge_masker" || !isModelLoaded) return@withLock null
-        val model = closeableModel ?: return@withLock null
-        isInferring = true
-        GlobalModelDiagnostics.publish("RemasterModelSession", "inferring")
-        try {
-            runCatching { createForegroundMaskFromSegmenter(model, bitmap, diagnostics, onOwnedEdge) }.getOrNull()
-        } finally {
-            isInferring = false
-            GlobalModelDiagnostics.publish("RemasterModelSession", if (isModelLoaded) "loaded" else "unloaded")
+        onOwnedEdge: (Long) -> Unit = {},
+    ): Bitmap? =
+        modelMutex.withLock {
+            if (activeModel?.id != "edge_masker" || !isModelLoaded) return@withLock null
+            val model = closeableModel ?: return@withLock null
+            isInferring = true
+            GlobalModelDiagnostics.publish("RemasterModelSession", "inferring")
+            try {
+                runCatching {
+                        createForegroundMaskFromSegmenter(model, bitmap, diagnostics, onOwnedEdge)
+                    }
+                    .getOrNull()
+            } finally {
+                isInferring = false
+                GlobalModelDiagnostics.publish(
+                    "RemasterModelSession",
+                    if (isModelLoaded) "loaded" else "unloaded",
+                )
+            }
         }
-    }
 
     fun unload() {
         val generation = ++commandGeneration
@@ -125,44 +142,40 @@ object RemasterModelSession {
         }
     }
 
-    suspend fun unloadIdleNow(): Boolean = modelMutex.withLock {
-        if (isModelLoading || isInferring) return@withLock false
-        ++commandGeneration
-        GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
-        runCatching { closeableModel?.close() }
-        closeableModel = null
-        activeModel = null
-        isModelLoaded = false
-        isModelLoading = false
-        GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
-        statusText = "로드된 모델이 없습니다."
-        true
-    }
+    suspend fun unloadIdleNow(): Boolean =
+        modelMutex.withLock {
+            if (isModelLoading || isInferring) return@withLock false
+            ++commandGeneration
+            GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
+            runCatching { closeableModel?.close() }
+            closeableModel = null
+            activeModel = null
+            isModelLoaded = false
+            isModelLoading = false
+            GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
+            statusText = "로드된 모델이 없습니다."
+            true
+        }
 
     fun hasModelAsset(context: Context, assetPath: String): Boolean {
         if (assetPath.isBlank()) return false
-        return runCatching {
-            context.assets.open(assetPath).use { true }
-        }.getOrDefault(false)
+        return runCatching { context.assets.open(assetPath).use { true } }.getOrDefault(false)
     }
 
     private fun createImageSegmenter(context: Context, assetPath: String): ImageSegmenter {
-        val baseOptions = BaseOptions.builder()
-            .setModelAssetPath(assetPath)
-            .build()
-        val options = ImageSegmenter.ImageSegmenterOptions.builder()
-            .setBaseOptions(baseOptions)
-            .setRunningMode(RunningMode.IMAGE)
-            .setOutputCategoryMask(true)
-            .setOutputConfidenceMasks(false)
-            .build()
+        val baseOptions = BaseOptions.builder().setModelAssetPath(assetPath).build()
+        val options =
+            ImageSegmenter.ImageSegmenterOptions.builder()
+                .setBaseOptions(baseOptions)
+                .setRunningMode(RunningMode.IMAGE)
+                .setOutputCategoryMask(true)
+                .setOutputConfidenceMasks(false)
+                .build()
         return ImageSegmenter.createFromOptions(context, options)
     }
 
     private fun createTfliteInterpreter(context: Context, assetPath: String): Interpreter {
-        val options = Interpreter.Options().apply {
-            setNumThreads(4)
-        }
+        val options = Interpreter.Options().apply { setNumThreads(4) }
         return Interpreter(loadMappedAsset(context, assetPath), options)
     }
 
@@ -170,19 +183,30 @@ object RemasterModelSession {
         val descriptor = context.assets.openFd(assetPath)
         descriptor.use { afd ->
             afd.createInputStream().channel.use { channel ->
-                return channel.map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
+                return channel.map(
+                    FileChannel.MapMode.READ_ONLY,
+                    afd.startOffset,
+                    afd.declaredLength,
+                )
             }
         }
     }
 
-    private fun createForegroundMaskFromSegmenter(segmenter: Any, bitmap: Bitmap, diagnostics: MemoryTrackerScope?, onOwnedEdge: (Long) -> Unit): Bitmap {
-        val imageBuilderClass = Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
-        val inputCopy = bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, false)
-            ?: error("입력 이미지를 복사하지 못했습니다.")
+    private fun createForegroundMaskFromSegmenter(
+        segmenter: Any,
+        bitmap: Bitmap,
+        diagnostics: MemoryTrackerScope?,
+        onOwnedEdge: (Long) -> Unit,
+    ): Bitmap {
+        val imageBuilderClass =
+            Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
+        val inputCopy =
+            bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, false) ?: error("입력 이미지를 복사하지 못했습니다.")
         val inputEdge = diagnostics?.track(inputCopy, "remaster:modelInputCopy") ?: 0L
         var mpImage: Any? = null
         try {
-            val imageBuilder = imageBuilderClass.getConstructor(Bitmap::class.java).newInstance(inputCopy)
+            val imageBuilder =
+                imageBuilderClass.getConstructor(Bitmap::class.java).newInstance(inputCopy)
             mpImage = imageBuilderClass.getMethod("build").invoke(imageBuilder)
         } catch (t: Throwable) {
             if (mpImage == null) inputCopy.recycle()
@@ -192,27 +216,40 @@ object RemasterModelSession {
         var foregroundMask: Bitmap? = null
         var primaryFailure: Throwable? = null
         try {
-            val segmentMethod = segmenter.javaClass.methods.firstOrNull { method ->
-                method.name == "segment" &&
-                    method.parameterTypes.size == 1 &&
-                    method.parameterTypes[0].isAssignableFrom(mpImage!!.javaClass)
-            } ?: error("segment 메서드를 찾을 수 없습니다.")
+            val segmentMethod =
+                segmenter.javaClass.methods.firstOrNull { method ->
+                    method.name == "segment" &&
+                        method.parameterTypes.size == 1 &&
+                        method.parameterTypes[0].isAssignableFrom(mpImage!!.javaClass)
+                } ?: error("segment 메서드를 찾을 수 없습니다.")
             val result = segmentMethod.invoke(segmenter, mpImage)
-            val categoryMaskOptional = result.javaClass.methods.firstOrNull { method ->
-                method.name == "categoryMask" && method.parameterTypes.isEmpty()
-            }?.invoke(result) ?: error("category mask 결과가 없습니다.")
-            val isPresent = categoryMaskOptional.javaClass.getMethod("isPresent").invoke(categoryMaskOptional) as Boolean
+            val categoryMaskOptional =
+                result.javaClass.methods
+                    .firstOrNull { method ->
+                        method.name == "categoryMask" && method.parameterTypes.isEmpty()
+                    }
+                    ?.invoke(result) ?: error("category mask 결과가 없습니다.")
+            val isPresent =
+                categoryMaskOptional.javaClass.getMethod("isPresent").invoke(categoryMaskOptional)
+                    as Boolean
             if (!isPresent) error("category mask가 비어 있습니다.")
-            categoryMaskImage = categoryMaskOptional.javaClass.getMethod("get").invoke(categoryMaskOptional)
+            categoryMaskImage =
+                categoryMaskOptional.javaClass.getMethod("get").invoke(categoryMaskOptional)
             val rawMask = extractBitmapFromMpImage(categoryMaskImage as Any)
             val rawEdge = diagnostics?.track(rawMask, "remaster:rawCategoryMask") ?: 0L
             try {
-                foregroundMask = categoryBitmapToForegroundMask(rawMask, bitmap.width, bitmap.height, diagnostics)
+                foregroundMask =
+                    categoryBitmapToForegroundMask(
+                        rawMask,
+                        bitmap.width,
+                        bitmap.height,
+                        diagnostics,
+                        onOwnedEdge,
+                    )
             } finally {
                 if (!rawMask.isRecycled) rawMask.recycle()
                 diagnostics?.release(rawEdge)
             }
-            diagnostics?.track(checkNotNull(foregroundMask), "remaster:finalArgbMask")?.let(onOwnedEdge)
             return foregroundMask
         } catch (t: Throwable) {
             primaryFailure = t
@@ -226,12 +263,8 @@ object RemasterModelSession {
                     cleanupFailures += cleanup
                 }
             }
-            closeAndCollect {
-                if (categoryMaskImage != null) closeMpImage(categoryMaskImage)
-            }
-            closeAndCollect {
-                closeMpImage(mpImage)
-            }
+            closeAndCollect { if (categoryMaskImage != null) closeMpImage(categoryMaskImage) }
+            closeAndCollect { closeMpImage(mpImage) }
             if (!inputCopy.isRecycled) inputCopy.recycle()
             diagnostics?.release(inputEdge)
             if (cleanupFailures.isNotEmpty()) {
@@ -252,28 +285,47 @@ object RemasterModelSession {
 
     private fun extractBitmapFromMpImage(maskImage: Any): Bitmap {
         val extractorClass = Class.forName("com.google.mediapipe.framework.image.BitmapExtractor")
-        val extractMethod = extractorClass.methods.firstOrNull { method ->
-            method.name == "extract" && method.parameterTypes.size == 1 && method.parameterTypes[0].isAssignableFrom(maskImage.javaClass)
-        } ?: error("BitmapExtractor.extract 메서드를 찾을 수 없습니다.")
+        val extractMethod =
+            extractorClass.methods.firstOrNull { method ->
+                method.name == "extract" &&
+                    method.parameterTypes.size == 1 &&
+                    method.parameterTypes[0].isAssignableFrom(maskImage.javaClass)
+            } ?: error("BitmapExtractor.extract 메서드를 찾을 수 없습니다.")
         return extractMethod.invoke(null, maskImage) as Bitmap
     }
 
-    private fun categoryBitmapToForegroundMask(rawMask: Bitmap, targetWidth: Int, targetHeight: Int, diagnostics: MemoryTrackerScope?): Bitmap {
+    private fun categoryBitmapToForegroundMask(
+        rawMask: Bitmap,
+        targetWidth: Int,
+        targetHeight: Int,
+        diagnostics: MemoryTrackerScope?,
+        onOwnedEdge: (Long) -> Unit,
+    ): Bitmap {
         var scaledMask: Bitmap? = null
         var out: Bitmap? = null
         var scaledEdge = 0L
+        var finalEdge = 0L
+        var rowTransient = 0L
+        var succeeded = false
         var primaryFailure: Throwable? = null
         try {
-            scaledMask = if (rawMask.width == targetWidth && rawMask.height == targetHeight) {
-                rawMask
-            } else {
-                createScaledBitmapOrThrow(rawMask, targetWidth, targetHeight, false)
-            }
-            if (scaledMask !== rawMask) scaledEdge = diagnostics?.track(scaledMask!!, "remaster:scaledCategoryMask") ?: 0L
+            scaledMask =
+                if (rawMask.width == targetWidth && rawMask.height == targetHeight) {
+                    rawMask
+                } else {
+                    createScaledBitmapOrThrow(rawMask, targetWidth, targetHeight, false)
+                }
+            if (scaledMask !== rawMask)
+                scaledEdge = diagnostics?.track(scaledMask!!, "remaster:scaledCategoryMask") ?: 0L
             out = createBitmapOrThrow(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+            finalEdge = diagnostics?.track(out, "remaster:finalArgbMask") ?: 0L
             val inRow = IntArray(targetWidth)
             val outRow = IntArray(targetWidth)
-            val rowTransient = diagnostics?.trackTransientBytes("remaster:maskRows", targetWidth.toLong() * Int.SIZE_BYTES * 2L) ?: 0L
+            rowTransient =
+                diagnostics?.trackTransientBytes(
+                    "remaster:maskRows",
+                    targetWidth.toLong() * Int.SIZE_BYTES * 2L,
+                ) ?: 0L
             for (y in 0 until targetHeight) {
                 scaledMask.getPixels(inRow, 0, targetWidth, 0, y, targetWidth, 1)
                 for (x in 0 until targetWidth) {
@@ -289,7 +341,8 @@ object RemasterModelSession {
                 }
                 out.setPixels(outRow, 0, targetWidth, 0, y, targetWidth, 1)
             }
-            diagnostics?.releaseTransient(rowTransient)
+            onOwnedEdge(finalEdge)
+            succeeded = true
             return out
         } catch (t: Throwable) {
             primaryFailure = t
@@ -306,6 +359,10 @@ object RemasterModelSession {
             recycleAndCollect {
                 if (scaledMask != null && scaledMask !== rawMask) scaledMask.recycle()
                 diagnostics?.release(scaledEdge)
+            }
+            recycleAndCollect { diagnostics?.releaseTransient(rowTransient) }
+            if (!succeeded) {
+                recycleAndCollect { diagnostics?.release(finalEdge) }
             }
             if (cleanupFailures.isNotEmpty()) {
                 if (primaryFailure != null) {
@@ -327,17 +384,17 @@ object RemasterModelSession {
         when (image) {
             null -> Unit
             is AutoCloseable -> image.close()
-            else -> image.javaClass.methods.firstOrNull { method ->
-                method.name == "close" && method.parameterTypes.isEmpty()
-            }?.invoke(image)
+            else ->
+                image.javaClass.methods
+                    .firstOrNull { method ->
+                        method.name == "close" && method.parameterTypes.isEmpty()
+                    }
+                    ?.invoke(image)
         }
     }
-
 }
 
-private class TfliteModelHandle(
-    private val interpreter: Interpreter
-) : AutoCloseable {
+private class TfliteModelHandle(private val interpreter: Interpreter) : AutoCloseable {
     override fun close() {
         interpreter.close()
     }
