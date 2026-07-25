@@ -197,8 +197,8 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             undoSnapshotOwned?.let(::recycleHistorySnapshot)
             remasterTracker?.end()
         }
-    }, handoff = PreparedResourceHandoff.create(
-        token = nextRevision,
+  }, handoff = PreparedResourceHandoff.create(
+    token = nextRevision.toLong(),
         prepareTracker = remasterPrepareTracker,
         undoSnapshot = undoSnapshot
     ) {

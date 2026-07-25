@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
+import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
@@ -34,8 +35,8 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         return
     }
 
-        val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
-    val ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
+  val undoSnapshot = captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
+  var ownedBase = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
         undoSnapshot?.let(::recycleHistorySnapshot)
         updateUiState { it.copy(message = "이미지를 준비하지 못했습니다.") }
         if (failure is BitmapAllocationRejectedException) {
@@ -61,10 +62,11 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         )
     }
 
-    launchManagedEditWithPreparedResources({ operationToken ->
-        var ownedPreview: Bitmap? = null
-        try {
-            withContext(Dispatchers.Default) {
+launchManagedEditWithPreparedResources({ operationToken ->
+    var adoptedFlare = ownedBase
+    var ownedPreview: Bitmap? = null
+    try {
+      withContext(Dispatchers.Default) {
                 val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
                     checkNotNull(ownedBase),
                     mode.ordinal,
@@ -80,36 +82,21 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                 ownedPreview = copy
                 val result = NativePhotoCore.nativeRenderPreviewInPlace(
                     copy,
-                    params.exposure,
-                    params.contrast,
-                    params.shadows,
-                    params.highlights,
-                    params.whites,
-                    params.blacks,
-                    params.temperature,
-                    params.tint,
-                    params.saturation,
-                    params.vibrance,
-                    params.clarity,
-                    params.dehaze,
-                    params.sharpness,
-                    params.noiseReduction,
-                    params.luminanceNoiseReduction,
-                    params.colorNoiseReduction,
-                    params.noiseDetailProtection,
-                    engines.noiseEngine.nativeId,
-                    engines.detailEngine.nativeId,
-                    engines.toneEngine.nativeId,
-                    engines.hazeEngine.nativeId,
-                    nextRevision,
-                    presetLook
+                    params.exposure, params.contrast, params.shadows, params.highlights,
+                    params.whites, params.blacks, params.temperature, params.tint,
+                    params.saturation, params.vibrance, params.clarity, params.dehaze,
+                    params.sharpness, params.noiseReduction, params.luminanceNoiseReduction,
+                    params.colorNoiseReduction, params.noiseDetailProtection,
+                    engines.noiseEngine.nativeId, engines.detailEngine.nativeId,
+                    engines.toneEngine.nativeId, engines.hazeEngine.nativeId,
+                    nextRevision, presetLook
                 )
                 if (result < 0) {
                     throw IllegalStateException("native flare preview render failed: code=$result")
                 }
                 applyActiveQuickEffectsToBitmap(copy, quickEffects, nextRevision)
             }
-            val adoptedFlare = checkNotNull(ownedBase)
+            adoptedFlare = checkNotNull(ownedBase)
             val adoptedPreview = checkNotNull(ownedPreview)
             if (isManagedEditCurrent(operationToken, nextRevision) &&
                 uiState.value.sourcePath == sourcePath &&
@@ -127,7 +114,6 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
                     )
                 }
                 settleAdoptedEditHistory(undoSnapshot)
-                undoSnapshot = null
                 ownedBase = null
                 ownedPreview = null
                 scheduleDraftAutosave()
@@ -153,7 +139,12 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         } finally {
             ownedBase?.let { if (!it.isRecycled) it.recycle() }
             ownedPreview?.let { if (!it.isRecycled) it.recycle() }
-            undoSnapshot?.let(::recycleHistorySnapshot)
         }
-    }
+  }, handoff = PreparedResourceHandoff.create(
+    token = nextRevision.toLong(),
+        prepareTracker = null,
+        undoSnapshot = undoSnapshot
+    ) {
+        undoSnapshot?.let(::recycleHistorySnapshot)
+    })
 }

@@ -16,6 +16,10 @@ import com.projectnuke.keplerstudio.editor.estimateAutoStraightenDegreesV0
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.normalized
 import com.projectnuke.keplerstudio.editor.renderCropTransform
+import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
+import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -231,11 +235,11 @@ fun EditorViewModel.applyCropTransform() {
             if (!adoptionConfirmed) undoSnapshotOwned?.let(::recycleHistorySnapshot)
             cropTracker?.end()
         }
-    }, handoff = PreparedResourceHandoff.create(
-        token = nextRevision,
-        prepareTracker = cropPrepareTracker,
-        undoSnapshot = undoSnapshot
-    ) {
+}, handoff = PreparedResourceHandoff.create(
+    token = nextRevision.toLong(),
+    prepareTracker = cropPrepareTracker,
+    undoSnapshot = undoSnapshot
+  ) {
         undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         cropPrepareTracker?.end()

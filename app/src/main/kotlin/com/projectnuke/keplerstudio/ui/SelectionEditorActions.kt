@@ -9,6 +9,7 @@ import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
+import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -20,6 +21,7 @@ import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
 import com.projectnuke.keplerstudio.editor.SelectionPaintMode
 import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
+import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -51,13 +53,12 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         snapshotState = "inferring",
         transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
     )
-    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
     val ownedBase = try {
         base.copyOrThrow(mutable = false).also { selectionTracker?.track(it, "subjectSelection:base") }
     } catch (t: Throwable) {
-        undoSnapshot?.let(::recycleHistorySnapshot)
-        undoSnapshot = null
         selectionTracker?.end()
+        undoSnapshot?.let(::recycleHistorySnapshot)
         updateUiState { it.copy(message = "마스크 입력 이미지를 준비하지 못했습니다.") }
         if (t is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.SubjectSelection, t.requiredBytes)
         return
@@ -146,12 +147,13 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             ownedBase.recycle()
             selectionTracker?.end()
         }
-    }, onChildNeverStarted = {
-        if (!ownedBase.isRecycled) ownedBase.recycle()
-        undoSnapshot?.let(::recycleHistorySnapshot)
-        undoSnapshot = null
-        selectionTracker?.end()
-    })
+  }, handoff = PreparedResourceHandoff.create(
+    token = sourceRevision.toLong(),
+    prepareTracker = selectionTracker,
+    undoSnapshot = undoSnapshot
+  ) {
+    selectionTracker?.end()
+  })
 }
 
 fun EditorViewModel.createBrushSelection() {

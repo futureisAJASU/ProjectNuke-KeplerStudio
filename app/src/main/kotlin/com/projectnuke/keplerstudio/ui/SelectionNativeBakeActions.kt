@@ -3,9 +3,11 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.EditParams
+import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
+import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.engineSelection
-import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -14,8 +16,8 @@ import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
-import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
+import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -44,9 +46,8 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     val sourcePath = current.sourcePath
     val baseContentToken = current.baseContentToken
 
-        val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
+    val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
     val prepareTracker = beginMemoryTracking("selectionNativeBake:prepare", snapshotState = "copying", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
-
     val ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse { failure ->
         prepareTracker?.end()
         undoSnapshot?.let(::recycleHistorySnapshot)
@@ -55,11 +56,10 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         return
     }
     prepareTracker?.track(checkNotNull(ownedBase), "selectionBake:base")
-    val ownedLayers: List<com.projectnuke.keplerstudio.editor.SelectionLayer> = runCatching {
+    val ownedLayers: List<SelectionLayer> = runCatching {
         enabledLayers.copyBitmapsOwned()
     }.getOrElse { failure ->
         ownedBase?.takeIf { !it.isRecycled }?.recycle()
-        ownedBase = null
         prepareTracker?.end()
         undoSnapshot?.let(::recycleHistorySnapshot)
         updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
@@ -84,9 +84,9 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
             snapshotState = "rendering",
             transientReserveBytes = BitmapMemoryBudget.operationReserveBytes()
         )
-        ownedBase?.let { bakeTracker?.track(it, "selectionBake:base") }
-        ownedLayers.forEach { bakeTracker?.track(it.bitmap, "selectionBake:layer:${it.id}") }
-        prepareTracker?.end()
+bakeTracker?.track(checkNotNull(ownedBase), "selectionBake:base")
+  ownedLayers.forEach { bakeTracker?.track(it.bitmap, "selectionBake:layer:${it.id}") }
+  prepareTracker?.end()
         try {
             withContext(Dispatchers.Default) {
                 val localOnlyState = current.copy(
@@ -132,12 +132,10 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 bakedOriginal = null
                 renderedPreview = null
                 settleAdoptedEditHistory(undoSnapshot)
-                undoSnapshot = null
                 persistDraftSnapshot()
             } else if (isManagedEditTokenCurrent(operationToken)) {
                 updateUiState { it.copy(isBusy = false) }
             }
-
         } catch (ce: CancellationException) {
             throw ce
         } catch (_: Throwable) {
@@ -156,13 +154,18 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 updateUiState { it.copy(isBusy = false) }
             }
         } finally {
-
             ownedBase?.takeIf { !it.isRecycled }?.recycle()
             ownedLayers.forEach { it.bitmap.takeIf { bitmap -> !bitmap.isRecycled }?.recycle() }
             bakedOriginal?.takeIf { !it.isRecycled }?.recycle()
             renderedPreview?.takeIf { !it.isRecycled }?.recycle()
-            undoSnapshot?.let(::recycleHistorySnapshot)
             bakeTracker?.end()
         }
-    }
+  }, handoff = PreparedResourceHandoff.create(
+    token = nextRevision.toLong(),
+    prepareTracker = prepareTracker,
+    undoSnapshot = undoSnapshot
+  ) {
+    undoSnapshot?.let(::recycleHistorySnapshot)
+    prepareTracker?.end()
+  })
 }
