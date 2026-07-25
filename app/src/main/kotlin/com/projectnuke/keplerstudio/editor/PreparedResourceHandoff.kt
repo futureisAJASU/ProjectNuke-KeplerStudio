@@ -1,37 +1,34 @@
 package com.projectnuke.keplerstudio.editor
 
-import android.graphics.Bitmap
 import java.util.concurrent.atomic.AtomicReference
 
 internal class PreparedResourceHandoff private constructor(
-  val token: Long,
-  val prepareTracker: MemoryTrackerScope?,
-  val undoSnapshot: EditorHistorySnapshot?,
-  private val callerCleanup: () -> Unit,
+    private val cleanup: () -> Unit,
 ) {
-  private enum class Phase { PENDING, CLAIMED, DONE }
-  private val phase = AtomicReference(Phase.PENDING)
+    private enum class Phase { PENDING, CLAIMED, DONE }
+    private val phase = AtomicReference(Phase.PENDING)
 
-  fun claim(operationToken: Long): Boolean =
-    token == operationToken && phase.compareAndSet(Phase.PENDING, Phase.CLAIMED)
+    fun tryAcquire(): Boolean = phase.compareAndSet(Phase.PENDING, Phase.CLAIMED)
 
-  fun settleIfClaimed() {
-    if (phase.get() == Phase.CLAIMED) phase.compareAndSet(Phase.CLAIMED, Phase.DONE)
-  }
+    fun settle(): Boolean = phase.compareAndSet(Phase.CLAIMED, Phase.DONE)
 
-  fun isNeverClaimed(): Boolean = phase.get() == Phase.PENDING
-  fun isSettled(): Boolean = phase.get() == Phase.DONE
+    fun isClaimed(): Boolean = phase.get() == Phase.CLAIMED
 
-  fun fireCallerCleanupIfUnclaimed() {
-    if (phase.compareAndSet(Phase.PENDING, Phase.DONE)) callerCleanup()
-  }
+    fun isSettled(): Boolean = phase.get() == Phase.DONE
 
-  companion object {
-    fun create(
-      token: Long,
-      prepareTracker: MemoryTrackerScope?,
-      undoSnapshot: EditorHistorySnapshot?,
-      callerCleanup: () -> Unit,
-    ): PreparedResourceHandoff = PreparedResourceHandoff(token, prepareTracker, undoSnapshot, callerCleanup)
-  }
+    fun fireCallerCleanupIfUnclaimed(): Boolean {
+        return when (val current = phase.get()) {
+            Phase.SETTLED -> false
+            Phase.CLAIMED -> false
+            Phase.PENDING -> {
+                val moved = phase.compareAndSet(Phase.PENDING, Phase.DONE)
+                if (moved) cleanup() else false
+            }
+        }
+    }
+
+    companion object {
+        fun create(cleanup: () -> Unit): PreparedResourceHandoff =
+            PreparedResourceHandoff(cleanup)
+    }
 }
