@@ -28,6 +28,7 @@ internal class MemoryTrackerScope private constructor(
     private val operationToken: Long
     private val ended = AtomicBoolean(false)
     private val trackedEdges = ArrayDeque<Long>(8)
+    private val transientContributors = ArrayDeque<Long>(4)
 
     init {
         operationToken = tracker.beginOperation(
@@ -64,9 +65,24 @@ internal class MemoryTrackerScope private constructor(
         trackedEdges.remove(handle)
     }
 
+    fun trackTransientBytes(label: String, bytes: Long?): Long {
+        val handle = tracker.registerTransientContributor(operationToken, documentGeneration, label, bytes)
+        if (handle != 0L) transientContributors.addLast(handle)
+        return handle
+    }
+
+    fun releaseTransient(handle: Long) {
+        if (handle == 0L) return
+        tracker.releaseTransientContributor(handle)
+        transientContributors.remove(handle)
+    }
+
     fun end() {
         if (ended.compareAndSet(false, true)) {
             while (trackedEdges.isNotEmpty()) tracker.releaseEdge(trackedEdges.removeFirst())
+            while (transientContributors.isNotEmpty()) {
+                tracker.releaseTransientContributor(transientContributors.removeFirst())
+            }
             tracker.endOperation(name, operationToken)
         }
     }

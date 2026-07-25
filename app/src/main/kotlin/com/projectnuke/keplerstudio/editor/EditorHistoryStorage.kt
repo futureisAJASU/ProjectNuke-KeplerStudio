@@ -99,6 +99,8 @@ internal class EditorHistoryCoordinator(
     private var diagnosticOperationKind = TrackerSession.HistoryOperationKind.Idle
     private var diagnosticNavigationDirection: String? = null
     private var diagnosticProtectedTargetId: String? = null
+    private var diagnosticRecoveryMode: String? = null
+    private var diagnosticOperationPhase: String? = null
     private var activeColdLoadDecodedBytes = 0L
     private var closed = false
     @Volatile private var visibleFlags = HistoryFlags(false, false, true)
@@ -224,6 +226,7 @@ internal class EditorHistoryCoordinator(
                         admittedEntry.coldPayload = published
                         admittedEntry.hotSnapshot = null
                         admittedEntry.payloadState = HistoryPayloadState.Cold
+                        snapshot.transferDiagnosticsToCoordinator()
                         snapshot.recycleBitmaps()
                         moved = true
                     } else {
@@ -231,6 +234,7 @@ internal class EditorHistoryCoordinator(
                     }
                 }
                 if (admittedEntry.hotSnapshot == null || fitsWith(snapshotBytes)) {
+                snapshot.transferDiagnosticsToCoordinator()
                 undo.addLast(admittedEntry)
                 retained = true
                 publishState()
@@ -287,6 +291,7 @@ internal class EditorHistoryCoordinator(
         entry.coldPayload = published
         entry.hotSnapshot = null
         entry.payloadState = HistoryPayloadState.Cold
+        snapshot.transferDiagnosticsToCoordinator()
         snapshot.recycleBitmaps()
         return entry
     }
@@ -461,6 +466,11 @@ internal class EditorHistoryCoordinator(
         if (operationBusy) return RecoverResult(0L, true, superseded = true)
         val token = beginOperation()
         val generation = documentGeneration
+        diagnosticOperationKind = TrackerSession.HistoryOperationKind.Recovery
+        diagnosticRecoveryMode = if (strong) "strong" else "automatic"
+        diagnosticOperationPhase = "idle"
+        diagnosticProtectedTargetId = protectedEntryId
+        publishState()
         val discarded = ArrayList<EditorHistoryEntry>()
         var reclaimed = 0L
         var diskBudgetSatisfied = true
@@ -600,6 +610,8 @@ internal class EditorHistoryCoordinator(
         diagnosticOperationKind = TrackerSession.HistoryOperationKind.Maintenance
         diagnosticNavigationDirection = null
         diagnosticProtectedTargetId = null
+        diagnosticRecoveryMode = null
+        diagnosticOperationPhase = null
         val oldGeneration = documentGeneration
         val oldEntries = (undo + redo).toList()
         val pendingOperations = operationCompletions.values.toList()
@@ -750,7 +762,12 @@ internal class EditorHistoryCoordinator(
         val snapshot = entry.hotSnapshot ?: return if (entry.coldPayload != null) SpillResult.Success else SpillResult.CurrentFailure
         if (entry.payloadState != HistoryPayloadState.Hot) return SpillResult.CurrentFailure
         entry.payloadState = HistoryPayloadState.Spilling
-        diagnosticOperationKind = TrackerSession.HistoryOperationKind.Spilling
+        if (diagnosticRecoveryMode != null) {
+            diagnosticOperationKind = TrackerSession.HistoryOperationKind.Recovery
+            diagnosticOperationPhase = "spilling"
+        } else {
+            diagnosticOperationKind = TrackerSession.HistoryOperationKind.Spilling
+        }
         publishState()
         val published = try {
             storage.publish(entry, snapshot)
@@ -807,7 +824,12 @@ internal class EditorHistoryCoordinator(
         var total = totalColdDiskBytes()
         val budget = BitmapMemoryBudget.historyDiskBudgetBytes()
         if (total <= budget) return TrimResult.Satisfied
-        diagnosticOperationKind = TrackerSession.HistoryOperationKind.Trimming
+        if (diagnosticRecoveryMode != null) {
+            diagnosticOperationKind = TrackerSession.HistoryOperationKind.Recovery
+            diagnosticOperationPhase = "trimming"
+        } else {
+            diagnosticOperationKind = TrackerSession.HistoryOperationKind.Trimming
+        }
         publishState()
         retryPendingDeletions()
         // Recheck after suspension — replacement may have superseded.
@@ -903,6 +925,8 @@ internal class EditorHistoryCoordinator(
             diagnosticOperationKind = TrackerSession.HistoryOperationKind.Idle
             diagnosticNavigationDirection = null
             diagnosticProtectedTargetId = null
+            diagnosticRecoveryMode = null
+            diagnosticOperationPhase = null
             activeColdLoadDecodedBytes = 0L
             publishState()
             idleSignal.complete(Unit)
@@ -965,7 +989,9 @@ internal class EditorHistoryCoordinator(
                 timestamp = System.currentTimeMillis(),
                 operationKind = diagnosticOperationKind,
                 navigationDirection = diagnosticNavigationDirection,
-                operationToken = operationToken
+                operationToken = operationToken,
+                recoveryMode = diagnosticRecoveryMode,
+                operationPhase = diagnosticOperationPhase
             ))
         } catch (_: Throwable) {
         }

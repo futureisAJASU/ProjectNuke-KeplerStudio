@@ -517,12 +517,74 @@ class DebugMemoryTrackerTest {
         try {
             GlobalModelDiagnostics.publish("test-model", "inferring")
             val snapshot = tracker.snapshot()
-            assertTrue(snapshot.globalModelContributors.any { it.name == "test-model" && it.state == "inferring" })
+            assertTrue(snapshot.globalModelContributors.any { it.contributorId == "test-model" && it.state == "inferring" })
             assertEquals(1L, snapshot.unknownNativeContributorCount)
             assertEquals(null, snapshot.combinedCompleteEstimatedBytes)
         } finally {
             GlobalModelDiagnostics.publish("test-model", "unloaded")
         }
+    }
+
+    @Test
+    fun independentModelContributorsCoexistAndUnloadExactly() {
+        GlobalModelDiagnostics.resetForTest(true)
+        try {
+            val first = GlobalModelDiagnostics.newContributorId("FlareGuardModelRunner")
+            val second = GlobalModelDiagnostics.newContributorId("FlareGuardModelRunner")
+            GlobalModelDiagnostics.publish(first, "FlareGuardModelRunner", "loaded")
+            GlobalModelDiagnostics.publish(second, "FlareGuardModelRunner", "inferring")
+            assertEquals(2, GlobalModelDiagnostics.snapshot().size)
+            GlobalModelDiagnostics.publish(first, "FlareGuardModelRunner", "unloaded")
+            val remaining = GlobalModelDiagnostics.snapshot()
+            assertEquals(1, remaining.size)
+            assertEquals(second, remaining.single().contributorId)
+            assertEquals("FlareGuardModelRunner", remaining.single().category)
+        } finally {
+            GlobalModelDiagnostics.resetForTest()
+        }
+    }
+
+    @Test
+    fun disabledModelPublicationDoesNotMutateRegistry() {
+        GlobalModelDiagnostics.resetForTest(false)
+        try {
+            val id = GlobalModelDiagnostics.newContributorId("FlareGuardModelRunner")
+            GlobalModelDiagnostics.publish(id, "FlareGuardModelRunner", "loading")
+            assertTrue(GlobalModelDiagnostics.snapshot().isEmpty())
+        } finally {
+            GlobalModelDiagnostics.resetForTest()
+        }
+    }
+
+    @Test
+    fun activatingDocumentClearsAllHistoryAggregatesBeforeRefresh() {
+        publishHistory(hotBytes = 400L, hotCount = 2, coldBytes = 300L, deletionDebtBytes = 200L, coldLoadBytes = 100L)
+        tracker.activateDocument("gen2", "gen1")
+        val snapshot = tracker.snapshot()
+        assertEquals("gen2", tracker.currentDocumentGeneration())
+        assertEquals(0L, snapshot.historyHotResidentBytes)
+        assertEquals(0, snapshot.historyHotEntryCount)
+        assertEquals(0L, snapshot.historyColdCompressedBytes)
+        assertEquals(0L, snapshot.deletionDebtBytes)
+        assertEquals(0L, snapshot.coldLoadDecodedTransientBytes)
+        assertEquals(null, tracker.historySnapshot())
+    }
+
+    @Test
+    fun liveTransientContributorsAffectCurrentAndSettleWithOperation() {
+        val operation = tracker.beginOperation("tensor", "gen1", "base", 0, 50L, "inferring")
+        val known = tracker.registerTransientContributor(operation, "gen1", "input", 120L)
+        val unknown = tracker.registerTransientContributor(operation, "gen1", "delegate", null)
+        var snapshot = tracker.snapshot()
+        assertEquals(120L, snapshot.knownLiveTransientBytes)
+        assertEquals(1L, snapshot.unknownTransientContributorCount)
+        assertTrue(snapshot.combinedHasUnknownContributors)
+        tracker.releaseTransientContributor(known)
+        tracker.releaseTransientContributor(unknown)
+        tracker.endOperation("tensor", operation)
+        snapshot = tracker.snapshot()
+        assertEquals(0L, snapshot.knownLiveTransientBytes)
+        assertEquals(0L, snapshot.unknownTransientContributorCount)
     }
 
     private fun publishHistory(

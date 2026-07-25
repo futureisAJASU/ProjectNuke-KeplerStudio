@@ -52,7 +52,8 @@ internal object TrackerSessionHolder {
 }
 
 internal data class GlobalModelContributor(
-    val name: String,
+    val contributorId: String,
+    val category: String,
     val state: String,
     val knownEstimateBytes: Long?
 )
@@ -60,15 +61,26 @@ internal data class GlobalModelContributor(
 /** Process-global model state; it stores numeric/state data and never tracker sessions. */
 internal object GlobalModelDiagnostics {
     private val contributors = AtomicReference<Map<String, GlobalModelContributor>>(emptyMap())
+    private val nextContributorId = AtomicLong(0L)
+    @Volatile private var enabledForTest: Boolean? = null
 
-    fun publish(name: String, state: String, knownEstimateBytes: Long? = null) {
+    fun newContributorId(category: String): String =
+        if (enabled()) "$category-${nextContributorId.incrementAndGet()}" else ""
+
+    fun publish(contributorId: String, category: String, state: String, knownEstimateBytes: Long? = null) {
+        if (!enabled() || contributorId.isEmpty()) return
         try {
             while (true) {
                 val current = contributors.get()
                 val next = if (state == "unloaded") {
-                    current - name
+                    current - contributorId
                 } else {
-                    current + (name to GlobalModelContributor(name, state, knownEstimateBytes?.takeIf { it >= 0L }))
+                    current + (contributorId to GlobalModelContributor(
+                        contributorId,
+                        category,
+                        state,
+                        knownEstimateBytes?.takeIf { it >= 0L }
+                    ))
                 }
                 if (contributors.compareAndSet(current, next)) break
             }
@@ -77,7 +89,18 @@ internal object GlobalModelDiagnostics {
         }
     }
 
+    fun publish(contributorId: String, state: String, knownEstimateBytes: Long? = null) =
+        publish(contributorId, contributorId, state, knownEstimateBytes)
+
     fun snapshot(): List<GlobalModelContributor> = contributors.get().values.toList()
+
+    internal fun resetForTest(enabled: Boolean? = null) {
+        contributors.set(emptyMap())
+        nextContributorId.set(0L)
+        enabledForTest = enabled
+    }
+
+    private fun enabled(): Boolean = enabledForTest ?: DebugMemoryTracker.isEnabled()
 }
 
 /** Narrow diagnostics seam.  The release implementation is a stateless singleton. */
@@ -94,6 +117,8 @@ internal interface TrackerDiagnostics {
     fun rebindNativeSessionGeneration(handle: Long, generation: String)
     fun unregisterNativeSession(handle: Long)
     fun beginOperation(name: String, documentGeneration: String, baseContentToken: String, revision: Int, transientReserveBytes: Long, snapshotState: String): Long
+    fun registerTransientContributor(operationToken: Long, documentGeneration: String, label: String, knownBytes: Long?): Long
+    fun releaseTransientContributor(handle: Long): Boolean
     fun endOperation(name: String, token: Long)
     fun logSnapshot(tag: String)
     fun debugString(): String
@@ -113,6 +138,8 @@ private object NoopTrackerDiagnostics : TrackerDiagnostics {
     override fun rebindNativeSessionGeneration(handle: Long, generation: String) = Unit
     override fun unregisterNativeSession(handle: Long) = Unit
     override fun beginOperation(name: String, documentGeneration: String, baseContentToken: String, revision: Int, transientReserveBytes: Long, snapshotState: String) = 0L
+    override fun registerTransientContributor(operationToken: Long, documentGeneration: String, label: String, knownBytes: Long?) = 0L
+    override fun releaseTransientContributor(handle: Long) = false
     override fun endOperation(name: String, token: Long) = Unit
     override fun logSnapshot(tag: String) = Unit
     override fun debugString() = "release build - tracking disabled (stateless no-op)"
@@ -203,6 +230,8 @@ internal class TrackerSession(
         val residentBitmapBytes: Long,
         val nativeEstimateBytes: Long,
         val activeTransientReserveBytes: Long,
+        val knownLiveTransientBytes: Long = 0L,
+        val unknownTransientContributorCount: Long = 0L,
         val historyHotResidentBytes: Long,
         val coldLoadDecodedTransientBytes: Long,
         val historyColdCompressedBytes: Long,
@@ -233,6 +262,8 @@ internal class TrackerSession(
         val coldLoadDecodedTransientBytes: Long,
         val deletionDebtBytes: Long,
         val activeTransientReserveBytes: Long,
+        val knownLiveTransientBytes: Long = 0L,
+        val unknownTransientContributorCount: Long = 0L,
         val nativeEstimateBytes: Long,
         val unknownNativeContributorCount: Long,
         val combinedKnownEstimatedBytes: Long,
@@ -246,6 +277,14 @@ internal class TrackerSession(
         val thumbnailResidentBytes: Long = 0L,
         val thumbnailRemovedButLeasedBytes: Long = 0L,
         val globalModelContributors: List<GlobalModelContributor> = emptyList()
+    )
+
+    data class TransientContributorRecord(
+        val handle: Long,
+        val operationToken: Long,
+        val documentGeneration: String,
+        val label: String,
+        val knownBytes: Long?
     )
 
     data class HistoryMetricsSnapshot(
@@ -264,7 +303,9 @@ internal class TrackerSession(
         val timestamp: Long,
         val operationKind: HistoryOperationKind = HistoryOperationKind.Idle,
         val navigationDirection: String? = null,
-        val operationToken: Long = 0L
+        val operationToken: Long = 0L,
+        val recoveryMode: String? = null,
+        val operationPhase: String? = null
     )
 
     enum class HistoryOperationKind { Idle, Loading, Spilling, Adopting, Trimming, Maintenance, DirectToCold, Recovery }
@@ -286,6 +327,7 @@ internal class TrackerSession(
     private val nodes = ConcurrentHashMap<WeakIdentityKey, NodeEntry>()
     private val edgeIndex = ConcurrentHashMap<Long, NodeEntry>()
     private val operations = ConcurrentHashMap<String, OperationRecord>()
+    private val transientContributors = ConcurrentHashMap<Long, TransientContributorRecord>()
 
     private val documentGenerations = ConcurrentHashMap<String, Long>()
     private val documentPeaks = ConcurrentHashMap<String, AtomicReference<PeakSnapshot>>()
@@ -384,8 +426,13 @@ internal class TrackerSession(
         try { lock.withLock {
             if (lifecycle.get() != Lifecycle.Active) return
             registerDocument(newGeneration)
-            currentGeneration.set(newGeneration)
+            historyHotResidentBytes.set(0L)
+            historyHotEntryCount.set(0L)
+            historyColdCompressedBytes.set(0L)
+            coldLoadDecodedTransientBytes.set(0L)
+            deletionDebtBytes.set(0L)
             latestHistoryMetrics.set(null)
+            currentGeneration.set(newGeneration)
             previousGeneration?.takeIf { it != newGeneration }?.let(::unregisterDocument)
         } } catch (_: Throwable) { }
     }
@@ -593,6 +640,7 @@ internal class TrackerSession(
             lock.withLock {
                 if (lifecycle.get() == Lifecycle.Closed) return
                 operations.remove("$name:$token")
+                transientContributors.entries.removeAll { it.value.operationToken == token }
             }
         } catch (_: Throwable) {
         }
@@ -605,6 +653,44 @@ internal class TrackerSession(
             total = BitmapMemoryBudget.saturatingAdd(total, op.transientReserveBytes)
         }
         return total
+    }
+
+    override fun registerTransientContributor(
+        operationToken: Long,
+        documentGeneration: String,
+        label: String,
+        knownBytes: Long?
+    ): Long = try {
+        val handle = lock.withLock {
+            if (lifecycle.get() != Lifecycle.Active ||
+                operations.values.none { it.token == operationToken && it.documentGeneration == documentGeneration }
+            ) return@withLock 0L
+            val next = currentToken.incrementAndGet()
+            transientContributors[next] = TransientContributorRecord(
+                next,
+                operationToken,
+                documentGeneration,
+                label,
+                knownBytes?.coerceAtLeast(0L)
+            )
+            next
+        }
+        if (handle != 0L) considerPeak(documentGeneration)
+        handle
+    } catch (_: Throwable) { 0L }
+
+    override fun releaseTransientContributor(handle: Long): Boolean = try {
+        lock.withLock { transientContributors.remove(handle) != null }
+    } catch (_: Throwable) { false }
+
+    private fun getLiveTransientAndUnknown(documentGeneration: String): Pair<Long, Long> = lock.withLock {
+        var bytes = 0L
+        var unknown = 0L
+        transientContributors.values.forEach {
+            if (it.documentGeneration != documentGeneration) return@forEach
+            if (it.knownBytes == null) unknown++ else bytes = BitmapMemoryBudget.saturatingAdd(bytes, it.knownBytes)
+        }
+        bytes to unknown
     }
 
     private fun getNativeEstimateAndUnknown(documentGeneration: String = currentGeneration.get()): Pair<Long, Long> {
@@ -630,6 +716,28 @@ internal class TrackerSession(
         val byOwnerAcquisitions: Map<String, Int>,
         val byOperationAcquisitions: Map<String, Int>
     )
+
+    private data class HistoryAggregateSummary(
+        val hotBytes: Long,
+        val hotEntryCount: Int,
+        val coldBytes: Long,
+        val coldLoadBytes: Long,
+        val deletionDebtBytes: Long
+    )
+
+    private fun captureHistoryAggregates(documentGeneration: String): HistoryAggregateSummary = lock.withLock {
+        if (currentGeneration.get() != documentGeneration) {
+            HistoryAggregateSummary(0L, 0, 0L, 0L, 0L)
+        } else {
+            HistoryAggregateSummary(
+                historyHotResidentBytes.get(),
+                historyHotEntryCount.get().toInt(),
+                historyColdCompressedBytes.get(),
+                coldLoadDecodedTransientBytes.get(),
+                deletionDebtBytes.get()
+            )
+        }
+    }
 
     private fun captureLedgerSummary(documentGeneration: String = currentGeneration.get()): LedgerSummary = lock.withLock {
         purgeClearedReferencesLocked()
@@ -673,10 +781,12 @@ internal class TrackerSession(
             val nativeEstimate = BitmapMemoryBudget.saturatingAdd(sessionNativeEstimate, modelEstimate)
             val unknownNative = sessionUnknownNative + globalModels.count { it.knownEstimateBytes == null }
             val activeTransient = getActiveTransientReserve(documentGeneration)
-            val historyHot = historyHotResidentBytes.get()
-            val coldLoad = coldLoadDecodedTransientBytes.get()
-            val historyCold = historyColdCompressedBytes.get()
-            val deletionDebt = deletionDebtBytes.get()
+            val (liveTransient, unknownTransient) = getLiveTransientAndUnknown(documentGeneration)
+            val history = captureHistoryAggregates(documentGeneration)
+            val historyHot = history.hotBytes
+            val coldLoad = history.coldLoadBytes
+            val historyCold = history.coldBytes
+            val deletionDebt = history.deletionDebtBytes
             val thumbnails = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
             val combinedKnown = BitmapMemoryBudget.saturatingAdd(
                 snap.bytes,
@@ -684,7 +794,8 @@ internal class TrackerSession(
                     nativeEstimate,
                     BitmapMemoryBudget.saturatingAdd(
                         historyHot,
-                        BitmapMemoryBudget.saturatingAdd(coldLoad, BitmapMemoryBudget.saturatingAdd(activeTransient,
+                        BitmapMemoryBudget.saturatingAdd(coldLoad, BitmapMemoryBudget.saturatingAdd(
+                            BitmapMemoryBudget.saturatingAdd(activeTransient, liveTransient),
                             BitmapMemoryBudget.saturatingAdd(
                                 thumbnails.residentBytes,
                                 thumbnails.removedButLeasedBytes)))
@@ -703,13 +814,15 @@ internal class TrackerSession(
                         residentBitmapBytes = snap.bytes,
                         nativeEstimateBytes = nativeEstimate,
                         activeTransientReserveBytes = activeTransient,
+                        knownLiveTransientBytes = liveTransient,
+                        unknownTransientContributorCount = unknownTransient,
                         historyHotResidentBytes = historyHot,
                         coldLoadDecodedTransientBytes = coldLoad,
                         historyColdCompressedBytes = historyCold,
                         deletionDebtBytes = deletionDebt,
                         combinedKnownEstimatedPeakBytes = combinedKnown,
-                        combinedCompleteEstimatedPeakBytes = if (unknownNative == 0L) combinedWithUnknown else null,
-                        combinedHasUnknownContributors = unknownNative > 0L,
+                        combinedCompleteEstimatedPeakBytes = if (unknownNative + unknownTransient == 0L) combinedWithUnknown else null,
+                        combinedHasUnknownContributors = unknownNative + unknownTransient > 0L,
                         documentGeneration = documentGeneration,
                         timestamp = System.currentTimeMillis()
                     )
@@ -747,16 +860,18 @@ internal class TrackerSession(
             val ledger = captureLedgerSummary(generation)
             val (activeOps, sessions) = lock.withLock { operations.values.toList() to nativeSessions.values.toList() }
             val activeTransient = getActiveTransientReserve()
+            val (liveTransient, unknownTransient) = getLiveTransientAndUnknown(generation)
             val (sessionNativeEstimate, sessionUnknownNative) = getNativeEstimateAndUnknown()
             val globalModels = GlobalModelDiagnostics.snapshot()
             val nativeEstimate = globalModels.fold(sessionNativeEstimate) { total, model ->
                 BitmapMemoryBudget.saturatingAdd(total, model.knownEstimateBytes ?: 0L)
             }
             val unknownNative = sessionUnknownNative + globalModels.count { it.knownEstimateBytes == null }
-            val historyHot = historyHotResidentBytes.get()
-            val historyCold = historyColdCompressedBytes.get()
-            val coldLoad = coldLoadDecodedTransientBytes.get()
-            val deletionDebt = deletionDebtBytes.get()
+            val history = captureHistoryAggregates(generation)
+            val historyHot = history.hotBytes
+            val historyCold = history.coldBytes
+            val coldLoad = history.coldLoadBytes
+            val deletionDebt = history.deletionDebtBytes
             val thumbnails = ThumbnailBitmapCache.globalDiagnosticsSnapshot()
             val combinedKnown = BitmapMemoryBudget.saturatingAdd(
                 ledger.bytes,
@@ -764,7 +879,8 @@ internal class TrackerSession(
                     nativeEstimate,
                     BitmapMemoryBudget.saturatingAdd(
                         historyHot,
-                        BitmapMemoryBudget.saturatingAdd(coldLoad, BitmapMemoryBudget.saturatingAdd(activeTransient,
+                        BitmapMemoryBudget.saturatingAdd(coldLoad, BitmapMemoryBudget.saturatingAdd(
+                            BitmapMemoryBudget.saturatingAdd(activeTransient, liveTransient),
                             BitmapMemoryBudget.saturatingAdd(thumbnails.residentBytes, thumbnails.removedButLeasedBytes)))
                     )
                 )
@@ -785,16 +901,18 @@ internal class TrackerSession(
                 estimatedPeakBytes = peakSnap?.combinedKnownEstimatedPeakBytes ?: 0L,
                 peakSnapshot = peakSnap,
                 historyHotResidentBytes = historyHot,
-                historyHotEntryCount = historyHotEntryCount.get().toInt(),
+                historyHotEntryCount = history.hotEntryCount,
                 historyColdCompressedBytes = historyCold,
                 coldLoadDecodedTransientBytes = coldLoad,
                 deletionDebtBytes = deletionDebt,
                 activeTransientReserveBytes = activeTransient,
+                knownLiveTransientBytes = liveTransient,
+                unknownTransientContributorCount = unknownTransient,
                 nativeEstimateBytes = nativeEstimate,
                 unknownNativeContributorCount = unknownNative,
                 combinedKnownEstimatedBytes = combinedKnown,
-                combinedHasUnknownContributors = unknownNative > 0L,
-                combinedCompleteEstimatedBytes = if (unknownNative == 0L) combinedKnown else null,
+                combinedHasUnknownContributors = unknownNative + unknownTransient > 0L,
+                combinedCompleteEstimatedBytes = if (unknownNative + unknownTransient == 0L) combinedKnown else null,
                 timestamp = System.currentTimeMillis(),
                 activeThumbnailEntryCount = thumbnails.residentEntryCount,
                 activeThumbnailLeases = thumbnails.totalActiveLeases,
@@ -897,6 +1015,7 @@ internal class TrackerSession(
             nodes.clear()
             edgeIndex.clear()
             operations.clear()
+            transientContributors.clear()
             nativeSessions.clear()
             documentGenerations.clear()
             documentPeaks.clear()
@@ -926,6 +1045,7 @@ internal class TrackerSession(
                 nodes.clear()
                 edgeIndex.clear()
                 operations.clear()
+                transientContributors.clear()
                 nativeSessions.clear()
                 documentGenerations.clear()
                 documentPeaks.clear()

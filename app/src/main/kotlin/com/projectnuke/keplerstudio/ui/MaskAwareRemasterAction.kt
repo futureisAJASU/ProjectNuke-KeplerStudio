@@ -98,10 +98,10 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     basePreview = createdBase,
                     mask = mask,
                     state = current,
-                    revision = nextRevision
+                    revision = nextRevision,
+                    diagnostics = remasterTracker
                 )
                 remasteredOriginal = created
-                remasterTracker?.track(created, "remaster:original")
             }
 
             withContext(Dispatchers.Default) {
@@ -201,7 +201,8 @@ private fun renderMaskAwareRemaster(
     basePreview: Bitmap,
     mask: Bitmap,
     state: EditorUiState,
-    revision: Int
+    revision: Int,
+    diagnostics: com.projectnuke.keplerstudio.editor.MemoryTrackerScope?
 ): Bitmap {
     val baseParams = computeMaskAwareBaseParams(basePreview)
     val foregroundParams = baseParams.copy(
@@ -225,25 +226,44 @@ private fun renderMaskAwareRemaster(
     var foreground: Bitmap? = null
     var background: Bitmap? = null
     var resultOwned: Bitmap? = null
+    var foregroundEdge = 0L
+    var backgroundEdge = 0L
+    var resultEdge = 0L
     try {
         foreground = renderWithState(basePreview, foregroundParams, state, revision)
+        foregroundEdge = diagnostics?.track(foreground!!, "remaster:foregroundRender") ?: 0L
         background = renderWithState(basePreview, backgroundParams, state, revision)
+        backgroundEdge = diagnostics?.track(background!!, "remaster:backgroundRender") ?: 0L
         val blended = blendForegroundOverBackground(foreground, background, mask)
         resultOwned = blended
-        if (foreground === blended) foreground = null
-        if (background === blended) background = null
+        resultEdge = diagnostics?.track(blended, "remaster:blendedResult") ?: 0L
+        if (foreground === blended) {
+            diagnostics?.release(foregroundEdge)
+            foregroundEdge = 0L
+            foreground = null
+        }
+        if (background === blended) {
+            diagnostics?.release(backgroundEdge)
+            backgroundEdge = 0L
+            background = null
+        }
         return blended
     } catch (t: Throwable) {
         resultOwned?.takeIf { !it.isRecycled }?.recycle()
+        diagnostics?.release(resultEdge)
         resultOwned = null
         background?.takeIf { !it.isRecycled && it !== foreground }?.recycle()
+        diagnostics?.release(backgroundEdge)
         background = null
         foreground?.takeIf { !it.isRecycled }?.recycle()
+        diagnostics?.release(foregroundEdge)
         foreground = null
         throw t
     } finally {
         background?.takeIf { !it.isRecycled }?.recycle()
+        diagnostics?.release(backgroundEdge)
         foreground?.takeIf { !it.isRecycled }?.recycle()
+        diagnostics?.release(foregroundEdge)
     }
 }
 

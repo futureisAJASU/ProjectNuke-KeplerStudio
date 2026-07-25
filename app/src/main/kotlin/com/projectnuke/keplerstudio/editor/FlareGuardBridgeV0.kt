@@ -32,7 +32,7 @@ fun applyFlareGuardModelOrRuleV0(
     }
 ): Bitmap = applyFlareGuardModelOrRuleResultV0(context, source, mode, strength).bitmap
 
-fun applyFlareGuardModelOrRuleResultV0(
+internal fun applyFlareGuardModelOrRuleResultV0(
     context: Context,
     source: Bitmap,
     mode: FlareGuardMode,
@@ -40,7 +40,8 @@ fun applyFlareGuardModelOrRuleResultV0(
         FlareGuardMode.NightLight -> 0.28f
         FlareGuardMode.DaySun -> 0.24f
     },
-    allowRuleFallback: Boolean = true
+    allowRuleFallback: Boolean = true,
+    diagnostics: MemoryTrackerScope? = null
 ): FlareGuardApplyResult {
     val runner = FlareGuardModelRunner.createOrNull(context)
     if (runner != null) {
@@ -49,7 +50,7 @@ fun applyFlareGuardModelOrRuleResultV0(
                 FLARE_GUARD_BRIDGE_TAG,
                 "FlareGuard model loaded: mode=$mode input=${runner.inputWidth}x${runner.inputHeight} source=${source.width}x${source.height}"
             )
-            val result = runner.predictMaskOrNull(source)
+            val result = runner.predictMaskOrNull(source, diagnostics)
             if (result != null) {
                 Log.i(
                     FLARE_GUARD_BRIDGE_TAG,
@@ -62,6 +63,7 @@ fun applyFlareGuardModelOrRuleResultV0(
                     )
                 } finally {
                     result.mask.recycle()
+                    diagnostics?.release(result.diagnosticEdge)
                 }
             }
             Log.w(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model inference returned null")

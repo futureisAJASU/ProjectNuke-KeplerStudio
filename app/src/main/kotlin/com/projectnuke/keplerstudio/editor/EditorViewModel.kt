@@ -437,7 +437,7 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
     internal fun launchManagedEdit(block: suspend (Long) -> Unit): Job {
         managedEditJob?.cancel()
         val token = ++managedEditToken
-        return viewModelScope.launch {
+        return viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 block(token)
             } finally {
@@ -926,7 +926,13 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
             }
             return null
         }
-        return runCatching { state.toHistorySnapshot(effectiveStorage).also { it.coordinatorGeneration = historyCoordinator.currentGeneration() } }.getOrNull()
+        return runCatching {
+            state.toHistorySnapshot(effectiveStorage).also {
+                val generation = historyCoordinator.currentGeneration()
+                it.coordinatorGeneration = generation
+                it.attachLocalDiagnostics(trackerSession, generation)
+            }
+        }.getOrNull()
     }
 
     internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean) {
@@ -1189,7 +1195,6 @@ private suspend fun settleCommittedDraft(
 
         viewModelScope.launch {
             var preview: Bitmap? = null
-            var previewEdge = 0L
             var createdSession = 0L
             var sourceFile: File? = null
             val opTracker = beginMemoryTracking("openImage", snapshotState = "decoding")
@@ -1198,9 +1203,8 @@ private suspend fun settleCommittedDraft(
                 withContext(Dispatchers.IO) {
                     val copiedSource = copyUriToCache(context, uri)
                     sourceFile = copiedSource
-                    val decoded = decodeSampledMutableBitmapWithExif(copiedSource.absolutePath, maxSide = 2048)
+                    val decoded = decodeSampledMutableBitmapWithExif(copiedSource.absolutePath, maxSide = 2048, opTracker)
                     preview = decoded
-                    previewEdge = opTracker?.track(decoded, "openImage:decodedPreview") ?: 0L
                 }
                 if (shuttingDown || openToken != restoreDraftToken) {
                     preview?.recycle()
@@ -1267,8 +1271,6 @@ private suspend fun settleCommittedDraft(
                 createdSession = 0L
                 tracker.updateNativeSession(nativeSession, "active")
                 lastSuccessfullyRenderedParams = EditParams()
-                opTracker?.release(previewEdge)
-                previewEdge = 0L
                 preview = null
                 releaseNativeSessionHandle(previousSession)
                 deleteOwnedWorkingSource(context, previousState.sourcePath)
@@ -1619,9 +1621,8 @@ private suspend fun settleCommittedDraft(
         renderJob = launchManagedEdit { operationToken ->
             try {
                 withContext(Dispatchers.IO) {
-                    val result = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048)
+                    val result = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048, resetTracker)
                     decoded = result
-                    resetTracker?.track(result, "resetAdjustments:decoded")
                 }
                 val identityUnchanged = uiState.value.sourcePath == sourcePath &&
                     uiState.value.baseContentToken == baseContentToken
@@ -2628,7 +2629,13 @@ fun clearDraft() {
                 ownedBaseOwned = baseOriginal.copyOrThrow()
                 flareTracker?.track(checkNotNull(ownedBaseOwned), "applyFlareGuard:ownedBase")
                 val result = withContext(Dispatchers.Default) {
-                    val r = applyFlareGuardModelOrRuleResultV0(appContext, checkNotNull(ownedBaseOwned), mode, allowRuleFallback = true)
+                    val r = applyFlareGuardModelOrRuleResultV0(
+                        appContext,
+                        checkNotNull(ownedBaseOwned),
+                        mode,
+                        allowRuleFallback = true,
+                        diagnostics = flareTracker
+                    )
                     flareGuardResult = r
                     flareGuardBitmap = r.bitmap
                     r
@@ -2761,9 +2768,8 @@ fun clearDraft() {
             withContext(Dispatchers.IO) {
                 val workingSource = copyGenerationSourceToWorkingFile(context, validated.sourceFile)
                 ownedWorkingSource = workingSource
-                val decodedBase = decodeSampledMutableBitmapWithExif(workingSource.absolutePath, maxSide = 2048)
+                val decodedBase = decodeSampledMutableBitmapWithExif(workingSource.absolutePath, maxSide = 2048, restoreTracker)
                 ownedBase = decodedBase
-                restoreTracker?.track(decodedBase, "restoreDraft:base")
                 validated.maskFiles.forEach { file ->
                     val mask = decodeMutableBitmapOrThrow(file.absolutePath)
                     try {
@@ -3068,9 +3074,8 @@ fun clearDraft() {
         }
         try {
             withContext(Dispatchers.IO) {
-                val decoded = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048)
+                val decoded = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048, restoreTracker)
                 preview = decoded
-                restoreTracker?.track(decoded, "restoreLegacyDraft:base")
             }
             val nextRevision = _uiState.value.revision + 1
             expectedRestoreRevision = nextRevision
@@ -3453,8 +3458,54 @@ internal data class EditorHistorySnapshot(
     val flareGuardRuntimeStatus: String?,
     val storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
     var resourcesReleased: Boolean = false,
-    var coordinatorGeneration: String? = null
-)
+    var coordinatorGeneration: String? = null,
+    private var localDiagnostics: HistorySnapshotDiagnostics? = null
+) {
+    internal fun attachLocalDiagnostics(session: TrackerSession?, generation: String) {
+        if (session == null || storage == HistorySnapshotStorage.MetadataOnly || localDiagnostics != null) return
+        localDiagnostics = HistorySnapshotDiagnostics.acquire(session, this, generation)
+    }
+
+    internal fun transferDiagnosticsToCoordinator() {
+        localDiagnostics?.release()
+        localDiagnostics = null
+    }
+
+    internal fun releaseLocalDiagnostics() {
+        localDiagnostics?.release()
+        localDiagnostics = null
+    }
+}
+
+/** Handle-only snapshot ownership. The weak session reference cannot retain an editor ViewModel. */
+internal class HistorySnapshotDiagnostics(
+    session: TrackerSession,
+    private val handles: LongArray
+) {
+    private val session = java.lang.ref.WeakReference(session)
+
+    fun release() {
+        val target = session.get() ?: return
+        handles.forEach(target::releaseEdge)
+    }
+
+    companion object {
+        fun acquire(session: TrackerSession, snapshot: EditorHistorySnapshot, generation: String): HistorySnapshotDiagnostics {
+            val handles = ArrayList<Long>()
+            fun track(bitmap: Bitmap?, owner: String) {
+                bitmap?.takeUnless(Bitmap::isRecycled)?.let {
+                    session.registerBitmap(it, owner, "HistorySnapshot:local", 0L, generation)
+                        .takeIf { handle -> handle != 0L }
+                        ?.let(handles::add)
+                }
+            }
+            track(snapshot.previewBitmap, "HistorySnapshot:preview")
+            track(snapshot.originalPreviewBitmap, "HistorySnapshot:original")
+            snapshot.selectionLayers.forEach { track(it.bitmap, "HistorySnapshot:selection:${it.id}") }
+            return HistorySnapshotDiagnostics(session, handles.toLongArray())
+        }
+    }
+}
 
 /**
  * One instance per gesture. Old preview/finish jobs must re-confirm they still own this
@@ -3668,6 +3719,7 @@ internal fun EditorHistorySnapshot.recycleBitmaps() {
         Log.w(FLARE_GUARD_AI_TAG, "History bitmap release underflow: snapshot already released")
         return
     }
+    releaseLocalDiagnostics()
     resourcesReleased = true
     val bitmaps = identityBitmapSet()
     previewBitmap?.let(bitmaps::add)
@@ -3995,7 +4047,9 @@ private fun persistentDraftThumbnailFile(context: Context): File =
 private fun persistentDraftDirectory(context: Context): File =
     File(context.filesDir, "drafts/current").apply { mkdirs() }
 
-private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
+private data class TrackedDecode(val bitmap: Bitmap, val edge: Long)
+
+private fun decodeSampledMutableBitmap(path: String, maxSide: Int, diagnostics: MemoryTrackerScope?): TrackedDecode {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(path, bounds)
     require(bounds.outWidth > 0 && bounds.outHeight > 0) { "지원하지 않는 이미지이거나 디코딩에 실패했습니다" }
@@ -4017,25 +4071,42 @@ private fun decodeSampledMutableBitmap(path: String, maxSide: Int): Bitmap {
         inMutable = true
     }
     var decoded: Bitmap? = null
+    var decodedEdge = 0L
     try {
         decoded = requireNotNull(BitmapFactory.decodeFile(path, options)) { "미리보기 디코딩에 실패했습니다" }
-        if (decoded!!.config == Bitmap.Config.ARGB_8888 && decoded!!.isMutable) return decoded!!
+        if (decoded!!.config == Bitmap.Config.ARGB_8888 && decoded!!.isMutable) {
+            return TrackedDecode(decoded!!, diagnostics?.track(decoded!!, "decode:source") ?: 0L)
+        }
+        decodedEdge = diagnostics?.track(decoded!!, "decode:source") ?: 0L
         val mutable = decoded!!.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+        val mutableEdge = diagnostics?.track(mutable, "decode:mutableResult") ?: 0L
         decoded!!.recycle()
+        diagnostics?.release(decodedEdge)
         decoded = null
-        return mutable
+        return TrackedDecode(mutable, mutableEdge)
     } catch (t: Throwable) {
         decoded?.takeUnless(Bitmap::isRecycled)?.recycle()
+        diagnostics?.release(decodedEdge)
         if (t is OutOfMemoryError) throw BitmapAllocationRejectedException(decodePeakBytes)
         throw t
     }
 }
 
-private fun decodeSampledMutableBitmapWithExif(path: String, maxSide: Int): Bitmap {
-    return applyExifOrientation(path, decodeSampledMutableBitmap(path, maxSide))
+private fun decodeSampledMutableBitmapWithExif(
+    path: String,
+    maxSide: Int,
+    diagnostics: MemoryTrackerScope? = null
+): Bitmap {
+    val decoded = decodeSampledMutableBitmap(path, maxSide, diagnostics)
+    return applyExifOrientation(path, decoded.bitmap, decoded.edge, diagnostics)
 }
 
-private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
+private fun applyExifOrientation(
+    path: String,
+    bitmap: Bitmap,
+    bitmapEdge: Long,
+    diagnostics: MemoryTrackerScope?
+): Bitmap {
     val orientation = runCatching {
         ExifInterface(path).getAttributeInt(
             ExifInterface.TAG_ORIENTATION,
@@ -4069,11 +4140,17 @@ private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
     }
     var transformed: Bitmap? = null
     var mutable: Bitmap? = null
+    var transformedEdge = 0L
+    var mutableEdge = 0L
     try {
         transformed = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (transformed !== bitmap) transformedEdge = diagnostics?.track(transformed!!, "decode:exifTransformed") ?: 0L
         mutable = transformed!!.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+        mutableEdge = diagnostics?.track(mutable!!, "decode:exifMutableResult") ?: 0L
         if (transformed !== bitmap && !transformed!!.isRecycled) transformed!!.recycle()
+        diagnostics?.release(transformedEdge)
         if (mutable !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+        diagnostics?.release(bitmapEdge)
         val result = mutable!!
         mutable = null
         transformed = null
@@ -4081,8 +4158,11 @@ private fun applyExifOrientation(path: String, bitmap: Bitmap): Bitmap {
         return result
     } catch (t: Throwable) {
         mutable?.takeUnless(Bitmap::isRecycled)?.recycle()
+        diagnostics?.release(mutableEdge)
         transformed?.takeUnless { it === bitmap || it.isRecycled }?.recycle()
+        diagnostics?.release(transformedEdge)
         if (transformed !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+        diagnostics?.release(bitmapEdge)
         if (t is OutOfMemoryError) throw BitmapAllocationRejectedException(transformPeakBytes)
         throw t
     }
