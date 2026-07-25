@@ -197,17 +197,15 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             undoSnapshotOwned?.let(::recycleHistorySnapshot)
             remasterTracker?.end()
         }
-  }, handoff = PreparedResourceHandoff.create(
+}, handoff = PreparedResourceHandoff.create(
     token = nextRevision.toLong(),
-        prepareTracker = remasterPrepareTracker,
-        undoSnapshot = undoSnapshot
-    ) {
-        ownedBase?.takeIf { !it.isRecycled }?.recycle()
-        ownedBase = null
-        undoSnapshot?.let(::recycleHistorySnapshot)
-        undoSnapshot = null
-        remasterPrepareTracker?.end()
-    })
+    prepareTracker = remasterPrepareTracker,
+    undoSnapshot = undoSnapshot
+  ) {
+    ownedBase?.takeIf { !it.isRecycled }?.recycle()
+    undoSnapshot?.let(::recycleHistorySnapshot)
+    remasterPrepareTracker?.end()
+  })
 }
 
 private fun renderMaskAwareRemaster(

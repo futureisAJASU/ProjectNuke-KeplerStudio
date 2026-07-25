@@ -44,7 +44,7 @@ fun EditorViewModel.updateCropRect(left: Float, top: Float, right: Float, bottom
 
 fun EditorViewModel.rotateCropLeft() { if (!canEnterEditorAction()) return; invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(rotationDegrees = it.cropState.rotationDegrees - 90).normalized()) } }
 fun EditorViewModel.rotateCropRight() { if (!canEnterEditorAction()) return; invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(rotationDegrees = it.cropState.rotationDegrees + 90).normalized()) } }
-fun EditorViewModel.toggleCropFlipHorizontal() { if (!canEnterEditorAction()) return; invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(flipHorizontal = !it.flipHorizontal)) } }
+fun EditorViewModel.toggleCropFlipHorizontal() { if (!canEnterEditorAction()) return; invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(flipHorizontal = !it.cropState.flipHorizontal)) } }
 fun EditorViewModel.setStraightenDegrees(value: Float) { if (!canEnterEditorAction()) return; invalidateCropOperation(); updateUiState { it.copy(cropState = it.cropState.copy(straightenDegrees = value.coerceIn(-45f, 45f))) } }
 
 fun EditorViewModel.autoStraightenCrop() {
@@ -240,10 +240,13 @@ fun EditorViewModel.applyCropTransform() {
     prepareTracker = cropPrepareTracker,
     undoSnapshot = undoSnapshot
   ) {
-        undoSnapshot?.let(::recycleHistorySnapshot)
-        undoSnapshot = null
-        cropPrepareTracker?.end()
-    })
+    maskInputs.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+    previewInput?.takeIf { !it.isRecycled }?.recycle()
+    if (originalInput !== previewInput) originalInput?.takeIf { !it.isRecycled }?.recycle()
+    undoSnapshot?.let(::recycleHistorySnapshot)
+    cropPrepareTracker?.end()
+    invalidateCropOperation()
+  })
 }
 
 private fun EditorViewModel.identityBitmapSetForFinally(): MutableSet<Bitmap> = Collections.newSetFromMap(IdentityHashMap())

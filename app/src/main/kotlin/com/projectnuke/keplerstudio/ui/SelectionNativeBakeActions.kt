@@ -165,6 +165,8 @@ bakeTracker?.track(checkNotNull(ownedBase), "selectionBake:base")
     prepareTracker = prepareTracker,
     undoSnapshot = undoSnapshot
   ) {
+    ownedBase?.takeIf { !it.isRecycled }?.recycle()
+    ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
     undoSnapshot?.let(::recycleHistorySnapshot)
     prepareTracker?.end()
   })

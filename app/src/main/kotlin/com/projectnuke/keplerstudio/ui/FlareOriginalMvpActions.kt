@@ -36,7 +36,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
     }
 
   val undoSnapshot = captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
-  var ownedBase = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
+  var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
         undoSnapshot?.let(::recycleHistorySnapshot)
         updateUiState { it.copy(message = "이미지를 준비하지 못했습니다.") }
         if (failure is BitmapAllocationRejectedException) {
@@ -140,11 +140,11 @@ launchManagedEditWithPreparedResources({ operationToken ->
             ownedBase?.let { if (!it.isRecycled) it.recycle() }
             ownedPreview?.let { if (!it.isRecycled) it.recycle() }
         }
-  }, handoff = PreparedResourceHandoff.create(
+}, handoff = PreparedResourceHandoff.create(
     token = nextRevision.toLong(),
-        prepareTracker = null,
-        undoSnapshot = undoSnapshot
-    ) {
-        undoSnapshot?.let(::recycleHistorySnapshot)
-    })
+    prepareTracker = null,
+    undoSnapshot = undoSnapshot
+  ) {
+    undoSnapshot?.let(::recycleHistorySnapshot)
+  })
 }

@@ -147,7 +147,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             ownedBase.recycle()
             selectionTracker?.end()
         }
-  }, handoff = PreparedResourceHandoff.create(
+}, handoff = PreparedResourceHandoff.create(
     token = sourceRevision.toLong(),
     prepareTracker = selectionTracker,
     undoSnapshot = undoSnapshot
