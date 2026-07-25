@@ -434,19 +434,30 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
     }
 
     /** Starts a superseding bitmap/model edit. Callers must gate adoption with [isManagedEditCurrent]. */
-    internal fun launchManagedEdit(block: suspend (Long) -> Unit): Job {
+    internal fun launchManagedEdit(block: suspend (Long) -> Unit): Job =
+        launchManagedEditWithPreparedResources(block)
+
+    internal fun launchManagedEditWithPreparedResources(
+        block: suspend (Long) -> Unit,
+        onChildNeverStarted: () -> Unit = {}
+    ): Job {
         managedEditJob?.cancel()
         val token = ++managedEditToken
-        lateinit var job: Job
-        job = viewModelScope.launch {
+        val started = java.util.concurrent.atomic.AtomicBoolean(false)
+        val job = viewModelScope.launch {
+            val self = currentCoroutineContext()[Job]
+            started.set(true)
             try {
                 block(token)
             } finally {
-                if (managedEditToken == token && managedEditJob === job) managedEditJob = null
+                if (managedEditToken == token && managedEditJob === self) managedEditJob = null
             }
         }
         managedEditJob = job
-        job.invokeOnCompletion { if (managedEditToken == token && managedEditJob === job) managedEditJob = null }
+        job.invokeOnCompletion {
+            if (!started.get()) runCatching(onChildNeverStarted)
+            if (managedEditToken == token && managedEditJob === job) managedEditJob = null
+        }
         if (job.isCompleted && managedEditJob === job) managedEditJob = null
         return job
     }
@@ -942,7 +953,10 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
 
     internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean) {
         val reserve = _uiState.value.historyBitmapBytes()
+        val started = java.util.concurrent.atomic.AtomicBoolean(false)
         val job = viewModelScope.launch(NonCancellable) {
+            started.set(true)
+            snapshot.claimCoordinatorOwnership()
             val result = historyCoordinator.admitAdoptedSnapshot(snapshot, clearRedo, reserve)
             if (historyIoJob === currentCoroutineContext()[Job]) historyIoJob = null
             updateHistoryFlags()
@@ -956,7 +970,7 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
         }
         historyIoJob = job
         job.invokeOnCompletion {
-            if (job.isCancelled) snapshot.recycleBitmaps()
+            if (!started.get() && snapshot.callerOwnsBeforeAdmission()) snapshot.recycleBitmaps()
             if (historyIoJob === job) historyIoJob = null
         }
         if (job.isCompleted && historyIoJob === job) historyIoJob = null
@@ -1903,7 +1917,8 @@ return
                                 engines = exportEngines,
                                 revision = exportRevision + 1,
                                 look = exportLook,
-                                quickEffects = exportQuickEffects
+                                quickEffects = exportQuickEffects,
+                                diagnostics = exportTracker
                             )
                         } else {
                             renderEditedExport(
@@ -1926,7 +1941,6 @@ return
                 val exportResult = ownedExportResult ?: run {
                     return@launch
                 }
-                exportTracker?.track(exportResult, "exportPreview:result")
                 markMemoryRetrySucceeded(MemoryRetryAction.ExportPreview)
                 val exportedResolutionLabel = "${exportResult.width}x${exportResult.height}"
 
@@ -3493,8 +3507,11 @@ internal data class EditorHistorySnapshot(
     val storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
     var resourcesReleased: Boolean = false,
     var coordinatorGeneration: String? = null,
-    private var localDiagnostics: HistorySnapshotDiagnostics? = null
+    private var localDiagnostics: HistorySnapshotDiagnostics? = null,
+    @Transient private var admissionOwner: HistorySnapshotAdmissionOwner = HistorySnapshotAdmissionOwner.Caller
 ) {
+    internal fun claimCoordinatorOwnership() { admissionOwner = HistorySnapshotAdmissionOwner.Coordinator }
+    internal fun callerOwnsBeforeAdmission(): Boolean = admissionOwner == HistorySnapshotAdmissionOwner.Caller
     internal fun attachLocalDiagnostics(session: TrackerSession?, generation: String) {
         if (session == null || storage == HistorySnapshotStorage.MetadataOnly || localDiagnostics != null) return
         localDiagnostics = HistorySnapshotDiagnostics.acquire(session, this, generation)
@@ -3510,6 +3527,8 @@ internal data class EditorHistorySnapshot(
         localDiagnostics = null
     }
 }
+
+internal enum class HistorySnapshotAdmissionOwner { Caller, Coordinator }
 
 /** Handle-only snapshot ownership. The weak session reference cannot retain an editor ViewModel. */
 internal class HistorySnapshotDiagnostics(
@@ -3767,6 +3786,7 @@ internal fun EditorHistorySnapshot.recycleBitmaps() {
 
 internal fun EditorHistorySnapshot.releaseBitmapOwnership() {
     check(!resourcesReleased) { "history snapshot resources already released" }
+    releaseLocalDiagnostics()
     resourcesReleased = true
     previewBitmap = null
     originalPreviewBitmap = null
@@ -4307,7 +4327,7 @@ private fun renderEditedExport(
         renderBitmapInNative(working, params, engines, revision, look)
         applyActiveQuickEffectsToBitmap(working, quickEffects, revision)
         applySelectedToneEngine(working, engines.toneEngine)
-        scaled = scaleBitmapForExport(working, resolution)
+        scaled = scaleBitmapForExport(working, resolution, diagnostics)
         if (scaled !== working) {
             working.recycle()
         }
@@ -4329,7 +4349,8 @@ private fun renderEditedExportFromBitmap(
     engines: EngineSelection,
     revision: Int,
     look: PresetColorLook? = null,
-    quickEffects: List<ActiveQuickEffect> = emptyList()
+    quickEffects: List<ActiveQuickEffect> = emptyList(),
+    diagnostics: MemoryTrackerScope? = null
 ): Bitmap {
     var working: Bitmap? = ownedBaseBitmap
     var scaled: Bitmap? = null
@@ -4338,7 +4359,7 @@ private fun renderEditedExportFromBitmap(
         renderBitmapInNative(renderTarget, params, engines, revision, look)
         applyActiveQuickEffectsToBitmap(renderTarget, quickEffects, revision)
         applySelectedToneEngine(renderTarget, engines.toneEngine)
-        scaled = scaleBitmapForExport(renderTarget, resolution)
+        scaled = scaleBitmapForExport(renderTarget, resolution, diagnostics)
         if (scaled !== renderTarget) {
             renderTarget.recycle()
         }
@@ -4529,12 +4550,14 @@ private fun smoothstepFloat(edge0: Float, edge1: Float, value: Float): Float {
 
 private fun lerpFloat(a: Float, b: Float, t: Float): Float = a + (b - a) * t
 
-private fun scaleBitmapForExport(bitmap: Bitmap, resolution: ExportResolution): Bitmap {
+private fun scaleBitmapForExport(bitmap: Bitmap, resolution: ExportResolution, diagnostics: MemoryTrackerScope? = null): Bitmap {
     if (resolution.scalePercent >= 100) return bitmap
     val scale = resolution.scalePercent / 100f
     val width = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
     val height = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
-    return createScaledBitmapOrThrow(bitmap, width, height, true)
+    return createScaledBitmapOrThrow(bitmap, width, height, true).also {
+        diagnostics?.track(it, "export:scaledResult")
+    }
 }
 
 private fun insertExportPendingRow(

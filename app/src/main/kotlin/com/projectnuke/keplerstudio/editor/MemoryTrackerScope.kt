@@ -85,8 +85,11 @@ internal class MemoryTrackerScope private constructor(
 
     fun releaseTransient(handle: Long) {
         if (handle == 0L) return
-        tracker.releaseTransientContributor(handle)
-        transientContributors.remove(handle)
+        ownershipLock.lock()
+        try {
+            tracker.releaseTransientContributor(handle)
+            transientContributors.remove(handle)
+        } finally { ownershipLock.unlock() }
     }
 
     fun end() {

@@ -73,8 +73,9 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         )
     }
 
-    launchManagedEdit { operationToken ->
+    launchManagedEditWithPreparedResources({ operationToken ->
         var modelMask: Bitmap? = null
+        var modelMaskEdge = 0L
         var remasteredOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
         var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
@@ -91,9 +92,9 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         try {
             withContext(Dispatchers.Default) {
                 val createdBase = checkNotNull(ownedBaseOwned)
-                val mask = RemasterModelSession.createForegroundMask(createdBase, remasterTracker) ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
+                val mask = RemasterModelSession.createForegroundMask(createdBase, remasterTracker) { modelMaskEdge = it }
+                    ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
                 modelMask = mask
-                remasterTracker?.track(mask, "remaster:modelMask")
                 val created = renderMaskAwareRemaster(
                     basePreview = createdBase,
                     mask = mask,
@@ -190,11 +191,18 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             renderedPreview?.takeIf { !it.isRecycled }?.recycle()
             remasteredOriginal?.takeIf { !it.isRecycled }?.recycle()
             modelMask?.takeIf { !it.isRecycled }?.recycle()
+            remasterTracker?.release(modelMaskEdge)
             ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
             undoSnapshotOwned?.let(::recycleHistorySnapshot)
             remasterTracker?.end()
         }
-    }
+    }, onChildNeverStarted = {
+        ownedBase?.takeIf { !it.isRecycled }?.recycle()
+        ownedBase = null
+        undoSnapshot?.let(::recycleHistorySnapshot)
+        undoSnapshot = null
+        remasterPrepareTracker?.end()
+    })
 }
 
 private fun renderMaskAwareRemaster(

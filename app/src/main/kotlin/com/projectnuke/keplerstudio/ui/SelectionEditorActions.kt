@@ -63,16 +63,18 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         return
     }
     updateUiState { it.copy(isBusy = true, message = busyMessage) }
-    launchManagedEdit { operationToken ->
+    launchManagedEditWithPreparedResources({ operationToken ->
         var pendingLayerBitmap: Bitmap? = null
         try {
             val layer = withContext(Dispatchers.Default) {
-                val mask = RemasterModelSession.createForegroundMask(ownedBase)
+                var modelMaskEdge = 0L
+                val mask = RemasterModelSession.createForegroundMask(ownedBase, selectionTracker) { modelMaskEdge = it }
                     ?: error("\uB9C8\uC2A4\uD06C\uB97C \uC0DD\uC131\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.")
                 val ownedMask = try {
                     mask.copyOrThrow(Bitmap.Config.ARGB_8888, true)
                 } finally {
                     mask.recycle()
+                    selectionTracker?.release(modelMaskEdge)
                 }
                 if (!ownedMask.hasForegroundPixel()) {
                     ownedMask.recycle()
@@ -95,7 +97,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 if (isManagedEditCurrent(operationToken, sourceRevision) && current.sourcePath == sourcePath && current.revision == sourceRevision) {
                     updateUiState { it.copy(isBusy = false, message = "\uD53C\uC0AC\uCCB4\uB97C \uAC10\uC9C0\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.") }
                 }
-                return@launchManagedEdit
+                return@launchManagedEditWithPreparedResources
             }
             var applied = false
             updateUiState { current ->
@@ -117,7 +119,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 undoSnapshot?.let(::recycleHistorySnapshot)
                 undoSnapshot = null
                 val current = uiState.value
-                return@launchManagedEdit
+                return@launchManagedEditWithPreparedResources
             }
             settleAdoptedEditHistory(undoSnapshot)
             undoSnapshot = null
@@ -144,7 +146,12 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             ownedBase.recycle()
             selectionTracker?.end()
         }
-    }
+    }, onChildNeverStarted = {
+        if (!ownedBase.isRecycled) ownedBase.recycle()
+        undoSnapshot?.let(::recycleHistorySnapshot)
+        undoSnapshot = null
+        selectionTracker?.end()
+    })
 }
 
 fun EditorViewModel.createBrushSelection() {

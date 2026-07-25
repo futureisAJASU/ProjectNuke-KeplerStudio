@@ -90,13 +90,17 @@ object RemasterModelSession {
         }
     }
 
-    internal suspend fun createForegroundMask(bitmap: Bitmap, diagnostics: MemoryTrackerScope? = null): Bitmap? = modelMutex.withLock {
+    internal suspend fun createForegroundMask(
+        bitmap: Bitmap,
+        diagnostics: MemoryTrackerScope? = null,
+        onOwnedEdge: (Long) -> Unit = {}
+    ): Bitmap? = modelMutex.withLock {
         if (activeModel?.id != "edge_masker" || !isModelLoaded) return@withLock null
         val model = closeableModel ?: return@withLock null
         isInferring = true
         GlobalModelDiagnostics.publish("RemasterModelSession", "inferring")
         try {
-            runCatching { createForegroundMaskFromSegmenter(model, bitmap, diagnostics) }.getOrNull()
+            runCatching { createForegroundMaskFromSegmenter(model, bitmap, diagnostics, onOwnedEdge) }.getOrNull()
         } finally {
             isInferring = false
             GlobalModelDiagnostics.publish("RemasterModelSession", if (isModelLoaded) "loaded" else "unloaded")
@@ -171,7 +175,7 @@ object RemasterModelSession {
         }
     }
 
-    private fun createForegroundMaskFromSegmenter(segmenter: Any, bitmap: Bitmap, diagnostics: MemoryTrackerScope?): Bitmap {
+    private fun createForegroundMaskFromSegmenter(segmenter: Any, bitmap: Bitmap, diagnostics: MemoryTrackerScope?, onOwnedEdge: (Long) -> Unit): Bitmap {
         val imageBuilderClass = Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
         val inputCopy = bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, false)
             ?: error("입력 이미지를 복사하지 못했습니다.")
@@ -208,7 +212,7 @@ object RemasterModelSession {
                 if (!rawMask.isRecycled) rawMask.recycle()
                 diagnostics?.release(rawEdge)
             }
-            diagnostics?.track(checkNotNull(foregroundMask), "remaster:finalArgbMask")
+            diagnostics?.track(checkNotNull(foregroundMask), "remaster:finalArgbMask")?.let(onOwnedEdge)
             return foregroundMask
         } catch (t: Throwable) {
             primaryFailure = t
