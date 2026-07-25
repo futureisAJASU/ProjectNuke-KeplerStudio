@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.engineSelection
+import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -13,6 +14,7 @@ import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -42,26 +44,24 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     val sourcePath = current.sourcePath
     val baseContentToken = current.baseContentToken
 
-    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-    val prepareTracker = beginMemoryTracking("selectionNativeBake:prepare", snapshotState = "copying")
+        val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
+    val prepareTracker = beginMemoryTracking("selectionNativeBake:prepare", snapshotState = "copying", transientReserveBytes = BitmapMemoryBudget.operationReserveBytes())
 
-    var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse { failure ->
+    val ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow() }.getOrElse { failure ->
         prepareTracker?.end()
         undoSnapshot?.let(::recycleHistorySnapshot)
-        undoSnapshot = null
         updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
         if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.ApplySelectionNative, failure.requiredBytes)
         return
     }
     prepareTracker?.track(checkNotNull(ownedBase), "selectionBake:base")
-    var ownedLayers: List<com.projectnuke.keplerstudio.editor.SelectionLayer> = runCatching {
+    val ownedLayers: List<com.projectnuke.keplerstudio.editor.SelectionLayer> = runCatching {
         enabledLayers.copyBitmapsOwned()
     }.getOrElse { failure ->
         ownedBase?.takeIf { !it.isRecycled }?.recycle()
         ownedBase = null
         prepareTracker?.end()
         undoSnapshot?.let(::recycleHistorySnapshot)
-        undoSnapshot = null
         updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
         if (failure is BitmapAllocationRejectedException) requestAllocationRecovery(MemoryRetryAction.ApplySelectionNative, failure.requiredBytes)
         return
@@ -76,7 +76,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         )
     }
 
-    launchManagedEdit { operationToken ->
+    launchManagedEditWithPreparedResources({ operationToken ->
         var bakedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
         val bakeTracker = beginMemoryTracking(

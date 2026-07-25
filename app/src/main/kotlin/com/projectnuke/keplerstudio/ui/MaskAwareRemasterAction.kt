@@ -6,6 +6,7 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
@@ -196,7 +197,11 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             undoSnapshotOwned?.let(::recycleHistorySnapshot)
             remasterTracker?.end()
         }
-    }, onChildNeverStarted = {
+    }, handoff = PreparedResourceHandoff.create(
+        token = nextRevision,
+        prepareTracker = remasterPrepareTracker,
+        undoSnapshot = undoSnapshot
+    ) {
         ownedBase?.takeIf { !it.isRecycled }?.recycle()
         ownedBase = null
         undoSnapshot?.let(::recycleHistorySnapshot)

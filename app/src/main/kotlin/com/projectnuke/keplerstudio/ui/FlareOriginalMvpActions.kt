@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
@@ -33,10 +34,9 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         return
     }
 
-    var undoSnapshot: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-    var ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
+        val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
+    val ownedBase: Bitmap? = runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }.getOrElse { failure ->
         undoSnapshot?.let(::recycleHistorySnapshot)
-        undoSnapshot = null
         updateUiState { it.copy(message = "이미지를 준비하지 못했습니다.") }
         if (failure is BitmapAllocationRejectedException) {
             requestAllocationRecovery(if (mode == FlareGuardMode.NightLight) MemoryRetryAction.FlareNight else MemoryRetryAction.FlareSun, failure.requiredBytes)
@@ -61,7 +61,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(mode: FlareGuardMode,
         )
     }
 
-    launchManagedEdit { operationToken ->
+    launchManagedEditWithPreparedResources({ operationToken ->
         var ownedPreview: Bitmap? = null
         try {
             withContext(Dispatchers.Default) {
