@@ -189,14 +189,27 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
             }
         },
         handoff =
-            PreparedResourceHandoff.create {
-                ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                ownedBase = null
-                ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
-                ownedLayers = emptyList()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                undoSnapshot = null
-                prepareTracker?.end()
-            },
+            PreparedResourceHandoff.create(
+                {
+                    ownedBase?.takeIf { !it.isRecycled }?.recycle()
+                    ownedBase = null
+                },
+                {
+                    ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
+                    ownedLayers = emptyList()
+                },
+                {
+                    undoSnapshot?.let(::recycleHistorySnapshot)
+                    undoSnapshot = null
+                },
+                { prepareTracker?.end() },
+                {
+                    val live = uiState.value
+                    if (live.revision == nextRevision && live.sourcePath == sourcePath &&
+                        live.baseContentToken == baseContentToken) {
+                        updateUiState { it.copy(isBusy = false) }
+                    }
+                },
+            ),
     )
 }

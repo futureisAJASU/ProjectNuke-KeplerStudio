@@ -11,6 +11,7 @@ import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
+import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -67,7 +68,19 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
     updateUiState { nextState }
 
     val previewToken = beginSelectionPreview(transaction)
+    val handoff =
+        PreparedResourceHandoff.create(
+            { if (!ownedBase.isRecycled) ownedBase.recycle() },
+            {
+                ownedLayers.forEach { layer ->
+                    if (!layer.bitmap.isRecycled) layer.bitmap.recycle()
+                }
+            },
+            { prepareTracker?.end() },
+        )
     val previewJob = viewModelScope.launch {
+        if (!handoff.claimForChild()) return@launch
+        try {
         var preview: Bitmap? = null
         val previewTracker = beginMemoryTracking(
             "selectionLivePreview",
@@ -113,11 +126,13 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
                 }
             }
         } finally {
-            ownedBase.recycle()
-            ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
             previewTracker?.end()
         }
+        } finally {
+            handoff.settleChildOwned()
+        }
     }
+    previewJob.invokeOnCompletion { handoff.settleCallerOwned() }
     bindSelectionPreviewJob(transaction, previewJob, nextRevision, baseToken, activeId)
 }
 

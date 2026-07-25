@@ -190,11 +190,22 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
             }
         },
         handoff =
-            PreparedResourceHandoff.create {
-                ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                ownedBase = null
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                undoSnapshot = null
-            },
+            PreparedResourceHandoff.create(
+                {
+                    ownedBase?.takeIf { !it.isRecycled }?.recycle()
+                    ownedBase = null
+                },
+                {
+                    undoSnapshot?.let(::recycleHistorySnapshot)
+                    undoSnapshot = null
+                },
+                {
+                    val live = uiState.value
+                    if (live.revision == nextRevision && live.sourcePath == sourcePath &&
+                        live.baseContentToken == baseToken) {
+                        updateUiState { it.copy(isBusy = false) }
+                    }
+                },
+            ),
     )
 }

@@ -124,8 +124,14 @@ fun EditorViewModel.autoStraightenCrop() {
             }
     cropTracker?.track(input, "autoStraightenCrop:input")
     cropJob?.cancel()
-    cropJob =
+    val handoff =
+        PreparedResourceHandoff.create(
+            { if (!input.isRecycled) input.recycle() },
+            { cropTracker?.end() },
+        )
+    val launchedJob =
         viewModelScope.launch {
+            if (!handoff.claimForChild()) return@launch
             try {
                 val angle =
                     withContext(Dispatchers.Default) { estimateAutoStraightenDegreesV0(input) }
@@ -144,10 +150,15 @@ fun EditorViewModel.autoStraightenCrop() {
                 if (isCropResultCurrent(cropToken, state.revision))
                     updateUiState { it.copy(message = "기울기 보정에 실패했습니다: ${t.message}") }
             } finally {
-                cropTracker?.end()
-                input.recycle()
+                handoff.settleChildOwned()
             }
         }
+    cropJob = launchedJob
+    launchedJob.invokeOnCompletion {
+        handoff.settleCallerOwned()
+        if (cropJob === launchedJob) cropJob = null
+    }
+    if (launchedJob.isCompleted && cropJob === launchedJob) cropJob = null
 }
 
 fun EditorViewModel.resetCropState() {
@@ -387,24 +398,34 @@ fun EditorViewModel.applyCropTransform() {
             }
         },
         handoff =
-            PreparedResourceHandoff.create {
-                maskInputs.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
-                previewInput?.takeIf { !it.isRecycled }?.recycle()
-                if (originalInput !== previewInput)
-                    originalInput?.takeIf { !it.isRecycled }?.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                undoSnapshot = null
-                cropPrepareTracker?.end()
-                val live = uiState.value
-                if (
-                    isCropOperationCurrent(cropToken) &&
-                        live.revision == nextRevision &&
-                        live.sourcePath == sourcePath &&
-                        live.baseContentToken == baseContentToken
-                ) {
-                    updateUiState { it.copy(isBusy = false) }
+            PreparedResourceHandoff.create(
+                buildList {
+                    maskInputs.forEach { layer ->
+                        add { if (!layer.bitmap.isRecycled) layer.bitmap.recycle() }
+                    }
+                    add { previewInput?.takeIf { !it.isRecycled }?.recycle() }
+                    add {
+                        if (originalInput !== previewInput)
+                            originalInput?.takeIf { !it.isRecycled }?.recycle()
+                    }
+                    add {
+                        undoSnapshot?.let(::recycleHistorySnapshot)
+                        undoSnapshot = null
+                    }
+                    add { cropPrepareTracker?.end() }
+                    add {
+                        val live = uiState.value
+                        if (
+                            isCropOperationCurrent(cropToken) &&
+                                live.revision == nextRevision &&
+                                live.sourcePath == sourcePath &&
+                                live.baseContentToken == baseContentToken
+                        ) {
+                            updateUiState { it.copy(isBusy = false) }
+                        }
+                    }
                 }
-            },
+            ),
     )
 }
 

@@ -211,11 +211,24 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             }
         },
         handoff =
-            PreparedResourceHandoff.create {
-                ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                remasterPrepareTracker?.end()
-            },
+            PreparedResourceHandoff.create(
+                {
+                    ownedBase?.takeIf { !it.isRecycled }?.recycle()
+                    ownedBase = null
+                },
+                {
+                    undoSnapshot?.let(::recycleHistorySnapshot)
+                    undoSnapshot = null
+                },
+                { remasterPrepareTracker?.end() },
+                {
+                    val live = uiState.value
+                    if (live.revision == nextRevision && live.sourcePath == sourcePath &&
+                        live.baseContentToken == baseContentToken) {
+                        updateUiState { it.copy(isBusy = false) }
+                    }
+                },
+            ),
     )
 }
 

@@ -211,13 +211,25 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             }
         },
         handoff =
-            PreparedResourceHandoff.create {
-                ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                ownedBase = null
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                undoSnapshot = null
-                selectionTracker?.end()
-            },
+            PreparedResourceHandoff.create(
+                {
+                    ownedBase?.takeIf { !it.isRecycled }?.recycle()
+                    ownedBase = null
+                },
+                {
+                    undoSnapshot?.let(::recycleHistorySnapshot)
+                    undoSnapshot = null
+                },
+                { selectionTracker?.end() },
+                {
+                    val live = uiState.value
+                    if (live.revision == sourceRevision &&
+                        live.sourcePath == sourcePath &&
+                        live.baseContentToken == state.baseContentToken) {
+                        updateUiState { it.copy(isBusy = false) }
+                    }
+                },
+            ),
     )
 }
 
@@ -375,7 +387,8 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
     updateUiState {
         it.copy(isBusy = true, revision = nextRevision, message = "마스크 보정을 적용하는 중입니다.")
     }
-    launchManagedEdit { operationToken ->
+    launchManagedEditWithPreparedResources(
+        { operationToken ->
         var renderedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
         val selectionTracker =
@@ -443,10 +456,24 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                 }
             }
         } finally {
-            undoSnapshot?.let(::recycleHistorySnapshot)
             selectionTracker?.end()
         }
-    }
+    },
+        PreparedResourceHandoff.create(
+            {
+                undoSnapshot?.let(::recycleHistorySnapshot)
+                undoSnapshot = null
+            },
+            {
+                val live = uiState.value
+                if (live.revision == nextRevision &&
+                    live.baseContentToken == state.baseContentToken &&
+                    live.sourcePath == state.sourcePath) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+            },
+        ),
+    )
 }
 
 private fun applyPaintStroke(

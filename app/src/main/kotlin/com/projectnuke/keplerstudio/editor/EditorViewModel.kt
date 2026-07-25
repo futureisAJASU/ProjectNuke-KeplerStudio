@@ -571,7 +571,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         managedEditJob?.cancel()
         val token = ++managedEditToken
         val job =
-            viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            viewModelScope.launch {
                 val self = currentCoroutineContext()[Job]
                 val handoffClaimed = handoff?.claimForChild() ?: true
                 try {
@@ -1197,7 +1197,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun scheduleDraftAutosave(delayMs: Long = 2000L) {
         val (epoch, _) = beginDraftSaveOperation()
         val job =
-            viewModelScope.launch(start = CoroutineStart.LAZY) {
+            viewModelScope.launch {
                 try {
                     delay(delayMs)
                     persistDraftSnapshotInternal(epoch)
@@ -1206,7 +1206,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         draftSaveJob = job
-        job.start()
+        if (job.isCompleted && draftSaveJob === job) draftSaveJob = null
     }
 
     private fun forceDraftSaveAsync() {
@@ -1665,7 +1665,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         renderJob?.cancel()
         activeParamRenderRevision = nextRevision
-        renderJob = launchManagedEdit { operationToken ->
+        renderJob = launchManagedEditWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
             try {
                 rendered =
@@ -1731,11 +1731,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 }
-            } finally {
-                ownedBase.recycle()
-                paramTracker?.end()
             }
-        }
+        }, PreparedResourceHandoff.create(
+            { if (!ownedBase.isRecycled) ownedBase.recycle() },
+            { paramTracker?.end() },
+            {
+                if (activeParamRenderRevision == nextRevision) {
+                    activeParamRenderRevision = null
+                    if (_uiState.value.revision == nextRevision) {
+                        updateUiState { it.copy(isBusy = false) }
+                    }
+                }
+            },
+        ))
     }
 
     fun applyAutoEnhance() {
@@ -1776,7 +1784,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다")
         }
-        launchManagedEdit { operationToken ->
+        launchManagedEditWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
             try {
                 val nextParams =
@@ -1832,11 +1840,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 rendered?.takeIf { !it.isRecycled }?.recycle()
-                ownedBase.takeIf { !it.isRecycled }?.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                autoEnhanceTracker?.end()
             }
-        }
+        }, PreparedResourceHandoff.create(
+            { ownedBase.takeIf { !it.isRecycled }?.recycle() },
+            { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            { autoEnhanceTracker?.end() },
+            {
+                val live = _uiState.value
+                if (live.revision == nextRevision && live.sourcePath == sourcePath &&
+                    live.baseContentToken == baseContentToken) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+            },
+        ))
     }
 
     fun setNoiseEngine(engine: NoiseEngine) {
@@ -1922,7 +1938,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         }
         renderJob?.cancel()
-        renderJob = launchManagedEdit { operationToken ->
+        renderJob = launchManagedEditWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
             try {
                 withContext(Dispatchers.Default) {
@@ -1979,11 +1995,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 rendered?.takeIf { !it.isRecycled }?.recycle()
-                ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                engineTracker?.end()
             }
-        }
+        }, PreparedResourceHandoff.create(
+            { ownedBase?.takeIf { !it.isRecycled }?.recycle(); ownedBase = null },
+            { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            { engineTracker?.end() },
+            {
+                val live = _uiState.value
+                if (live.revision == nextRevision && live.sourcePath == sourcePath &&
+                    live.baseContentToken == baseContentToken) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+            },
+        ))
     }
 
     fun resetAdjustments() {
@@ -2011,7 +2035,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             it.copy(isBusy = true, revision = nextRevision, message = "초기화하는 중입니다")
         }
-        renderJob = launchManagedEdit { operationToken ->
+        renderJob = launchManagedEditWithPreparedResources({ operationToken ->
             try {
                 withContext(Dispatchers.IO) {
                     val result =
@@ -2067,10 +2091,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 decoded?.takeIf { !it.isRecycled }?.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                resetTracker?.end()
             }
-        }
+        }, PreparedResourceHandoff.create(
+            { decoded?.takeIf { !it.isRecycled }?.recycle(); decoded = null },
+            { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            { resetTracker?.end() },
+            {
+                val live = _uiState.value
+                if (live.revision == nextRevision && live.sourcePath == sourcePath &&
+                    live.baseContentToken == baseContentToken) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+            },
+        ))
     }
 
     fun applyPresetLook(
@@ -2118,7 +2151,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             it.copy(isBusy = true, revision = nextRevision, message = message)
         }
-        renderJob = launchManagedEdit { operationToken ->
+        renderJob = launchManagedEditWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
             try {
                 withContext(Dispatchers.Default) {
@@ -2173,11 +2206,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 rendered?.takeIf { !it.isRecycled }?.recycle()
-                ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                presetTracker?.end()
             }
-        }
+        }, PreparedResourceHandoff.create(
+            { ownedBase?.takeIf { !it.isRecycled }?.recycle(); ownedBase = null },
+            { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            { presetTracker?.end() },
+            {
+                val live = _uiState.value
+                if (live.revision == nextRevision && live.sourcePath == sourcePath &&
+                    live.baseContentToken == baseContentToken) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+            },
+        ))
         return PresetApplyResult.Accepted
     }
 
@@ -2319,29 +2360,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val fileName = "KeplerStudio_${exportTimestamp()}.${exportFormat.extension}"
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = exportBusyMessage) }
         val exportHandoff =
-            PreparedResourceHandoff.create {
-                runCatching {
+            PreparedResourceHandoff.create(
+                {
                     ownedDirtyBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedDirtyBase = null
-                }
-                runCatching { exportPrepareTracker?.release(dirtyBaseEdge) }
-                runCatching {
+                },
+                { exportPrepareTracker?.release(dirtyBaseEdge) },
+                {
                     exportPrepareTracker?.end()
                     exportPrepareTracker = null
-                }
-                val live = _uiState.value
-                if (
-                    !shuttingDown &&
-                        exportToken == token &&
-                        live.sourcePath == sourcePath &&
-                        live.baseContentToken == exportBaseToken &&
-                        live.revision == exportRevision
-                ) {
-                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
-                }
-            }
+                },
+                {
+                    val live = _uiState.value
+                    if (
+                        !shuttingDown &&
+                            exportToken == token &&
+                            live.sourcePath == sourcePath &&
+                            live.baseContentToken == exportBaseToken &&
+                            live.revision == exportRevision
+                    ) {
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
+                    }
+                },
+            )
         val launchedJob =
-            viewModelScope.launch(start = CoroutineStart.LAZY) {
+            viewModelScope.launch {
                 if (!exportHandoff.claimForChild()) return@launch
                 try {
                     val exportTracker =
@@ -2584,7 +2627,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             exportHandoff.settleCallerOwned()
             if (exportJob === launchedJob) exportJob = null
         }
-        launchedJob.start()
         if (launchedJob.isCompleted && exportJob === launchedJob) exportJob = null
     }
 
@@ -3251,7 +3293,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             it.copy(isBusy = true, revision = nextRevision, message = "$title 적용 중입니다.")
         }
-        renderJob = launchManagedEdit { operationToken ->
+        renderJob = launchManagedEditWithPreparedResources({ operationToken ->
             var renderedPreview: Bitmap? = null
             val effectsTracker =
                 beginMemoryTracking(
@@ -3324,10 +3366,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
                 ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                undoSnapshot?.let(::recycleHistorySnapshot)
                 effectsTracker?.end()
             }
-        }
+        }, PreparedResourceHandoff.create(
+            { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            {
+                val live = _uiState.value
+                if (live.revision == nextRevision && live.sourcePath == sourcePath &&
+                    live.baseContentToken == baseContentToken) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+            },
+        ))
     }
 
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
@@ -3348,7 +3398,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 FlareGuardMode.DaySun -> "태양 번짐 영역 감지"
             }
         val nextRevision = current.revision + 1
-        val undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
         val sourcePath = current.sourcePath
         val baseContentToken = current.baseContentToken
         val params = current.params
@@ -3368,11 +3418,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             FLARE_GUARD_AI_TAG,
             "Starting FlareGuard preview: mode=$mode source=${baseOriginal.width}x${baseOriginal.height} revision=$nextRevision",
         )
-        renderJob = launchManagedEdit { operationToken ->
+        renderJob = launchManagedEditWithPreparedResources({ operationToken ->
             var flareGuardResult: FlareGuardApplyResult? = null
             var flareGuardBitmap: Bitmap? = null
             var renderedPreview: Bitmap? = null
             var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
+            undoSnapshot = null
             var ownedBaseOwned: Bitmap? = null
             val flareTracker =
                 beginMemoryTracking(
@@ -3477,7 +3528,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 flareTracker?.end()
             }
-        }
+        }, PreparedResourceHandoff.create(
+            { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            {
+                val live = _uiState.value
+                if (live.revision == nextRevision && live.sourcePath == sourcePath &&
+                    live.baseContentToken == baseContentToken) {
+                    updateUiState { it.copy(isBusy = false) }
+                }
+            },
+        ))
     }
 
     private suspend fun restoreCurrentDraftGeneration(
