@@ -101,6 +101,8 @@ internal class EditorHistoryCoordinator(
     private var diagnosticProtectedTargetId: String? = null
     private var diagnosticRecoveryMode: String? = null
     private var diagnosticOperationPhase: String? = null
+    /** Diagnostic-only handoff: prevents a target from being counted as both history and UI. */
+    private var diagnosticTransferredHotEntryId: String? = null
     private var activeColdLoadDecodedBytes = 0L
     private var closed = false
     @Volatile private var visibleFlags = HistoryFlags(false, false, true)
@@ -416,13 +418,32 @@ internal class EditorHistoryCoordinator(
             val foregroundReserve = maxOf(targetForAdoption.bitmapBytes(), destinationEntry.hotResidentBytes())
             maintenanceReserve = foregroundReserve
 
+            if (loadedFromDisk) {
+                // The decoded target is about to become UI-owned; do not retain it as cold-load RAM.
+                activeColdLoadDecodedBytes = 0L
+            } else {
+                diagnosticTransferredHotEntryId = target.id
+            }
+            publishState()
             adopted = adopt(targetForAdoption)
-            if (!adopted) return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+            if (!adopted) {
+                diagnosticTransferredHotEntryId = null
+                if (loadedFromDisk) activeColdLoadDecodedBytes = targetForAdoption.bitmapBytes()
+                publishState()
+                return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+            }
+            // UI reconciliation has acquired the destination edges; the materialized local
+            // snapshot must no longer contribute a second ledger owner.
+            targetForAdoption.releaseLocalDiagnostics()
+            // The current snapshot now moves into the coordinator's hot/cold entry.  Drop its
+            // local handles before publishing the destination aggregate.
+            if (currentEntry == null) currentSnapshot?.transferDiagnosticsToCoordinator()
             currentSnapshot = null
             undo = nextUndo
             redo = nextRedo
             target.hotSnapshot = null
             target.payloadState = HistoryPayloadState.Discarded
+            diagnosticTransferredHotEntryId = null
             discarded += target
             publishState()
             trimEntryCount(discarded)
@@ -612,6 +633,7 @@ internal class EditorHistoryCoordinator(
         diagnosticProtectedTargetId = null
         diagnosticRecoveryMode = null
         diagnosticOperationPhase = null
+        diagnosticTransferredHotEntryId = null
         val oldGeneration = documentGeneration
         val oldEntries = (undo + redo).toList()
         val pendingOperations = operationCompletions.values.toList()
@@ -927,6 +949,7 @@ internal class EditorHistoryCoordinator(
             diagnosticProtectedTargetId = null
             diagnosticRecoveryMode = null
             diagnosticOperationPhase = null
+            diagnosticTransferredHotEntryId = null
             activeColdLoadDecodedBytes = 0L
             publishState()
             idleSignal.complete(Unit)
@@ -954,7 +977,10 @@ internal class EditorHistoryCoordinator(
     private fun reportHistoryMetrics() {
         tracker ?: return
         try {
-            val hot = hotBytes()
+            val excludedHot = diagnosticTransferredHotEntryId?.let { id ->
+                (undo + redo).firstOrNull { it.id == id }?.hotResidentBytes() ?: 0L
+            } ?: 0L
+            val hot = (hotBytes() - excludedHot).coerceAtLeast(0L)
             var entryCount = 0
             var coldBytes = 0L
             undo.forEach {

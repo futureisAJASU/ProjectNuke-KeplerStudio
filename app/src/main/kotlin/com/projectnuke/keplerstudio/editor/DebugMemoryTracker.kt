@@ -449,6 +449,9 @@ internal class TrackerSession(
         return try {
             val handle = lock.withLock {
                 if (lifecycle.get() != Lifecycle.Active || bitmap.isRecycled) return@withLock 0L
+                if (token != 0L && operations.values.none {
+                        it.token == token && it.name == operation && it.documentGeneration == documentGeneration
+                    }) return@withLock 0L
                 purgeClearedReferencesLocked()
                 val identity = identityHashProvider(bitmap)
                 val lookup = WeakIdentityKey(bitmap, referenceQueue, identity)

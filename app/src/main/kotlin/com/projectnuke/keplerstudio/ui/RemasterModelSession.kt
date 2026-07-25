@@ -12,6 +12,7 @@ import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.GlobalModelDiagnostics
+import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.max
@@ -89,13 +90,13 @@ object RemasterModelSession {
         }
     }
 
-    suspend fun createForegroundMask(bitmap: Bitmap): Bitmap? = modelMutex.withLock {
+    internal suspend fun createForegroundMask(bitmap: Bitmap, diagnostics: MemoryTrackerScope? = null): Bitmap? = modelMutex.withLock {
         if (activeModel?.id != "edge_masker" || !isModelLoaded) return@withLock null
         val model = closeableModel ?: return@withLock null
         isInferring = true
         GlobalModelDiagnostics.publish("RemasterModelSession", "inferring")
         try {
-            runCatching { createForegroundMaskFromSegmenter(model, bitmap) }.getOrNull()
+            runCatching { createForegroundMaskFromSegmenter(model, bitmap, diagnostics) }.getOrNull()
         } finally {
             isInferring = false
             GlobalModelDiagnostics.publish("RemasterModelSession", if (isModelLoaded) "loaded" else "unloaded")
@@ -170,10 +171,11 @@ object RemasterModelSession {
         }
     }
 
-    private fun createForegroundMaskFromSegmenter(segmenter: Any, bitmap: Bitmap): Bitmap {
+    private fun createForegroundMaskFromSegmenter(segmenter: Any, bitmap: Bitmap, diagnostics: MemoryTrackerScope?): Bitmap {
         val imageBuilderClass = Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
         val inputCopy = bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, false)
             ?: error("입력 이미지를 복사하지 못했습니다.")
+        val inputEdge = diagnostics?.track(inputCopy, "remaster:modelInputCopy") ?: 0L
         var mpImage: Any? = null
         try {
             val imageBuilder = imageBuilderClass.getConstructor(Bitmap::class.java).newInstance(inputCopy)
@@ -199,7 +201,14 @@ object RemasterModelSession {
             if (!isPresent) error("category mask가 비어 있습니다.")
             categoryMaskImage = categoryMaskOptional.javaClass.getMethod("get").invoke(categoryMaskOptional)
             val rawMask = extractBitmapFromMpImage(categoryMaskImage as Any)
-            foregroundMask = categoryBitmapToForegroundMask(rawMask, bitmap.width, bitmap.height)
+            val rawEdge = diagnostics?.track(rawMask, "remaster:rawCategoryMask") ?: 0L
+            try {
+                foregroundMask = categoryBitmapToForegroundMask(rawMask, bitmap.width, bitmap.height, diagnostics)
+            } finally {
+                if (!rawMask.isRecycled) rawMask.recycle()
+                diagnostics?.release(rawEdge)
+            }
+            diagnostics?.track(checkNotNull(foregroundMask), "remaster:finalArgbMask")
             return foregroundMask
         } catch (t: Throwable) {
             primaryFailure = t
@@ -219,6 +228,8 @@ object RemasterModelSession {
             closeAndCollect {
                 closeMpImage(mpImage)
             }
+            if (!inputCopy.isRecycled) inputCopy.recycle()
+            diagnostics?.release(inputEdge)
             if (cleanupFailures.isNotEmpty()) {
                 if (primaryFailure != null) {
                     cleanupFailures.forEach(primaryFailure::addSuppressed)
@@ -243,9 +254,10 @@ object RemasterModelSession {
         return extractMethod.invoke(null, maskImage) as Bitmap
     }
 
-    private fun categoryBitmapToForegroundMask(rawMask: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
+    private fun categoryBitmapToForegroundMask(rawMask: Bitmap, targetWidth: Int, targetHeight: Int, diagnostics: MemoryTrackerScope?): Bitmap {
         var scaledMask: Bitmap? = null
         var out: Bitmap? = null
+        var scaledEdge = 0L
         var primaryFailure: Throwable? = null
         try {
             scaledMask = if (rawMask.width == targetWidth && rawMask.height == targetHeight) {
@@ -253,9 +265,11 @@ object RemasterModelSession {
             } else {
                 createScaledBitmapOrThrow(rawMask, targetWidth, targetHeight, false)
             }
+            if (scaledMask !== rawMask) scaledEdge = diagnostics?.track(scaledMask!!, "remaster:scaledCategoryMask") ?: 0L
             out = createBitmapOrThrow(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
             val inRow = IntArray(targetWidth)
             val outRow = IntArray(targetWidth)
+            val rowTransient = diagnostics?.trackTransientBytes("remaster:maskRows", targetWidth.toLong() * Int.SIZE_BYTES * 2L) ?: 0L
             for (y in 0 until targetHeight) {
                 scaledMask.getPixels(inRow, 0, targetWidth, 0, y, targetWidth, 1)
                 for (x in 0 until targetWidth) {
@@ -271,6 +285,7 @@ object RemasterModelSession {
                 }
                 out.setPixels(outRow, 0, targetWidth, 0, y, targetWidth, 1)
             }
+            diagnostics?.releaseTransient(rowTransient)
             return out
         } catch (t: Throwable) {
             primaryFailure = t
@@ -286,6 +301,7 @@ object RemasterModelSession {
             }
             recycleAndCollect {
                 if (scaledMask != null && scaledMask !== rawMask) scaledMask.recycle()
+                diagnostics?.release(scaledEdge)
             }
             if (cleanupFailures.isNotEmpty()) {
                 if (primaryFailure != null) {

@@ -91,7 +91,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         try {
             withContext(Dispatchers.Default) {
                 val createdBase = checkNotNull(ownedBaseOwned)
-                val mask = RemasterModelSession.createForegroundMask(createdBase) ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
+                val mask = RemasterModelSession.createForegroundMask(createdBase, remasterTracker) ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
                 modelMask = mask
                 remasterTracker?.track(mask, "remaster:modelMask")
                 val created = renderMaskAwareRemaster(

@@ -437,13 +437,18 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
     internal fun launchManagedEdit(block: suspend (Long) -> Unit): Job {
         managedEditJob?.cancel()
         val token = ++managedEditToken
-        return viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+        lateinit var job: Job
+        job = viewModelScope.launch {
             try {
                 block(token)
             } finally {
-                if (managedEditToken == token) managedEditJob = null
+                if (managedEditToken == token && managedEditJob === job) managedEditJob = null
             }
-        }.also { managedEditJob = it }
+        }
+        managedEditJob = job
+        job.invokeOnCompletion { if (managedEditToken == token && managedEditJob === job) managedEditJob = null }
+        if (job.isCompleted && managedEditJob === job) managedEditJob = null
+        return job
     }
 
     internal fun isManagedEditCurrent(token: Long, revision: Int): Boolean =
@@ -937,9 +942,9 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
 
     internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean) {
         val reserve = _uiState.value.historyBitmapBytes()
-        historyIoJob = viewModelScope.launch(NonCancellable, start = CoroutineStart.UNDISPATCHED) {
+        val job = viewModelScope.launch(NonCancellable) {
             val result = historyCoordinator.admitAdoptedSnapshot(snapshot, clearRedo, reserve)
-            historyIoJob = null
+            if (historyIoJob === currentCoroutineContext()[Job]) historyIoJob = null
             updateHistoryFlags()
             if (!result.retained) {
                 updateUiStateAndRecycleReplaced {
@@ -949,6 +954,12 @@ private suspend fun performMemoryCleanup(strong: Boolean, protectedEntryId: Stri
                 updateUiStateAndRecycleReplaced { it.copy(message = "오래된 편집 기록을 저장소로 옮겼습니다.") }
             }
         }
+        historyIoJob = job
+        job.invokeOnCompletion {
+            if (job.isCancelled) snapshot.recycleBitmaps()
+            if (historyIoJob === job) historyIoJob = null
+        }
+        if (job.isCompleted && historyIoJob === job) historyIoJob = null
     }
 
     internal fun recycleHistorySnapshot(snapshot: EditorHistorySnapshot) {
@@ -1902,7 +1913,8 @@ return
                                 engines = exportEngines,
                                 revision = exportRevision + 1,
                                 look = exportLook,
-                                quickEffects = exportQuickEffects
+                                quickEffects = exportQuickEffects,
+                                diagnostics = exportTracker
                             )
                         }
                         ownedExportResult = rendered
@@ -2286,7 +2298,7 @@ fun clearDraft() {
         invalidateExport()
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "저장된 편집 기록을 불러오는 중입니다.") }
         val navTracker = beginMemoryTracking(if (undo) "navigateHistory:undo" else "navigateHistory:redo", snapshotState = "navigating", transientReserveBytes = _uiState.value.historyBitmapBytes())
-        historyIoJob = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+        val navJob = viewModelScope.launch {
             try {
                 val result = historyCoordinator.navigate(
                     undoDirection = undo,
@@ -2295,7 +2307,7 @@ fun clearDraft() {
                     captureCurrent = { preferredStorage, targetBaseToken ->
                         captureHistorySnapshotForNavigation(preferredStorage, targetBaseToken)
                     },
-                    materialize = ::materializeHistorySnapshot,
+                    materialize = { snapshot, register -> materializeHistorySnapshot(snapshot, register, navTracker) },
                     adopt = { snapshot ->
                         val prefix = if (undo) "이전 편집 상태를 적용했습니다" else "다음 편집 상태를 적용했습니다"
                         applyHistorySnapshot(snapshot, buildHistoryAppliedMessage(_uiState.value, snapshot, prefix))
@@ -2339,14 +2351,23 @@ fun clearDraft() {
                 navTracker?.end()
             }
         }
+        historyIoJob = navJob
+        navJob.invokeOnCompletion {
+            navTracker?.end()
+            if (historyIoJob === navJob) historyIoJob = null
+        }
+        if (navJob.isCompleted && historyIoJob === navJob) historyIoJob = null
     }
 
     internal fun clearRedoAfterAdoptedEdit() {
-        historyIoJob = viewModelScope.launch(NonCancellable, start = CoroutineStart.UNDISPATCHED) {
+        val job = viewModelScope.launch(NonCancellable) {
             historyCoordinator.clearRedoAfterAdoptedEdit()
-            historyIoJob = null
+            if (historyIoJob === currentCoroutineContext()[Job]) historyIoJob = null
             updateHistoryFlags()
         }
+        historyIoJob = job
+        job.invokeOnCompletion { if (historyIoJob === job) historyIoJob = null }
+        if (job.isCompleted && historyIoJob === job) historyIoJob = null
     }
 
     internal fun settleAdoptedEditHistory(snapshot: EditorHistorySnapshot?) {
@@ -3284,7 +3305,11 @@ fun clearDraft() {
         val required = if (storage == HistorySnapshotStorage.Exact) state.historyBitmapBytes() else 0L
         if (!BitmapMemoryBudget.canAllocate(required)) return null
         return try {
-            state.toHistorySnapshot(storage)
+            state.toHistorySnapshot(storage).also { snapshot ->
+                val generation = historyCoordinator.currentGeneration()
+                snapshot.coordinatorGeneration = generation
+                snapshot.attachLocalDiagnostics(trackerSession, generation)
+            }
         } catch (failure: BitmapAllocationRejectedException) {
             throw failure
         } catch (_: Throwable) {
@@ -3294,7 +3319,8 @@ fun clearDraft() {
 
     private suspend fun materializeHistorySnapshot(
         snapshot: EditorHistorySnapshot,
-        register: (EditorHistorySnapshot) -> Unit
+        register: (EditorHistorySnapshot) -> Unit,
+        diagnostics: MemoryTrackerScope?
     ): EditorHistorySnapshot? {
         if (snapshot.storage == HistorySnapshotStorage.Exact) return snapshot.also(register)
         val current = _uiState.value
@@ -3302,9 +3328,12 @@ fun clearDraft() {
         if (current.baseContentToken != snapshot.baseContentToken || current.selectionLayers.isNotEmpty() || current.cropState != snapshot.cropState) return null
         var ownedBase: Bitmap? = null
         var rendered: Bitmap? = null
+        var baseEdge = 0L
+        var renderedEdge = 0L
         return try {
             withContext(Dispatchers.Default) {
                 ownedBase = base.copyOrThrow()
+                baseEdge = diagnostics?.track(checkNotNull(ownedBase), "navigateHistory:metadataBase") ?: 0L
                 rendered = renderEditedPreview(
                     checkNotNull(ownedBase),
                     snapshot.params,
@@ -3313,8 +3342,11 @@ fun clearDraft() {
                     snapshot.presetLook,
                     snapshot.activeQuickEffects
                 )
+                renderedEdge = diagnostics?.track(checkNotNull(rendered), "navigateHistory:metadataRendered") ?: 0L
             }
             snapshot.copy(previewBitmap = rendered, resourcesReleased = false).also {
+                it.coordinatorGeneration = snapshot.coordinatorGeneration
+                it.attachLocalDiagnostics(trackerSession, snapshot.coordinatorGeneration ?: historyCoordinator.currentGeneration())
                 register(it)
                 rendered = null
             }
@@ -3326,7 +3358,9 @@ fun clearDraft() {
             null
         } finally {
             ownedBase?.takeIf { !it.isRecycled }?.recycle()
+            diagnostics?.release(baseEdge)
             rendered?.takeIf { !it.isRecycled }?.recycle()
+            if (rendered != null) diagnostics?.release(renderedEdge)
         }
     }
 
@@ -4262,12 +4296,13 @@ private fun renderEditedExport(
     engines: EngineSelection,
     revision: Int,
     look: PresetColorLook? = null,
-    quickEffects: List<ActiveQuickEffect> = emptyList()
+    quickEffects: List<ActiveQuickEffect> = emptyList(),
+    diagnostics: MemoryTrackerScope? = null
 ): Bitmap {
     var decoded: Bitmap? = null
     var scaled: Bitmap? = null
     try {
-        decoded = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE)
+        decoded = decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE, diagnostics)
         val working = decoded!!
         renderBitmapInNative(working, params, engines, revision, look)
         applyActiveQuickEffectsToBitmap(working, quickEffects, revision)

@@ -27,6 +27,7 @@ internal class MemoryTrackerScope private constructor(
 ) {
     private val operationToken: Long
     private val ended = AtomicBoolean(false)
+    private val ownershipLock = ReentrantLock()
     private val trackedEdges = ArrayDeque<Long>(8)
     private val transientContributors = ArrayDeque<Long>(4)
 
@@ -44,15 +45,16 @@ internal class MemoryTrackerScope private constructor(
     val token: Long get() = operationToken
 
     fun track(bitmap: Bitmap, owner: String): Long {
-        val handle = tracker.registerBitmap(
-            bitmap = bitmap,
-            owner = owner,
-            operation = name,
-            token = operationToken,
-            documentGeneration = documentGeneration
-        )
-        if (handle != 0L) trackedEdges.addLast(handle)
-        return handle
+        return try {
+            ownershipLock.lock()
+            try {
+                if (ended.get()) return 0L
+                tracker.registerBitmap(bitmap, owner, name, operationToken, documentGeneration).also {
+                    if (it != 0L && !ended.get()) trackedEdges.addLast(it)
+                    else if (it != 0L) tracker.releaseEdge(it)
+                }
+            } finally { ownershipLock.unlock() }
+        } catch (_: Throwable) { 0L }
     }
 
     fun trackAll(bitmaps: List<Bitmap>, owner: String) {
@@ -61,14 +63,24 @@ internal class MemoryTrackerScope private constructor(
 
     fun release(handle: Long) {
         if (handle == 0L) return
-        tracker.releaseEdge(handle)
-        trackedEdges.remove(handle)
+        ownershipLock.lock()
+        try {
+            tracker.releaseEdge(handle)
+            trackedEdges.remove(handle)
+        } finally { ownershipLock.unlock() }
     }
 
     fun trackTransientBytes(label: String, bytes: Long?): Long {
-        val handle = tracker.registerTransientContributor(operationToken, documentGeneration, label, bytes)
-        if (handle != 0L) transientContributors.addLast(handle)
-        return handle
+        return try {
+            ownershipLock.lock()
+            try {
+                if (ended.get()) return 0L
+                tracker.registerTransientContributor(operationToken, documentGeneration, label, bytes).also {
+                    if (it != 0L && !ended.get()) transientContributors.addLast(it)
+                    else if (it != 0L) tracker.releaseTransientContributor(it)
+                }
+            } finally { ownershipLock.unlock() }
+        } catch (_: Throwable) { 0L }
     }
 
     fun releaseTransient(handle: Long) {
@@ -78,13 +90,13 @@ internal class MemoryTrackerScope private constructor(
     }
 
     fun end() {
-        if (ended.compareAndSet(false, true)) {
+        ownershipLock.lock()
+        try {
+            if (!ended.compareAndSet(false, true)) return
             while (trackedEdges.isNotEmpty()) tracker.releaseEdge(trackedEdges.removeFirst())
-            while (transientContributors.isNotEmpty()) {
-                tracker.releaseTransientContributor(transientContributors.removeFirst())
-            }
+            while (transientContributors.isNotEmpty()) tracker.releaseTransientContributor(transientContributors.removeFirst())
             tracker.endOperation(name, operationToken)
-        }
+        } finally { ownershipLock.unlock() }
     }
 
     companion object {

@@ -58,7 +58,7 @@ internal fun applyFlareGuardModelOrRuleResultV0(
                 )
                 try {
                     return FlareGuardApplyResult(
-                        bitmap = applyFlareGuardMaskBlendV0(source, result.mask, mode, strength),
+                        bitmap = applyFlareGuardMaskBlendV0(source, result.mask, mode, strength, diagnostics),
                         status = FlareGuardRuntimeStatus.ModelInferenceSuccess
                     )
                 } finally {
@@ -75,7 +75,7 @@ internal fun applyFlareGuardModelOrRuleResultV0(
             if (!allowRuleFallback) {
                 return FlareGuardApplyResult(source.copyOrThrow(Bitmap.Config.ARGB_8888, true), FlareGuardRuntimeStatus.Unavailable)
             }
-            val fallback = applyFlareGuardRuleFallback(source, mode, strength)
+            val fallback = applyFlareGuardRuleFallback(source, mode, strength, diagnostics)
             Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_failed")
             return FlareGuardApplyResult(fallback, FlareGuardRuntimeStatus.ModelFailedRuleFallback)
         } finally {
@@ -88,40 +88,48 @@ internal fun applyFlareGuardModelOrRuleResultV0(
     if (!allowRuleFallback) {
         return FlareGuardApplyResult(source.copyOrThrow(Bitmap.Config.ARGB_8888, true), FlareGuardRuntimeStatus.Unavailable)
     }
-    val fallback = applyFlareGuardRuleFallback(source, mode, strength)
+    val fallback = applyFlareGuardRuleFallback(source, mode, strength, diagnostics)
     Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_unavailable")
     return FlareGuardApplyResult(fallback, FlareGuardRuntimeStatus.ModelUnavailableRuleFallback)
 }
 
-private fun applyFlareGuardRuleFallback(source: Bitmap, mode: FlareGuardMode, strength: Float): Bitmap =
+private fun applyFlareGuardRuleFallback(source: Bitmap, mode: FlareGuardMode, strength: Float, diagnostics: MemoryTrackerScope?): Bitmap =
     when (mode) {
-        FlareGuardMode.NightLight -> applyFlareGuardV0(source, strength)
-        FlareGuardMode.DaySun -> applyDaySunFlareGuardV0(source, strength)
+        FlareGuardMode.NightLight -> applyFlareGuardTracked(source, strength, mode, diagnostics)
+        FlareGuardMode.DaySun -> applyFlareGuardTracked(source, strength, mode, diagnostics)
     }
 
-fun applyFlareGuardMaskBlendV0(
+internal fun applyFlareGuardMaskBlendV0(
     source: Bitmap,
     modelMask: Bitmap,
     mode: FlareGuardMode,
-    strength: Float
+    strength: Float,
+    diagnostics: MemoryTrackerScope? = null
 ): Bitmap {
     var output: Bitmap? = null
     var ruleMask: Bitmap? = null
     var scaledMask: Bitmap? = null
+    var outputEdge = 0L
+    var ruleEdge = 0L
+    var scaledEdge = 0L
     var success = false
     try {
         output = source.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-        ruleMask = createFlareMaskV0(source, if (mode == FlareGuardMode.DaySun) 0.88f else 0.92f)
+        outputEdge = diagnostics?.track(output!!, "flareGuard:fullSizeOutputCopy") ?: 0L
+        ruleMask = createFlareMaskTracked(source, if (mode == FlareGuardMode.DaySun) 0.88f else 0.92f, diagnostics)
+        ruleEdge = 0L // createFlareMaskTracked already retained the exact scope handle.
         scaledMask = if (modelMask.width == source.width && modelMask.height == source.height) {
             modelMask
         } else {
             createScaledBitmapOrThrow(modelMask, source.width, source.height, true)
         }
+        if (scaledMask !== modelMask) scaledEdge = diagnostics?.track(scaledMask!!, "flareGuard:scaledModelMask") ?: 0L
 
         val width = output!!.width
         val row = IntArray(width)
         val ruleRow = IntArray(width)
         val modelRow = IntArray(width)
+        val rowsTransient = diagnostics?.trackTransientBytes("flareGuard:blendRows", width.toLong() * Int.SIZE_BYTES * 3L) ?: 0L
         val safeStrength = strength.coerceIn(0f, 1f)
 
         for (y in 0 until output!!.height) {
@@ -153,12 +161,16 @@ fun applyFlareGuardMaskBlendV0(
             output!!.setPixels(row, 0, width, 0, y, width, 1)
         }
         success = true
+        diagnostics?.releaseTransient(rowsTransient)
         return output!!
     } finally {
         ruleMask?.recycle()
+        diagnostics?.release(ruleEdge)
         if (scaledMask !== modelMask) scaledMask?.recycle()
+        diagnostics?.release(scaledEdge)
         if (!success) {
             output?.recycle()
+            diagnostics?.release(outputEdge)
         }
     }
 }

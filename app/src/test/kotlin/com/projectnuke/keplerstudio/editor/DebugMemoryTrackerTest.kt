@@ -587,6 +587,37 @@ class DebugMemoryTrackerTest {
         assertEquals(0L, snapshot.unknownTransientContributorCount)
     }
 
+    @Test
+    fun scopeRejectsTrackingAfterEndAndOperationTokenCannotRepopulateLedger() {
+        val scope = MemoryTrackerScope.create(tracker, "scope", "gen1", "base", 1, "test", 0L)
+        val first = createMockBitmap(3, 3)
+        assertTrue(scope.track(first, "scope:first") > 0L)
+        scope.end()
+        val late = createMockBitmap(4, 4)
+        assertEquals(0L, scope.track(late, "scope:late"))
+        assertEquals(0L, scope.trackTransientBytes("late", 64L))
+        first.recycle()
+        late.recycle()
+        assertTrue(tracker.snapshot().activeOperations.isEmpty())
+        assertEquals(0, tracker.snapshot().bitmapCount)
+    }
+
+    @Test
+    fun scopeTrackRaceWithEndLeavesNoOrphanedEdge() {
+        val scope = MemoryTrackerScope.create(tracker, "race", "gen1", "base", 1, "test", 0L)
+        val bitmap = createMockBitmap(8, 8)
+        val barrier = CyclicBarrier(2)
+        val pool = Executors.newFixedThreadPool(2)
+        val tracked = pool.submit<Long> { barrier.await(); scope.track(bitmap, "race") }
+        val ended = pool.submit<Unit> { barrier.await(); scope.end() }
+        tracked.get(5, TimeUnit.SECONDS)
+        ended.get(5, TimeUnit.SECONDS)
+        bitmap.recycle()
+        assertTrue(tracker.ledgerInvariantViolations().isEmpty())
+        assertEquals(0, tracker.snapshot().bitmapCount)
+        pool.shutdownNow()
+    }
+
     private fun publishHistory(
         generation: String = "gen1",
         hotBytes: Long = 0L,
