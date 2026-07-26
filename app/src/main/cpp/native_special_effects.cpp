@@ -60,9 +60,9 @@ static void apply_chroma_fringe_reduce(uint8_t* base, int width, int height, int
     const float s = clamp01(strength);
     if (s <= 0.001f) return;
     for (int y = 0; y < height; ++y) {
-        auto* row = base + y * stride;
+        auto* row = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
-            auto* px = row + x * 4;
+            auto* px = row + static_cast<size_t>(x) * 4U;
             float r = px[0] / 255.0f;
             float g = px[1] / 255.0f;
             float b = px[2] / 255.0f;
@@ -88,14 +88,14 @@ static void apply_vignette_correction(uint8_t* base, int width, int height, int 
     const float cy = (height - 1) * 0.5f;
     const float invMax = 1.0f / std::max(1.0f, std::sqrt(cx * cx + cy * cy));
     for (int y = 0; y < height; ++y) {
-        auto* row = base + y * stride;
+        auto* row = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
             const float dx = x - cx;
             const float dy = y - cy;
             const float d = std::sqrt(dx * dx + dy * dy) * invMax;
             const float mask = smoothstep(0.38f, 1.0f, d) * s;
             const float gain = 1.0f + mask * 0.32f;
-            auto* px = row + x * 4;
+            auto* px = row + static_cast<size_t>(x) * 4U;
             px[0] = to_u8((px[0] / 255.0f) * gain);
             px[1] = to_u8((px[1] / 255.0f) * gain);
             px[2] = to_u8((px[2] / 255.0f) * gain);
@@ -109,26 +109,33 @@ static void apply_soft_blur(uint8_t* base, int width, int height, int stride, fl
     std::vector<uint8_t> src(byteCount);
     std::copy(base, base + byteCount, src.data());
     for (int y = 0; y < height; ++y) {
-        auto* outRow = base + y * stride;
+        auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
             float sum[3] = {0.0f, 0.0f, 0.0f};
             float weightSum = 0.0f;
             for (int dy = -1; dy <= 1; ++dy) {
                 const int yy = std::min(height - 1, std::max(0, y + dy));
-                const auto* row = src.data() + yy * stride;
+                const auto* row =
+                    src.data() +
+                    static_cast<size_t>(yy) * static_cast<size_t>(stride);
                 for (int dx = -1; dx <= 1; ++dx) {
                     const int xx = std::min(width - 1, std::max(0, x + dx));
                     const float w = (dx == 0 && dy == 0) ? 4.0f : ((dx == 0 || dy == 0) ? 2.0f : 1.0f);
-                    const auto* p = row + xx * 4;
+                    const auto* p = row + static_cast<size_t>(xx) * 4U;
                     sum[0] += (p[0] / 255.0f) * w;
                     sum[1] += (p[1] / 255.0f) * w;
                     sum[2] += (p[2] / 255.0f) * w;
                     weightSum += w;
                 }
             }
-            auto* out = outRow + x * 4;
+            auto* out = outRow + static_cast<size_t>(x) * 4U;
             for (int c = 0; c < 3; ++c) {
-                const float original = src[static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4U + c] / 255.0f;
+                const float original =
+                    src[
+                        static_cast<size_t>(y) * static_cast<size_t>(stride) +
+                        static_cast<size_t>(x) * 4U +
+                        static_cast<size_t>(c)
+                    ] / 255.0f;
                 const float blurred = sum[c] / std::max(0.0001f, weightSum);
                 out[c] = to_u8(original + (blurred - original) * s);
             }
@@ -142,9 +149,12 @@ static void apply_small_spot_cleanup(uint8_t* base, int width, int height, int s
     std::vector<uint8_t> src(byteCount);
     std::copy(base, base + byteCount, src.data());
     for (int y = 0; y < height; ++y) {
-        auto* outRow = base + y * stride;
+        auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
-            const auto* center = src.data() + y * stride + x * 4;
+            const auto* center =
+                src.data() +
+                static_cast<size_t>(y) * static_cast<size_t>(stride) +
+                static_cast<size_t>(x) * 4U;
             float cr = center[0] / 255.0f;
             float cg = center[1] / 255.0f;
             float cb = center[2] / 255.0f;
@@ -163,7 +173,10 @@ static void apply_small_spot_cleanup(uint8_t* base, int width, int height, int s
                     if (dx == 0 && dy == 0) continue;
                     const int xx = std::min(width - 1, std::max(0, x + dx));
                     if (xx == x && yy == y) continue;
-                    const auto* p = src.data() + yy * stride + xx * 4;
+                    const auto* p =
+                        src.data() +
+                        static_cast<size_t>(yy) * static_cast<size_t>(stride) +
+                        static_cast<size_t>(xx) * 4U;
                     const float r = p[0] / 255.0f;
                     const float g = p[1] / 255.0f;
                     const float b = p[2] / 255.0f;
@@ -201,7 +214,7 @@ static void apply_small_spot_cleanup(uint8_t* base, int width, int height, int s
             );
             const float detailGuard = 1.0f - smoothstep(0.055f, 0.180f, localRange);
             const float mix = isolated * detailGuard * s * 0.72f;
-            auto* out = outRow + x * 4;
+            auto* out = outRow + static_cast<size_t>(x) * 4U;
             out[0] = to_u8(cr + (avg[0] - cr) * mix);
             out[1] = to_u8(cg + (avg[1] - cg) * mix);
             out[2] = to_u8(cb + (avg[2] - cb) * mix);

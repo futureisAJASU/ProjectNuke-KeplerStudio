@@ -118,6 +118,10 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
     jint passes
 ) {
     return runNativeGuarded("nativeCreateFlareMaskNative", [&]() -> jint {
+        if (kepler_native::isSameBitmap(env, sourceBitmap, maskBitmap)) {
+            LOGE("Source/mask alias is not supported");
+            return -13;
+        }
         AndroidBitmapInfo srcInfo{};
         AndroidBitmapInfo maskInfo{};
         if (!kepler_native::getBitmapInfo(env, sourceBitmap, srcInfo) ||
@@ -133,7 +137,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
             LOGE("Invalid bitmap dimensions or stride");
             return -11;
         }
-        if (srcInfo.width != maskInfo.width || srcInfo.height != maskInfo.height) {
+        if (!kepler_native::dimensionsMatch(srcInfo, maskInfo)) {
             LOGE("Mask size mismatch");
             return -3;
         }
@@ -149,9 +153,10 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
         }
 
         LockedBitmap srcLock(env, sourceBitmap);
-        if (srcLock.lock() != 0) return -4;
         LockedBitmap maskLock(env, maskBitmap);
-        if (maskLock.lock() != 0) return -5;
+        const int failedLock = kepler_native::lockAll(srcLock, maskLock);
+        if (failedLock == 0) return -4;
+        if (failedLock == 1) return -5;
 
         const int width = static_cast<int>(srcInfo.width);
         const int height = static_cast<int>(srcInfo.height);
@@ -161,7 +166,14 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
         std::vector<uint8_t> alpha(pixelCount);
 
         for (int y = 0; y < height; ++y) {
-            const auto* row = src + static_cast<size_t>(y) * srcInfo.stride;
+            const uint8_t* row = nullptr;
+            if (!kepler_native::checkedRowPointer(
+                    src,
+                    srcInfo,
+                    static_cast<std::uint32_t>(y),
+                    row)) {
+                return -11;
+            }
             for (int x = 0; x < width; ++x) {
                 const uint8_t* p = row + static_cast<size_t>(x) * 4U;
                 const float l = luma_of(p);
@@ -172,7 +184,14 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
         box_blur_u8(alpha, width, height, std::max(0, radius), std::max(0, passes));
 
         for (int y = 0; y < height; ++y) {
-            auto* row = mask + static_cast<size_t>(y) * maskInfo.stride;
+            uint8_t* row = nullptr;
+            if (!kepler_native::checkedRowPointer(
+                    mask,
+                    maskInfo,
+                    static_cast<std::uint32_t>(y),
+                    row)) {
+                return -11;
+            }
             for (int x = 0; x < width; ++x) {
                 const uint8_t v = alpha[static_cast<size_t>(y) * width + x];
                 auto* out = row + static_cast<size_t>(x) * 4U;

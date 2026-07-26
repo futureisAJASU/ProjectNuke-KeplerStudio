@@ -49,6 +49,14 @@ object NativePhotoCore {
         revision: Int,
         look: PresetColorLook? = null
     ): Int {
+        val scratchPlan =
+            NativeScratchPlanner.mainRender(
+                rowBytes = bitmap.rowBytes,
+                needsFiveRows =
+                    luminanceNoiseReduction > 0.001f || colorNoiseReduction > 0.001f,
+                needsThreeRows = sharpness > 0.001f,
+            )
+        if (!scratchPlan.withinNativeBudget) return -12
         // Kotlin keeps highlights signed opposite the native kernel, so pass the negated value here.
         val result = nativeRenderPreviewInPlaceNative(
             bitmap,
@@ -86,14 +94,27 @@ object NativePhotoCore {
         effect: Int,
         strength: Float,
         revision: Int
-    ): Int = nativeApplySpecialEffectInPlaceNative(bitmap, effect, strength, revision)
+    ): Int {
+        val plan = NativeScratchPlanner.specialEffect(bitmap.rowBytes, bitmap.height, effect)
+        if (!plan.withinNativeBudget) return -12
+        return nativeApplySpecialEffectInPlaceNative(bitmap, effect, strength, revision)
+    }
 
     fun nativeApplyFlareGuardInPlace(
         bitmap: Bitmap,
         mode: Int,
         strength: Float,
         revision: Int
-    ): Int = nativeApplyFlareGuardInPlaceNative(bitmap, mode, strength, revision)
+    ): Int {
+        val plan =
+            NativeScratchPlanner.flareCorrection(
+                bitmap.rowBytes,
+                bitmap.width,
+                bitmap.height,
+            )
+        if (!plan.withinNativeBudget) return -12
+        return nativeApplyFlareGuardInPlaceNative(bitmap, mode, strength, revision)
+    }
 
     fun nativeCreateFlareMask(
         source: Bitmap,
@@ -101,7 +122,12 @@ object NativePhotoCore {
         threshold: Float,
         radius: Int,
         passes: Int
-    ): Int = nativeCreateFlareMaskNative(source, mask, threshold, radius, passes)
+    ): Int {
+        val plan =
+            NativeScratchPlanner.flareMask(source.width, source.height, radius, passes)
+        if (!plan.withinNativeBudget) return -12
+        return nativeCreateFlareMaskNative(source, mask, threshold, radius, passes)
+    }
 
     fun nativeBlendSelectionLayerInPlace(
         target: Bitmap,

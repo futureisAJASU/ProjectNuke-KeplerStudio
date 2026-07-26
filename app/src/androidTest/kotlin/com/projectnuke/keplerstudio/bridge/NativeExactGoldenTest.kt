@@ -93,6 +93,48 @@ class NativeExactGoldenTest {
     }
 
     @Test
+    fun unsupportedBitmapAliasesAreRejectedWithoutModification() {
+        val crop = fixture()
+        val cropBefore = pixels(crop)
+        assertEquals(
+            -13,
+            NativePhotoCore.nativeRenderCropTransform(
+                crop,
+                crop,
+                0f,
+                0f,
+                1f,
+                1f,
+                0f,
+                false,
+                31,
+            ),
+        )
+        assertArrayEquals(cropBefore, pixels(crop))
+
+        val flare = fixture()
+        val flareBefore = pixels(flare)
+        assertEquals(-13, NativePhotoCore.nativeCreateFlareMask(flare, flare, 0.8f, 1, 1))
+        assertArrayEquals(flareBefore, pixels(flare))
+
+        val selection = fixture()
+        val selectionBefore = pixels(selection)
+        val mask = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        mask.eraseColor(0xffffffff.toInt())
+        assertEquals(
+            -13,
+            NativePhotoCore.nativeBlendSelectionLayerInPlace(
+                selection,
+                selection,
+                mask,
+                false,
+                1f,
+            ),
+        )
+        assertArrayEquals(selectionBefore, pixels(selection))
+    }
+
+    @Test
     fun fixtureVersionAndHashStayStable() {
         assertEquals(1, FIXTURE_VERSION)
         assertEquals(289374068137732291L, exactHash(pixels(fixture())))

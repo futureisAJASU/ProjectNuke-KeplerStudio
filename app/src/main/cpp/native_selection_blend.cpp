@@ -34,7 +34,9 @@ static inline uint8_t to_u8(float v) {
 }
 
 static inline const uint8_t* px_at(const uint8_t* base, int stride, int x, int y) {
-    return base + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4U;
+    return base +
+        static_cast<size_t>(y) * static_cast<size_t>(stride) +
+        static_cast<size_t>(x) * 4U;
 }
 
 static float sample_mask(const uint8_t* mask, int maskW, int maskH, int maskStride, int targetW, int targetH, int x, int y) {
@@ -70,6 +72,12 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeBlendSelectionLay
     jfloat opacity
 ) {
     return runNativeGuarded("nativeBlendSelectionLayerInPlaceNative", [&]() -> jint {
+        if (kepler_native::isSameBitmap(env, targetBitmap, localBitmap) ||
+            kepler_native::isSameBitmap(env, targetBitmap, maskBitmap) ||
+            kepler_native::isSameBitmap(env, localBitmap, maskBitmap)) {
+            LOGE("Selection bitmap aliasing is not supported");
+            return -13;
+        }
         AndroidBitmapInfo targetInfo{};
         AndroidBitmapInfo localInfo{};
         AndroidBitmapInfo maskInfo{};
@@ -91,17 +99,18 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeBlendSelectionLay
             LOGE("Invalid bitmap dimensions or stride");
             return -11;
         }
-        if (targetInfo.width != localInfo.width || targetInfo.height != localInfo.height) {
+        if (!kepler_native::dimensionsMatch(targetInfo, localInfo)) {
             LOGE("Target/local size mismatch");
             return -3;
         }
 
         LockedBitmap targetLock(env, targetBitmap);
-        if (targetLock.lock() != 0) return -4;
         LockedBitmap localLock(env, localBitmap);
-        if (localLock.lock() != 0) return -5;
         LockedBitmap maskLock(env, maskBitmap);
-        if (maskLock.lock() != 0) return -6;
+        const int failedLock = kepler_native::lockAll(targetLock, localLock, maskLock);
+        if (failedLock == 0) return -4;
+        if (failedLock == 1) return -5;
+        if (failedLock == 2) return -6;
 
         auto* target = static_cast<uint8_t*>(targetLock.pixels);
         const auto* local = static_cast<const uint8_t*>(localLock.pixels);
@@ -114,8 +123,20 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeBlendSelectionLay
         const float op = clamp01(opacity);
 
         for (int y = 0; y < height; ++y) {
-            auto* targetRow = target + static_cast<size_t>(y) * targetInfo.stride;
-            const auto* localRow = local + static_cast<size_t>(y) * localInfo.stride;
+            uint8_t* targetRow = nullptr;
+            const uint8_t* localRow = nullptr;
+            if (!kepler_native::checkedRowPointer(
+                    target,
+                    targetInfo,
+                    static_cast<std::uint32_t>(y),
+                    targetRow) ||
+                !kepler_native::checkedRowPointer(
+                    local,
+                    localInfo,
+                    static_cast<std::uint32_t>(y),
+                    localRow)) {
+                return -11;
+            }
             for (int x = 0; x < width; ++x) {
                 float alpha = sample_mask(mask, maskW, maskH, static_cast<int>(maskInfo.stride), width, height, x, y);
                 if (inv) alpha = 1.0f - alpha;

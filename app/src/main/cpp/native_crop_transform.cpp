@@ -86,7 +86,9 @@ static Bounds compute_bounds(int width, int height, float radians, bool flip) {
 }
 
 static inline const uint8_t* src_px(const uint8_t* src, int stride, int x, int y) {
-    return src + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4U;
+    return src +
+        static_cast<size_t>(y) * static_cast<size_t>(stride) +
+        static_cast<size_t>(x) * 4U;
 }
 
 static void sample_bilinear(
@@ -134,6 +136,10 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderCropTransfo
     jint revision
 ) {
     return runNativeGuarded("nativeRenderCropTransformNative", [&]() -> jint {
+        if (kepler_native::isSameBitmap(env, sourceBitmap, destinationBitmap)) {
+            LOGE("Source/destination alias is not supported");
+            return -13;
+        }
         AndroidBitmapInfo srcInfo{};
         AndroidBitmapInfo dstInfo{};
         if (!kepler_native::getBitmapInfo(env, sourceBitmap, srcInfo) ||
@@ -151,9 +157,10 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderCropTransfo
         }
 
         LockedBitmap srcLock(env, sourceBitmap);
-        if (srcLock.lock() != 0) return -3;
         LockedBitmap dstLock(env, destinationBitmap);
-        if (dstLock.lock() != 0) return -4;
+        const int failedLock = kepler_native::lockAll(srcLock, dstLock);
+        if (failedLock == 0) return -3;
+        if (failedLock == 1) return -4;
 
         const int srcW = static_cast<int>(srcInfo.width);
         const int srcH = static_cast<int>(srcInfo.height);
@@ -180,7 +187,14 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderCropTransfo
         auto* src = static_cast<const uint8_t*>(srcLock.pixels);
         auto* dst = static_cast<uint8_t*>(dstLock.pixels);
         for (int y = 0; y < dstH; ++y) {
-            auto* outRow = dst + static_cast<size_t>(y) * dstInfo.stride;
+            uint8_t* outRow = nullptr;
+            if (!kepler_native::checkedRowPointer(
+                    dst,
+                    dstInfo,
+                    static_cast<std::uint32_t>(y),
+                    outRow)) {
+                return -11;
+            }
             const float ty = cropY + (static_cast<float>(y) + 0.5f) * cropH / std::max(1, dstH);
             for (int x = 0; x < dstW; ++x) {
                 const float tx = cropX + (static_cast<float>(x) + 0.5f) * cropW / std::max(1, dstW);

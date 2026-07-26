@@ -290,9 +290,9 @@ static void apply_adjustment_rgba8888(
     const float tintB = 1.0f + tint * 0.045f;
 
     for (int y = 0; y < height; ++y) {
-        auto* row = base + y * stride;
+        auto* row = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
-            auto* px = row + x * 4;
+            auto* px = row + static_cast<size_t>(x) * 4U;
 
             float r = px[0] / 255.0f;
             float g = px[1] / 255.0f;
@@ -393,7 +393,12 @@ static void apply_edge_aware_noise_reduction_rgba8888(
 
     copy_row(curr.data(), base, stride);
     copy_row(next.data(), base + stride, stride);
-    copy_row(next2.data(), (height > 2) ? (base + stride * 2) : (base + stride), stride);
+    copy_row(
+        next2.data(),
+        (height > 2)
+            ? (base + static_cast<size_t>(stride) * 2U)
+            : (base + static_cast<size_t>(stride)),
+        stride);
     copy_row(prev.data(), curr.data(), stride);
     copy_row(prev2.data(), curr.data(), stride);
 
@@ -402,12 +407,12 @@ static void apply_edge_aware_noise_reduction_rgba8888(
     const float sigma2 = std::max(0.0001f, sigma * sigma * 2.0f);
 
     for (int y = 0; y < height; ++y) {
-        auto* outRow = base + y * stride;
+        auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
         if (y + 2 >= height) copy_row(next2.data(), next.data(), stride);
 
         for (int x = 0; x < width; ++x) {
-            auto* outPx = outRow + x * 4;
+            auto* outPx = outRow + static_cast<size_t>(x) * 4U;
             const float centerR = channel_at(curr, x, 0);
             const float centerG = channel_at(curr, x, 1);
             const float centerB = channel_at(curr, x, 2);
@@ -499,7 +504,12 @@ static void apply_edge_aware_noise_reduction_rgba8888(
             curr.swap(next);
             next.swap(next2);
             if (y + 2 < height) {
-                copy_row(next2.data(), base + (y + 3 < height ? y + 3 : height - 1) * stride, stride);
+                copy_row(
+                    next2.data(),
+                    base +
+                        static_cast<size_t>(y + 3 < height ? y + 3 : height - 1) *
+                            static_cast<size_t>(stride),
+                    stride);
             } else {
                 copy_row(next2.data(), next.data(), stride);
             }
@@ -578,7 +588,12 @@ static void apply_guided_noise_reduction_rgba8888(
 
     copy_row(curr.data(), base, stride);
     copy_row(next.data(), base + stride, stride);
-    copy_row(next2.data(), (height > 2) ? (base + stride * 2) : (base + stride), stride);
+    copy_row(
+        next2.data(),
+        (height > 2)
+            ? (base + static_cast<size_t>(stride) * 2U)
+            : (base + static_cast<size_t>(stride)),
+        stride);
     copy_row(prev.data(), curr.data(), stride);
     copy_row(prev2.data(), curr.data(), stride);
 
@@ -587,12 +602,12 @@ static void apply_guided_noise_reduction_rgba8888(
     const float chromaEps = 0.0012f + (1.0f - maxStrength) * 0.0075f;
 
     for (int y = 0; y < height; ++y) {
-        auto* outRow = base + y * stride;
+        auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
         if (y + 2 >= height) copy_row(next2.data(), next.data(), stride);
 
         for (int x = 0; x < width; ++x) {
-            auto* outPx = outRow + x * 4;
+            auto* outPx = outRow + static_cast<size_t>(x) * 4U;
             const float centerR = channel_at(curr, x, 0);
             const float centerG = channel_at(curr, x, 1);
             const float centerB = channel_at(curr, x, 2);
@@ -658,7 +673,12 @@ static void apply_guided_noise_reduction_rgba8888(
             curr.swap(next);
             next.swap(next2);
             if (y + 2 < height) {
-                copy_row(next2.data(), base + (y + 3 < height ? y + 3 : height - 1) * stride, stride);
+                copy_row(
+                    next2.data(),
+                    base +
+                        static_cast<size_t>(y + 3 < height ? y + 3 : height - 1) *
+                            static_cast<size_t>(stride),
+                    stride);
             } else {
                 copy_row(next2.data(), next.data(), stride);
             }
@@ -686,13 +706,13 @@ static void apply_sharpness_rgba8888(
     copy_row(prev.data(), curr.data(), stride);
 
     for (int y = 0; y < height; ++y) {
-        auto* outRow = base + y * stride;
+        auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
 
         for (int x = 0; x < width; ++x) {
             const int lx = std::max(0, x - 1);
             const int rx = std::min(width - 1, x + 1);
-            auto* outPx = outRow + x * 4;
+            auto* outPx = outRow + static_cast<size_t>(x) * 4U;
             const uint8_t alpha = curr[static_cast<size_t>(x) * 4U + 3U];
 
             const float centerL = luma_at(curr, x);
@@ -729,7 +749,11 @@ static void apply_sharpness_rgba8888(
             prev.swap(curr);
             curr.swap(next);
             if (y + 2 < height) {
-                copy_row(next.data(), base + (y + 2) * stride, stride);
+                copy_row(
+                    next.data(),
+                    base +
+                        static_cast<size_t>(y + 2) * static_cast<size_t>(stride),
+                    stride);
             } else {
                 copy_row(next.data(), curr.data(), stride);
             }

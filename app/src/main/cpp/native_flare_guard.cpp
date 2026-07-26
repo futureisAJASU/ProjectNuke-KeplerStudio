@@ -76,7 +76,9 @@ static inline float luma_of(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 static inline const uint8_t* pixel_at(const std::vector<uint8_t>& src, int stride, int x, int y) {
-    return src.data() + static_cast<size_t>(y) * stride + static_cast<size_t>(x) * 4U;
+    return src.data() +
+        static_cast<size_t>(y) * static_cast<size_t>(stride) +
+        static_cast<size_t>(x) * 4U;
 }
 
 static void sliding_max_row(const float* input, float* output, int length, int radius);
