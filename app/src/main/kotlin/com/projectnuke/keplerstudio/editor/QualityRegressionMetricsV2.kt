@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
 data class ImageQualityMetricsV2(
     val changedPixelRatio: Float,
@@ -22,6 +23,7 @@ data class MaskBoundaryMetrics(
     val boundaryPrecision: Float,
     val boundaryRecall: Float,
     val boundaryFScore: Float,
+    val toleranceBoundaryFScore: Float,
     val expectedComponentCount: Int,
     val actualComponentCount: Int,
     val affectedAreaDrift: Float,
@@ -87,7 +89,7 @@ object QualityRegressionMetricsV2 {
             lumaError += abs(afterLuma - beforeLuma)
             val beforeChroma = chroma(before)
             val afterChroma = chroma(after)
-            chromaError += abs(afterChroma - beforeChroma)
+            chromaError += chromaDelta(before, after)
             if (beforeLuma >= 250f) baselineHighlights++
             if (afterLuma >= 250f) candidateHighlights++
             if (beforeLuma <= 5f) baselineShadows++
@@ -131,6 +133,7 @@ object QualityRegressionMetricsV2 {
         actual: BooleanArray,
         width: Int,
         height: Int,
+        tolerancePixels: Int = 1,
     ): MaskBoundaryMetrics {
         requirePixelDimensions(width, height, expected.size)
         require(actual.size == expected.size)
@@ -146,6 +149,7 @@ object QualityRegressionMetricsV2 {
         }
         val expectedBoundary = boundary(expected, width, height)
         val actualBoundary = boundary(actual, width, height)
+        require(tolerancePixels >= 0)
         var boundaryIntersection = 0
         var expectedBoundaryCount = 0
         var actualBoundaryCount = 0
@@ -166,6 +170,8 @@ object QualityRegressionMetricsV2 {
             } else {
                 boundaryIntersection.toFloat() / expectedBoundaryCount
             }
+        val tolerantPrecision = boundaryMatchRatio(actualBoundary, expectedBoundary, width, height, tolerancePixels)
+        val tolerantRecall = boundaryMatchRatio(expectedBoundary, actualBoundary, width, height, tolerancePixels)
         return MaskBoundaryMetrics(
             intersectionOverUnion = if (union == 0) 1f else intersection.toFloat() / union,
             boundaryPrecision = precision,
@@ -173,6 +179,9 @@ object QualityRegressionMetricsV2 {
             boundaryFScore =
                 if (precision + recall == 0f) 0f
                 else 2f * precision * recall / (precision + recall),
+            toleranceBoundaryFScore =
+                if (tolerantPrecision + tolerantRecall == 0f) 0f
+                else 2f * tolerantPrecision * tolerantRecall / (tolerantPrecision + tolerantRecall),
             expectedComponentCount = componentCount(expected, width, height),
             actualComponentCount = componentCount(actual, width, height),
             affectedAreaDrift = (actualArea - expectedArea).toFloat() / expected.size.coerceAtLeast(1),
@@ -308,11 +317,53 @@ object QualityRegressionMetricsV2 {
             else -> argb and 0xff
         }
 
-    private fun chroma(argb: Int): Int {
+    private fun chroma(argb: Int): Float {
         val red = channel(argb, 0)
         val green = channel(argb, 1)
         val blue = channel(argb, 2)
-        return max(red, max(green, blue)) - min(red, min(green, blue))
+        val cb = (blue - luma(argb)) * 0.564f
+        val cr = (red - luma(argb)) * 0.713f
+        return sqrt(cb * cb + cr * cr)
+    }
+
+    private fun chromaDelta(first: Int, second: Int): Float {
+        val firstLuma = luma(first)
+        val secondLuma = luma(second)
+        val cbDelta = ((channel(second, 2) - secondLuma) - (channel(first, 2) - firstLuma)) * 0.564f
+        val crDelta = ((channel(second, 0) - secondLuma) - (channel(first, 0) - firstLuma)) * 0.713f
+        return sqrt(cbDelta * cbDelta + crDelta * crDelta)
+    }
+
+    private fun boundaryMatchRatio(
+        source: BooleanArray,
+        target: BooleanArray,
+        width: Int,
+        height: Int,
+        tolerance: Int,
+    ): Float {
+        var sourceCount = 0
+        var matched = 0
+        source.indices.forEach { index ->
+            if (!source[index]) return@forEach
+            sourceCount++
+            val x = index % width
+            val y = index / width
+            var found = false
+            for (dy in -tolerance..tolerance) {
+                val candidateY = y + dy
+                if (candidateY !in 0 until height) continue
+                for (dx in -tolerance..tolerance) {
+                    val candidateX = x + dx
+                    if (candidateX in 0 until width && target[candidateY * width + candidateX]) {
+                        found = true
+                        break
+                    }
+                }
+                if (found) break
+            }
+            if (found) matched++
+        }
+        return if (sourceCount == 0) 1f else matched.toFloat() / sourceCount
     }
 
     private fun luma(argb: Int): Float =

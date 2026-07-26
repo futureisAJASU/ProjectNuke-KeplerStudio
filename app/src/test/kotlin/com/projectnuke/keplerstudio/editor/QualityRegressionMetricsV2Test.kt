@@ -40,6 +40,36 @@ class QualityRegressionMetricsV2Test {
     }
 
     @Test
+    fun chromaAndBoundaryToleranceSeparateHueAndOnePixelShift() {
+        val lumaOnly =
+            QualityRegressionMetricsV2.compareArgb(
+                intArrayOf(0xff404040.toInt()),
+                intArrayOf(0xff808080.toInt()),
+                1,
+                1,
+            )
+        val hueShift =
+            QualityRegressionMetricsV2.compareArgb(
+                intArrayOf(0xff804040.toInt()),
+                intArrayOf(0xff408040.toInt()),
+                1,
+                1,
+            )
+        assertEquals(0f, lumaOnly.chromaMeanAbsoluteError)
+        assertTrue(hueShift.chromaMeanAbsoluteError > 0f)
+
+        val expected = BooleanArray(5 * 5)
+        val shifted = BooleanArray(5 * 5)
+        for (y in 1..3) {
+            expected[y * 5 + 1] = true
+            shifted[y * 5 + 2] = true
+        }
+        val boundary = QualityRegressionMetricsV2.compareMasks(expected, shifted, 5, 5, tolerancePixels = 1)
+        assertTrue(boundary.boundaryFScore < 1f)
+        assertEquals(1f, boundary.toleranceBoundaryFScore)
+    }
+
+    @Test
     fun debugArtifactIsExplicitAndContainsStableHeatmapAndJson() {
         val baseline = intArrayOf(0xff101010.toInt(), 0xff808080.toInt())
         val candidate = intArrayOf(0xff201010.toInt(), 0xff808080.toInt())
