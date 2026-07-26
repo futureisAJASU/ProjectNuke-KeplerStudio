@@ -98,7 +98,9 @@ class FlareGuardModelRunner private constructor(
         val meanAlpha: Float,
         val maxAlpha: Float,
         val activeRegionMeanAlpha: Float,
+        val activeRegionPercentileAlpha: Float,
         val affectedAreaRatio: Float,
+        val backgroundLeakageAlpha: Float,
         val policyConfidence: Float,
         internal val diagnosticEdge: Long = 0L
     )
@@ -214,9 +216,12 @@ class FlareGuardModelRunner private constructor(
                             maskResult,
                             maskResult.policyConfidence,
                             ModelConfidence(
+                                wholeImageMean = maskResult.meanAlpha,
                                 peak = maskResult.maxAlpha,
                                 activeRegionMean = maskResult.activeRegionMeanAlpha,
+                                activeRegionPercentile = maskResult.activeRegionPercentileAlpha,
                                 affectedAreaRatio = maskResult.affectedAreaRatio,
+                                backgroundLeakage = maskResult.backgroundLeakageAlpha,
                                 finalPolicy = maskResult.policyConfidence,
                             ),
                         )
@@ -315,11 +320,19 @@ class FlareGuardModelRunner private constructor(
 
             val outPixels = IntArray(checkedTensorElementCount(outputWidth, outputHeight))
             val pixelsTransient = diagnostics?.trackTransientBytes("flareGuard:maskPixels", outPixels.size.toLong() * Int.SIZE_BYTES) ?: 0L
+            val histogramTransient =
+                diagnostics?.trackTransientBytes(
+                    "flareGuard:activeHistogram",
+                    256L * Int.SIZE_BYTES,
+                ) ?: 0L
             try {
                 var sum = 0f
                 var max = 0f
                 var activeSum = 0f
                 var activeCount = 0
+                var backgroundSum = 0f
+                var backgroundCount = 0
+                val activeHistogram = IntArray(256)
                 for (y in 0 until outputHeight) {
                     for (x in 0 until outputWidth) {
                         val alpha = readOutputPixel(values, x, y).coerceIn(0f, 1f)
@@ -328,6 +341,10 @@ class FlareGuardModelRunner private constructor(
                         if (alpha >= MASK_ACTIVE_THRESHOLD) {
                             activeSum += alpha
                             activeCount++
+                            activeHistogram[(alpha * 255f).roundToInt().coerceIn(0, 255)]++
+                        } else {
+                            backgroundSum += alpha
+                            backgroundCount++
                         }
                         val v = (alpha * 255f).roundToInt().coerceIn(0, 255)
                         outPixels[y * outputWidth + x] = -0x1000000 or (v shl 16) or (v shl 8) or v
@@ -340,8 +357,20 @@ class FlareGuardModelRunner private constructor(
                     bitmap!!.setPixels(outPixels, 0, outputWidth, 0, 0, outputWidth, outputHeight)
                     val mean = if (outPixels.isEmpty()) 0f else sum / outPixels.size
                     val activeMean = if (activeCount == 0) 0f else activeSum / activeCount
+                    val percentileRank = ((activeCount - 1) * 0.90f).roundToInt().coerceAtLeast(0)
+                    var cumulative = 0
+                    var percentile = 0f
+                    for (bucket in activeHistogram.indices) {
+                        cumulative += activeHistogram[bucket]
+                        if (cumulative > percentileRank) {
+                            percentile = bucket / 255f
+                            break
+                        }
+                    }
                     val affectedArea =
                         if (outPixels.isEmpty()) 0f else activeCount.toFloat() / outPixels.size
+                    val backgroundLeakage =
+                        if (backgroundCount == 0) 0f else backgroundSum / backgroundCount
                     val areaReliability =
                         sqrt((affectedArea / MIN_CONFIDENT_AREA_RATIO).coerceIn(0f, 1f))
                     val result =
@@ -350,7 +379,9 @@ class FlareGuardModelRunner private constructor(
                             meanAlpha = mean,
                             maxAlpha = max,
                             activeRegionMeanAlpha = activeMean,
+                            activeRegionPercentileAlpha = percentile,
                             affectedAreaRatio = affectedArea,
+                            backgroundLeakageAlpha = backgroundLeakage,
                             policyConfidence = (activeMean * areaReliability).coerceIn(0f, 1f),
                         )
                     bitmap = null
@@ -360,6 +391,7 @@ class FlareGuardModelRunner private constructor(
                     throw t
                 }
             } finally {
+                diagnostics?.releaseTransient(histogramTransient)
                 diagnostics?.releaseTransient(pixelsTransient)
             }
         } finally {

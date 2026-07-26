@@ -210,9 +210,12 @@ data class ModelOperationContext(
 }
 
 data class ModelConfidence(
+    val wholeImageMean: Float,
     val peak: Float,
     val activeRegionMean: Float,
+    val activeRegionPercentile: Float,
     val affectedAreaRatio: Float,
+    val backgroundLeakage: Float,
     val modelProvided: Float? = null,
     val finalPolicy: Float,
 )
