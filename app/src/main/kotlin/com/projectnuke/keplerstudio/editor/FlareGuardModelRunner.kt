@@ -16,8 +16,6 @@ import kotlinx.coroutines.CancellationException
 import kotlin.math.sqrt
 import kotlin.math.roundToInt
 
-private const val FLARE_MASKER_MODEL_ASSET = "models/flare_guard.tflite"
-
 /**
  * Runtime slot for the current Flare Masker model.
  *
@@ -459,11 +457,16 @@ class FlareGuardModelRunner private constructor(
     }
 
     companion object {
-        fun create(context: Context): ModelLoadResult<FlareGuardModelRunner> =
-            create(
-                factory = defaultFactory(context),
+        fun create(context: Context): ModelLoadResult<FlareGuardModelRunner> {
+            val manifest =
+                ModelAssetManifest.byId("flare_masker")
+                    ?: return ModelLoadResult.AssetMissing("manifest has no flare_masker entry")
+            return create(
+                factory = defaultFactory(context, manifest.asset.assetPath),
                 assetOpen = { path -> runCatching { context.assets.open(path) }.getOrNull() },
+                manifestProvider = { manifest },
             )
+        }
 
         /**
          * Test seam: all non-Ready paths funnel through one settlement block so the
@@ -500,6 +503,21 @@ class FlareGuardModelRunner private constructor(
                             diagnosticId,
                             ownedInterpreter = null,
                             result = ModelLoadResult.AssetInvalid(validation.detail),
+                        )
+                    is ModelAssetValidation.UnpinnedExperimental ->
+                        // The Flare runner refuses an unpinned experimental asset even when
+                        // the developer override is enabled; this load path is strict-only.
+                        // Other experimental paths (e.g. UI readout) may surface the
+                        // UnpinnedExperimental reason, but a runtime model load never adopts
+                        // an unverified asset.
+                        return settleLoadFailure(
+                            diagnosticId,
+                            ownedInterpreter = null,
+                            result = ModelLoadResult.AssetInvalid(
+                                "FlareGuard runtime refuses an unpinned experimental asset (override=${
+                                    ModelAssetPolicy.allowUnpinnedExperimental()
+                                })",
+                            ),
                         )
                     is ModelAssetValidation.Valid -> Unit
                 }
@@ -619,12 +637,14 @@ class FlareGuardModelRunner private constructor(
         }
 
         /**
-         * Production loader/factory wires the real LiteRT interpreter over the validated
-         * manifest asset path. Tests inject a fake seam directly.
+         * Production loader/factory wires the real LiteRT interpreter over the
+         * validated manifest asset path. The path the loader maps here is the same
+         * path ModelAssetValidator validated; there is no separate hardcoded path
+         * that can drift from the manifest.
          */
-        private fun defaultFactory(context: Context): FlareGuardLoaderFactory =
+        private fun defaultFactory(context: Context, assetPath: String): FlareGuardLoaderFactory =
             object : FlareGuardLoaderFactory {
-                override fun loadAsset(): MappedByteBuffer = loadMappedAsset(context, FLARE_MASKER_MODEL_ASSET)
+                override fun loadAsset(): MappedByteBuffer = loadMappedAsset(context, assetPath)
 
                 override fun newInterpreter(model: MappedByteBuffer): Interpreter =
                     Interpreter(

@@ -1,3 +1,5 @@
+import java.security.MessageDigest as ShaDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -69,4 +71,44 @@ dependencies {
     testImplementation("org.robolectric:robolectric:4.16.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.1")
+}
+
+/**
+ * Reproducible model-asset pinning helper.
+ *
+ * Prints id/path/byte-size/sha-256 for every file under app/src/main/assets/models,
+ * in a paste-friendly form so a developer can copy the printed sha256 into
+ * ModelAssetManifest.entries and re-run validation.
+ *
+ *     ./gradlew :app:printModelAssetSummary
+ *
+ * Only id/path/size/hash are emitted; never image or pixel contents.
+ */
+tasks.register("printModelAssetSummary") {
+    group = "kepler"
+    description = "Print id/path/byte-size/sha-256 for each packaged model asset so the developer can pin it in ModelAssetManifest."
+    doLast {
+        val modelsDir = file("src/main/assets/models")
+        if (!modelsDir.isDirectory) {
+            logger.lifecycle("# no packaged model assets at ${modelsDir.path}")
+            return@doLast
+        }
+        val md = ShaDigest.getInstance("SHA-256")
+        logger.lifecycle("# model asset report — paste sha256 + path into ModelAssetManifest.entries")
+        modelsDir.listFiles()?.sortedBy { it.name }?.forEach { modelFile ->
+            if (!modelFile.isFile) return@forEach
+            md.reset()
+            val shaHex = modelFile.inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    md.update(buffer, 0, read)
+                }
+                md.digest().joinToString("") { b -> "%02x".format(b) }
+            }
+            val size = modelFile.length()
+            logger.lifecycle("path=models/${modelFile.name}\tsize=${size}\tsha256=${shaHex}")
+        }
+    }
 }
