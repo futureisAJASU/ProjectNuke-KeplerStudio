@@ -204,11 +204,15 @@ class FlareGuardModelRunner private constructor(
                     outputBuffer.rewind()
 
                     val maskResult =
-                        readMask(outputBuffer, diagnostics).let {
-                            it.copy(
-                                diagnosticEdge =
-                                    diagnostics?.track(it.mask, "flareGuard:modelMask") ?: 0L
-                            )
+                        try {
+                            readMask(outputBuffer, diagnostics).let {
+                                it.copy(
+                                    diagnosticEdge =
+                                        diagnostics?.track(it.mask, "flareGuard:modelMask") ?: 0L
+                                )
+                            }
+                        } catch (malformedOutput: IllegalArgumentException) {
+                            throw InvalidOutputException(malformedOutput.message ?: "model output violated the alpha contract", malformedOutput)
                         }
                     try {
                         operation.validateOrThrow()
@@ -244,6 +248,8 @@ class FlareGuardModelRunner private constructor(
             val reason =
                 when (t) {
                     is CancellationException -> ModelFailureReason.Cancelled
+                    is StaleModelGenerationException -> ModelFailureReason.StaleGeneration
+                    is InvalidOutputException -> ModelFailureReason.InvalidOutput
                     is IllegalArgumentException -> ModelFailureReason.InvalidInput
                     else -> ModelFailureReason.InferenceFailed
                 }
@@ -314,7 +320,7 @@ class FlareGuardModelRunner private constructor(
         try {
             for (i in values.indices) {
                 val value = readOutputValue(buffer)
-                require(value.isFinite()) { "FlareGuard output contains NaN or infinity" }
+                FlareGuardContract.assertAlphaInContract(value)
                 values[i] = value.coerceIn(0f, 1f)
             }
 
@@ -453,83 +459,139 @@ class FlareGuardModelRunner private constructor(
     }
 
     companion object {
-        fun create(context: Context): ModelLoadResult<FlareGuardModelRunner> {
+        fun create(context: Context): ModelLoadResult<FlareGuardModelRunner> =
+            create(
+                factory = defaultFactory(context),
+                assetOpen = { path -> runCatching { context.assets.open(path) }.getOrNull() },
+            )
+
+        /**
+         * Test seam: all non-Ready paths funnel through one settlement block so the
+         * diagnostic contributor can never leak as a permanent "loading" entry.
+         */
+        internal fun create(
+            factory: FlareGuardLoaderFactory,
+            assetOpen: (String) -> java.io.InputStream?,
+            manifestProvider: () -> ModelAssetManifestEntry? = { ModelAssetManifest.byId("flare_masker") },
+        ): ModelLoadResult<FlareGuardModelRunner> {
             val diagnosticId = GlobalModelDiagnostics.newContributorId(DIAGNOSTIC_CATEGORY)
             GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "loading")
             var ownedInterpreter: Interpreter? = null
-            return try {
-                val manifest = checkNotNull(ModelAssetManifest.byId("flare_masker"))
-                when (
-                    val validation =
-                        ModelAssetValidator.validate(manifest) { path ->
-                            runCatching { context.assets.open(path) }.getOrNull()
-                        }
-                ) {
+            var transferredOwnership = false
+            try {
+                val manifest =
+                    manifestProvider()
+                        ?: return settleLoadFailure(
+                            diagnosticId,
+                            ownedInterpreter = null,
+                            result = ModelLoadResult.AssetMissing("manifest has no flare_masker entry"),
+                        )
+                val validation =
+                    ModelAssetValidator.validate(manifest, assetOpen)
+                when (validation) {
                     ModelAssetValidation.Missing ->
-                        return ModelLoadResult.AssetMissing("${manifest.asset.assetPath} is not packaged")
+                        return settleLoadFailure(
+                            diagnosticId,
+                            ownedInterpreter = null,
+                            result = ModelLoadResult.AssetMissing("${manifest.asset.assetPath} is not packaged"),
+                        )
                     is ModelAssetValidation.Invalid ->
-                        return ModelLoadResult.AssetInvalid(validation.detail)
+                        return settleLoadFailure(
+                            diagnosticId,
+                            ownedInterpreter = null,
+                            result = ModelLoadResult.AssetInvalid(validation.detail),
+                        )
                     is ModelAssetValidation.Valid -> Unit
                 }
-                val options = Interpreter.Options().apply {
-                    setNumThreads(2)
-                    setUseXNNPACK(true)
-                }
-                val interpreter =
-                    Interpreter(loadMappedAsset(context, FLARE_MASKER_MODEL_ASSET), options)
-                        .also { ownedInterpreter = it }
-                val inputTensor = interpreter.getInputTensor(0)
-                val outputTensor = interpreter.getOutputTensor(0)
-                val inputShape = parseInputShape(inputTensor.shape())
-                val outputShape = parseOutputShape(outputTensor.shape())
-                val inputType = inputTensor.dataType()
-                val outputType = outputTensor.dataType()
-                bytesPerElement(inputType)
-                bytesPerElement(outputType)
-                val inputQuantization =
-                    tensorQuantization(
-                        inputType,
-                        inputTensor.quantizationParams().scale,
-                        inputTensor.quantizationParams().zeroPoint,
-                    )
-                val outputQuantization =
-                    tensorQuantization(
-                        outputType,
-                        outputTensor.quantizationParams().scale,
-                        outputTensor.quantizationParams().zeroPoint,
-                    )
+                val modelBytes = factory.loadAsset()
+                ownedInterpreter =
+                    try {
+                        factory.newInterpreter(modelBytes)
+                    } catch (linkage: UnsatisfiedLinkError) {
+                        throw RuntimeUnavailableException(linkage)
+                    } catch (missing: NoClassDefFoundError) {
+                        throw RuntimeUnavailableException(missing)
+                    }
+                val inputTensor =
+                    try {
+                        ownedInterpreter.getInputTensor(FlareGuardContract.SINGLE_INPUT_INDEX)
+                    } catch (t: Throwable) {
+                        throw TensorInspectionException("input tensor inspection failed", t)
+                    }
+                val outputTensor =
+                    try {
+                        ownedInterpreter.getOutputTensor(FlareGuardContract.SINGLE_OUTPUT_INDEX)
+                    } catch (t: Throwable) {
+                        throw TensorInspectionException("output tensor inspection failed", t)
+                    }
+                val contract =
+                    try {
+                        FlareGuardContract.validate(inputTensor, outputTensor)
+                    } catch (unsupported: IllegalArgumentException) {
+                        throw UnsupportedContractException(unsupported.message ?: "invalid FlareGuard tensor contract", unsupported)
+                    } catch (unsupported: IllegalStateException) {
+                        throw UnsupportedContractException(unsupported.message ?: "invalid FlareGuard tensor contract", unsupported)
+                    }
                 val runner =
-                    FlareGuardModelRunner(
-                        interpreter = interpreter,
-                        diagnosticContributorId = diagnosticId,
-                        inputWidth = inputShape.width,
-                        inputHeight = inputShape.height,
-                        inputLayout = inputShape.layout,
-                        inputType = inputType,
-                        inputQuantization = inputQuantization,
-                        outputWidth = outputShape.width,
-                        outputHeight = outputShape.height,
-                        outputChannels = outputShape.channels,
-                        outputLayout = outputShape.layout,
-                        outputType = outputType,
-                        outputQuantization = outputQuantization,
-                    )
-                ownedInterpreter = null
+                    try {
+                        FlareGuardModelRunner(
+                            interpreter = ownedInterpreter,
+                            diagnosticContributorId = diagnosticId,
+                            inputWidth = contract.inputShape.width,
+                            inputHeight = contract.inputShape.height,
+                            inputLayout = contract.inputShape.layout,
+                            inputType = contract.inputType,
+                            inputQuantization = contract.inputQuantization,
+                            outputWidth = contract.outputShape.width,
+                            outputHeight = contract.outputShape.height,
+                            outputChannels = contract.outputShape.channels,
+                            outputLayout = contract.outputShape.layout,
+                            outputType = contract.outputType,
+                            outputQuantization = contract.outputQuantization,
+                        )
+                    } catch (t: Throwable) {
+                        throw DescriptorConstructionException("FlareGuard runner descriptor construction failed", t)
+                    }
+                transferredOwnership = true
                 GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "loaded")
-                ModelLoadResult.Ready(runner)
+                return ModelLoadResult.Ready(runner)
             } catch (failure: Throwable) {
-                runCatching { ownedInterpreter?.close() }
-                GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "unloaded")
-                when (failure) {
-                    is IOException -> ModelLoadResult.AssetMissing(failure.message)
-                    is IllegalArgumentException, is IllegalStateException ->
-                        ModelLoadResult.UnsupportedContract(failure.message ?: "invalid FlareGuard tensor contract")
-                    is UnsatisfiedLinkError, is NoClassDefFoundError ->
-                        ModelLoadResult.RuntimeUnavailable(failure.message ?: "LiteRT runtime unavailable")
-                    else -> ModelLoadResult.LoadFailed(failure.message ?: "FlareGuard runner initialization failed")
+                return settleLoadFailure(diagnosticId, ownedInterpreter, classifyLoadFailure(failure))
+            } finally {
+                if (!transferredOwnership) {
+                    runCatching { ownedInterpreter?.close() }
+                    GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "unloaded")
                 }
             }
         }
+
+        private fun settleLoadFailure(
+            diagnosticId: String,
+            ownedInterpreter: Interpreter?,
+            result: ModelLoadResult<Nothing>,
+        ): ModelLoadResult<FlareGuardModelRunner> {
+            runCatching { ownedInterpreter?.close() }
+            GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "unloaded")
+            return result
+        }
+
+        private fun classifyLoadFailure(failure: Throwable): ModelLoadResult<Nothing> =
+            when (failure) {
+                is IOException -> ModelLoadResult.AssetMissing(failure.message)
+                is UnsupportedContractException ->
+                    ModelLoadResult.UnsupportedContract(failure.message ?: "invalid FlareGuard tensor contract")
+                is TensorInspectionException ->
+                    ModelLoadResult.UnsupportedContract(failure.message ?: "tensor inspection failed")
+                is DescriptorConstructionException ->
+                    ModelLoadResult.LoadFailed(failure.message ?: "descriptor construction failed")
+                is RuntimeUnavailableException ->
+                    ModelLoadResult.RuntimeUnavailable(failure.message ?: "LiteRT runtime unavailable")
+                is UnsatisfiedLinkError, is NoClassDefFoundError ->
+                    ModelLoadResult.RuntimeUnavailable(failure.message ?: "LiteRT runtime unavailable")
+                is IllegalArgumentException, is IllegalStateException ->
+                    ModelLoadResult.UnsupportedContract(failure.message ?: "invalid FlareGuard tensor contract")
+                else -> ModelLoadResult.LoadFailed(failure.message ?: "FlareGuard runner initialization failed")
+            }
 
         /** Legacy bitmap-only entry point; production paths must retain the structured reason. */
         @Deprecated("Use create() so the fallback can distinguish asset and contract failures")
@@ -555,6 +617,24 @@ class FlareGuardModelRunner private constructor(
                 throw error
             }
         }
+
+        /**
+         * Production loader/factory wires the real LiteRT interpreter over the validated
+         * manifest asset path. Tests inject a fake seam directly.
+         */
+        private fun defaultFactory(context: Context): FlareGuardLoaderFactory =
+            object : FlareGuardLoaderFactory {
+                override fun loadAsset(): MappedByteBuffer = loadMappedAsset(context, FLARE_MASKER_MODEL_ASSET)
+
+                override fun newInterpreter(model: MappedByteBuffer): Interpreter =
+                    Interpreter(
+                        model,
+                        Interpreter.Options().apply {
+                            setNumThreads(2)
+                            setUseXNNPACK(true)
+                        },
+                    )
+            }
     }
 }
 

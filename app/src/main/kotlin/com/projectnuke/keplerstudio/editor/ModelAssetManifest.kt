@@ -174,6 +174,7 @@ object ModelAssetValidator {
         validation: ModelAssetValidation,
         loaded: Boolean = false,
         inferenceAvailable: Boolean = false,
+        loadResult: ModelLoadResult<*>? = null,
     ): ModelAvailability =
         when {
             !entry.inferenceAdapterImplemented -> ModelAvailability.RunnerNotImplemented
@@ -181,6 +182,9 @@ object ModelAssetValidator {
                 ModelAvailability.ContractUnsupported
             validation is ModelAssetValidation.Missing -> ModelAvailability.AssetMissing
             validation is ModelAssetValidation.Invalid -> ModelAvailability.AssetInvalid
+            loadResult is ModelLoadResult.UnsupportedContract -> ModelAvailability.ContractUnsupported
+            loadResult is ModelLoadResult.RuntimeUnavailable -> ModelAvailability.LoadFailed
+            loadResult is ModelLoadResult.LoadFailed -> ModelAvailability.LoadFailed
             inferenceAvailable && entry.productionReady -> ModelAvailability.InferenceAvailable
             loaded && entry.productionReady -> ModelAvailability.Loaded
             else -> ModelAvailability.ExperimentalOnly

@@ -240,3 +240,26 @@ interface ModelRunnerContract {
 
 internal class StaleModelGenerationException :
     CancellationException("Model operation belongs to a stale document generation")
+
+/**
+ * Distinct from a malformed input: the model produced output outside the validated
+ * alpha-mask contract. Must surface as `[ModelFailureReason.InvalidOutput]`, never
+ * silently clamped, never collapsed into `InvalidInput`/`InferenceFailed`.
+ */
+internal class InvalidOutputException(message: String, cause: Throwable? = null) :
+    RuntimeException(message, cause)
+
+/** LiteRT / TensorFlow Lite runtime not linkable on this device. */
+internal class RuntimeUnavailableException(cause: Throwable) : RuntimeException(cause)
+
+/** Tensor shape/data inspection failed after the interpreter was constructed. */
+internal class TensorInspectionException(message: String, cause: Throwable? = null) :
+    RuntimeException(message, cause)
+
+/** Tensor contract validation rejected a model. */
+internal class UnsupportedContractException(message: String, cause: Throwable? = null) :
+    RuntimeException(message, cause)
+
+/** Runner descriptor construction failed after the contract was validated. */
+internal class DescriptorConstructionException(message: String, cause: Throwable? = null) :
+    RuntimeException(message, cause)
