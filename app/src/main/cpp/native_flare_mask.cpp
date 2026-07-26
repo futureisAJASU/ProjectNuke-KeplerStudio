@@ -9,6 +9,7 @@
 #include <new>
 #include <vector>
 #include "native_common.h"
+#include "native_cancellation.h"
 
 #define LOG_TAG "KeplerFlareMask"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -115,9 +116,12 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
     jobject maskBitmap,
     jfloat threshold,
     jint radius,
-    jint passes
+    jint passes,
+    jlong operationToken
 ) {
     return runNativeGuarded("nativeCreateFlareMaskNative", [&]() -> jint {
+        kepler_native::CancellationLease cancellation(operationToken);
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeStart;
         if (kepler_native::isSameBitmap(env, sourceBitmap, maskBitmap)) {
             LOGE("Source/mask alias is not supported");
             return -13;
@@ -166,6 +170,8 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
         std::vector<uint8_t> alpha(pixelCount);
 
         for (int y = 0; y < height; ++y) {
+            if ((y & 15) == 0 && cancellation.cancelled())
+                return kepler_native::kCancelledMidPass;
             const uint8_t* row = nullptr;
             if (!kepler_native::checkedRowPointer(
                     src,
@@ -184,6 +190,8 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
         box_blur_u8(alpha, width, height, std::max(0, radius), std::max(0, passes));
 
         for (int y = 0; y < height; ++y) {
+            if ((y & 15) == 0 && cancellation.cancelled())
+                return kepler_native::kCancelledMidPass;
             uint8_t* row = nullptr;
             if (!kepler_native::checkedRowPointer(
                     mask,
@@ -202,6 +210,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
             }
         }
 
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         return 0;
     });
 }

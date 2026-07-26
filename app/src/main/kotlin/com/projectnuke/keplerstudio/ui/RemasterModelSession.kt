@@ -187,7 +187,7 @@ object RemasterModelSession : ModelRunnerContract {
         operation: ModelOperationContext,
     ): Bitmap? =
         when (val result = createForegroundMaskResult(bitmap, diagnostics, operation)) {
-            is ModelRunResult.Success -> result.value.adopt()
+            is ModelRunResult.Success -> result.value.adoptOrNull()
             is ModelRunResult.Failure -> null
         }
 
@@ -225,31 +225,16 @@ object RemasterModelSession : ModelRunnerContract {
             var ownedMask: TrackedMask? = null
             try {
                 operation.validateOrThrow()
-                val maskBitmap =
-                    createForegroundMaskFromSegmenter(model, bitmap, diagnostics)
-                operation.validateOrThrow()
-                val trackingGeneration =
-                    operation.documentGeneration.takeIf { it != "unspecified" } ?: "session"
                 ownedMask =
-                    TrackedMask.acquire(
-                        bitmap = maskBitmap,
-                        scope = diagnostics,
-                        owner = "remaster:finalArgbMask",
-                        modelId = activeModel?.id ?: "edge_masker",
-                        modelVersion = activeModel?.semanticVersion ?: "1.0.0",
-                        operationToken = operation.operationToken,
-                        documentGeneration = trackingGeneration,
-                        confidenceMetrics =
-                            ModelConfidence(
-                                wholeImageMean = 1f,
-                                peak = 1f,
-                                activeRegionMean = 1f,
-                                activeRegionPercentile = 1f,
-                                affectedAreaRatio = 1f,
-                                backgroundLeakage = 0f,
-                                finalPolicy = 1f,
-                            ),
+                    createForegroundMaskFromSegmenter(
+                        model,
+                        bitmap,
+                        diagnostics,
+                        operation,
+                        activeModel?.id ?: "edge_masker",
+                        activeModel?.semanticVersion ?: "1.0.0",
                     )
+                operation.validateOrThrow()
                 ModelRunResult.Success(
                     ownedMask,
                     confidence = 1f,
@@ -365,7 +350,10 @@ object RemasterModelSession : ModelRunnerContract {
         segmenter: Any,
         bitmap: Bitmap,
         diagnostics: MemoryTrackerScope?,
-    ): Bitmap {
+        operation: ModelOperationContext,
+        modelId: String,
+        modelVersion: String,
+    ): TrackedMask {
         val imageBuilderClass =
             Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
         val inputCopy =
@@ -381,7 +369,7 @@ object RemasterModelSession : ModelRunnerContract {
             throw t
         }
         var categoryMaskImage: Any? = null
-        var foregroundMask: Bitmap? = null
+        var foregroundMask: TrackedMask? = null
         var primaryFailure: Throwable? = null
         try {
             val segmentMethod =
@@ -412,12 +400,15 @@ object RemasterModelSession : ModelRunnerContract {
                         bitmap.width,
                         bitmap.height,
                         diagnostics,
+                        operation,
+                        modelId,
+                        modelVersion,
                     )
             } finally {
                 if (!rawMask.isRecycled) rawMask.recycle()
                 diagnostics?.release(rawEdge)
             }
-            return foregroundMask
+            return checkNotNull(foregroundMask)
         } catch (t: Throwable) {
             primaryFailure = t
             throw t
@@ -437,15 +428,15 @@ object RemasterModelSession : ModelRunnerContract {
             if (cleanupFailures.isNotEmpty()) {
                 if (primaryFailure != null) {
                     cleanupFailures.forEach(primaryFailure::addSuppressed)
-                    foregroundMask?.recycle()
+                    foregroundMask?.recycleAndRelease()
                 } else {
-                    foregroundMask?.recycle()
+                    foregroundMask?.recycleAndRelease()
                     val cleanupFailure = cleanupFailures.first()
                     cleanupFailures.drop(1).forEach(cleanupFailure::addSuppressed)
                     throw cleanupFailure
                 }
             } else if (primaryFailure != null) {
-                foregroundMask?.recycle()
+                foregroundMask?.recycleAndRelease()
             }
         }
     }
@@ -462,19 +453,20 @@ object RemasterModelSession : ModelRunnerContract {
     }
 
     /**
-     * Build the final ARGB-8888 foreground mask bitmap. The returned bitmap is the
-     * caller's responsibility; the caller wraps it into a [TrackedMask] so its
-     * diagnostic edge is tracked together with the bitmap identity (no separate
-     * raw Long edge to leak).
+     * Builds and immediately tracks the final ARGB mask while raw/scaled masks and
+     * conversion rows are still resident.
      */
     private fun categoryBitmapToForegroundMask(
         rawMask: Bitmap,
         targetWidth: Int,
         targetHeight: Int,
         diagnostics: MemoryTrackerScope?,
-    ): Bitmap {
+        operation: ModelOperationContext,
+        modelId: String,
+        modelVersion: String,
+    ): TrackedMask {
         var scaledMask: Bitmap? = null
-        var out: Bitmap? = null
+        var out: TrackedMask? = null
         var scaledEdge = 0L
         var rowTransient = 0L
         var succeeded = false
@@ -488,10 +480,18 @@ object RemasterModelSession : ModelRunnerContract {
                 }
             if (scaledMask !== rawMask)
                 scaledEdge = diagnostics?.track(scaledMask!!, "remaster:scaledCategoryMask") ?: 0L
-            out = createBitmapOrThrow(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-            // Do NOT pre-track the final mask here: the caller wraps it in a TrackedMask
-            // which registers the diagnostic edge (with its own labelled owner) on
-            // acquire. Tracking here would create a duplicate edge that leaks.
+            val finalBitmap = createBitmapOrThrow(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+            out =
+                TrackedMask.acquire(
+                    finalBitmap,
+                    diagnostics,
+                    "remaster:finalArgbMask",
+                    modelId,
+                    modelVersion,
+                    operation.operationToken,
+                    operation.documentGeneration,
+                    ModelConfidence(1f, 1f, 1f, 1f, 1f, 0f, finalPolicy = 1f),
+                )
             val inRow = IntArray(targetWidth)
             val outRow = IntArray(targetWidth)
             rowTransient =
@@ -512,7 +512,7 @@ object RemasterModelSession : ModelRunnerContract {
                     val mask = if (category > 0) 255 else 0
                     outRow[x] = -0x1000000 or (mask shl 16) or (mask shl 8) or mask
                 }
-                out.setPixels(outRow, 0, targetWidth, 0, y, targetWidth, 1)
+                finalBitmap.setPixels(outRow, 0, targetWidth, 0, y, targetWidth, 1)
             }
             succeeded = true
             return out
@@ -534,20 +534,20 @@ object RemasterModelSession : ModelRunnerContract {
             }
             recycleAndCollect { diagnostics?.releaseTransient(rowTransient) }
             if (!succeeded) {
-                recycleAndCollect { out?.recycle() }
+                recycleAndCollect { out?.recycleAndRelease() }
             }
             if (cleanupFailures.isNotEmpty()) {
                 if (primaryFailure != null) {
                     cleanupFailures.forEach(primaryFailure::addSuppressed)
-                    if (!succeeded) out?.recycle()
+                    if (!succeeded) out?.recycleAndRelease()
                 } else {
-                    if (!succeeded) out?.recycle()
+                    if (!succeeded) out?.recycleAndRelease()
                     val cleanupFailure = cleanupFailures.first()
                     cleanupFailures.drop(1).forEach(cleanupFailure::addSuppressed)
                     throw cleanupFailure
                 }
             } else if (primaryFailure != null) {
-                if (!succeeded) out?.recycle()
+                if (!succeeded) out?.recycleAndRelease()
             }
         }
     }

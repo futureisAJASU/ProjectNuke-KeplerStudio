@@ -1,31 +1,14 @@
 package com.projectnuke.keplerstudio.editor
 
 import android.graphics.Bitmap
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Structured ownership for a model-produced mask bitmap and its exact diagnostic edge.
+ * Atomic ownership of a model-produced mask and its diagnostic edge.
  *
- * This replaces the raw "Bitmap + separately mutable Long diagnosticEdge" pattern that
- * was easy to leak or double-release. TrackedMask owns the bitmap AND the diagnostic
- * edge together, registers the edge immediately when the final bitmap is allocated, and
- * exposes only idempotent release/recycle/transfer operations:
- *
- * - [release] / [recycleAndRelease] idempotent; second call is a no-op
- * - [transferTo] re-keys the edge to a new owner exactly once
- * - [adopt] hands the bitmap to the caller and releases the diagnostic edge exactly once
- * - if an exception is thrown during caller transfer, the caller has not adopted yet, so
- *   [recycleAndRelease] in finally remains exact-once
- *
- * Helper failures (during construction of the mask) MUST call [recycleAndRelease] so
- * the partial mask is recycled and its edge released. Stale/cancelled results settle
- * the [TrackedMask] WITHOUT publishing — only successful transfer publishes anything.
- *
- * The final mask Bitmap remains visible to the caller while internal tensor/row/output
- * buffers stay alive in the model runner — TrackedMask does not lifetime-link the mask
- * to those internal buffers; the runner releases them separately through
- * [MemoryTrackerScope.releaseTransient].
+ * All lifecycle fields are protected by [lock].  In particular, diagnostic transfer is
+ * performed while the source is still owned: a failed destination registration leaves
+ * this object unchanged, and a successful registration is installed before the old edge
+ * is released.  Cleanup paths deliberately swallow tracker/recycle failures.
  */
 class TrackedMask private constructor(
     val bitmap: Bitmap,
@@ -33,81 +16,130 @@ class TrackedMask private constructor(
     val modelVersion: String,
     val operationToken: Long,
     val documentGeneration: String,
-    val confidenceMetrics: ModelConfidence,
-    val maskQuality: MaskQualityResult?,
-    private val scope: MemoryTrackerScope?,
-    private var edge: Long,
+    confidenceMetrics: ModelConfidence,
+    maskQuality: MaskQualityResult?,
+    private val edgeTracker: EdgeTracker?,
+    edge: Long,
+    owner: String,
 ) {
-    private val settled = AtomicBoolean(false)
-    private val transferred = AtomicReference("")
-
-    val isSettled: Boolean get() = settled.get()
-
-    /** Current diagnostic owner label (empty if released). */
-    val diagnosticOwner: String get() = transferred.get()
-
-    /** Idempotent release of the diagnostic edge without recycling the bitmap. */
-    fun release(): Boolean {
-        if (!settled.compareAndSet(false, true)) return false
-        scope?.release(edge)
-        edge = 0L
-        transferred.set("")
-        return true
+    private sealed interface State {
+        data class Owned(val edge: Long, val owner: String) : State
+        data object Adopted : State
+        data object Recycled : State
+        data object ReleasedWithoutRecycle : State
     }
 
-    /** Idempotent recycle + release. Returns true if this call settled the mask. */
-    fun recycleAndRelease(): Boolean {
-        if (!settled.compareAndSet(false, true)) return false
-        val ownedScope = scope
-        val ownedEdge = edge
-        edge = 0L
-        transferred.set("")
+    internal interface EdgeTracker {
+        fun track(bitmap: Bitmap, owner: String): Long
+        fun release(edge: Long)
+    }
+
+    private val lock = Any()
+    private var state: State = State.Owned(edge, owner)
+    private var metadata = Metadata(confidenceMetrics, maskQuality)
+
+    private data class Metadata(
+        val confidence: ModelConfidence,
+        val quality: MaskQualityResult?,
+    )
+
+    val confidenceMetrics: ModelConfidence get() = synchronized(lock) { metadata.confidence }
+    val maskQuality: MaskQualityResult? get() = synchronized(lock) { metadata.quality }
+    val isSettled: Boolean get() = synchronized(lock) { state !is State.Owned }
+    val diagnosticOwner: String
+        get() = synchronized(lock) { (state as? State.Owned)?.owner.orEmpty() }
+
+    /** Finalizes metadata without changing bitmap/edge ownership. */
+    internal fun finalizeMetadata(
+        confidenceMetrics: ModelConfidence,
+        maskQuality: MaskQualityResult? = null,
+    ): Boolean = synchronized(lock) {
+        if (state !is State.Owned) return@synchronized false
+        metadata = Metadata(confidenceMetrics, maskQuality)
+        true
+    }
+
+    /** Returns the bitmap to exactly one adopter, or null after any settlement. */
+    fun adoptOrNull(): Bitmap? = synchronized(lock) {
+        val owned = state as? State.Owned ?: return@synchronized null
+        if (bitmap.isRecycled) {
+            state = State.Recycled
+            safeRelease(owned.edge)
+            return@synchronized null
+        }
+        state = State.Adopted
+        safeRelease(owned.edge)
+        bitmap
+    }
+
+    fun requireAdopt(): Bitmap =
+        adoptOrNull() ?: throw IllegalStateException("TrackedMask was already settled")
+
+    /**
+     * Transfers the diagnostic owner, retaining original ownership if registration fails.
+     * The destination edge is installed before source release, so one resident bitmap is
+     * continuously represented.
+     */
+    fun transferToOrKeep(owner: String): Boolean = synchronized(lock) {
+        val owned = state as? State.Owned ?: return@synchronized false
+        if (bitmap.isRecycled) {
+            state = State.Recycled
+            safeRelease(owned.edge)
+            return@synchronized false
+        }
+        val tracker = edgeTracker
+        if (tracker == null) {
+            state = State.Owned(owned.edge, owner)
+            return@synchronized true
+        }
+        val destination =
+            try {
+                tracker.track(bitmap, owner)
+            } catch (_: Throwable) {
+                return@synchronized false
+            }
+        if (destination == 0L) return@synchronized false
+        state = State.Owned(destination, owner)
+        safeRelease(owned.edge)
+        true
+    }
+
+    /** Idempotent settlement without recycling; intended only when ownership moved externally. */
+    fun releaseWithoutRecycle(): Boolean = synchronized(lock) {
+        val owned = state as? State.Owned ?: return@synchronized false
+        state = State.ReleasedWithoutRecycle
+        safeRelease(owned.edge)
+        true
+    }
+
+    /** Idempotent, production-no-throw recycle and edge release. */
+    fun recycleAndRelease(): Boolean = synchronized(lock) {
+        val owned = state as? State.Owned ?: return@synchronized false
+        state = State.Recycled
         try {
             if (!bitmap.isRecycled) bitmap.recycle()
+        } catch (_: Throwable) {
+            // Finalizer cleanup must not mask the primary failure.
         } finally {
-            ownedScope?.release(ownedEdge)
+            safeRelease(owned.edge)
         }
-        return true
+        true
     }
 
-    /**
-     * Idempotent transfer to a new diagnostic owner. Use when the same Bitmap is
-     * adopted by a different owner mid-lifecycle (e.g. UI-state reconciliation).
-     * Returns true if this call captured the transfer.
-     */
-    fun transferTo(owner: String): Boolean {
-        if (settled.get()) return false
-        val ownedScope = scope
-        if (ownedScope == null) {
-            transferred.set(owner)
-            return true
+    private fun safeRelease(edge: Long) {
+        if (edge == 0L) return
+        try {
+            edgeTracker?.release(edge)
+        } catch (_: Throwable) {
+            // Diagnostic cleanup is best effort and must never escape finalizers.
         }
-        val destinationEdge = ownedScope.track(bitmap, owner)
-        if (destinationEdge == 0L) return false
-        val sourceEdge = edge
-        edge = destinationEdge
-        transferred.set(owner)
-        ownedScope.release(sourceEdge)
-        return true
     }
 
-    /**
-     * Caller adopts the bitmap exactly once; the diagnostic edge is released. After
-     * adoption the caller owns the bitmap's lifecycle and TrackedMask is settled.
-     */
-    fun adopt(): Bitmap {
-        release()
-        return bitmap
+    internal fun exactEdge(): Long = synchronized(lock) {
+        (state as? State.Owned)?.edge ?: 0L
     }
-
-    internal fun exactEdge(): Long = edge
 
     companion object {
-        /**
-         * Allocate a tracked mask with immediate edge registration. The edge is
-         * registered against [owner] synchronously; if the tracker is null or the
-         * operation is already ended, the edge is 0L (no-op on release).
-         */
         internal fun acquire(
             bitmap: Bitmap,
             scope: MemoryTrackerScope?,
@@ -119,17 +151,34 @@ class TrackedMask private constructor(
             confidenceMetrics: ModelConfidence,
             maskQuality: MaskQualityResult? = null,
         ): TrackedMask {
-            val edge = scope?.track(bitmap, owner) ?: 0L
+            val tracker =
+                scope?.let {
+                    object : EdgeTracker {
+                        override fun track(bitmap: Bitmap, owner: String): Long = it.track(bitmap, owner)
+                        override fun release(edge: Long) = it.release(edge)
+                    }
+                }
+            return acquireForTest(
+                bitmap, tracker, owner, modelId, modelVersion, operationToken,
+                documentGeneration, confidenceMetrics, maskQuality,
+            )
+        }
+
+        internal fun acquireForTest(
+            bitmap: Bitmap,
+            edgeTracker: EdgeTracker?,
+            owner: String,
+            modelId: String,
+            modelVersion: String,
+            operationToken: Long,
+            documentGeneration: String,
+            confidenceMetrics: ModelConfidence,
+            maskQuality: MaskQualityResult? = null,
+        ): TrackedMask {
+            val edge = edgeTracker?.track(bitmap, owner) ?: 0L
             return TrackedMask(
-                bitmap = bitmap,
-                modelId = modelId,
-                modelVersion = modelVersion,
-                operationToken = operationToken,
-                documentGeneration = documentGeneration,
-                confidenceMetrics = confidenceMetrics,
-                maskQuality = maskQuality,
-                scope = scope,
-                edge = edge,
+                bitmap, modelId, modelVersion, operationToken, documentGeneration,
+                confidenceMetrics, maskQuality, edgeTracker, edge, owner,
             )
         }
     }

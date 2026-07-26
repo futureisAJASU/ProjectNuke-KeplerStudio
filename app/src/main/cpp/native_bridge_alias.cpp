@@ -26,7 +26,8 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     jint detailEngine,
     jint toneEngine,
     jint hazeEngine,
-    jint revision
+    jint revision,
+    jlong operationToken
 );
 
 extern "C" JNIEXPORT jint JNICALL
@@ -55,7 +56,8 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     jint detailEngine,
     jint toneEngine,
     jint hazeEngine,
-    jint revision
+    jint revision,
+    jlong operationToken
 ) {
     // Both JNI names stay exported so the Kotlin wrapper and the legacy direct entrypoint resolve cleanly.
     return Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPlace(
@@ -83,6 +85,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         detailEngine,
         toneEngine,
         hazeEngine,
-        revision
+        revision,
+        operationToken
     );
 }

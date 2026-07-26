@@ -1,5 +1,7 @@
 package com.projectnuke.keplerstudio.bridge
 
+import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
+import com.projectnuke.keplerstudio.editor.TrackerSession
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -50,4 +52,45 @@ class NativeScratchPlannerTest {
         assertTrue(NativeScratchPlanner.crop().withinNativeBudget)
         assertTrue(NativeScratchPlanner.selectionBlend().withinNativeBudget)
     }
+
+    @Test
+    fun contributorIsVisibleDuringExecutionAndReleasedAfterward() {
+        val tracker = TrackerSession("native-scratch")
+        tracker.activateDocument("gen")
+        val scope = scope(tracker)
+        val plan = NativeScratchPlanner.mainRender(4096, true, true)
+        val result =
+            invokeWithScratch(plan, scope) {
+                val snapshot = tracker.snapshot()
+                assertEquals(plan.knownBytes, snapshot.knownLiveTransientBytes)
+                assertEquals(1L, snapshot.unknownTransientContributorCount)
+                17
+            }
+        assertEquals(17, result)
+        assertEquals(0L, tracker.snapshot().knownLiveTransientBytes)
+        assertEquals(0L, tracker.snapshot().unknownTransientContributorCount)
+        scope.end()
+        tracker.close()
+    }
+
+    @Test
+    fun failureSettlesContributorAndOperationBudgetAlsoRejects() {
+        val tracker = TrackerSession("native-scratch-failure")
+        tracker.activateDocument("gen")
+        val scope = scope(tracker)
+        val plan = NativeScratchPlanner.mainRender(4096, true, true)
+        assertFailsWith<IllegalStateException> {
+            invokeWithScratch(plan, scope) { error("native failure") }
+        }
+        assertEquals(0L, tracker.snapshot().knownLiveTransientBytes)
+        assertFalse(plan.admitted(operationBudgetBytes = plan.knownBytes - 1L))
+        assertTrue(plan.admitted(operationBudgetBytes = plan.knownBytes))
+        scope.end()
+        tracker.close()
+    }
+
+    private fun scope(tracker: TrackerSession): MemoryTrackerScope =
+        MemoryTrackerScope.create(
+            tracker, "native", "gen", "base", 1, "active", 0L,
+        )
 }

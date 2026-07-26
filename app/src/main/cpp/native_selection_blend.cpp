@@ -8,6 +8,7 @@
 #include <limits>
 #include <new>
 #include "native_common.h"
+#include "native_cancellation.h"
 
 #define LOG_TAG "KeplerSelectionBlend"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -69,9 +70,12 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeBlendSelectionLay
     jobject localBitmap,
     jobject maskBitmap,
     jboolean inverted,
-    jfloat opacity
+    jfloat opacity,
+    jlong operationToken
 ) {
     return runNativeGuarded("nativeBlendSelectionLayerInPlaceNative", [&]() -> jint {
+        kepler_native::CancellationLease cancellation(operationToken);
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeStart;
         if (kepler_native::isSameBitmap(env, targetBitmap, localBitmap) ||
             kepler_native::isSameBitmap(env, targetBitmap, maskBitmap) ||
             kepler_native::isSameBitmap(env, localBitmap, maskBitmap)) {
@@ -123,6 +127,8 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeBlendSelectionLay
         const float op = clamp01(opacity);
 
         for (int y = 0; y < height; ++y) {
+            if ((y & 15) == 0 && cancellation.cancelled())
+                return kepler_native::kCancelledMidPass;
             uint8_t* targetRow = nullptr;
             const uint8_t* localRow = nullptr;
             if (!kepler_native::checkedRowPointer(
@@ -152,6 +158,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeBlendSelectionLay
             }
         }
 
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         return 0;
     });
 }

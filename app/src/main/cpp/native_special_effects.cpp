@@ -9,6 +9,7 @@
 #include <new>
 #include <vector>
 #include "native_common.h"
+#include "native_cancellation.h"
 
 #define LOG_TAG "KeplerNativeFx"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -231,9 +232,12 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplySpecialEffec
     jobject bitmap,
     jint effect,
     jfloat strength,
-    jint revision
+    jint revision,
+    jlong operationToken
 ) {
     return runNativeGuarded("nativeApplySpecialEffectInPlaceNative", [&]() -> jint {
+        kepler_native::CancellationLease cancellation(operationToken);
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeStart;
         AndroidBitmapInfo info{};
         if (!kepler_native::getBitmapInfo(env, bitmap, info)) {
             LOGE("AndroidBitmap_getInfo failed");
@@ -271,6 +275,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplySpecialEffec
             default:
                 return -10;
         }
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         return revision;
     });
 }

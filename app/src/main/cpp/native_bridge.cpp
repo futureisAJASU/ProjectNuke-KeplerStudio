@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include "native_common.h"
+#include "native_cancellation.h"
 
 #define LOG_TAG "KeplerPhotoCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -820,9 +821,12 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     jint detailEngine,
     jint toneEngine,
     jint hazeEngine,
-    jint revision
+    jint revision,
+    jlong operationToken
 ) {
     return runNativeGuarded("nativeRenderPreviewInPlace", [&]() -> jint {
+        kepler_native::CancellationLease cancellation(operationToken);
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeStart;
         (void)detailEngine;
         (void)toneEngine;
         (void)hazeEngine;
@@ -886,6 +890,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             colorNoiseReduction
         );
         const auto toneEnd = std::chrono::steady_clock::now();
+        if (cancellation.cancelled()) return kepler_native::kCancelledMidPass;
 
         const auto denoiseStart = std::chrono::steady_clock::now();
         if (noiseEngine == 1) {
@@ -931,6 +936,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             );
         }
         const auto denoiseEnd = std::chrono::steady_clock::now();
+        if (cancellation.cancelled()) return kepler_native::kCancelledMidPass;
 
         const auto sharpenStart = std::chrono::steady_clock::now();
         apply_sharpness_rgba8888(
@@ -942,6 +948,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             luminanceNoiseReduction
         );
         const auto sharpenEnd = std::chrono::steady_clock::now();
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         const auto totalEnd = std::chrono::steady_clock::now();
 
         LOGD(
@@ -955,6 +962,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             std::chrono::duration<double, std::milli>(totalEnd - totalStart).count()
         );
 
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         return revision;
     });
 }

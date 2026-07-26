@@ -5,6 +5,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Gate 5 native cancellation registry and scratch-plan V1 safety checks.
@@ -16,11 +18,13 @@ import kotlin.test.assertTrue
  * and scratch-budget plan enforcement.
  */
 class NativeCancellationSafetyTest {
+    private val backend = FakeBackend()
+
     @Test
     fun tokenSignalledBeforeStartReturnsCancellationCode() {
-        val op = CancellableNativeOperation()
+        val op = CancellableNativeOperation(backend)
         op.signal()
-        assertTrue(op.checkCancelled())
+        assertTrue(backend.cancelled(op.token))
         assertTrue(
             isNativeCancelledCode(CancelledNativeExitCode.CancelledBeforeStart.code),
         )
@@ -29,34 +33,34 @@ class NativeCancellationSafetyTest {
 
     @Test
     fun tokenNeverSignalledIsNotCancelled() {
-        val op = CancellableNativeOperation()
-        assertFalse(op.checkCancelled())
+        val op = CancellableNativeOperation(backend)
+        assertFalse(backend.cancelled(op.token))
         op.close()
     }
 
     @Test
     fun closedTokenIsRemovedAsIfCancelled() {
-        val op = CancellableNativeOperation()
+        val op = CancellableNativeOperation(backend)
         op.close()
-        assertTrue(NativeCancellation.isCancelled(op.token))
+        assertFalse(backend.active(op.token))
     }
 
     @Test
     fun doubleCloseIsNoop() {
-        val op = CancellableNativeOperation()
+        val op = CancellableNativeOperation(backend)
         op.close()
         op.close()
     }
 
     @Test
     fun oldTokenCannotCancelNewerOperation() {
-        val first = CancellableNativeOperation()
+        val first = CancellableNativeOperation(backend)
         first.signal()
         val firstToken = first.token
         first.close()
-        val second = CancellableNativeOperation()
-        NativeCancellation.signal(firstToken)
-        assertFalse(second.checkCancelled())
+        val second = CancellableNativeOperation(backend)
+        assertFalse(backend.signal(firstToken))
+        assertFalse(backend.cancelled(second.token))
         second.close()
     }
 
@@ -70,11 +74,12 @@ class NativeCancellationSafetyTest {
     @Test
     fun nativeCancellationRegistryIsClearedAcrossRuns() {
         repeat(4) {
-            val t = NativeCancellation.createToken()
-            NativeCancellation.signal(t)
-            assertTrue(NativeCancellation.isCancelled(t))
-            NativeCancellation.release(t)
+            val t = backend.register()
+            backend.signal(t)
+            assertTrue(backend.cancelled(t))
+            backend.release(t)
         }
+        assertEquals(0, backend.size())
     }
 
     @Test
@@ -90,5 +95,17 @@ class NativeCancellationSafetyTest {
         // Crop + Selection blend always within budget
         assertTrue(NativeScratchPlanner.crop().withinNativeBudget)
         assertTrue(NativeScratchPlanner.selectionBlend().withinNativeBudget)
+    }
+
+    private class FakeBackend : NativeCancellationBackend {
+        private val next = AtomicLong()
+        private val flags = ConcurrentHashMap<Long, Boolean>()
+        override fun register(): Long = next.incrementAndGet().also { flags[it] = false }
+        override fun signal(token: Long): Boolean =
+            flags.computeIfPresent(token) { _, _ -> true } != null
+        override fun release(token: Long): Boolean = flags.remove(token) != null
+        fun cancelled(token: Long) = flags[token] == true
+        fun active(token: Long) = flags.containsKey(token)
+        fun size() = flags.size
     }
 }

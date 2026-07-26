@@ -7,6 +7,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -44,16 +45,30 @@ import org.robolectric.annotation.Config
 class EditorHistoryCoordinatorTransitionTest {
     private lateinit var context: Context
     private lateinit var coordinator: EditorHistoryCoordinator
+    private lateinit var testScope: TestScope
+    private lateinit var dispatcher: TestDispatcher
 
     @Before
     fun setUp() {
         context = RuntimeEnvironment.getApplication()
-        coordinator = EditorHistoryCoordinator(context, kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob()), tracker = null)
+        dispatcher = StandardTestDispatcher()
+        testScope = TestScope(dispatcher)
+        Dispatchers.setMain(dispatcher)
+        coordinator = EditorHistoryCoordinator(
+            context,
+            testScope,
+            tracker = null,
+            settlementDispatcher = dispatcher,
+            storage = EditorHistoryStorage(context, dispatcher),
+        )
+        testScope.advanceUntilIdle()
     }
 
     @After
     fun tearDown() {
         coordinator.close()
+        testScope.advanceUntilIdle()
+        Dispatchers.resetMain()
     }
 
     @Test
@@ -79,4 +94,89 @@ class EditorHistoryCoordinatorTransitionTest {
     // The remaining async tests require real dispatch advancement which conflicts
     // with the coordinator init'd Dispatchers.Main — those are postponed to the
     // device-level androidTest gate (require real Main thread).
+    @Test
+    fun exactSnapshotToHotAndCloseDrain() = testScope.runTest {
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        assertTrue(coordinator.admitAdoptedSnapshot(snapshot(bitmap), true, 0L).retained)
+        assertFalse(bitmap.isRecycled)
+        coordinator.close()
+        advanceUntilIdle()
+        assertTrue(bitmap.isRecycled)
+    }
+
+    @Test
+    fun failedAdmissionRecyclesAndRetainsNoEntry() = testScope.runTest {
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        val stale = snapshot(bitmap).copy(coordinatorGeneration = "stale")
+        assertFalse(coordinator.admitAdoptedSnapshot(stale, true, 0L).retained)
+        assertTrue(bitmap.isRecycled)
+        assertFalse(coordinator.flags().canUndo)
+    }
+
+    @Test
+    fun hotUndoCapturesCurrentAndTransfersTargetToUi() = testScope.runTest {
+        val target = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        assertTrue(coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L).retained)
+        val current = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        var adopted: Bitmap? = null
+        val result = coordinator.navigate(
+            undoDirection = true,
+            expectedTargetId = coordinator.navigationTargetId(true),
+            currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+            captureCurrent = { storage, _ -> snapshot(current, storage) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { adopted = it.previewBitmap; true },
+        )
+        assertTrue(result is HistoryNavigationResult.Adopted)
+        assertTrue(adopted === target)
+        assertTrue(coordinator.flags().canRedo)
+        coordinator.close()
+        advanceUntilIdle()
+        assertTrue(current.isRecycled)
+        target.recycle()
+    }
+
+    @Test
+    fun failedUiAdoptionKeepsUndoAndSettlesCurrentCapture() = testScope.runTest {
+        val target = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        assertTrue(coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L).retained)
+        val current = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+            captureCurrent = { storage, _ -> snapshot(current, storage) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { false },
+        )
+        assertTrue(result is HistoryNavigationResult.Failed)
+        assertTrue(coordinator.flags().canUndo)
+        assertTrue(current.isRecycled)
+        assertFalse(target.isRecycled)
+    }
+
+    private fun snapshot(
+        bitmap: Bitmap,
+        storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
+    ): EditorHistorySnapshot =
+        EditorHistorySnapshot(
+            params = EditParams(),
+            noiseEngine = NoiseEngine.FastEdgeAware,
+            detailEngine = DetailEngine.MaskedUnsharp,
+            toneEngine = ToneEngine.HistogramAuto,
+            hazeEngine = DehazeEngine.FastContrast,
+            baseBitmapDirty = false,
+            baseContentToken = "base",
+            previewBitmap = bitmap,
+            originalPreviewBitmap = null,
+            presetLook = null,
+            cropState = CropState(),
+            selectionLayers = emptyList(),
+            activeSelectionLayerId = null,
+            selectionPaintSettings = SelectionPaintSettings(),
+            showSelectionOverlay = false,
+            activeQuickEffects = emptyList(),
+            flareGuardRuntimeStatus = null,
+            storage = storage,
+            coordinatorGeneration = coordinator.currentGeneration(),
+        ).also { it.claimCoordinatorOwnership() }
 }

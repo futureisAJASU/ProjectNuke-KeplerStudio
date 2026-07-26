@@ -1,88 +1,55 @@
 package com.projectnuke.keplerstudio.bridge
 
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.withContext
 
-/**
- * Cancellation registry for native compute operations.
- *
- * Every coroutine-backed native invocation creates a unique token, registers
- * it before JNI dispatch, and signals cancellation from the coroutine-join
- * step. The native kernel can check the flag between passes without probing
- * every pixel注: bounded-checkpoints only.
- *
- * Tokens are unregistered RAII-style on return (or via cancellation pre-close).
- * An old token can never cancel a newer operation because the signal only fires
- * for the owning coroutine's currently-active token.
- */
-internal object NativeCancellation {
-    private val nextId = AtomicLong(0L)
-    private val flags = ConcurrentHashMap<Long, TokenEntry>()
+internal interface NativeCancellationBackend {
+    fun register(): Long
+    fun signal(token: Long): Boolean
+    fun release(token: Long): Boolean
+}
 
-    private data class TokenEntry(
-        val cancelled: AtomicBoolean = AtomicBoolean(false),
-    )
+private object JniCancellationBackend : NativeCancellationBackend {
+    override fun register() = NativePhotoCore.nativeRegisterCancellationToken()
+    override fun signal(token: Long) = NativePhotoCore.nativeSignalCancellation(token)
+    override fun release(token: Long) = NativePhotoCore.nativeReleaseCancellationToken(token)
+}
 
-    fun createToken(): Long {
-        val id = nextId.incrementAndGet()
-        flags[id] = TokenEntry()
-        return id
-    }
+/** Exact owner of a C++ registry entry. */
+class CancellableNativeOperation internal constructor(
+    private val backend: NativeCancellationBackend = JniCancellationBackend,
+) : AutoCloseable {
+    val token: Long = backend.register()
+    private val closed = AtomicBoolean(false)
 
-    fun signal(token: Long): Boolean {
-        flags[token]?.cancelled?.set(true)
-        val entry = flags[token]
-        return entry != null
-    }
+    fun signal(): Boolean = !closed.get() && backend.signal(token)
 
-    fun isCancelled(token: Long): Boolean {
-        return flags[token]?.cancelled?.get() ?: true
-    }
-
-    fun release(token: Long) {
-        flags.remove(token)
-    }
-
-    fun cleanup() {
-        flags.clear()
+    override fun close() {
+        if (closed.compareAndSet(false, true)) backend.release(token)
     }
 }
 
-/**
- * Cancellation that maps the native cancellation token to a Kotlin coroutine [Job].
- *
- * Usage:
- *   val token = CancellableNativeOperation.begin()
- *   try {
- *       // native render / crop / flare / specialEffect
- *       val result = nativeLike(...)
- *       token.checkCancelled()
- *   } finally {
- *       token.close()
- *   }
- *
- * Implementation: the token lives as a Kotlin token for the native registry [NativeCancellation];
- * the coroutine cancellation produces a [kotlinx.coroutines.CancellationException]; return values
- * from the native layer map to known cancellation codes are caught and classified as cancellation.
- * The native cancellation patch is transactional: no partial bitmap mutation is visible across
- * a cancelled operation.
- */
-class CancellableNativeOperation {
-    val token: Long = NativeCancellation.createToken()
-
-    fun checkCancelled(): Boolean = NativeCancellation.isCancelled(token)
-
-    fun signal() {
-        NativeCancellation.signal(token)
+/** Runs JNI off Main, forwards Job cancellation, waits for native return, then settles once. */
+internal suspend fun executeCancellableNative(call: (Long) -> Int): Int {
+    val operation = CancellableNativeOperation()
+    val job = currentCoroutineContext()[Job]
+    val cancellation = job?.invokeOnCompletion { cause ->
+        if (cause is CancellationException) operation.signal()
     }
-
-    fun close() {
-        NativeCancellation.release(token)
+    return try {
+        val result = withContext(Dispatchers.Default) { call(operation.token) }
+        if (isNativeCancelledCode(result)) throw CancellationException("native operation cancelled")
+        result
+    } finally {
+        cancellation?.dispose()
+        operation.close()
     }
 }
 
-/** Code returned by cancelled native kernels. */
 enum class CancelledNativeExitCode(val code: Int) {
     CancelledBeforeStart(-7),
     CancelledMidPass(-8),
@@ -90,6 +57,4 @@ enum class CancelledNativeExitCode(val code: Int) {
 }
 
 fun isNativeCancelledCode(exitCode: Int): Boolean =
-    exitCode == CancelledNativeExitCode.CancelledBeforeStart.code ||
-        exitCode == CancelledNativeExitCode.CancelledMidPass.code ||
-        exitCode == CancelledNativeExitCode.CancelledAtCommit.code
+    CancelledNativeExitCode.entries.any { it.code == exitCode }

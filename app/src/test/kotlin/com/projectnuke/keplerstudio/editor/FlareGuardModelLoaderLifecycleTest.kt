@@ -1,5 +1,10 @@
 package com.projectnuke.keplerstudio.editor
 
+import io.mockk.every
+import io.mockk.just
+import io.mockk.mockk
+import io.mockk.runs
+import io.mockk.verify
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.nio.MappedByteBuffer
@@ -11,6 +16,8 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.DataType
+import org.tensorflow.lite.Tensor
 
 /**
  * Gate 1 model-load lifecycle coverage via an injectable loader/factory seam.
@@ -99,7 +106,7 @@ class FlareGuardModelLoaderLifecycleTest {
     }
 
     @Test
-    fun ioFailureMapsToAssetMissing() {
+    fun ioFailureAfterValidationMapsToLoadFailed() {
         GlobalModelDiagnostics.resetForTest(true)
         val entry = pinnedEntry()
         val factory =
@@ -115,7 +122,7 @@ class FlareGuardModelLoaderLifecycleTest {
                 assetOpen = { validStream(entry) },
                 manifestProvider = { entry },
             )
-        assertIs<ModelLoadResult.AssetMissing>(result)
+        assertIs<ModelLoadResult.LoadFailed>(result)
         assertTrue(GlobalModelDiagnostics.snapshot().isEmpty())
     }
 
@@ -170,6 +177,43 @@ class FlareGuardModelLoaderLifecycleTest {
     }
 
     @Test
+    fun postConstructionTensorInspectionFailureClosesExactlyOnce() {
+        val interpreter = mockk<Interpreter>(relaxed = true)
+        every { interpreter.inputTensorCount } returns 1
+        every { interpreter.outputTensorCount } returns 1
+        every { interpreter.getInputTensor(0) } throws IllegalStateException("inspection")
+        val result = createWith(interpreter)
+        assertIs<ModelLoadResult.UnsupportedContract>(result)
+        verify(exactly = 1) { interpreter.close() }
+        assertTrue(GlobalModelDiagnostics.snapshot().isEmpty())
+    }
+
+    @Test
+    fun unsupportedTensorCountsCloseExactlyOnce() {
+        for ((inputs, outputs) in listOf(0 to 1, 2 to 1, 1 to 0, 1 to 2)) {
+            val interpreter = mockk<Interpreter>(relaxed = true)
+            every { interpreter.inputTensorCount } returns inputs
+            every { interpreter.outputTensorCount } returns outputs
+            val result = createWith(interpreter)
+            assertIs<ModelLoadResult.UnsupportedContract>(result)
+            verify(exactly = 1) { interpreter.close() }
+        }
+    }
+
+    @Test
+    fun readyRunnerOwnsInterpreterUntilRepeatedClose() {
+        val interpreter = validInterpreter()
+        val result = createWith(interpreter)
+        val ready = assertIs<ModelLoadResult.Ready<FlareGuardModelRunner>>(result)
+        verify(exactly = 0) { interpreter.close() }
+        assertTrue(GlobalModelDiagnostics.snapshot().isNotEmpty())
+        ready.runner.close()
+        ready.runner.close()
+        verify(exactly = 1) { interpreter.close() }
+        assertTrue(GlobalModelDiagnostics.snapshot().isEmpty())
+    }
+
+    @Test
     fun assertAlphaInContractRejectsOutOfToleranceValues() {
         assertContractFails(Float.NaN)
         assertContractFails(Float.POSITIVE_INFINITY)
@@ -184,9 +228,16 @@ class FlareGuardModelLoaderLifecycleTest {
 
     @Test
     fun structuredFailureReasonsRemainDistinct() {
-        // The runtime classifier must not collapse all failures into InvalidInput.
-        assertEquals(ModelFailureReason.StaleGeneration, ModelFailureReason.StaleGeneration)
-        assertEquals(ModelFailureReason.InvalidOutput, ModelFailureReason.InvalidOutput)
+        assertEquals(
+            ModelFailureReason.StaleGeneration,
+            FlareGuardModelRunner.classifyInferenceFailure(StaleModelGenerationException()),
+        )
+        assertEquals(
+            ModelFailureReason.Cancelled,
+            FlareGuardModelRunner.classifyInferenceFailure(
+                kotlinx.coroutines.CancellationException("cancelled"),
+            ),
+        )
         assertIs<ModelLoadResult.LoadFailed>(ModelLoadResult.LoadFailed("x"))
     }
 
@@ -195,6 +246,40 @@ class FlareGuardModelLoaderLifecycleTest {
             FlareGuardContract.assertAlphaInContract(value)
         }
     }
+
+    private fun createWith(interpreter: Interpreter): ModelLoadResult<FlareGuardModelRunner> {
+        GlobalModelDiagnostics.resetForTest(true)
+        val entry = pinnedEntry()
+        return FlareGuardModelRunner.create(
+            factory =
+                object : FlareGuardLoaderFactory {
+                    override fun loadAsset(): MappedByteBuffer = mappedBuffer()
+                    override fun newInterpreter(model: MappedByteBuffer): Interpreter = interpreter
+                },
+            assetOpen = { validStream(entry) },
+            manifestProvider = { entry },
+        )
+    }
+
+    private fun validInterpreter(): Interpreter {
+        val interpreter = mockk<Interpreter>()
+        val input = tensor(intArrayOf(1, 2, 2, 3))
+        val output = tensor(intArrayOf(1, 2, 2, 1))
+        every { interpreter.inputTensorCount } returns 1
+        every { interpreter.outputTensorCount } returns 1
+        every { interpreter.getInputTensor(0) } returns input
+        every { interpreter.getOutputTensor(0) } returns output
+        every { interpreter.close() } just runs
+        return interpreter
+    }
+
+    private fun tensor(shape: IntArray): Tensor =
+        mockk<Tensor>().also { tensor ->
+            every { tensor.shape() } returns shape
+            every { tensor.dataType() } returns DataType.FLOAT32
+            every { tensor.quantizationParams().scale } returns 0f
+            every { tensor.quantizationParams().zeroPoint } returns 0
+        }
 
     private fun pinnedEntry(): ModelAssetManifestEntry {
         val base = checkNotNull(ModelAssetManifest.byId("flare_masker"))

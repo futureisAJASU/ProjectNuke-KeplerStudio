@@ -1,5 +1,7 @@
 package com.projectnuke.keplerstudio.bridge
 
+import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
+
 internal enum class NativeScratchKind {
     MainRender,
     SpecialEffect,
@@ -16,6 +18,11 @@ internal data class NativeScratchPlan(
 ) {
     val withinNativeBudget: Boolean
         get() = knownBytes in 0L..MAX_NATIVE_TEMPORARY_BYTES
+
+    fun admitted(operationBudgetBytes: Long = BitmapMemoryBudget.operationReserveBytes()): Boolean =
+        withinNativeBudget &&
+            knownBytes <= operationBudgetBytes &&
+            BitmapMemoryBudget.canAllocate(knownBytes)
 
     companion object {
         const val MAX_NATIVE_TEMPORARY_BYTES = 256L * 1024L * 1024L

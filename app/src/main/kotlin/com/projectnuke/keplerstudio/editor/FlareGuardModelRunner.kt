@@ -208,7 +208,7 @@ class FlareGuardModelRunner private constructor(
 
                     val maskResult =
                         try {
-                            readMask(outputBuffer, diagnostics)
+                            readMask(outputBuffer, diagnostics, operation)
                         } catch (malformedOutput: IllegalArgumentException) {
                             throw InvalidOutputException(malformedOutput.message ?: "model output violated the alpha contract", malformedOutput)
                         }
@@ -236,14 +236,7 @@ class FlareGuardModelRunner private constructor(
             }
         } catch (t: Throwable) {
             if (t is BitmapAllocationRejectedException) throw t
-            val reason =
-                when (t) {
-                    is CancellationException -> ModelFailureReason.Cancelled
-                    is StaleModelGenerationException -> ModelFailureReason.StaleGeneration
-                    is InvalidOutputException -> ModelFailureReason.InvalidOutput
-                    is IllegalArgumentException -> ModelFailureReason.InvalidInput
-                    else -> ModelFailureReason.InferenceFailed
-                }
+            val reason = classifyInferenceFailure(t)
             ModelRunResult.Failure(
                 ModelFailure(reason, t.message),
                 DeterministicModelFallback.ExistingRuleOrNative,
@@ -304,7 +297,11 @@ class FlareGuardModelRunner private constructor(
         }
     }
 
-    private fun readMask(buffer: ByteBuffer, diagnostics: MemoryTrackerScope?): MaskResult {
+    private fun readMask(
+        buffer: ByteBuffer,
+        diagnostics: MemoryTrackerScope?,
+        operation: ModelOperationContext,
+    ): MaskResult {
         val values =
             FloatArray(checkedTensorElementCount(outputWidth, outputHeight, outputChannels))
         val valuesTransient = diagnostics?.trackTransientBytes("flareGuard:outputValues", values.size.toLong() * Float.SIZE_BYTES) ?: 0L
@@ -348,13 +345,20 @@ class FlareGuardModelRunner private constructor(
                     }
                 }
 
-                var bitmap: Bitmap? = null
+                var tracked: TrackedMask? = null
                 try {
-                    bitmap = createBitmapOrThrow(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
-                    // Register the edge IMMEDIATELY when the final bitmap is allocated, so
-                    // the final mask is visible to diagnostics while the remaining row/output
-                    // buffers stay alive (they are released in the outer finally blocks).
-                    val edge = diagnostics?.track(bitmap, "flareGuard:modelMask") ?: 0L
+                    val bitmap = createBitmapOrThrow(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
+                    tracked =
+                        TrackedMask.acquire(
+                            bitmap = bitmap,
+                            scope = diagnostics,
+                            owner = "flareGuard:modelMask",
+                            modelId = descriptor.modelId,
+                            modelVersion = descriptor.asset.semanticModelVersion,
+                            operationToken = operation.operationToken,
+                            documentGeneration = operation.documentGeneration,
+                            confidenceMetrics = EMPTY_CONFIDENCE,
+                        )
                     bitmap.setPixels(outPixels, 0, outputWidth, 0, 0, outputWidth, outputHeight)
                     val mean = if (outPixels.isEmpty()) 0f else sum / outPixels.size
                     val activeMean = if (activeCount == 0) 0f else activeSum / activeCount
@@ -375,26 +379,17 @@ class FlareGuardModelRunner private constructor(
                     val areaReliability =
                         sqrt((affectedArea / MIN_CONFIDENT_AREA_RATIO).coerceIn(0f, 1f))
                     val policyConfidence = (activeMean * areaReliability).coerceIn(0f, 1f)
-                    val tracked =
-                        TrackedMask.acquire(
-                            bitmap = bitmap!!,
-                            scope = diagnostics,
-                            owner = "flareGuard:modelMask",
-                            modelId = "flare-masker",
-                            modelVersion = "1.0.0",
-                            operationToken = 0L,
-                            documentGeneration = "unspecified",
-                            confidenceMetrics =
-                                ModelConfidence(
-                                    wholeImageMean = mean,
-                                    peak = max,
-                                    activeRegionMean = activeMean,
-                                    activeRegionPercentile = percentile,
-                                    affectedAreaRatio = affectedArea,
-                                    backgroundLeakage = backgroundLeakage,
-                                    finalPolicy = policyConfidence,
-                                ),
+                    val confidence =
+                        ModelConfidence(
+                            wholeImageMean = mean,
+                            peak = max,
+                            activeRegionMean = activeMean,
+                            activeRegionPercentile = percentile,
+                            affectedAreaRatio = affectedArea,
+                            backgroundLeakage = backgroundLeakage,
+                            finalPolicy = policyConfidence,
                         )
+                    check(tracked.finalizeMetadata(confidence))
                     val result =
                         MaskResult(
                             trackedMask = tracked,
@@ -406,10 +401,10 @@ class FlareGuardModelRunner private constructor(
                             backgroundLeakageAlpha = backgroundLeakage,
                             policyConfidence = policyConfidence,
                         )
-                    bitmap = null
+                    tracked = null
                     return result
                 } catch (t: Throwable) {
-                    bitmap?.takeUnless(Bitmap::isRecycled)?.recycle()
+                    tracked?.recycleAndRelease()
                     throw t
                 }
             } finally {
@@ -475,6 +470,17 @@ class FlareGuardModelRunner private constructor(
     }
 
     companion object {
+        private val EMPTY_CONFIDENCE =
+            ModelConfidence(0f, 0f, 0f, 0f, 0f, 0f, finalPolicy = 0f)
+
+        internal fun classifyInferenceFailure(failure: Throwable): ModelFailureReason =
+            when (failure) {
+                is StaleModelGenerationException -> ModelFailureReason.StaleGeneration
+                is CancellationException -> ModelFailureReason.Cancelled
+                is InvalidOutputException -> ModelFailureReason.InvalidOutput
+                is IllegalArgumentException -> ModelFailureReason.InvalidInput
+                else -> ModelFailureReason.InferenceFailed
+            }
         fun create(context: Context): ModelLoadResult<FlareGuardModelRunner> {
             val manifest =
                 ModelAssetManifest.byId("flare_masker")
@@ -502,41 +508,14 @@ class FlareGuardModelRunner private constructor(
             try {
                 val manifest =
                     manifestProvider()
-                        ?: return settleLoadFailure(
-                            diagnosticId,
-                            ownedInterpreter = null,
-                            result = ModelLoadResult.AssetMissing("manifest has no flare_masker entry"),
-                        )
+                        ?: return ModelLoadResult.AssetMissing("manifest has no flare_masker entry")
                 val validation =
                     ModelAssetValidator.validate(manifest, assetOpen)
                 when (validation) {
                     ModelAssetValidation.Missing ->
-                        return settleLoadFailure(
-                            diagnosticId,
-                            ownedInterpreter = null,
-                            result = ModelLoadResult.AssetMissing("${manifest.asset.assetPath} is not packaged"),
-                        )
+                        return ModelLoadResult.AssetMissing("${manifest.asset.assetPath} is not packaged")
                     is ModelAssetValidation.Invalid ->
-                        return settleLoadFailure(
-                            diagnosticId,
-                            ownedInterpreter = null,
-                            result = ModelLoadResult.AssetInvalid(validation.detail),
-                        )
-                    is ModelAssetValidation.UnpinnedExperimental ->
-                        // The Flare runner refuses an unpinned experimental asset even when
-                        // the developer override is enabled; this load path is strict-only.
-                        // Other experimental paths (e.g. UI readout) may surface the
-                        // UnpinnedExperimental reason, but a runtime model load never adopts
-                        // an unverified asset.
-                        return settleLoadFailure(
-                            diagnosticId,
-                            ownedInterpreter = null,
-                            result = ModelLoadResult.AssetInvalid(
-                                "FlareGuard runtime refuses an unpinned experimental asset (override=${
-                                    ModelAssetPolicy.allowUnpinnedExperimental()
-                                })",
-                            ),
-                        )
+                        return ModelLoadResult.AssetInvalid(validation.detail)
                     is ModelAssetValidation.Valid -> Unit
                 }
                 val modelBytes = factory.loadAsset()
@@ -548,6 +527,12 @@ class FlareGuardModelRunner private constructor(
                     } catch (missing: NoClassDefFoundError) {
                         throw RuntimeUnavailableException(missing)
                     }
+                if (ownedInterpreter.inputTensorCount != 1 || ownedInterpreter.outputTensorCount != 1) {
+                    throw UnsupportedContractException(
+                        "FlareGuard requires exactly one input and one output tensor; " +
+                            "found ${ownedInterpreter.inputTensorCount}/${ownedInterpreter.outputTensorCount}",
+                    )
+                }
                 val inputTensor =
                     try {
                         ownedInterpreter.getInputTensor(FlareGuardContract.SINGLE_INPUT_INDEX)
@@ -592,7 +577,7 @@ class FlareGuardModelRunner private constructor(
                 GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "loaded")
                 return ModelLoadResult.Ready(runner)
             } catch (failure: Throwable) {
-                return settleLoadFailure(diagnosticId, ownedInterpreter, classifyLoadFailure(failure))
+                return classifyLoadFailure(failure)
             } finally {
                 if (!transferredOwnership) {
                     runCatching { ownedInterpreter?.close() }
@@ -601,19 +586,9 @@ class FlareGuardModelRunner private constructor(
             }
         }
 
-        private fun settleLoadFailure(
-            diagnosticId: String,
-            ownedInterpreter: Interpreter?,
-            result: ModelLoadResult<Nothing>,
-        ): ModelLoadResult<FlareGuardModelRunner> {
-            runCatching { ownedInterpreter?.close() }
-            GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "unloaded")
-            return result
-        }
-
         private fun classifyLoadFailure(failure: Throwable): ModelLoadResult<Nothing> =
             when (failure) {
-                is IOException -> ModelLoadResult.AssetMissing(failure.message)
+                is IOException -> ModelLoadResult.LoadFailed(failure.message ?: "validated asset could not be mapped")
                 is UnsupportedContractException ->
                     ModelLoadResult.UnsupportedContract(failure.message ?: "invalid FlareGuard tensor contract")
                 is TensorInspectionException ->

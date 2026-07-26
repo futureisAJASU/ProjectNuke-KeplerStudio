@@ -11,6 +11,7 @@
 #include <new>
 #include <vector>
 #include "native_common.h"
+#include "native_cancellation.h"
 
 #define LOG_TAG "KeplerNativeFlare"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -324,9 +325,12 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplyFlareGuardIn
     jobject bitmap,
     jint mode,
     jfloat strength,
-    jint revision
+    jint revision,
+    jlong operationToken
 ) {
     return runNativeGuarded("nativeApplyFlareGuardInPlaceNative", [&]() -> jint {
+        kepler_native::CancellationLease cancellation(operationToken);
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeStart;
         AndroidBitmapInfo info{};
         if (!kepler_native::getBitmapInfo(env, bitmap, info)) {
             LOGE("AndroidBitmap_getInfo failed");
@@ -370,6 +374,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplyFlareGuardIn
         } else {
             apply_night_flare(bytes, src, width, height, stride, strength);
         }
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         return revision;
     });
 }

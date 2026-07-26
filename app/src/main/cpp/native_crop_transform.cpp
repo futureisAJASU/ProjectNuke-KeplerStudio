@@ -8,6 +8,7 @@
 #include <limits>
 #include <new>
 #include "native_common.h"
+#include "native_cancellation.h"
 
 #define LOG_TAG "KeplerNativeCrop"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -133,9 +134,12 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderCropTransfo
     jfloat cropBottom,
     jfloat rotationDegrees,
     jboolean flipHorizontal,
-    jint revision
+    jint revision,
+    jlong operationToken
 ) {
     return runNativeGuarded("nativeRenderCropTransformNative", [&]() -> jint {
+        kepler_native::CancellationLease cancellation(operationToken);
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeStart;
         if (kepler_native::isSameBitmap(env, sourceBitmap, destinationBitmap)) {
             LOGE("Source/destination alias is not supported");
             return -13;
@@ -187,6 +191,8 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderCropTransfo
         auto* src = static_cast<const uint8_t*>(srcLock.pixels);
         auto* dst = static_cast<uint8_t*>(dstLock.pixels);
         for (int y = 0; y < dstH; ++y) {
+            if ((y & 15) == 0 && cancellation.cancelled())
+                return kepler_native::kCancelledMidPass;
             uint8_t* outRow = nullptr;
             if (!kepler_native::checkedRowPointer(
                     dst,
@@ -210,6 +216,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderCropTransfo
             }
         }
 
+        if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         return revision;
     });
 }

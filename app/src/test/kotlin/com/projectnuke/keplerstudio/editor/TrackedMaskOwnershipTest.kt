@@ -4,7 +4,12 @@ import android.graphics.Bitmap
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import org.junit.After
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -66,7 +71,7 @@ class TrackedMaskOwnershipTest {
             TrackedMask.acquire(bitmap, scope, "model:finalMask", "flare-masker", "1.0.0", 0L, "gen", fullConfidence())
         assertTrue(mask.recycleAndRelease())
         assertFalse(mask.recycleAndRelease())
-        assertFalse(mask.release())
+        assertFalse(mask.releaseWithoutRecycle())
         assertEquals(0, tracker.snapshot().bitmapCount)
         scope.end()
         tracker.close()
@@ -80,7 +85,7 @@ class TrackedMaskOwnershipTest {
         val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
         val mask =
             TrackedMask.acquire(bitmap, scope, "model:finalMask", "flare-masker", "1.0.0", 0L, "gen", fullConfidence())
-        val adopted = mask.adopt()
+        val adopted = mask.requireAdopt()
         assertEquals(bitmap, adopted)
         assertFalse(bitmap.isRecycled)
         assertEquals(0, tracker.snapshot().bitmapCount)
@@ -99,7 +104,7 @@ class TrackedMaskOwnershipTest {
         val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
         val mask =
             TrackedMask.acquire(bitmap, scope, "model:finalMask", "flare-masker", "1.0.0", 0L, "gen", fullConfidence())
-        assertTrue(mask.transferTo("uiState:finalMask"))
+        assertTrue(mask.transferToOrKeep("uiState:finalMask"))
         assertEquals("uiState:finalMask", mask.diagnosticOwner)
         // Bitmap count remains 1; no duplicate tracking edge.
         assertEquals(1, tracker.snapshot().bitmapCount)
@@ -142,17 +147,130 @@ class TrackedMaskOwnershipTest {
         val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
         val mask =
             TrackedMask.acquire(bitmap, scope, "stale:finalMask", "flare-masker", "1.0.0", 0L, "gen", fullConfidence())
-        val firstAdoption = mask.adopt()
-        // A second adoption path (caller adopting a stale result) must see a settled
-        // mask; the call returns the same bitmap reference but no edge is released
-        // a second time, and the tracker is already empty.
-        val secondAdoption = mask.adopt()
-        assertEquals(firstAdoption, secondAdoption)
+        val firstAdoption = mask.requireAdopt()
+        // A second adoption explicitly fails and can never receive the bitmap again.
+        assertNull(mask.adoptOrNull())
+        assertFailsWith<IllegalStateException> { mask.requireAdopt() }
+        assertEquals(bitmap, firstAdoption)
         assertEquals(0, tracker.snapshot().bitmapCount)
         bitmap.recycle()
         scope.end()
         tracker.close()
     }
+
+    @Test
+    fun twoAdoptersAreLinearized() {
+        val mask = maskWithCountingTracker()
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val results = List(2) { pool.submit<Bitmap?> { start.await(); mask.adoptOrNull() } }
+            start.countDown()
+            assertEquals(1, results.count { it.get() != null })
+        } finally {
+            pool.shutdownNow()
+            if (!mask.bitmap.isRecycled) mask.bitmap.recycle()
+        }
+    }
+
+    @Test
+    fun adoptVersusRecycleAndReleaseAreLinearized() {
+        repeat(40) { raceSettlement { it.adoptOrNull() } }
+        repeat(40) { raceSettlement { it.releaseWithoutRecycle() } }
+    }
+
+    @Test
+    fun transferVersusRecycleAndReleaseAreLinearized() {
+        repeat(40) { raceTransfer { it.recycleAndRelease() } }
+        repeat(40) { raceTransfer { it.releaseWithoutRecycle() } }
+    }
+
+    @Test
+    fun destinationRegistrationFailureKeepsOriginalOwnership() {
+        val releases = AtomicInteger()
+        val tracker = object : TrackedMask.EdgeTracker {
+            var calls = 0
+            override fun track(bitmap: Bitmap, owner: String): Long {
+                calls++
+                if (calls > 1) throw IllegalStateException("registration failed")
+                return 11L
+            }
+            override fun release(edge: Long) { releases.incrementAndGet() }
+        }
+        val mask = testMask(tracker)
+        assertFalse(mask.transferToOrKeep("destination"))
+        assertEquals("source", mask.diagnosticOwner)
+        assertEquals(11L, mask.exactEdge())
+        assertTrue(mask.recycleAndRelease())
+        assertEquals(1, releases.get())
+    }
+
+    @Test
+    fun cleanupExceptionsAreNoThrowAndSettlementIsExactOnce() {
+        val tracker = object : TrackedMask.EdgeTracker {
+            override fun track(bitmap: Bitmap, owner: String) = 7L
+            override fun release(edge: Long) { error("cleanup failure") }
+        }
+        val mask = testMask(tracker)
+        assertTrue(mask.recycleAndRelease())
+        assertFalse(mask.recycleAndRelease())
+        assertTrue(mask.bitmap.isRecycled)
+    }
+
+    private fun raceSettlement(other: (TrackedMask) -> Any?) {
+        val mask = maskWithCountingTracker()
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val adopt = pool.submit<Bitmap?> { start.await(); mask.adoptOrNull() }
+            val settle = pool.submit<Any?> { start.await(); other(mask) }
+            start.countDown()
+            val adopted = adopt.get()
+            settle.get()
+            if (adopted != null) assertFalse(adopted.isRecycled)
+            assertTrue(mask.isSettled)
+        } finally {
+            pool.shutdownNow()
+            if (!mask.bitmap.isRecycled) mask.bitmap.recycle()
+        }
+    }
+
+    private fun raceTransfer(other: (TrackedMask) -> Any?) {
+        val releases = AtomicInteger()
+        val tracker = object : TrackedMask.EdgeTracker {
+            private val next = AtomicInteger(0)
+            override fun track(bitmap: Bitmap, owner: String) = next.incrementAndGet().toLong()
+            override fun release(edge: Long) { releases.incrementAndGet() }
+        }
+        val mask = testMask(tracker)
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val transfer = pool.submit<Boolean> { start.await(); mask.transferToOrKeep("destination") }
+            val settle = pool.submit<Any?> { start.await(); other(mask) }
+            start.countDown()
+            transfer.get()
+            settle.get()
+            assertTrue(mask.isSettled)
+            assertTrue(releases.get() in 1..2)
+        } finally {
+            pool.shutdownNow()
+            if (!mask.bitmap.isRecycled) mask.bitmap.recycle()
+        }
+    }
+
+    private fun maskWithCountingTracker(): TrackedMask = testMask(
+        object : TrackedMask.EdgeTracker {
+            override fun track(bitmap: Bitmap, owner: String) = 1L
+            override fun release(edge: Long) = Unit
+        },
+    )
+
+    private fun testMask(tracker: TrackedMask.EdgeTracker): TrackedMask =
+        TrackedMask.acquireForTest(
+            Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+            tracker, "source", "model", "1", 1L, "gen", fullConfidence(),
+        )
 
     private fun fullConfidence(): ModelConfidence =
         ModelConfidence(

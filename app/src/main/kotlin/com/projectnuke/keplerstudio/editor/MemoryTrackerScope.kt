@@ -16,8 +16,8 @@ internal object TrackerOwners {
     const val DOCUMENT_GENERATION = "DocumentGeneration"
     const val NATIVE_SESSION = "NativeSession"
 }
-internal class MemoryTrackerScope private constructor(
-    val tracker: TrackerDiagnostics,
+class MemoryTrackerScope private constructor(
+    private val tracker: TrackerDiagnostics,
     val name: String,
     val documentGeneration: String,
     val baseContentToken: String,
@@ -103,7 +103,7 @@ internal class MemoryTrackerScope private constructor(
     }
 
     companion object {
-        fun create(
+        internal fun create(
             tracker: TrackerDiagnostics,
             name: String,
             documentGeneration: String,

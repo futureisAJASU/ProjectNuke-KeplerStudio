@@ -11,6 +11,7 @@ add_library(
     native_flare_guard.cpp
     native_flare_mask.cpp
     native_selection_blend.cpp
+    native_cancellation.cpp
 )
 
 find_library(log-lib log)

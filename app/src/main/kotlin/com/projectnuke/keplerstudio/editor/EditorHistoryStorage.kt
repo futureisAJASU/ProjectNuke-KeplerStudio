@@ -16,6 +16,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -79,11 +80,12 @@ internal sealed class HistoryNavigationResult {
 internal class EditorHistoryCoordinator(
     context: Context,
     private val scope: CoroutineScope,
-    private val tracker: TrackerSession? = null
+    private val tracker: TrackerSession? = null,
+    settlementDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
+    private val storage: EditorHistoryStorage = EditorHistoryStorage(context.applicationContext),
 ) {
-    private val storage = EditorHistoryStorage(context.applicationContext)
     /** Detached settlement survives viewModelScope cancellation and owns all lifecycle IO. */
-    private val settlementScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val settlementScope = CoroutineScope(SupervisorJob() + settlementDispatcher)
     private var undo = ArrayDeque<EditorHistoryEntry>()
     private var redo = ArrayDeque<EditorHistoryEntry>()
     @Volatile private var documentGeneration = UUID.randomUUID().toString()
@@ -1031,7 +1033,10 @@ internal class EditorHistoryCoordinator(
     }
 }
 
-private class EditorHistoryStorage(context: Context) {
+internal class EditorHistoryStorage(
+    context: Context,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
     private val root = File(context.filesDir, "editor_history_v3")
 
     fun registerSession(sessionId: String) {
@@ -1042,7 +1047,7 @@ private class EditorHistoryStorage(context: Context) {
         activeSessions -= sessionId
     }
 
-    suspend fun initializeSession(sessionId: String) = withContext(Dispatchers.IO) {
+    suspend fun initializeSession(sessionId: String) = withContext(ioDispatcher) {
         root.mkdirs()
         sessionDirectory(sessionId).mkdirs()
         root.listFiles()?.filter(File::isDirectory)?.forEach { directory ->
@@ -1056,7 +1061,7 @@ private class EditorHistoryStorage(context: Context) {
         }
     }
 
-    suspend fun publish(entry: EditorHistoryEntry, snapshot: EditorHistorySnapshot): ColdHistoryPayload? = withContext(Dispatchers.IO) {
+    suspend fun publish(entry: EditorHistoryEntry, snapshot: EditorHistorySnapshot): ColdHistoryPayload? = withContext(ioDispatcher) {
         val session = sessionDirectory(entry.documentGeneration)
         if (!isSafeId(entry.id) || !isSafeId(entry.documentGeneration)) return@withContext null
         session.mkdirs()
@@ -1089,7 +1094,7 @@ private class EditorHistoryStorage(context: Context) {
         entry: EditorHistoryEntry,
         expectedGeneration: String,
         register: (EditorHistorySnapshot) -> Unit
-    ): EditorHistorySnapshot? = withContext(Dispatchers.IO) {
+    ): EditorHistorySnapshot? = withContext(ioDispatcher) {
         val payload = entry.coldPayload ?: return@withContext null
         val directory = payload.directory
         if (entry.documentGeneration != expectedGeneration || !isOwnedEntryDirectory(directory, expectedGeneration, entry.id) || !directory.isCompleteHistoryDirectory()) return@withContext null
@@ -1148,7 +1153,7 @@ private class EditorHistoryStorage(context: Context) {
         }
     }
 
-    suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long? = withContext(Dispatchers.IO) {
+    suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long? = withContext(ioDispatcher) {
         runCatching {
             val payload = checkNotNull(entry.coldPayload)
             val directory = payload.directory
@@ -1169,7 +1174,7 @@ private class EditorHistoryStorage(context: Context) {
      *  Every entry is attempted independently — a single failure does not skip remaining entries.
      *  Ownership-validation failure returns the payload as failed without deleting the path.
      *  Per-payload exceptions are caught and returned as deletion failures; all entries are attempted. */
-    suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): DeletionResult = withContext(Dispatchers.IO) {
+    suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): DeletionResult = withContext(ioDispatcher) {
         val failed = ArrayList<ColdHistoryPayload>()
         for (entry in entries) {
             val payload = entry.coldPayload ?: continue
@@ -1182,18 +1187,18 @@ private class EditorHistoryStorage(context: Context) {
         DeletionResult(failed.isEmpty(), failed)
     }
 
-    suspend fun delete(entry: EditorHistoryEntry): Boolean = withContext(Dispatchers.IO) {
+    suspend fun delete(entry: EditorHistoryEntry): Boolean = withContext(ioDispatcher) {
         val payload = entry.coldPayload ?: return@withContext true
         try { deleteInternal(payload) } catch (_: Throwable) { false }
     }
 
-    suspend fun delete(payload: ColdHistoryPayload): Boolean = withContext(Dispatchers.IO) {
+    suspend fun delete(payload: ColdHistoryPayload): Boolean = withContext(ioDispatcher) {
         try { deleteInternal(payload) } catch (_: Throwable) { false }
     }
 
     /** Returns the result of batch cold-payload deletion by payload reference.
      *  Per-payload exceptions are caught and returned as deletion failures; all payloads are attempted. */
-    suspend fun deletePayloads(payloads: Collection<ColdHistoryPayload>): DeletionResult = withContext(Dispatchers.IO) {
+    suspend fun deletePayloads(payloads: Collection<ColdHistoryPayload>): DeletionResult = withContext(ioDispatcher) {
         val failed = ArrayList<ColdHistoryPayload>()
         for (payload in payloads) {
             try {
@@ -1206,7 +1211,7 @@ private class EditorHistoryStorage(context: Context) {
     }
 
     /** Returns true when the session directory is confirmed deleted or absent. */
-    suspend fun deleteSession(sessionId: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun deleteSession(sessionId: String): Boolean = withContext(ioDispatcher) {
         val dir = sessionDirectory(sessionId).takeIf { isOwnedSessionDirectory(it, sessionId) } ?: return@withContext true
         dir.deleteRecursively() || !dir.exists()
     }
