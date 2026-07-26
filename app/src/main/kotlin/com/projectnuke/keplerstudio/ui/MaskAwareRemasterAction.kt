@@ -9,6 +9,7 @@ import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -21,6 +22,8 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyMaskAwareRemaster() {
@@ -93,10 +96,30 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             undoSnapshot = null
             ownedBase = null
             try {
+                val inferenceJob = currentCoroutineContext()[Job]
+                val modelOperation =
+                    ModelOperationContext(
+                        operationToken = operationToken,
+                        documentGeneration = baseContentToken.toString(),
+                        documentIdentity = sourcePath,
+                        isCurrent = { token, generation ->
+                            val live = uiState.value
+                            isManagedEditTokenCurrent(token) &&
+                                generation == baseContentToken.toString() &&
+                                live.sourcePath == sourcePath &&
+                                live.baseContentToken == baseContentToken &&
+                                live.revision == nextRevision
+                        },
+                        isCancelled = { inferenceJob?.isActive == false || isShuttingDown() },
+                    )
                 withContext(Dispatchers.Default) {
                     val createdBase = checkNotNull(ownedBaseOwned)
                     val mask =
-                        RemasterModelSession.createForegroundMask(createdBase, remasterTracker) {
+                        RemasterModelSession.createForegroundMask(
+                            createdBase,
+                            remasterTracker,
+                            modelOperation,
+                        ) {
                             modelMaskEdge = it
                         } ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
                     modelMask = mask

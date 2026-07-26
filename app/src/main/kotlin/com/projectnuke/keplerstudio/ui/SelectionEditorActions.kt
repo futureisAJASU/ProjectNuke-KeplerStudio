@@ -10,6 +10,7 @@ import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
@@ -26,6 +27,8 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
@@ -88,6 +91,22 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             undoSnapshot = null
             var pendingLayerBitmap: Bitmap? = null
             try {
+                val inferenceJob = currentCoroutineContext()[Job]
+                val modelOperation =
+                    ModelOperationContext(
+                        operationToken = operationToken,
+                        documentGeneration = state.baseContentToken.toString(),
+                        documentIdentity = sourcePath,
+                        isCurrent = { token, generation ->
+                            val live = uiState.value
+                            isManagedEditTokenCurrent(token) &&
+                                generation == state.baseContentToken.toString() &&
+                                live.sourcePath == sourcePath &&
+                                live.baseContentToken == state.baseContentToken &&
+                                live.revision == sourceRevision
+                        },
+                        isCancelled = { inferenceJob?.isActive == false || isShuttingDown() },
+                    )
                 val layer =
                     withContext(Dispatchers.Default) {
                         var modelMaskEdge = 0L
@@ -95,6 +114,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                             RemasterModelSession.createForegroundMask(
                                 checkNotNull(ownedBaseOwned),
                                 selectionTracker,
+                                modelOperation,
                             ) {
                                 modelMaskEdge = it
                             }

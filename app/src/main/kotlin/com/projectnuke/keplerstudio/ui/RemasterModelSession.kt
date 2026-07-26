@@ -182,17 +182,10 @@ object RemasterModelSession : ModelRunnerContract {
     internal suspend fun createForegroundMask(
         bitmap: Bitmap,
         diagnostics: MemoryTrackerScope? = null,
+        operation: ModelOperationContext,
         onOwnedEdge: (Long) -> Unit = {},
     ): Bitmap? =
-        when (
-            val result =
-                createForegroundMaskResult(
-                    bitmap,
-                    diagnostics,
-                    ModelOperationContext(0L, commandGeneration.get().toString()),
-                    onOwnedEdge,
-                )
-        ) {
+        when (val result = createForegroundMaskResult(bitmap, diagnostics, operation, onOwnedEdge)) {
             is ModelRunResult.Success -> result.value
             is ModelRunResult.Failure -> null
         }
