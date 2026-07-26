@@ -128,8 +128,7 @@ internal fun applyFlareGuardModelOrRuleResultV0(
                         fallbackReason = null,
                     )
                 } finally {
-                    result.mask.recycle()
-                    diagnostics?.release(result.diagnosticEdge)
+                    result.ownedMask.recycleAndRelease()
                 }
             }
             val failure = modelRun as ModelRunResult.Failure

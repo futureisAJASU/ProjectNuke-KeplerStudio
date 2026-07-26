@@ -10,6 +10,7 @@ import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
+import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -114,23 +115,28 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     )
                 withContext(Dispatchers.Default) {
                     val createdBase = checkNotNull(ownedBaseOwned)
-                    val mask =
-                        RemasterModelSession.createForegroundMask(
+                    val maskResult =
+                        RemasterModelSession.createForegroundMaskResult(
                             createdBase,
                             remasterTracker,
                             modelOperation,
-                        ) {
-                            modelMaskEdge = it
-                        } ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
-                    modelMask = mask
-                    val created =
-                        renderMaskAwareRemaster(
-                            basePreview = createdBase,
-                            mask = mask,
-                            state = current,
-                            revision = nextRevision,
-                            diagnostics = remasterTracker,
                         )
+                    val mask =
+                        (maskResult as? ModelRunResult.Success)?.value
+                            ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
+                    modelMask = mask.bitmap
+                    val created =
+                        try {
+                            renderMaskAwareRemaster(
+                                basePreview = createdBase,
+                                mask = mask.bitmap,
+                                state = current,
+                                revision = nextRevision,
+                                diagnostics = remasterTracker,
+                            )
+                        } finally {
+                            mask.recycleAndRelease()
+                        }
                     remasteredOriginal = created
                 }
 

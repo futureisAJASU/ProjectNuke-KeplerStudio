@@ -2378,15 +2378,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             dirtyBaseEdge =
                 exportPrepareTracker?.track(checkNotNull(ownedDirtyBase), "exportPreview:dirtyBase")
                     ?: 0L
-            if (ownedDirtyBase == null) {
-                updateUiStateAndRecycleReplaced {
-                    it.copy(
-                        message =
-                            "\uB0B4\uBCF4\uB0B4\uAE30 \uC900\uBE44\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4"
-                    )
-                }
-                return
-            }
         } else if (!canPreflightCleanExport(sourcePath, exportResolution)) {
             updateUiStateAndRecycleReplaced {
                 it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.")

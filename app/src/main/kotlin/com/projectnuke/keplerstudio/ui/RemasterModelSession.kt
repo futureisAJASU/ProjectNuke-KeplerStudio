@@ -17,6 +17,7 @@ import com.projectnuke.keplerstudio.editor.ModelAssetValidator
 import com.projectnuke.keplerstudio.editor.ModelAvailability
 import com.projectnuke.keplerstudio.editor.ModelChannelOrder
 import com.projectnuke.keplerstudio.editor.ModelColorSpace
+import com.projectnuke.keplerstudio.editor.ModelConfidence
 import com.projectnuke.keplerstudio.editor.ModelFailure
 import com.projectnuke.keplerstudio.editor.ModelFailureReason
 import com.projectnuke.keplerstudio.editor.ModelInputContract
@@ -30,6 +31,7 @@ import com.projectnuke.keplerstudio.editor.ModelRunnerDescriptor
 import com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle
 import com.projectnuke.keplerstudio.editor.ModelTensorDataType
 import com.projectnuke.keplerstudio.editor.ModelTensorLayout
+import com.projectnuke.keplerstudio.editor.TrackedMask
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
@@ -183,19 +185,23 @@ object RemasterModelSession : ModelRunnerContract {
         bitmap: Bitmap,
         diagnostics: MemoryTrackerScope? = null,
         operation: ModelOperationContext,
-        onOwnedEdge: (Long) -> Unit = {},
     ): Bitmap? =
-        when (val result = createForegroundMaskResult(bitmap, diagnostics, operation, onOwnedEdge)) {
-            is ModelRunResult.Success -> result.value
+        when (val result = createForegroundMaskResult(bitmap, diagnostics, operation)) {
+            is ModelRunResult.Success -> result.value.adopt()
             is ModelRunResult.Failure -> null
         }
 
+    /**
+     * Returns the foreground mask as a [TrackedMask] carrying its diagnostic edge,
+     * model identity, operation token and document generation. This replaces the
+     * raw `(Long) -> Unit` edge callback that allowed a Bitmap and a separately
+     * mutable Long to drift; the caller transfers/adopts exactly once.
+     */
     internal suspend fun createForegroundMaskResult(
         bitmap: Bitmap,
         diagnostics: MemoryTrackerScope? = null,
         operation: ModelOperationContext,
-        onOwnedEdge: (Long) -> Unit = {},
-    ): ModelRunResult<Bitmap> =
+    ): ModelRunResult<TrackedMask> =
         modelMutex.withLock {
             if (activeModel?.id != "edge_masker" || !isModelLoaded) {
                 return@withLock ModelRunResult.Failure(
@@ -213,23 +219,47 @@ object RemasterModelSession : ModelRunnerContract {
             isInferring = true
             lifecycle = ModelRunnerLifecycle.Inferencing
             GlobalModelDiagnostics.publish("RemasterModelSession", "inferring")
-            var ownedMask: Bitmap? = null
-            var ownedEdge = 0L
+            // Track the foreground mask through a TrackedMask so the bitmap and
+            // diagnostic edge settle together exactly once, regardless of outcome.
+            // Built-late: we allocate the TrackedMask on success.
+            var ownedMask: TrackedMask? = null
             try {
-                ownedMask =
-                    createForegroundMaskFromSegmenter(model, bitmap, diagnostics) {
-                        ownedEdge = it
-                    }
                 operation.validateOrThrow()
-                onOwnedEdge(ownedEdge)
-                ModelRunResult.Success(checkNotNull(ownedMask).also { ownedMask = null }, confidence = 1f)
+                val maskBitmap =
+                    createForegroundMaskFromSegmenter(model, bitmap, diagnostics)
+                operation.validateOrThrow()
+                val trackingGeneration =
+                    operation.documentGeneration.takeIf { it != "unspecified" } ?: "session"
+                ownedMask =
+                    TrackedMask.acquire(
+                        bitmap = maskBitmap,
+                        scope = diagnostics,
+                        owner = "remaster:finalArgbMask",
+                        modelId = activeModel?.id ?: "edge_masker",
+                        modelVersion = activeModel?.semanticVersion ?: "1.0.0",
+                        operationToken = operation.operationToken,
+                        documentGeneration = trackingGeneration,
+                        confidenceMetrics =
+                            ModelConfidence(
+                                wholeImageMean = 1f,
+                                peak = 1f,
+                                activeRegionMean = 1f,
+                                activeRegionPercentile = 1f,
+                                affectedAreaRatio = 1f,
+                                backgroundLeakage = 0f,
+                                finalPolicy = 1f,
+                            ),
+                    )
+                ModelRunResult.Success(
+                    ownedMask,
+                    confidence = 1f,
+                    ownedMask.confidenceMetrics,
+                )
             } catch (cancelled: CancellationException) {
-                ownedMask?.takeUnless(Bitmap::isRecycled)?.recycle()
-                diagnostics?.release(ownedEdge)
+                ownedMask?.recycleAndRelease()
                 throw cancelled
             } catch (failure: Throwable) {
-                ownedMask?.takeUnless(Bitmap::isRecycled)?.recycle()
-                diagnostics?.release(ownedEdge)
+                ownedMask?.recycleAndRelease()
                 ModelRunResult.Failure(
                     ModelFailure(ModelFailureReason.InferenceFailed, failure.message),
                     DeterministicModelFallback.NoResult,
@@ -335,7 +365,6 @@ object RemasterModelSession : ModelRunnerContract {
         segmenter: Any,
         bitmap: Bitmap,
         diagnostics: MemoryTrackerScope?,
-        onOwnedEdge: (Long) -> Unit,
     ): Bitmap {
         val imageBuilderClass =
             Class.forName("com.google.mediapipe.framework.image.BitmapImageBuilder")
@@ -383,7 +412,6 @@ object RemasterModelSession : ModelRunnerContract {
                         bitmap.width,
                         bitmap.height,
                         diagnostics,
-                        onOwnedEdge,
                     )
             } finally {
                 if (!rawMask.isRecycled) rawMask.recycle()
@@ -433,17 +461,21 @@ object RemasterModelSession : ModelRunnerContract {
         return extractMethod.invoke(null, maskImage) as Bitmap
     }
 
+    /**
+     * Build the final ARGB-8888 foreground mask bitmap. The returned bitmap is the
+     * caller's responsibility; the caller wraps it into a [TrackedMask] so its
+     * diagnostic edge is tracked together with the bitmap identity (no separate
+     * raw Long edge to leak).
+     */
     private fun categoryBitmapToForegroundMask(
         rawMask: Bitmap,
         targetWidth: Int,
         targetHeight: Int,
         diagnostics: MemoryTrackerScope?,
-        onOwnedEdge: (Long) -> Unit,
     ): Bitmap {
         var scaledMask: Bitmap? = null
         var out: Bitmap? = null
         var scaledEdge = 0L
-        var finalEdge = 0L
         var rowTransient = 0L
         var succeeded = false
         var primaryFailure: Throwable? = null
@@ -457,7 +489,9 @@ object RemasterModelSession : ModelRunnerContract {
             if (scaledMask !== rawMask)
                 scaledEdge = diagnostics?.track(scaledMask!!, "remaster:scaledCategoryMask") ?: 0L
             out = createBitmapOrThrow(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-            finalEdge = diagnostics?.track(out, "remaster:finalArgbMask") ?: 0L
+            // Do NOT pre-track the final mask here: the caller wraps it in a TrackedMask
+            // which registers the diagnostic edge (with its own labelled owner) on
+            // acquire. Tracking here would create a duplicate edge that leaks.
             val inRow = IntArray(targetWidth)
             val outRow = IntArray(targetWidth)
             rowTransient =
@@ -480,7 +514,6 @@ object RemasterModelSession : ModelRunnerContract {
                 }
                 out.setPixels(outRow, 0, targetWidth, 0, y, targetWidth, 1)
             }
-            onOwnedEdge(finalEdge)
             succeeded = true
             return out
         } catch (t: Throwable) {
@@ -501,20 +534,20 @@ object RemasterModelSession : ModelRunnerContract {
             }
             recycleAndCollect { diagnostics?.releaseTransient(rowTransient) }
             if (!succeeded) {
-                recycleAndCollect { diagnostics?.release(finalEdge) }
+                recycleAndCollect { out?.recycle() }
             }
             if (cleanupFailures.isNotEmpty()) {
                 if (primaryFailure != null) {
                     cleanupFailures.forEach(primaryFailure::addSuppressed)
-                    out?.recycle()
+                    if (!succeeded) out?.recycle()
                 } else {
-                    out?.recycle()
+                    if (!succeeded) out?.recycle()
                     val cleanupFailure = cleanupFailures.first()
                     cleanupFailures.drop(1).forEach(cleanupFailure::addSuppressed)
                     throw cleanupFailure
                 }
             } else if (primaryFailure != null) {
-                out?.recycle()
+                if (!succeeded) out?.recycle()
             }
         }
     }

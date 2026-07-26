@@ -11,6 +11,7 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
+import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
@@ -109,24 +110,25 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                     )
                 val layer =
                     withContext(Dispatchers.Default) {
-                        var modelMaskEdge = 0L
-                        val mask =
-                            RemasterModelSession.createForegroundMask(
+                        val maskResult =
+                            RemasterModelSession.createForegroundMaskResult(
                                 checkNotNull(ownedBaseOwned),
                                 selectionTracker,
                                 modelOperation,
-                            ) {
-                                modelMaskEdge = it
-                            }
+                            )
+                        val tracked =
+                            (maskResult as? ModelRunResult.Success)?.value
                                 ?: error(
                                     "\uB9C8\uC2A4\uD06C\uB97C \uC0DD\uC131\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
                                 )
+                        // Subject-selection adoption: copy the validated mask into an
+                        // own bitmap, then release the model mask's diagnostic edge
+                        // exactly once (and recycle the source bitmap) via TrackedMask.
                         val ownedMask =
                             try {
-                                mask.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+                                tracked.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
                             } finally {
-                                mask.recycle()
-                                selectionTracker?.release(modelMaskEdge)
+                                tracked.recycleAndRelease()
                             }
                         if (!ownedMask.hasForegroundPixel()) {
                             ownedMask.recycle()

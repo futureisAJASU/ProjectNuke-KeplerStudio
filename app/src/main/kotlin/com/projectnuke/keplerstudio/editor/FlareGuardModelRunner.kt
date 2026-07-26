@@ -92,7 +92,7 @@ class FlareGuardModelRunner private constructor(
         )
 
     data class MaskResult(
-        val mask: Bitmap,
+        private val trackedMask: TrackedMask,
         val meanAlpha: Float,
         val maxAlpha: Float,
         val activeRegionMeanAlpha: Float,
@@ -100,8 +100,13 @@ class FlareGuardModelRunner private constructor(
         val affectedAreaRatio: Float,
         val backgroundLeakageAlpha: Float,
         val policyConfidence: Float,
-        internal val diagnosticEdge: Long = 0L
-    )
+    ) {
+        /** Mask bitmap; lifetime co-owned by [ownedMask]. */
+        val mask: Bitmap get() = trackedMask.bitmap
+
+        /** Structured ownership of the mask bitmap and its diagnostic edge. */
+        val ownedMask: TrackedMask get() = trackedMask
+    }
 
     fun predictMaskOrNull(source: Bitmap): MaskResult? = predictMaskOrNull(source, null)
 
@@ -203,12 +208,7 @@ class FlareGuardModelRunner private constructor(
 
                     val maskResult =
                         try {
-                            readMask(outputBuffer, diagnostics).let {
-                                it.copy(
-                                    diagnosticEdge =
-                                        diagnostics?.track(it.mask, "flareGuard:modelMask") ?: 0L
-                                )
-                            }
+                            readMask(outputBuffer, diagnostics)
                         } catch (malformedOutput: IllegalArgumentException) {
                             throw InvalidOutputException(malformedOutput.message ?: "model output violated the alpha contract", malformedOutput)
                         }
@@ -217,19 +217,12 @@ class FlareGuardModelRunner private constructor(
                         ModelRunResult.Success(
                             maskResult,
                             maskResult.policyConfidence,
-                            ModelConfidence(
-                                wholeImageMean = maskResult.meanAlpha,
-                                peak = maskResult.maxAlpha,
-                                activeRegionMean = maskResult.activeRegionMeanAlpha,
-                                activeRegionPercentile = maskResult.activeRegionPercentileAlpha,
-                                affectedAreaRatio = maskResult.affectedAreaRatio,
-                                backgroundLeakage = maskResult.backgroundLeakageAlpha,
-                                finalPolicy = maskResult.policyConfidence,
-                            ),
+                            maskResult.ownedMask.confidenceMetrics,
                         )
                     } catch (failure: Throwable) {
-                        maskResult.mask.takeUnless(Bitmap::isRecycled)?.recycle()
-                        diagnostics?.release(maskResult.diagnosticEdge)
+                        // Helper failure recycles the partial mask and releases its edge
+                        // exactly once via the TrackedMask.
+                        maskResult.ownedMask.recycleAndRelease()
                         throw failure
                     }
                 } finally {
@@ -358,7 +351,11 @@ class FlareGuardModelRunner private constructor(
                 var bitmap: Bitmap? = null
                 try {
                     bitmap = createBitmapOrThrow(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
-                    bitmap!!.setPixels(outPixels, 0, outputWidth, 0, 0, outputWidth, outputHeight)
+                    // Register the edge IMMEDIATELY when the final bitmap is allocated, so
+                    // the final mask is visible to diagnostics while the remaining row/output
+                    // buffers stay alive (they are released in the outer finally blocks).
+                    val edge = diagnostics?.track(bitmap, "flareGuard:modelMask") ?: 0L
+                    bitmap.setPixels(outPixels, 0, outputWidth, 0, 0, outputWidth, outputHeight)
                     val mean = if (outPixels.isEmpty()) 0f else sum / outPixels.size
                     val activeMean = if (activeCount == 0) 0f else activeSum / activeCount
                     val percentileRank = ((activeCount - 1) * 0.90f).roundToInt().coerceAtLeast(0)
@@ -377,16 +374,37 @@ class FlareGuardModelRunner private constructor(
                         if (backgroundCount == 0) 0f else backgroundSum / backgroundCount
                     val areaReliability =
                         sqrt((affectedArea / MIN_CONFIDENT_AREA_RATIO).coerceIn(0f, 1f))
+                    val policyConfidence = (activeMean * areaReliability).coerceIn(0f, 1f)
+                    val tracked =
+                        TrackedMask.acquire(
+                            bitmap = bitmap!!,
+                            scope = diagnostics,
+                            owner = "flareGuard:modelMask",
+                            modelId = "flare-masker",
+                            modelVersion = "1.0.0",
+                            operationToken = 0L,
+                            documentGeneration = "unspecified",
+                            confidenceMetrics =
+                                ModelConfidence(
+                                    wholeImageMean = mean,
+                                    peak = max,
+                                    activeRegionMean = activeMean,
+                                    activeRegionPercentile = percentile,
+                                    affectedAreaRatio = affectedArea,
+                                    backgroundLeakage = backgroundLeakage,
+                                    finalPolicy = policyConfidence,
+                                ),
+                        )
                     val result =
                         MaskResult(
-                            mask = bitmap!!,
+                            trackedMask = tracked,
                             meanAlpha = mean,
                             maxAlpha = max,
                             activeRegionMeanAlpha = activeMean,
                             activeRegionPercentileAlpha = percentile,
                             affectedAreaRatio = affectedArea,
                             backgroundLeakageAlpha = backgroundLeakage,
-                            policyConfidence = (activeMean * areaReliability).coerceIn(0f, 1f),
+                            policyConfidence = policyConfidence,
                         )
                     bitmap = null
                     return result
