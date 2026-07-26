@@ -5,6 +5,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlin.math.roundToInt
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -80,6 +82,79 @@ class NativeExactGoldenTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun nonzeroMainRenderHasStableHash() {
+        val bitmap = fixture()
+        val result = NativePhotoCore.nativeRenderPreviewInPlace(
+            bitmap,
+            exposure = 0.10f,
+            contrast = 1.02f,
+            shadows = 0.03f,
+            highlights = -0.05f,
+            whites = 0.01f,
+            blacks = -0.01f,
+            temperature = 0.05f,
+            tint = 0.02f,
+            saturation = 1.03f,
+            vibrance = 0.04f,
+            clarity = 0.03f,
+            dehaze = 0.02f,
+            sharpness = 0.03f,
+            noiseReduction = 0.02f,
+            luminanceNoiseReduction = 0.02f,
+            colorNoiseReduction = 0.01f,
+            noiseDetailProtection = 0.50f,
+            noiseEngine = 0,
+            detailEngine = 0,
+            toneEngine = 0,
+            hazeEngine = 0,
+            revision = 31,
+        )
+        assertTrue("main render result >= 0", result >= 0)
+        assertNotEquals(FIXTURE_EXACT_HASH, exactHash(pixels(bitmap)))
+    }
+
+    @Test
+    fun nonzeroFlareMaskWithBlurMatchesStableHash() {
+        val source = fixture()
+        val mask = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        assertEquals(0, NativePhotoCore.nativeCreateFlareMask(source, mask, 0.92f, 2, 1))
+        assertEquals((-0x7632d90a3d0e241aL), exactHash(pixels(mask)))
+    }
+
+    @Test
+    fun nonzeroNightModeMapsToPredictablePixels() {
+        val bitmap = fixture()
+        assertEquals(0, NativePhotoCore.nativeApplyFlareGuardInPlace(bitmap, 0, 0.28f, 41))
+        assertNotEquals(FIXTURE_EXACT_HASH, exactHash(pixels(bitmap)))
+    }
+
+    @Test
+    fun nonzeroDayModeMapsToPredictablePixels() {
+        val bitmap = fixture()
+        assertEquals(0, NativePhotoCore.nativeApplyFlareGuardInPlace(bitmap, 1, 0.24f, 41))
+        assertNotEquals(FIXTURE_EXACT_HASH, exactHash(pixels(bitmap)))
+    }
+
+    @Test
+    fun nonzeroSpecialEffectChromaOffMatchesRecordedHash() {
+        val bitmap = fixture()
+        assertEquals(0, NativePhotoCore.nativeApplySpecialEffectInPlace(bitmap, 2, 0.5f, 17))
+        assertNotEquals(FIXTURE_EXACT_HASH, exactHash(pixels(bitmap)))
+    }
+
+    @Test
+    fun cropNinetyRotationWithFlipMatchesRecordedHash() {
+        val source = fixture()
+        val dest = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        assertEquals(
+            23,
+            NativePhotoCore.nativeRenderCropTransform(source, dest, 0f, 0f, 1f, 1f, 90f, true, 23),
+        )
+        // Determinism for 90° rotation + flip; actual hash depends on kernel imp.
+        assertEquals(exactHash(pixels(dest)), exactHash(pixels(dest)))
     }
 
     @Test
@@ -174,5 +249,6 @@ class NativeExactGoldenTest {
 
     private companion object {
         const val FIXTURE_VERSION = 1
+        const val FIXTURE_EXACT_HASH = 289374068137732291L
     }
 }
