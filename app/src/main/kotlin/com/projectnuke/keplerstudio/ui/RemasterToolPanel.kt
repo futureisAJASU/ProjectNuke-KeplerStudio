@@ -43,9 +43,12 @@ fun RemasterToolPanel(
     val flareRestorer = OnDeviceRemasterModels.first { it.id == "flare_restorer" }
     val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
     val autoRouter = OnDeviceRemasterModels.first { it.id == "universal_auto_router" }
-    val flareMaskerAvailable = RemasterModelSession.hasModelAsset(context, flareMasker.assetPath)
-    val flareRestorerAvailable = RemasterModelSession.hasModelAsset(context, flareRestorer.assetPath)
-    val edgeAssetAvailable = RemasterModelSession.hasModelAsset(context, edgeMasker.assetPath)
+    val flareMaskerStatus = RemasterModelSession.modelAvailability(context, flareMasker)
+    val flareRestorerStatus = RemasterModelSession.modelAvailability(context, flareRestorer)
+    val edgeMaskerStatus = RemasterModelSession.modelAvailability(context, edgeMasker)
+    val flareMaskerAvailable = flareMaskerStatus.hasValidatedAsset()
+    val flareRestorerAvailable = flareRestorerStatus.hasValidatedAsset()
+    val edgeAssetAvailable = edgeMaskerStatus.hasValidatedAsset()
     val edgeLoaded = loaded && activeModel?.id == "edge_masker"
     val hasImage = editorState.previewBitmap != null || editorState.originalPreviewBitmap != null
 
@@ -80,7 +83,7 @@ fun RemasterToolPanel(
 
         ModelHubCard(
             title = "플레어 자동 선택",
-            status = if (flareMaskerAvailable) "사용 가능" else "모델 파일 없음",
+            status = flareMaskerStatus.uiLabel(),
             explanation = if (flareMaskerAvailable) {
                 "현재 모델은 번짐 영역 감지에 사용됩니다. 자동 복원 모델은 아닙니다."
             } else {
@@ -125,7 +128,7 @@ fun RemasterToolPanel(
 
         ModelHubCard(
             title = "AI 번짐 보정",
-            status = if (flareRestorerAvailable) "준비 중" else "모델 파일 없음",
+            status = flareRestorerStatus.uiLabel(),
             explanation = if (flareRestorerAvailable) {
                 "플레어 복원 모델 파일이 감지되었습니다. 실행 경로 연결은 별도 단계에서 진행합니다."
             } else {
@@ -141,11 +144,7 @@ fun RemasterToolPanel(
 
         ModelHubCard(
             title = edgeMasker.title,
-            status = when {
-                edgeLoaded -> "사용 가능"
-                edgeAssetAvailable -> "준비 중"
-                else -> "모델 파일 없음"
-            },
+            status = edgeMaskerStatus.uiLabel(),
             explanation = if (edgeAssetAvailable) {
                 "모델 마스크 보조를 사용할 수 있도록 런타임을 로드합니다."
             } else {

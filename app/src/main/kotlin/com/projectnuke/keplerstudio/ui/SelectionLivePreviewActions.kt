@@ -78,6 +78,15 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
                 }
             },
             { prepareTracker?.end() },
+            {
+                settleSelectionPreviewBusyIfOwned(
+                    transaction,
+                    previewToken,
+                    nextRevision,
+                    baseToken,
+                    activeId,
+                )
+            },
         )
     val previewJob = viewModelScope.launch {
         if (!handoff.claimForChild()) return@launch

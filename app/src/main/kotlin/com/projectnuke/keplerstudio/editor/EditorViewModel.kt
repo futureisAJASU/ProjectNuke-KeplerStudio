@@ -672,11 +672,55 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     ): Boolean {
         if (shuttingDown) return false
         if (selectionParamTransaction !== transaction) return false
-        if (transaction.latestPreviewToken != token) return false
         val state = _uiState.value
-        return state.revision == revision &&
-            state.baseContentToken == baseToken &&
-            state.activeSelectionLayerId == activeId
+        return SelectionPreviewIdentity(
+                gestureId = transaction.gestureId,
+                previewToken = token,
+                revision = revision,
+                baseContentToken = baseToken,
+                activeSelectionLayerId = activeId,
+            )
+            .matches(
+                activeGestureId = selectionParamTransaction?.gestureId,
+                latestPreviewToken = transaction.latestPreviewToken,
+                stateRevision = state.revision,
+                stateBaseContentToken = state.baseContentToken,
+                stateActiveSelectionLayerId = state.activeSelectionLayerId,
+            )
+    }
+
+    internal fun settleSelectionPreviewBusyIfOwned(
+        transaction: SelectionParamTransaction,
+        token: Long,
+        revision: Int,
+        baseToken: String,
+        activeId: String?,
+    ) {
+        if (selectionParamTransaction !== transaction) return
+        val identity =
+            SelectionPreviewIdentity(
+                gestureId = transaction.gestureId,
+                previewToken = token,
+                revision = revision,
+                baseContentToken = baseToken,
+                activeSelectionLayerId = activeId,
+            )
+        _uiState.update { state ->
+            if (
+                state.isBusy &&
+                    identity.matches(
+                        activeGestureId = selectionParamTransaction?.gestureId,
+                        latestPreviewToken = transaction.latestPreviewToken,
+                        stateRevision = state.revision,
+                        stateBaseContentToken = state.baseContentToken,
+                        stateActiveSelectionLayerId = state.activeSelectionLayerId,
+                    )
+            ) {
+                state.copy(isBusy = false)
+            } else {
+                state
+            }
+        }
     }
 
     internal fun beginSelectionParamGesture(): Boolean {
@@ -3464,7 +3508,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         flareGuardBitmap = r.bitmap
                         r
                     }
-                flareTracker?.track(flareGuardBitmap!!, "applyFlareGuard:flareGuardBitmap")
+                try {
+                    flareTracker?.track(
+                        flareGuardBitmap!!,
+                        "applyFlareGuard:flareGuardBitmap",
+                    )
+                } finally {
+                    flareGuardResult?.releaseHelperDiagnosticOwnership()
+                }
                 renderedPreview =
                     withContext(Dispatchers.Default) {
                         val p =

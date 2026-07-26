@@ -11,21 +11,29 @@ import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.projectnuke.keplerstudio.editor.GlobalModelDiagnostics
 import com.projectnuke.keplerstudio.editor.DeterministicModelFallback
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
+import com.projectnuke.keplerstudio.editor.ModelAlphaHandling
+import com.projectnuke.keplerstudio.editor.ModelAssetManifest
+import com.projectnuke.keplerstudio.editor.ModelAssetValidator
+import com.projectnuke.keplerstudio.editor.ModelAvailability
 import com.projectnuke.keplerstudio.editor.ModelChannelOrder
+import com.projectnuke.keplerstudio.editor.ModelColorSpace
 import com.projectnuke.keplerstudio.editor.ModelFailure
 import com.projectnuke.keplerstudio.editor.ModelFailureReason
+import com.projectnuke.keplerstudio.editor.ModelInputContract
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
+import com.projectnuke.keplerstudio.editor.ModelOutputContract
 import com.projectnuke.keplerstudio.editor.ModelOutputSemantic
+import com.projectnuke.keplerstudio.editor.ModelResizePolicy
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.ModelRunnerContract
 import com.projectnuke.keplerstudio.editor.ModelRunnerDescriptor
 import com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle
-import com.projectnuke.keplerstudio.editor.ModelTensorContract
+import com.projectnuke.keplerstudio.editor.ModelTensorDataType
+import com.projectnuke.keplerstudio.editor.ModelTensorLayout
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -34,7 +42,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import org.tensorflow.lite.Interpreter
 
 object RemasterModelSession : ModelRunnerContract {
     var activeModel by mutableStateOf<RemasterModelCandidate?>(null)
@@ -49,7 +56,7 @@ object RemasterModelSession : ModelRunnerContract {
     private var closeableModel: AutoCloseable? = null
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
-    private var commandGeneration: Long = 0L
+    private val commandGeneration = AtomicLong()
     var isModelLoading by mutableStateOf(false)
         private set
 
@@ -62,37 +69,61 @@ object RemasterModelSession : ModelRunnerContract {
     override val descriptor: ModelRunnerDescriptor?
         get() =
             activeModel?.let { candidate ->
+                val manifest = ModelAssetManifest.byId(candidate.id) ?: return@let null
                 ModelRunnerDescriptor(
                     modelId = candidate.id,
-                    semanticVersion = candidate.semanticVersion,
-                    assetVersion = candidate.assetVersion,
-                    assetPath = candidate.assetPath,
-                    tensor =
-                        ModelTensorContract(
+                    asset = manifest.asset,
+                    input =
+                        ModelInputContract(
                             width = null,
                             height = null,
+                            batch = 1,
                             channels = 3,
-                            bitmapConfig = Bitmap.Config.ARGB_8888,
-                            colorSpace = "sRGB",
+                            layout = ModelTensorLayout.NHWC,
+                            dataType = ModelTensorDataType.Float32,
+                            quantization = null,
                             channelOrder = ModelChannelOrder.RGB,
+                            colorSpace = ModelColorSpace.SRGB,
                             normalization = "runtime model contract",
-                            outputSemantic = ModelOutputSemantic.ForegroundCategoryMask,
-                            outputRange = 0f..1f,
+                            acceptedBitmapConfigs = setOf(Bitmap.Config.ARGB_8888),
+                            resizePolicy = ModelResizePolicy.RuntimeDefined,
+                            alphaHandling = ModelAlphaHandling.Ignore,
                         ),
+                    output =
+                        ModelOutputContract(
+                            width = null,
+                            height = null,
+                            channelsOrClasses = 1,
+                            layout = ModelTensorLayout.HW,
+                            dataType = ModelTensorDataType.Float32,
+                            quantization = null,
+                            semantic = manifest.outputSemantic,
+                            valueRange = 0f..1f,
+                            confidenceMeaning =
+                                if (manifest.outputSemantic ==
+                                    ModelOutputSemantic.ForegroundCategoryMask
+                                ) {
+                                    "MediaPipe category mask"
+                                } else {
+                                    null
+                                },
+                        ),
+                    inferenceAdapterImplemented = manifest.inferenceAdapterImplemented,
+                    productionReady = manifest.productionReady,
                     knownMemoryBytes = null,
                     hasUnknownRuntimeMemory = true,
                 )
             }
 
     fun load(context: Context, candidate: RemasterModelCandidate) {
-        val generation = ++commandGeneration
+        val generation = commandGeneration.incrementAndGet()
         isModelLoading = true
         isModelLoaded = false
         lifecycle = ModelRunnerLifecycle.Loading
         GlobalModelDiagnostics.publish("RemasterModelSession", "loading")
         modelScope.launch {
             modelMutex.withLock {
-                if (generation != commandGeneration) return@withLock
+                if (generation != commandGeneration.get()) return@withLock
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 activeModel = candidate
@@ -114,14 +145,9 @@ object RemasterModelSession : ModelRunnerContract {
                         val created =
                             when (candidate.id) {
                                 "edge_masker" -> createImageSegmenter(context, candidate.assetPath)
-                                "universal_balancer",
-                                "flare_masker" ->
-                                    TfliteModelHandle(
-                                        createTfliteInterpreter(context, candidate.assetPath)
-                                    )
                                 else -> null
                             }
-                        if (generation != commandGeneration) {
+                        if (generation != commandGeneration.get()) {
                             runCatching { created?.close() }
                             return@withLock
                         }
@@ -163,7 +189,7 @@ object RemasterModelSession : ModelRunnerContract {
                 createForegroundMaskResult(
                     bitmap,
                     diagnostics,
-                    ModelOperationContext(0L, commandGeneration.toString()),
+                    ModelOperationContext(0L, commandGeneration.get().toString()),
                     onOwnedEdge,
                 )
         ) {
@@ -228,13 +254,13 @@ object RemasterModelSession : ModelRunnerContract {
         }
 
     fun unload() {
-        val generation = ++commandGeneration
+        val generation = commandGeneration.incrementAndGet()
         isModelLoading = true
         lifecycle = ModelRunnerLifecycle.Closing
         GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
         modelScope.launch {
             modelMutex.withLock {
-                if (generation != commandGeneration) return@withLock
+                if (generation != commandGeneration.get()) return@withLock
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 activeModel = null
@@ -250,7 +276,7 @@ object RemasterModelSession : ModelRunnerContract {
     suspend fun unloadIdleNow(): Boolean =
         modelMutex.withLock {
             if (isModelLoading || isInferring) return@withLock false
-            ++commandGeneration
+            commandGeneration.incrementAndGet()
             GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
             lifecycle = ModelRunnerLifecycle.Closing
             runCatching { closeableModel?.close() }
@@ -269,10 +295,36 @@ object RemasterModelSession : ModelRunnerContract {
         return runCatching { context.assets.open(assetPath).use { true } }.getOrDefault(false)
     }
 
-    private fun isSupportedModelContract(candidate: RemasterModelCandidate): Boolean =
-        candidate.semanticVersion == "1.0.0" &&
-            candidate.assetVersion.isNotBlank() &&
-            candidate.id in setOf("edge_masker", "universal_balancer", "flare_masker")
+    fun modelAvailability(
+        context: Context,
+        candidate: RemasterModelCandidate,
+    ): ModelAvailability {
+        val manifest =
+            ModelAssetManifest.byId(candidate.id)
+                ?: return ModelAvailability.ContractUnsupported
+        val validation =
+            ModelAssetValidator.validate(manifest) { path ->
+                runCatching { context.assets.open(path) }.getOrNull()
+            }
+        return ModelAssetValidator.availability(
+            entry = manifest,
+            validation = validation,
+            loaded = activeModel?.id == candidate.id && isModelLoaded,
+            inferenceAvailable =
+                activeModel?.id == candidate.id &&
+                    isModelLoaded &&
+                    manifest.inferenceAdapterImplemented,
+        )
+    }
+
+    private fun isSupportedModelContract(candidate: RemasterModelCandidate): Boolean {
+        val manifest = ModelAssetManifest.byId(candidate.id) ?: return false
+        return candidate.id == "edge_masker" &&
+            manifest.inferenceAdapterImplemented &&
+            manifest.outputSemantic == ModelOutputSemantic.ForegroundCategoryMask &&
+            candidate.semanticVersion == manifest.asset.semanticModelVersion &&
+            manifest.asset.requiredContractSchemaVersion == ModelAssetManifest.CONTRACT_SCHEMA_VERSION
+    }
 
     private fun createImageSegmenter(context: Context, assetPath: String): ImageSegmenter {
         val baseOptions = BaseOptions.builder().setModelAssetPath(assetPath).build()
@@ -284,24 +336,6 @@ object RemasterModelSession : ModelRunnerContract {
                 .setOutputConfidenceMasks(false)
                 .build()
         return ImageSegmenter.createFromOptions(context, options)
-    }
-
-    private fun createTfliteInterpreter(context: Context, assetPath: String): Interpreter {
-        val options = Interpreter.Options().apply { setNumThreads(4) }
-        return Interpreter(loadMappedAsset(context, assetPath), options)
-    }
-
-    private fun loadMappedAsset(context: Context, assetPath: String): MappedByteBuffer {
-        val descriptor = context.assets.openFd(assetPath)
-        descriptor.use { afd ->
-            afd.createInputStream().channel.use { channel ->
-                return channel.map(
-                    FileChannel.MapMode.READ_ONLY,
-                    afd.startOffset,
-                    afd.declaredLength,
-                )
-            }
-        }
     }
 
     private fun createForegroundMaskFromSegmenter(
@@ -503,11 +537,5 @@ object RemasterModelSession : ModelRunnerContract {
                     }
                     ?.invoke(image)
         }
-    }
-}
-
-private class TfliteModelHandle(private val interpreter: Interpreter) : AutoCloseable {
-    override fun close() {
-        interpreter.close()
     }
 }

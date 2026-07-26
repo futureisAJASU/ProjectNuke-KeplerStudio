@@ -190,27 +190,28 @@ fun NativeModelToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     val flareMasker = OnDeviceRemasterModels.first { it.id == "flare_masker" }
     val flareRestorer = OnDeviceRemasterModels.first { it.id == "flare_restorer" }
     val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
-    val flareMaskerAvailable = RemasterModelSession.hasModelAsset(context, flareMasker.assetPath)
-    val flareRestorerAvailable = RemasterModelSession.hasModelAsset(context, flareRestorer.assetPath)
-    val edgeAssetAvailable = RemasterModelSession.hasModelAsset(context, edgeMasker.assetPath)
+    val flareMaskerStatus = RemasterModelSession.modelAvailability(context, flareMasker)
+    val flareRestorerStatus = RemasterModelSession.modelAvailability(context, flareRestorer)
+    val edgeMaskerStatus = RemasterModelSession.modelAvailability(context, edgeMasker)
+    val flareMaskerAvailable = flareMaskerStatus.hasValidatedAsset()
     NativeToolCard(
         title = "모델 허브",
         description = "모델 파일과 런타임 상태에 따라 사용할 수 있는 기능만 실행합니다."
     ) {
         Text(
-            text = "플레어 자동 선택: ${if (flareMaskerAvailable) "사용 가능" else "모델 파일 없음"}",
+            text = "플레어 자동 선택: ${flareMaskerStatus.uiLabel()}",
             color = NativePanelTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 4.dp)
         )
         Text(
-            text = "AI 번짐 보정: ${if (flareRestorerAvailable) "준비 중" else "모델 파일 없음"}",
+            text = "AI 번짐 보정: ${flareRestorerStatus.uiLabel()}",
             color = NativePanelTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 4.dp)
         )
         Text(
-            text = "Edge Masker: ${if (edgeAssetAvailable) "사용 가능" else "모델 파일 없음"}",
+            text = "Edge Masker: ${edgeMaskerStatus.uiLabel()}",
             color = NativePanelTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 4.dp)

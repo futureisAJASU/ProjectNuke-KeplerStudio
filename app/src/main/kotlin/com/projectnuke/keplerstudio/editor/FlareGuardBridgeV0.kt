@@ -9,10 +9,15 @@ import kotlin.math.roundToInt
 
 private const val FLARE_GUARD_BRIDGE_TAG = "KeplerFlareAI"
 
-data class FlareGuardApplyResult(
+class FlareGuardApplyResult internal constructor(
     val bitmap: Bitmap,
-    val status: FlareGuardRuntimeStatus
-)
+    val status: FlareGuardRuntimeStatus,
+    private val trackedBitmap: TrackedBitmap? = null,
+) {
+    internal fun releaseHelperDiagnosticOwnership() {
+        trackedBitmap?.release()
+    }
+}
 
 enum class FlareGuardRuntimeStatus(val uiText: String) {
     ModelLoaded("플레어 마스크 모델을 불러왔습니다."),
@@ -30,7 +35,11 @@ fun applyFlareGuardModelOrRuleV0(
         FlareGuardMode.NightLight -> 0.28f
         FlareGuardMode.DaySun -> 0.24f
     }
-): Bitmap = applyFlareGuardModelOrRuleResultV0(context, source, mode, strength).bitmap
+): Bitmap =
+    applyFlareGuardModelOrRuleResultV0(context, source, mode, strength).let { result ->
+        result.releaseHelperDiagnosticOwnership()
+        result.bitmap
+    }
 
 internal fun applyFlareGuardModelOrRuleResultV0(
     context: Context,
@@ -59,9 +68,18 @@ internal fun applyFlareGuardModelOrRuleResultV0(
                     "FlareGuard model inference success: mode=$mode confidence=${modelRun.confidence} mean=${result.meanAlpha} max=${result.maxAlpha}"
                 )
                 try {
+                    val blended =
+                        applyFlareGuardMaskBlendV0(
+                            source,
+                            result.mask,
+                            mode,
+                            strength,
+                            diagnostics,
+                        )
                     return FlareGuardApplyResult(
-                        bitmap = applyFlareGuardMaskBlendV0(source, result.mask, mode, strength, diagnostics),
-                        status = FlareGuardRuntimeStatus.ModelInferenceSuccess
+                        bitmap = blended.bitmap,
+                        status = FlareGuardRuntimeStatus.ModelInferenceSuccess,
+                        trackedBitmap = blended,
                     )
                 } finally {
                     result.mask.recycle()
@@ -86,7 +104,11 @@ internal fun applyFlareGuardModelOrRuleResultV0(
             }
             val fallback = applyFlareGuardRuleFallback(source, mode, strength, diagnostics)
             Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_failed")
-            return FlareGuardApplyResult(fallback, FlareGuardRuntimeStatus.ModelFailedRuleFallback)
+            return FlareGuardApplyResult(
+                fallback.bitmap,
+                FlareGuardRuntimeStatus.ModelFailedRuleFallback,
+                fallback,
+            )
         } finally {
             runner.close()
         }
@@ -99,10 +121,19 @@ internal fun applyFlareGuardModelOrRuleResultV0(
     }
     val fallback = applyFlareGuardRuleFallback(source, mode, strength, diagnostics)
     Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_unavailable")
-    return FlareGuardApplyResult(fallback, FlareGuardRuntimeStatus.ModelUnavailableRuleFallback)
+    return FlareGuardApplyResult(
+        fallback.bitmap,
+        FlareGuardRuntimeStatus.ModelUnavailableRuleFallback,
+        fallback,
+    )
 }
 
-private fun applyFlareGuardRuleFallback(source: Bitmap, mode: FlareGuardMode, strength: Float, diagnostics: MemoryTrackerScope?): Bitmap =
+private fun applyFlareGuardRuleFallback(
+    source: Bitmap,
+    mode: FlareGuardMode,
+    strength: Float,
+    diagnostics: MemoryTrackerScope?,
+): TrackedBitmap =
     when (mode) {
         FlareGuardMode.NightLight -> applyFlareGuardTracked(source, strength, mode, diagnostics)
         FlareGuardMode.DaySun -> applyFlareGuardTracked(source, strength, mode, diagnostics)
@@ -114,37 +145,48 @@ internal fun applyFlareGuardMaskBlendV0(
     mode: FlareGuardMode,
     strength: Float,
     diagnostics: MemoryTrackerScope? = null
-): Bitmap {
-    var output: Bitmap? = null
-    var ruleMask: Bitmap? = null
-    var scaledMask: Bitmap? = null
-    var outputEdge = 0L
-    var ruleEdge = 0L
-    var scaledEdge = 0L
+): TrackedBitmap {
+    var output: TrackedBitmap? = null
+    var ruleMask: TrackedBitmap? = null
+    var scaledMask: TrackedBitmap? = null
+    var rowsTransient = 0L
     var success = false
     try {
-        output = source.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-        outputEdge = diagnostics?.track(output!!, "flareGuard:fullSizeOutputCopy") ?: 0L
+        output =
+            TrackedBitmap.acquire(
+                source.copyOrThrow(Bitmap.Config.ARGB_8888, true),
+                diagnostics,
+                "flareGuard:fullSizeOutputCopy",
+            )
         ruleMask = createFlareMaskTracked(source, if (mode == FlareGuardMode.DaySun) 0.88f else 0.92f, diagnostics)
-        ruleEdge = 0L // createFlareMaskTracked already retained the exact scope handle.
-        scaledMask = if (modelMask.width == source.width && modelMask.height == source.height) {
-            modelMask
-        } else {
-            createScaledBitmapOrThrow(modelMask, source.width, source.height, true)
-        }
-        if (scaledMask !== modelMask) scaledEdge = diagnostics?.track(scaledMask!!, "flareGuard:scaledModelMask") ?: 0L
+        scaledMask =
+            if (modelMask.width == source.width && modelMask.height == source.height) {
+                null
+            } else {
+                TrackedBitmap.acquire(
+                    createScaledBitmapOrThrow(modelMask, source.width, source.height, true),
+                    diagnostics,
+                    "flareGuard:scaledModelMask",
+                )
+            }
+        val effectiveModelMask =
+            scaledMask?.bitmap ?: modelMask
 
-        val width = output!!.width
+        val width = output.bitmap.width
         val row = IntArray(width)
         val ruleRow = IntArray(width)
         val modelRow = IntArray(width)
-        val rowsTransient = diagnostics?.trackTransientBytes("flareGuard:blendRows", width.toLong() * Int.SIZE_BYTES * 3L) ?: 0L
+        rowsTransient =
+            diagnostics?.trackTransientBytes(
+                "flareGuard:blendRows",
+                width.toLong() * Int.SIZE_BYTES * 3L,
+            ) ?: 0L
         val safeStrength = strength.coerceIn(0f, 1f)
 
-        for (y in 0 until output!!.height) {
-            output!!.getPixels(row, 0, width, 0, y, width, 1)
-            ruleMask!!.getPixels(ruleRow, 0, width, 0, y, width, 1)
-            scaledMask!!.getPixels(modelRow, 0, width, 0, y, width, 1)
+        for (y in 0 until output.bitmap.height) {
+            output.bitmap.getPixels(row, 0, width, 0, y, width, 1)
+            ruleMask.bitmap.getPixels(ruleRow, 0, width, 0, y, width, 1)
+            effectiveModelMask.getPixels(modelRow, 0, width, 0, y, width, 1)
 
             for (x in 0 until width) {
                 val pixel = row[x]
@@ -167,19 +209,16 @@ internal fun applyFlareGuardMaskBlendV0(
                 }
             }
 
-            output!!.setPixels(row, 0, width, 0, y, width, 1)
+            output.bitmap.setPixels(row, 0, width, 0, y, width, 1)
         }
         success = true
-        diagnostics?.releaseTransient(rowsTransient)
-        return output!!
+        return output
     } finally {
-        ruleMask?.recycle()
-        diagnostics?.release(ruleEdge)
-        if (scaledMask !== modelMask) scaledMask?.recycle()
-        diagnostics?.release(scaledEdge)
+        diagnostics?.releaseTransient(rowsTransient)
+        ruleMask?.recycleAndRelease()
+        scaledMask?.recycleAndRelease()
         if (!success) {
-            output?.recycle()
-            diagnostics?.release(outputEdge)
+            output?.recycleAndRelease()
         }
     }
 }

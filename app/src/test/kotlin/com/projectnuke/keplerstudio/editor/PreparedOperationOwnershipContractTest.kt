@@ -6,7 +6,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class PreparedOperationCallerMatrixTest {
+/**
+ * Generic prepared-owner contract coverage.
+ *
+ * Caller-specific production integration is intentionally kept in the owning controller tests;
+ * this fixture must not be counted as production caller coverage.
+ */
+class PreparedOperationOwnershipContractTest {
     private val operationNames =
         listOf(
             "parameterRender",

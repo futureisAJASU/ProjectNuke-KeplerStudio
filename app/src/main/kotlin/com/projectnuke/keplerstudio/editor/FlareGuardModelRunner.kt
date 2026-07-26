@@ -13,6 +13,7 @@ import java.nio.channels.FileChannel
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
+import kotlin.math.sqrt
 import kotlin.math.roundToInt
 
 private const val FLARE_MASKER_MODEL_ASSET = "models/flare_guard.tflite"
@@ -32,16 +33,19 @@ class FlareGuardModelRunner private constructor(
     private val diagnosticContributorId: String,
     val inputWidth: Int,
     val inputHeight: Int,
-    private val inputLayout: TensorLayout,
+    private val inputLayout: ModelTensorLayout,
     private val inputType: DataType,
+    private val inputQuantization: ModelQuantizationContract?,
     private val outputWidth: Int,
     private val outputHeight: Int,
     private val outputChannels: Int,
-    private val outputLayout: TensorLayout,
-    private val outputType: DataType
+    private val outputLayout: ModelTensorLayout,
+    private val outputType: DataType,
+    private val outputQuantization: ModelQuantizationContract?,
 ) : AutoCloseable, ModelRunnerContract {
     private val closed = AtomicBoolean(false)
     private val lifecycleState = AtomicReference(ModelRunnerLifecycle.Loaded)
+    private val inferenceLock = Any()
 
     override val lifecycle: ModelRunnerLifecycle
         get() = lifecycleState.get()
@@ -49,26 +53,42 @@ class FlareGuardModelRunner private constructor(
     override val descriptor =
         ModelRunnerDescriptor(
             modelId = "flare-masker",
-            semanticVersion = "1.0.0",
-            assetVersion = "bundled-v1",
-            assetPath = FLARE_MASKER_MODEL_ASSET,
-            tensor =
-                ModelTensorContract(
+            asset =
+                checkNotNull(ModelAssetManifest.byId("flare_masker")).asset,
+            input =
+                ModelInputContract(
                     width = inputWidth,
                     height = inputHeight,
+                    batch = 1,
                     channels = 3,
-                    bitmapConfig = Bitmap.Config.ARGB_8888,
-                    colorSpace = "sRGB",
+                    layout = inputLayout,
+                    dataType = inputType.toContractType(),
+                    quantization = inputQuantization,
                     channelOrder = ModelChannelOrder.RGB,
+                    colorSpace = ModelColorSpace.SRGB,
                     normalization = when (inputType) {
                         DataType.FLOAT32 -> "channel / 255"
-                        DataType.UINT8 -> "uint8 0..255"
-                        DataType.INT8 -> "uint8 - 128"
+                        DataType.UINT8, DataType.INT8 -> "quantized channel / 255"
                         else -> "unsupported"
                     },
-                    outputSemantic = ModelOutputSemantic.FlareAlphaMask,
-                    outputRange = 0f..1f,
+                    acceptedBitmapConfigs = setOf(Bitmap.Config.ARGB_8888),
+                    resizePolicy = ModelResizePolicy.Bilinear,
+                    alphaHandling = ModelAlphaHandling.Ignore,
                 ),
+            output =
+                ModelOutputContract(
+                    width = outputWidth,
+                    height = outputHeight,
+                    channelsOrClasses = outputChannels,
+                    layout = outputLayout,
+                    dataType = outputType.toContractType(),
+                    quantization = outputQuantization,
+                    semantic = ModelOutputSemantic.FlareAlphaMask,
+                    valueRange = 0f..1f,
+                    confidenceMeaning = "mask distribution metrics; not a model-provided score",
+                ),
+            inferenceAdapterImplemented = true,
+            productionReady = false,
             knownMemoryBytes = null,
             hasUnknownRuntimeMemory = true,
         )
@@ -77,6 +97,9 @@ class FlareGuardModelRunner private constructor(
         val mask: Bitmap,
         val meanAlpha: Float,
         val maxAlpha: Float,
+        val activeRegionMeanAlpha: Float,
+        val affectedAreaRatio: Float,
+        val policyConfidence: Float,
         internal val diagnosticEdge: Long = 0L
     )
 
@@ -89,6 +112,15 @@ class FlareGuardModelRunner private constructor(
         }
 
     internal fun predictMask(
+        source: Bitmap,
+        diagnostics: MemoryTrackerScope?,
+        operation: ModelOperationContext,
+    ): ModelRunResult<MaskResult> =
+        synchronized(inferenceLock) {
+            predictMaskLocked(source, diagnostics, operation)
+        }
+
+    private fun predictMaskLocked(
         source: Bitmap,
         diagnostics: MemoryTrackerScope?,
         operation: ModelOperationContext,
@@ -180,7 +212,13 @@ class FlareGuardModelRunner private constructor(
                         operation.validateOrThrow()
                         ModelRunResult.Success(
                             maskResult,
-                            maskResult.maxAlpha.coerceIn(0f, 1f),
+                            maskResult.policyConfidence,
+                            ModelConfidence(
+                                peak = maskResult.maxAlpha,
+                                activeRegionMean = maskResult.activeRegionMeanAlpha,
+                                affectedAreaRatio = maskResult.affectedAreaRatio,
+                                finalPolicy = maskResult.policyConfidence,
+                            ),
                         )
                     } catch (failure: Throwable) {
                         maskResult.mask.takeUnless(Bitmap::isRecycled)?.recycle()
@@ -222,14 +260,14 @@ class FlareGuardModelRunner private constructor(
 
     private fun writeInput(buffer: ByteBuffer, pixels: IntArray) {
         when (inputLayout) {
-            TensorLayout.NHWC -> {
+            ModelTensorLayout.NHWC -> {
                 for (pixel in pixels) {
                     writeChannel(buffer, (pixel ushr 16) and 0xff)
                     writeChannel(buffer, (pixel ushr 8) and 0xff)
                     writeChannel(buffer, pixel and 0xff)
                 }
             }
-            TensorLayout.NCHW -> {
+            ModelTensorLayout.NCHW -> {
                 for (channel in 0 until 3) {
                     for (pixel in pixels) {
                         val value = when (channel) {
@@ -241,14 +279,25 @@ class FlareGuardModelRunner private constructor(
                     }
                 }
             }
+            else -> error("Unsupported FlareGuard input tensor layout: $inputLayout")
         }
     }
 
     private fun writeChannel(buffer: ByteBuffer, value: Int) {
         when (inputType) {
             DataType.FLOAT32 -> buffer.putFloat((value / 255f).coerceIn(0f, 1f))
-            DataType.UINT8 -> buffer.put(value.coerceIn(0, 255).toByte())
-            DataType.INT8 -> buffer.put((value - 128).coerceIn(-128, 127).toByte())
+            DataType.UINT8 -> {
+                val quantization = requireNotNull(inputQuantization)
+                val quantized =
+                    ((value / 255f) / quantization.scale + quantization.zeroPoint).roundToInt()
+                buffer.put(quantized.coerceIn(0, 255).toByte())
+            }
+            DataType.INT8 -> {
+                val quantization = requireNotNull(inputQuantization)
+                val quantized =
+                    ((value / 255f) / quantization.scale + quantization.zeroPoint).roundToInt()
+                buffer.put(quantized.coerceIn(-128, 127).toByte())
+            }
             else -> error("Unsupported FlareGuard input tensor type: $inputType")
         }
     }
@@ -269,11 +318,17 @@ class FlareGuardModelRunner private constructor(
             try {
                 var sum = 0f
                 var max = 0f
+                var activeSum = 0f
+                var activeCount = 0
                 for (y in 0 until outputHeight) {
                     for (x in 0 until outputWidth) {
                         val alpha = readOutputPixel(values, x, y).coerceIn(0f, 1f)
                         sum += alpha
                         if (alpha > max) max = alpha
+                        if (alpha >= MASK_ACTIVE_THRESHOLD) {
+                            activeSum += alpha
+                            activeCount++
+                        }
                         val v = (alpha * 255f).roundToInt().coerceIn(0, 255)
                         outPixels[y * outputWidth + x] = -0x1000000 or (v shl 16) or (v shl 8) or v
                     }
@@ -284,7 +339,20 @@ class FlareGuardModelRunner private constructor(
                     bitmap = createBitmapOrThrow(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
                     bitmap!!.setPixels(outPixels, 0, outputWidth, 0, 0, outputWidth, outputHeight)
                     val mean = if (outPixels.isEmpty()) 0f else sum / outPixels.size
-                    val result = MaskResult(mask = bitmap!!, meanAlpha = mean, maxAlpha = max)
+                    val activeMean = if (activeCount == 0) 0f else activeSum / activeCount
+                    val affectedArea =
+                        if (outPixels.isEmpty()) 0f else activeCount.toFloat() / outPixels.size
+                    val areaReliability =
+                        sqrt((affectedArea / MIN_CONFIDENT_AREA_RATIO).coerceIn(0f, 1f))
+                    val result =
+                        MaskResult(
+                            mask = bitmap!!,
+                            meanAlpha = mean,
+                            maxAlpha = max,
+                            activeRegionMeanAlpha = activeMean,
+                            affectedAreaRatio = affectedArea,
+                            policyConfidence = (activeMean * areaReliability).coerceIn(0f, 1f),
+                        )
                     bitmap = null
                     return result
                 } catch (t: Throwable) {
@@ -301,7 +369,7 @@ class FlareGuardModelRunner private constructor(
 
     private fun readOutputPixel(values: FloatArray, x: Int, y: Int): Float {
         return when (outputLayout) {
-            TensorLayout.NHWC -> {
+            ModelTensorLayout.NHWC -> {
                 val base = (y * outputWidth + x) * outputChannels
                 if (outputChannels == 1) {
                     values[base]
@@ -312,7 +380,7 @@ class FlareGuardModelRunner private constructor(
                     sum / channels
                 }
             }
-            TensorLayout.NCHW -> {
+            ModelTensorLayout.NCHW -> {
                 if (outputChannels == 1) {
                     values[y * outputWidth + x]
                 } else {
@@ -323,14 +391,22 @@ class FlareGuardModelRunner private constructor(
                     sum / channels
                 }
             }
+            ModelTensorLayout.HW -> values[y * outputWidth + x]
+            else -> error("Unsupported FlareGuard output tensor layout: $outputLayout")
         }
     }
 
     private fun readOutputValue(buffer: ByteBuffer): Float {
         return when (outputType) {
             DataType.FLOAT32 -> buffer.getFloat()
-            DataType.UINT8 -> (buffer.get().toInt() and 0xff) / 255f
-            DataType.INT8 -> ((buffer.get().toInt() + 128).coerceIn(0, 255)) / 255f
+            DataType.UINT8 -> {
+                val quantization = requireNotNull(outputQuantization)
+                ((buffer.get().toInt() and 0xff) - quantization.zeroPoint) * quantization.scale
+            }
+            DataType.INT8 -> {
+                val quantization = requireNotNull(outputQuantization)
+                (buffer.get().toInt() - quantization.zeroPoint) * quantization.scale
+            }
             else -> error("Unsupported FlareGuard output tensor type: $outputType")
         }
     }
@@ -339,11 +415,17 @@ class FlareGuardModelRunner private constructor(
         if (!closed.compareAndSet(false, true)) return
         lifecycleState.set(ModelRunnerLifecycle.Closing)
         GlobalModelDiagnostics.publish(diagnosticContributorId, DIAGNOSTIC_CATEGORY, "closing")
-        try {
-            interpreter.close()
-        } finally {
-            lifecycleState.set(ModelRunnerLifecycle.Unloaded)
-            GlobalModelDiagnostics.publish(diagnosticContributorId, DIAGNOSTIC_CATEGORY, "unloaded")
+        synchronized(inferenceLock) {
+            try {
+                interpreter.close()
+            } finally {
+                lifecycleState.set(ModelRunnerLifecycle.Unloaded)
+                GlobalModelDiagnostics.publish(
+                    diagnosticContributorId,
+                    DIAGNOSTIC_CATEGORY,
+                    "unloaded",
+                )
+            }
         }
     }
 
@@ -351,38 +433,64 @@ class FlareGuardModelRunner private constructor(
         fun createOrNull(context: Context): FlareGuardModelRunner? {
             val diagnosticId = GlobalModelDiagnostics.newContributorId(DIAGNOSTIC_CATEGORY)
             GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "loading")
-            return runCatching {
+            var ownedInterpreter: Interpreter? = null
+            return try {
                 val options = Interpreter.Options().apply {
                     setNumThreads(2)
                     setUseXNNPACK(true)
                 }
-                val interpreter = Interpreter(loadMappedAsset(context, FLARE_MASKER_MODEL_ASSET), options)
+                val interpreter =
+                    Interpreter(loadMappedAsset(context, FLARE_MASKER_MODEL_ASSET), options)
+                        .also { ownedInterpreter = it }
                 val inputTensor = interpreter.getInputTensor(0)
                 val outputTensor = interpreter.getOutputTensor(0)
                 val inputShape = parseInputShape(inputTensor.shape())
-                val outputShape = parseOutputShape(outputTensor.shape(), inputShape.width, inputShape.height)
-
-                FlareGuardModelRunner(
-                    interpreter = interpreter,
-                    diagnosticContributorId = diagnosticId,
-                    inputWidth = inputShape.width,
-                    inputHeight = inputShape.height,
-                    inputLayout = inputShape.layout,
-                    inputType = inputTensor.dataType(),
-                    outputWidth = outputShape.width,
-                    outputHeight = outputShape.height,
-                    outputChannels = outputShape.channels,
-                    outputLayout = outputShape.layout,
-                    outputType = outputTensor.dataType()
-                )
-            }.onSuccess {
+                val outputShape = parseOutputShape(outputTensor.shape())
+                val inputType = inputTensor.dataType()
+                val outputType = outputTensor.dataType()
+                bytesPerElement(inputType)
+                bytesPerElement(outputType)
+                val inputQuantization =
+                    tensorQuantization(
+                        inputType,
+                        inputTensor.quantizationParams().scale,
+                        inputTensor.quantizationParams().zeroPoint,
+                    )
+                val outputQuantization =
+                    tensorQuantization(
+                        outputType,
+                        outputTensor.quantizationParams().scale,
+                        outputTensor.quantizationParams().zeroPoint,
+                    )
+                val runner =
+                    FlareGuardModelRunner(
+                        interpreter = interpreter,
+                        diagnosticContributorId = diagnosticId,
+                        inputWidth = inputShape.width,
+                        inputHeight = inputShape.height,
+                        inputLayout = inputShape.layout,
+                        inputType = inputType,
+                        inputQuantization = inputQuantization,
+                        outputWidth = outputShape.width,
+                        outputHeight = outputShape.height,
+                        outputChannels = outputShape.channels,
+                        outputLayout = outputShape.layout,
+                        outputType = outputType,
+                        outputQuantization = outputQuantization,
+                    )
+                ownedInterpreter = null
                 GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "loaded")
-            }.onFailure {
+                runner
+            } catch (_: Throwable) {
+                runCatching { ownedInterpreter?.close() }
                 GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "unloaded")
-            }.getOrNull()
+                null
+            }
         }
 
         private const val DIAGNOSTIC_CATEGORY = "FlareGuardModelRunner"
+        private const val MASK_ACTIVE_THRESHOLD = 0.5f
+        private const val MIN_CONFIDENT_AREA_RATIO = 0.01f
 
         private fun loadMappedAsset(context: Context, assetPath: String): MappedByteBuffer {
             try {
@@ -402,46 +510,39 @@ class FlareGuardModelRunner private constructor(
     }
 }
 
-private enum class TensorLayout {
-    NHWC,
-    NCHW
-}
-
-private data class TensorImageShape(
+internal data class TensorImageShape(
     val width: Int,
     val height: Int,
     val channels: Int,
-    val layout: TensorLayout
+    val layout: ModelTensorLayout
 )
 
-private fun parseInputShape(shape: IntArray): TensorImageShape {
+internal fun parseInputShape(shape: IntArray): TensorImageShape {
     require(shape.all { it > 0 }) { "Dynamic FlareGuard input shape is not supported yet: ${shape.contentToString()}" }
     require(shape.size == 4 && shape[0] == 1) { "Expected 4D FlareGuard input tensor, got ${shape.contentToString()}" }
     return when {
-        shape[3] == 3 -> TensorImageShape(width = shape[2], height = shape[1], channels = 3, layout = TensorLayout.NHWC)
-        shape[1] == 3 -> TensorImageShape(width = shape[3], height = shape[2], channels = 3, layout = TensorLayout.NCHW)
+        shape[3] == 3 -> TensorImageShape(width = shape[2], height = shape[1], channels = 3, layout = ModelTensorLayout.NHWC)
+        shape[1] == 3 -> TensorImageShape(width = shape[3], height = shape[2], channels = 3, layout = ModelTensorLayout.NCHW)
         else -> error("Expected RGB FlareGuard input tensor, got ${shape.contentToString()}")
     }
 }
 
-private fun parseOutputShape(shape: IntArray, fallbackWidth: Int, fallbackHeight: Int): TensorImageShape {
+internal fun parseOutputShape(shape: IntArray): TensorImageShape {
     require(shape.all { it > 0 }) { "Dynamic FlareGuard output shape is not supported yet: ${shape.contentToString()}" }
     return when {
         shape.size == 4 && shape[0] == 1 && shape[3] in 1..4 -> {
-            TensorImageShape(width = shape[2], height = shape[1], channels = shape[3], layout = TensorLayout.NHWC)
+            TensorImageShape(width = shape[2], height = shape[1], channels = shape[3], layout = ModelTensorLayout.NHWC)
         }
         shape.size == 4 && shape[0] == 1 && shape[1] in 1..4 -> {
-            TensorImageShape(width = shape[3], height = shape[2], channels = shape[1], layout = TensorLayout.NCHW)
+            TensorImageShape(width = shape[3], height = shape[2], channels = shape[1], layout = ModelTensorLayout.NCHW)
         }
         shape.size == 3 && shape[0] == 1 -> {
-            TensorImageShape(width = shape[2], height = shape[1], channels = 1, layout = TensorLayout.NHWC)
+            TensorImageShape(width = shape[2], height = shape[1], channels = 1, layout = ModelTensorLayout.NHWC)
         }
         shape.size == 2 -> {
-            TensorImageShape(width = shape[1], height = shape[0], channels = 1, layout = TensorLayout.NHWC)
+            TensorImageShape(width = shape[1], height = shape[0], channels = 1, layout = ModelTensorLayout.HW)
         }
-        else -> {
-            TensorImageShape(width = fallbackWidth, height = fallbackHeight, channels = 1, layout = TensorLayout.NHWC)
-        }
+        else -> error("Unsupported FlareGuard output tensor shape: ${shape.contentToString()}")
     }
 }
 
@@ -454,7 +555,26 @@ private fun bytesPerElement(type: DataType): Int {
     }
 }
 
-private fun checkedTensorElementCount(vararg dimensions: Int): Int {
+internal fun tensorQuantization(
+    type: DataType,
+    scale: Float,
+    zeroPoint: Int,
+): ModelQuantizationContract? =
+    when (type) {
+        DataType.FLOAT32 -> null
+        DataType.UINT8, DataType.INT8 -> ModelQuantizationContract(scale, zeroPoint)
+        else -> error("Unsupported FlareGuard tensor type: $type")
+    }
+
+private fun DataType.toContractType(): ModelTensorDataType =
+    when (this) {
+        DataType.FLOAT32 -> ModelTensorDataType.Float32
+        DataType.UINT8 -> ModelTensorDataType.UInt8
+        DataType.INT8 -> ModelTensorDataType.Int8
+        else -> error("Unsupported FlareGuard tensor type: $this")
+    }
+
+internal fun checkedTensorElementCount(vararg dimensions: Int): Int {
     var count = 1L
     dimensions.forEach { dimension ->
         require(dimension > 0) { "Tensor dimensions must be positive" }

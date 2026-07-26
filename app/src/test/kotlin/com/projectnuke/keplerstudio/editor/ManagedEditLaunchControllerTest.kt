@@ -9,9 +9,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 class ManagedEditLaunchControllerTest {
@@ -106,6 +108,126 @@ class ManagedEditLaunchControllerTest {
         dispatcher.runAll()
 
         assertFalse(executed)
+        scope.cancel()
+    }
+
+    @Test
+    fun exceptionBeforeFirstSuspension_settlesChildOwnerAndClearsJob() {
+        val dispatcher = QueuedDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val releases = AtomicInteger()
+        val controller = ManagedEditLaunchController(scope)
+
+        val job =
+            controller.launch(PreparedResourceHandoff.create { releases.incrementAndGet() }) {
+                error("injected")
+            }
+        dispatcher.runAll()
+
+        assertTrue(job.isCancelled)
+        assertEquals(1, releases.get())
+        assertNull(controller.job)
+        scope.cancel()
+    }
+
+    @Test
+    fun exceptionAfterSuspension_settlesChildOwnerAndClearsJob() {
+        val dispatcher = QueuedDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val releases = AtomicInteger()
+        val controller = ManagedEditLaunchController(scope)
+
+        val job =
+            controller.launch(PreparedResourceHandoff.create { releases.incrementAndGet() }) {
+                kotlinx.coroutines.yield()
+                error("injected after suspension")
+            }
+        dispatcher.runAll()
+
+        assertTrue(job.isCancelled)
+        assertEquals(1, releases.get())
+        assertNull(controller.job)
+        scope.cancel()
+    }
+
+    @Test
+    fun invalidationCancelsCurrentJobAndAdvancesToken() {
+        val dispatcher = QueuedDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val controller = ManagedEditLaunchController(scope)
+        val releases = AtomicInteger()
+        val job =
+            controller.launch(PreparedResourceHandoff.create { releases.incrementAndGet() }) {
+                kotlinx.coroutines.awaitCancellation()
+            }
+        dispatcher.runNext()
+        val launchedToken = controller.token
+
+        controller.invalidate()
+        dispatcher.runAll()
+
+        assertTrue(job.isCancelled)
+        assertNotEquals(launchedToken, controller.token)
+        assertFalse(controller.isCurrent(launchedToken))
+        assertNull(controller.job)
+        assertEquals(1, releases.get())
+        scope.cancel()
+    }
+
+    @Test
+    fun noHandoffStillRunsAndMaintainsIdentity() {
+        val dispatcher = QueuedDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val controller = ManagedEditLaunchController(scope)
+        var observedToken = 0L
+
+        val job = controller.launch(null) { observedToken = it }
+        dispatcher.runAll()
+
+        assertTrue(job.isCompleted)
+        assertEquals(controller.token, observedToken)
+        assertNull(controller.job)
+        scope.cancel()
+    }
+
+    @Test
+    fun cleanupFailureDoesNotSkipIndependentActionsOrEscapeCompletion() {
+        val dispatcher = QueuedDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val controller = ManagedEditLaunchController(scope)
+        val releases = AtomicInteger()
+        val handoff =
+            PreparedResourceHandoff.create(
+                { error("diagnostic cleanup") },
+                { releases.incrementAndGet() },
+            )
+
+        val job = controller.launch(handoff) {}
+        dispatcher.runAll()
+
+        assertTrue(job.isCompleted)
+        assertEquals(1, releases.get())
+        assertNull(controller.job)
+        scope.cancel()
+    }
+
+    @Test
+    fun tokensIncreaseMonotonicallyAcrossReplacementAndInvalidation() {
+        val dispatcher = QueuedDispatcher()
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val controller = ManagedEditLaunchController(scope)
+        val first = controller.launch(null) { kotlinx.coroutines.awaitCancellation() }
+        val firstToken = controller.token
+        val second = controller.launch(null) { kotlinx.coroutines.awaitCancellation() }
+        val secondToken = controller.token
+        controller.invalidate()
+        val invalidatedToken = controller.token
+        dispatcher.runAll()
+
+        assertTrue(firstToken < secondToken)
+        assertTrue(secondToken < invalidatedToken)
+        assertTrue(first.isCancelled)
+        assertTrue(second.isCancelled)
         scope.cancel()
     }
 }

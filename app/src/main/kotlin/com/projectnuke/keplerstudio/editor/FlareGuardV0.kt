@@ -10,62 +10,75 @@ enum class FlareGuardMode {
 }
 
 fun createFlareMaskV0(bitmap: Bitmap, threshold: Float = 0.90f): Bitmap {
-    return createFlareMaskTracked(bitmap, threshold, null)
+    return createFlareMaskTracked(bitmap, threshold, null).disarmAfterAdoption()
 }
 
-internal fun createFlareMaskTracked(bitmap: Bitmap, threshold: Float = 0.90f, diagnostics: MemoryTrackerScope?): Bitmap {
-    var mask: Bitmap? = createBitmapOrThrow(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
-    var edge = diagnostics?.track(mask!!, "flareGuard:ruleMask") ?: 0L
+internal fun createFlareMaskTracked(
+    bitmap: Bitmap,
+    threshold: Float = 0.90f,
+    diagnostics: MemoryTrackerScope?,
+): TrackedBitmap {
+    var owned =
+        TrackedBitmap.acquire(
+            createBitmapOrThrow(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888),
+            diagnostics,
+            "flareGuard:ruleMask",
+        )
     try {
         val result = NativePhotoCore.nativeCreateFlareMask(
             source = bitmap,
-            mask = mask!!,
+            mask = owned.bitmap,
             threshold = threshold.coerceIn(0.70f, 0.98f),
             radius = max(6, max(bitmap.width, bitmap.height) / 96),
             passes = 2
         )
         if (result < 0) {
-            mask?.recycle()
-            diagnostics?.release(edge)
-            mask = null
+            owned.recycleAndRelease()
             error("nativeCreateFlareMask failed: $result")
         }
-        return mask!!
+        return owned
     } catch (t: Throwable) {
-        mask?.recycle()
-        diagnostics?.release(edge)
+        owned.recycleAndRelease()
         throw t
     }
 }
 
 fun applyFlareGuardV0(source: Bitmap, strength: Float = 0.28f): Bitmap {
     return applyFlareGuardTracked(source, strength, FlareGuardMode.NightLight, null)
+        .disarmAfterAdoption()
 }
 
-internal fun applyFlareGuardTracked(source: Bitmap, strength: Float, mode: FlareGuardMode, diagnostics: MemoryTrackerScope?): Bitmap {
-    var output: Bitmap? = source.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-    val edge = diagnostics?.track(output!!, "flareGuard:ruleFallbackOutput") ?: 0L
+internal fun applyFlareGuardTracked(
+    source: Bitmap,
+    strength: Float,
+    mode: FlareGuardMode,
+    diagnostics: MemoryTrackerScope?,
+): TrackedBitmap {
+    val output =
+        TrackedBitmap.acquire(
+            source.copyOrThrow(Bitmap.Config.ARGB_8888, true),
+            diagnostics,
+            "flareGuard:ruleFallbackOutput",
+        )
     try {
         val result = NativePhotoCore.nativeApplyFlareGuardInPlace(
-            bitmap = output!!,
+            bitmap = output.bitmap,
             mode = mode.ordinal,
             strength = strength.coerceIn(0f, 1f),
             revision = 0
         )
         if (result < 0) {
-            output?.recycle()
-            diagnostics?.release(edge)
-            output = null
+            output.recycleAndRelease()
             error("nativeApplyFlareGuardInPlace failed: $result")
         }
-        return output!!
+        return output
     } catch (t: Throwable) {
-        output?.recycle()
-        diagnostics?.release(edge)
+        output.recycleAndRelease()
         throw t
     }
 }
 
 fun applyDaySunFlareGuardV0(source: Bitmap, strength: Float = 0.24f): Bitmap {
     return applyFlareGuardTracked(source, strength, FlareGuardMode.DaySun, null)
+        .disarmAfterAdoption()
 }

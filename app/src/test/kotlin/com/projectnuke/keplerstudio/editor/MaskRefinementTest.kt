@@ -3,7 +3,9 @@ package com.projectnuke.keplerstudio.editor
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlinx.coroutines.CancellationException
 
 class MaskRefinementTest {
     @Test
@@ -82,6 +84,68 @@ class MaskRefinementTest {
 
         assertEquals(9, dilated.count { it == 1f })
         assertEquals(1, eroded.count { it == 1f })
+    }
+
+    @Test
+    fun plannerRejectsOverflowAndUnboundedRadiusWithoutAllocatingImage() {
+        assertFailsWith<IllegalArgumentException> {
+            MaskRefinement.plan(
+                Int.MAX_VALUE,
+                Int.MAX_VALUE,
+                MaskRefinementOptions(),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            MaskRefinement.plan(
+                64,
+                64,
+                MaskRefinementOptions(featherRadius = MaskRefinement.HARD_MAXIMUM_RADIUS + 1),
+            )
+        }
+        val plan =
+            MaskRefinement.plan(
+                4096,
+                3072,
+                MaskRefinementOptions(
+                    minimumComponentPixels = 4,
+                    dilationRadius = 3,
+                    featherRadius = 8,
+                ),
+            )
+        assertEquals(4096 * 3072, plan.pixelCount)
+        assertTrue(plan.knownPeakTransientBytes > plan.pixelCount.toLong() * Float.SIZE_BYTES)
+    }
+
+    @Test
+    fun separableMorphologyAndBlurAreDeterministicAndBounded() {
+        val source = mask(7, 5, setOf(3 to 2))
+        val options =
+            MaskRefinementOptions(
+                dilationRadius = 2,
+                erosionRadius = 1,
+                featherRadius = 2,
+            )
+
+        val first = MaskRefinement.refine(source, 7, 5, options)
+        val second = MaskRefinement.refine(source, 7, 5, options)
+
+        assertContentEquals(first, second)
+        assertTrue(first.all { it in 0f..1f })
+    }
+
+    @Test
+    fun cancellationIsCheckedBetweenBoundedPasses() {
+        var checks = 0
+        assertFailsWith<CancellationException> {
+            MaskRefinement.refine(
+                FloatArray(128 * 128) { 1f },
+                128,
+                128,
+                MaskRefinementOptions(featherRadius = 2),
+            ) {
+                ++checks > 1
+            }
+        }
     }
 
     private fun mask(width: Int, height: Int, points: Set<Pair<Int, Int>>): FloatArray =

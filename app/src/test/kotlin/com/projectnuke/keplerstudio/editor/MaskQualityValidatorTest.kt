@@ -87,4 +87,60 @@ class MaskQualityValidatorTest {
         assertTrue(result.metrics.entropy > 0f)
         assertTrue(result.metrics.edgeComplexity > 0f)
     }
+
+    @Test
+    fun sparseMaskUsesActiveRegionConfidenceInsteadOfWholeImageMean() {
+        val values = FloatArray(100)
+        values[44] = 0.9f
+        values[45] = 0.8f
+
+        val result = assertIs<MaskQualityResult.Valid>(
+            MaskQualityValidator.evaluate(values, width = 10, height = 10),
+        )
+
+        assertTrue(result.metrics.meanConfidence < 0.05f)
+        assertTrue(result.metrics.activeRegionMeanConfidence > 0.8f)
+        assertTrue(result.metrics.activeRegionP90Confidence >= 0.8f)
+        assertEquals(0.9f, result.metrics.peakConfidence)
+    }
+
+    @Test
+    fun connectivityIsExplicit() {
+        val values = FloatArray(9)
+        values[0] = 1f
+        values[4] = 1f
+        values[8] = 1f
+
+        val four = assertIs<MaskQualityResult.Valid>(
+            MaskQualityValidator.evaluate(
+                values,
+                3,
+                3,
+                MaskQualityThresholds(connectivity = MaskConnectivity.Four),
+            ),
+        )
+        val eight = assertIs<MaskQualityResult.Valid>(
+            MaskQualityValidator.evaluate(
+                values,
+                3,
+                3,
+                MaskQualityThresholds(connectivity = MaskConnectivity.Eight),
+            ),
+        )
+
+        assertEquals(3, four.metrics.connectedComponentCount)
+        assertEquals(1, eight.metrics.connectedComponentCount)
+    }
+
+    @Test
+    fun invalidThresholdsFailClosed() {
+        assertIs<MaskQualityResult.Invalid>(
+            MaskQualityValidator.evaluate(
+                floatArrayOf(1f),
+                1,
+                1,
+                MaskQualityThresholds(activationThreshold = Float.NaN),
+            ),
+        )
+    }
 }

@@ -1,5 +1,7 @@
 package com.projectnuke.keplerstudio.ui
 
+import com.projectnuke.keplerstudio.editor.ModelAvailability
+
 data class RemasterModelCandidate(
     val id: String,
     val category: String,
@@ -83,3 +85,20 @@ val OnDeviceRemasterModels = listOf(
         memoryTier = "M"
     )
 )
+
+internal fun ModelAvailability.hasValidatedAsset(): Boolean =
+    this == ModelAvailability.Loaded ||
+        this == ModelAvailability.InferenceAvailable ||
+        this == ModelAvailability.ExperimentalOnly
+
+internal fun ModelAvailability.uiLabel(): String =
+    when (this) {
+        ModelAvailability.RunnerNotImplemented -> "Runner not implemented"
+        ModelAvailability.AssetMissing -> "Asset missing"
+        ModelAvailability.AssetInvalid -> "Asset invalid"
+        ModelAvailability.ContractUnsupported -> "Contract unsupported"
+        ModelAvailability.LoadFailed -> "Load failed"
+        ModelAvailability.Loaded -> "Loaded"
+        ModelAvailability.InferenceAvailable -> "Inference available"
+        ModelAvailability.ExperimentalOnly -> "Experimental only"
+    }
