@@ -7,63 +7,22 @@
 #include <cstdint>
 #include <limits>
 #include <new>
+#include "native_common.h"
 
 #define LOG_TAG "KeplerSelectionBlend"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
 
-struct LockedBitmap {
-    JNIEnv* env;
-    jobject bitmap;
-    void* pixels = nullptr;
-    bool locked = false;
-
-    LockedBitmap(JNIEnv* env, jobject bitmap) : env(env), bitmap(bitmap) {}
-
-    int lock() {
-        if (AndroidBitmap_lockPixels(env, bitmap, &pixels) != ANDROID_BITMAP_RESULT_SUCCESS || pixels == nullptr) {
-            pixels = nullptr;
-            locked = false;
-            return -1;
-        }
-        locked = true;
-        return 0;
-    }
-
-    ~LockedBitmap() {
-        if (locked) {
-            AndroidBitmap_unlockPixels(env, bitmap);
-        }
-    }
-
-    LockedBitmap(const LockedBitmap&) = delete;
-    LockedBitmap& operator=(const LockedBitmap&) = delete;
-};
+using kepler_native::LockedBitmap;
 
 template <typename Fn>
 jint runNativeGuarded(const char* functionName, Fn&& fn) {
-    try {
-        return fn();
-    } catch (const std::bad_alloc&) {
-        LOGE("%s failed: bad_alloc", functionName);
-        return -20;
-    } catch (const std::exception& e) {
-        LOGE("%s failed: %s", functionName, e.what());
-        return -21;
-    } catch (...) {
-        LOGE("%s failed: unknown exception", functionName);
-        return -22;
-    }
+    return kepler_native::runNativeGuarded(LOG_TAG, functionName, std::forward<Fn>(fn));
 }
 
 static bool validateRgbaBitmapLayout(const AndroidBitmapInfo& info) {
-    if (info.width == 0 || info.height == 0 || info.stride == 0) return false;
-    if (info.width > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
-    if (info.height > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
-    if (info.stride > static_cast<uint32_t>(std::numeric_limits<int>::max())) return false;
-    if (static_cast<size_t>(info.width) > std::numeric_limits<size_t>::max() / 4ULL) return false;
-    return static_cast<size_t>(info.stride) >= static_cast<size_t>(info.width) * 4ULL;
+    return kepler_native::validateRgbaBitmapLayout(info);
 }
 
 static inline float clamp01(float v) {
@@ -114,9 +73,9 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeBlendSelectionLay
         AndroidBitmapInfo targetInfo{};
         AndroidBitmapInfo localInfo{};
         AndroidBitmapInfo maskInfo{};
-        if (AndroidBitmap_getInfo(env, targetBitmap, &targetInfo) != ANDROID_BITMAP_RESULT_SUCCESS ||
-            AndroidBitmap_getInfo(env, localBitmap, &localInfo) != ANDROID_BITMAP_RESULT_SUCCESS ||
-            AndroidBitmap_getInfo(env, maskBitmap, &maskInfo) != ANDROID_BITMAP_RESULT_SUCCESS) {
+        if (!kepler_native::getBitmapInfo(env, targetBitmap, targetInfo) ||
+            !kepler_native::getBitmapInfo(env, localBitmap, localInfo) ||
+            !kepler_native::getBitmapInfo(env, maskBitmap, maskInfo)) {
             LOGE("AndroidBitmap_getInfo failed");
             return -1;
         }

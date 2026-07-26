@@ -190,6 +190,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
         },
         handoff =
             PreparedResourceHandoff.create(
+                "nativeSelectionBake",
                 {
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null

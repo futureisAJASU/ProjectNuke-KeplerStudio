@@ -41,7 +41,8 @@ internal fun applyFlareGuardModelOrRuleResultV0(
         FlareGuardMode.DaySun -> 0.24f
     },
     allowRuleFallback: Boolean = true,
-    diagnostics: MemoryTrackerScope? = null
+    diagnostics: MemoryTrackerScope? = null,
+    operation: ModelOperationContext = ModelOperationContext(0L, "unspecified"),
 ): FlareGuardApplyResult {
     val runner = FlareGuardModelRunner.createOrNull(context)
     if (runner != null) {
@@ -50,11 +51,12 @@ internal fun applyFlareGuardModelOrRuleResultV0(
                 FLARE_GUARD_BRIDGE_TAG,
                 "FlareGuard model loaded: mode=$mode input=${runner.inputWidth}x${runner.inputHeight} source=${source.width}x${source.height}"
             )
-            val result = runner.predictMaskOrNull(source, diagnostics)
-            if (result != null) {
+            val modelRun = runner.predictMask(source, diagnostics, operation)
+            if (modelRun is ModelRunResult.Success) {
+                val result = modelRun.value
                 Log.i(
                     FLARE_GUARD_BRIDGE_TAG,
-                    "FlareGuard model inference success: mode=$mode mean=${result.meanAlpha} max=${result.maxAlpha}"
+                    "FlareGuard model inference success: mode=$mode confidence=${modelRun.confidence} mean=${result.meanAlpha} max=${result.maxAlpha}"
                 )
                 try {
                     return FlareGuardApplyResult(
@@ -66,7 +68,14 @@ internal fun applyFlareGuardModelOrRuleResultV0(
                     diagnostics?.release(result.diagnosticEdge)
                 }
             }
-            Log.w(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model inference returned null")
+            val failure = modelRun as ModelRunResult.Failure
+            if (failure.failure.reason == ModelFailureReason.Cancelled) {
+                throw CancellationException(failure.failure.detail)
+            }
+            Log.w(
+                FLARE_GUARD_BRIDGE_TAG,
+                "FlareGuard model inference unavailable: reason=${failure.failure.reason}",
+            )
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {

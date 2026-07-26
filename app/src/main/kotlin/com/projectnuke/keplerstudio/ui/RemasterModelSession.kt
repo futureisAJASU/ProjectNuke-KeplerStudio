@@ -9,7 +9,18 @@ import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.projectnuke.keplerstudio.editor.GlobalModelDiagnostics
+import com.projectnuke.keplerstudio.editor.DeterministicModelFallback
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
+import com.projectnuke.keplerstudio.editor.ModelChannelOrder
+import com.projectnuke.keplerstudio.editor.ModelFailure
+import com.projectnuke.keplerstudio.editor.ModelFailureReason
+import com.projectnuke.keplerstudio.editor.ModelOperationContext
+import com.projectnuke.keplerstudio.editor.ModelOutputSemantic
+import com.projectnuke.keplerstudio.editor.ModelRunResult
+import com.projectnuke.keplerstudio.editor.ModelRunnerContract
+import com.projectnuke.keplerstudio.editor.ModelRunnerDescriptor
+import com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle
+import com.projectnuke.keplerstudio.editor.ModelTensorContract
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
@@ -17,6 +28,7 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -24,7 +36,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.tensorflow.lite.Interpreter
 
-object RemasterModelSession {
+object RemasterModelSession : ModelRunnerContract {
     var activeModel by mutableStateOf<RemasterModelCandidate?>(null)
         private set
 
@@ -44,10 +56,39 @@ object RemasterModelSession {
     var isInferring by mutableStateOf(false)
         private set
 
+    override var lifecycle by mutableStateOf(ModelRunnerLifecycle.Unloaded)
+        private set
+
+    override val descriptor: ModelRunnerDescriptor?
+        get() =
+            activeModel?.let { candidate ->
+                ModelRunnerDescriptor(
+                    modelId = candidate.id,
+                    semanticVersion = candidate.semanticVersion,
+                    assetVersion = candidate.assetVersion,
+                    assetPath = candidate.assetPath,
+                    tensor =
+                        ModelTensorContract(
+                            width = null,
+                            height = null,
+                            channels = 3,
+                            bitmapConfig = Bitmap.Config.ARGB_8888,
+                            colorSpace = "sRGB",
+                            channelOrder = ModelChannelOrder.RGB,
+                            normalization = "runtime model contract",
+                            outputSemantic = ModelOutputSemantic.ForegroundCategoryMask,
+                            outputRange = 0f..1f,
+                        ),
+                    knownMemoryBytes = null,
+                    hasUnknownRuntimeMemory = true,
+                )
+            }
+
     fun load(context: Context, candidate: RemasterModelCandidate) {
         val generation = ++commandGeneration
         isModelLoading = true
         isModelLoaded = false
+        lifecycle = ModelRunnerLifecycle.Loading
         GlobalModelDiagnostics.publish("RemasterModelSession", "loading")
         modelScope.launch {
             modelMutex.withLock {
@@ -55,8 +96,16 @@ object RemasterModelSession {
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 activeModel = candidate
+                if (!isSupportedModelContract(candidate)) {
+                    isModelLoading = false
+                    lifecycle = ModelRunnerLifecycle.Failed
+                    GlobalModelDiagnostics.publish("RemasterModelSession", "failed")
+                    statusText = "${candidate.title}: unsupported model contract"
+                    return@withLock
+                }
                 if (!hasModelAsset(context, candidate.assetPath)) {
                     isModelLoading = false
+                    lifecycle = ModelRunnerLifecycle.Failed
                     GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                     statusText = "${candidate.title}: 모델 파일 없음"
                     return@withLock
@@ -81,6 +130,9 @@ object RemasterModelSession {
                     .onSuccess {
                         isModelLoaded = closeableModel != null
                         isModelLoading = false
+                        lifecycle =
+                            if (closeableModel != null) ModelRunnerLifecycle.Loaded
+                            else ModelRunnerLifecycle.Failed
                         GlobalModelDiagnostics.publish(
                             "RemasterModelSession",
                             if (closeableModel != null) "loaded" else "unloaded",
@@ -93,6 +145,7 @@ object RemasterModelSession {
                         closeableModel = null
                         isModelLoaded = false
                         isModelLoading = false
+                        lifecycle = ModelRunnerLifecycle.Failed
                         GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                         statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
                     }
@@ -105,18 +158,68 @@ object RemasterModelSession {
         diagnostics: MemoryTrackerScope? = null,
         onOwnedEdge: (Long) -> Unit = {},
     ): Bitmap? =
+        when (
+            val result =
+                createForegroundMaskResult(
+                    bitmap,
+                    diagnostics,
+                    ModelOperationContext(0L, commandGeneration.toString()),
+                    onOwnedEdge,
+                )
+        ) {
+            is ModelRunResult.Success -> result.value
+            is ModelRunResult.Failure -> null
+        }
+
+    internal suspend fun createForegroundMaskResult(
+        bitmap: Bitmap,
+        diagnostics: MemoryTrackerScope? = null,
+        operation: ModelOperationContext,
+        onOwnedEdge: (Long) -> Unit = {},
+    ): ModelRunResult<Bitmap> =
         modelMutex.withLock {
-            if (activeModel?.id != "edge_masker" || !isModelLoaded) return@withLock null
-            val model = closeableModel ?: return@withLock null
+            if (activeModel?.id != "edge_masker" || !isModelLoaded) {
+                return@withLock ModelRunResult.Failure(
+                    ModelFailure(ModelFailureReason.Closed),
+                    DeterministicModelFallback.NoResult,
+                )
+            }
+            val model =
+                closeableModel
+                    ?: return@withLock ModelRunResult.Failure(
+                        ModelFailure(ModelFailureReason.Closed),
+                        DeterministicModelFallback.NoResult,
+                    )
+            operation.validateOrThrow()
             isInferring = true
+            lifecycle = ModelRunnerLifecycle.Inferencing
             GlobalModelDiagnostics.publish("RemasterModelSession", "inferring")
+            var ownedMask: Bitmap? = null
+            var ownedEdge = 0L
             try {
-                runCatching {
-                        createForegroundMaskFromSegmenter(model, bitmap, diagnostics, onOwnedEdge)
+                ownedMask =
+                    createForegroundMaskFromSegmenter(model, bitmap, diagnostics) {
+                        ownedEdge = it
                     }
-                    .getOrNull()
+                operation.validateOrThrow()
+                onOwnedEdge(ownedEdge)
+                ModelRunResult.Success(checkNotNull(ownedMask).also { ownedMask = null }, confidence = 1f)
+            } catch (cancelled: CancellationException) {
+                ownedMask?.takeUnless(Bitmap::isRecycled)?.recycle()
+                diagnostics?.release(ownedEdge)
+                throw cancelled
+            } catch (failure: Throwable) {
+                ownedMask?.takeUnless(Bitmap::isRecycled)?.recycle()
+                diagnostics?.release(ownedEdge)
+                ModelRunResult.Failure(
+                    ModelFailure(ModelFailureReason.InferenceFailed, failure.message),
+                    DeterministicModelFallback.NoResult,
+                )
             } finally {
                 isInferring = false
+                lifecycle =
+                    if (isModelLoaded) ModelRunnerLifecycle.Loaded
+                    else ModelRunnerLifecycle.Unloaded
                 GlobalModelDiagnostics.publish(
                     "RemasterModelSession",
                     if (isModelLoaded) "loaded" else "unloaded",
@@ -127,6 +230,7 @@ object RemasterModelSession {
     fun unload() {
         val generation = ++commandGeneration
         isModelLoading = true
+        lifecycle = ModelRunnerLifecycle.Closing
         GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
         modelScope.launch {
             modelMutex.withLock {
@@ -136,6 +240,7 @@ object RemasterModelSession {
                 activeModel = null
                 isModelLoaded = false
                 isModelLoading = false
+                lifecycle = ModelRunnerLifecycle.Unloaded
                 GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                 statusText = "로드된 모델이 없습니다."
             }
@@ -147,11 +252,13 @@ object RemasterModelSession {
             if (isModelLoading || isInferring) return@withLock false
             ++commandGeneration
             GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
+            lifecycle = ModelRunnerLifecycle.Closing
             runCatching { closeableModel?.close() }
             closeableModel = null
             activeModel = null
             isModelLoaded = false
             isModelLoading = false
+            lifecycle = ModelRunnerLifecycle.Unloaded
             GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
             statusText = "로드된 모델이 없습니다."
             true
@@ -161,6 +268,11 @@ object RemasterModelSession {
         if (assetPath.isBlank()) return false
         return runCatching { context.assets.open(assetPath).use { true } }.getOrDefault(false)
     }
+
+    private fun isSupportedModelContract(candidate: RemasterModelCandidate): Boolean =
+        candidate.semanticVersion == "1.0.0" &&
+            candidate.assetVersion.isNotBlank() &&
+            candidate.id in setOf("edge_masker", "universal_balancer", "flare_masker")
 
     private fun createImageSegmenter(context: Context, assetPath: String): ImageSegmenter {
         val baseOptions = BaseOptions.builder().setModelAssetPath(assetPath).build()

@@ -126,6 +126,7 @@ fun EditorViewModel.autoStraightenCrop() {
     cropJob?.cancel()
     val handoff =
         PreparedResourceHandoff.create(
+            "autoStraighten",
             { if (!input.isRecycled) input.recycle() },
             { cropTracker?.end() },
         )
@@ -399,6 +400,7 @@ fun EditorViewModel.applyCropTransform() {
         },
         handoff =
             PreparedResourceHandoff.create(
+                "cropApply",
                 buildList {
                     maskInputs.forEach { layer ->
                         add { if (!layer.bitmap.isRecycled) layer.bitmap.recycle() }

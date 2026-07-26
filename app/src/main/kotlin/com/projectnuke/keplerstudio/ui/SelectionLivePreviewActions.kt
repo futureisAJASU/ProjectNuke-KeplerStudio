@@ -70,6 +70,7 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
     val previewToken = beginSelectionPreview(transaction)
     val handoff =
         PreparedResourceHandoff.create(
+            "selectionLivePreview",
             { if (!ownedBase.isRecycled) ownedBase.recycle() },
             {
                 ownedLayers.forEach { layer ->

@@ -11,7 +11,9 @@ data class RemasterModelCandidate(
     val status: String,
     val runtime: String,
     val assetPath: String,
-    val memoryTier: String
+    val memoryTier: String,
+    val semanticVersion: String = "1.0.0",
+    val assetVersion: String = "bundled-v1",
 )
 
 val OnDeviceRemasterModels = listOf(

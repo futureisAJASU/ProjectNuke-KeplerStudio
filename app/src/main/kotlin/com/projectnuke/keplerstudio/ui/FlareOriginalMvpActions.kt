@@ -191,6 +191,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
         },
         handoff =
             PreparedResourceHandoff.create(
+                "ruleFlare",
                 {
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null

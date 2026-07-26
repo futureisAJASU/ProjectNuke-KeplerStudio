@@ -5,6 +5,7 @@ import java.util.logging.Level
 import java.util.logging.Logger
 
 internal class PreparedResourceHandoff private constructor(
+    private val operationName: String,
     private val cleanupActions: List<() -> Unit>
 ) {
     private enum class Ownership {
@@ -34,7 +35,11 @@ internal class PreparedResourceHandoff private constructor(
         }
         aggregate?.let {
             runCatching {
-                logger.log(Level.WARNING, "Prepared resource cleanup completed with failures", it)
+                logger.log(
+                    Level.WARNING,
+                    "Prepared resource cleanup completed with failures: $operationName",
+                    it,
+                )
             }
         }
         return true
@@ -44,12 +49,24 @@ internal class PreparedResourceHandoff private constructor(
         private val logger = Logger.getLogger(PreparedResourceHandoff::class.java.name)
 
         fun create(cleanupAction: () -> Unit): PreparedResourceHandoff =
-            PreparedResourceHandoff(listOf(cleanupAction))
+            PreparedResourceHandoff("unspecified", listOf(cleanupAction))
 
         fun create(vararg cleanupActions: () -> Unit): PreparedResourceHandoff =
-            PreparedResourceHandoff(cleanupActions.toList())
+            PreparedResourceHandoff("unspecified", cleanupActions.toList())
 
         fun create(cleanupActions: List<() -> Unit>): PreparedResourceHandoff =
-            PreparedResourceHandoff(cleanupActions.toList())
+            PreparedResourceHandoff("unspecified", cleanupActions.toList())
+
+        fun create(
+            operationName: String,
+            vararg cleanupActions: () -> Unit,
+        ): PreparedResourceHandoff =
+            PreparedResourceHandoff(operationName, cleanupActions.toList())
+
+        fun create(
+            operationName: String,
+            cleanupActions: List<() -> Unit>,
+        ): PreparedResourceHandoff =
+            PreparedResourceHandoff(operationName, cleanupActions.toList())
     }
 }

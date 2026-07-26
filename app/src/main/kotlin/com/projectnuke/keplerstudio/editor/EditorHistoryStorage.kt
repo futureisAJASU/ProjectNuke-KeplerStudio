@@ -86,7 +86,7 @@ internal class EditorHistoryCoordinator(
     private val settlementScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var undo = ArrayDeque<EditorHistoryEntry>()
     private var redo = ArrayDeque<EditorHistoryEntry>()
-    private var documentGeneration = UUID.randomUUID().toString()
+    @Volatile private var documentGeneration = UUID.randomUUID().toString()
     private var operationToken = 0L
     private val operationCompletions = HashMap<Long, CompletableDeferred<Unit>>()
     /** Pending generation-settlement completions (from replaceDocument). close() awaits these. */

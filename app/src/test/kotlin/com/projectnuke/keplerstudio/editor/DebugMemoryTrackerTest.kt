@@ -618,6 +618,52 @@ class DebugMemoryTrackerTest {
         pool.shutdownNow()
     }
 
+    @Test
+    fun bitmapAliasesDeduplicateResidentBytesButKeepIndependentEdges() {
+        val bitmap = createMockBitmap(12, 7)
+        val first = tracker.registerBitmap(bitmap, "same-owner", "one", 0L, "gen1")
+        val second = tracker.registerBitmap(bitmap, "same-owner", "two", 0L, "gen1")
+        val expectedBytes = 12L * 7L * 4L
+
+        assertTrue(first != second)
+        assertEquals(1, tracker.snapshot().bitmapCount)
+        assertEquals(expectedBytes, tracker.snapshot().totalBytes)
+        tracker.releaseEdge(first)
+        assertEquals(1, tracker.snapshot().bitmapCount)
+        tracker.releaseEdge(second)
+        assertEquals(0, tracker.snapshot().bitmapCount)
+        bitmap.recycle()
+    }
+
+    @Test
+    fun transientReleaseRaceWithEndLeavesNoContributor() {
+        val scope = MemoryTrackerScope.create(tracker, "transient-race", "gen1", "base", 1, "test", 0L)
+        val handle = scope.trackTransientBytes("rows", 256L)
+        val barrier = CyclicBarrier(2)
+        val pool = Executors.newFixedThreadPool(2)
+        val released = pool.submit<Unit> { barrier.await(); scope.releaseTransient(handle) }
+        val ended = pool.submit<Unit> { barrier.await(); scope.end() }
+
+        released.get(5, TimeUnit.SECONDS)
+        ended.get(5, TimeUnit.SECONDS)
+        assertEquals(0L, tracker.snapshot().knownLiveTransientBytes)
+        assertTrue(tracker.snapshot().activeOperations.isEmpty())
+        pool.shutdownNow()
+    }
+
+    @Test
+    fun closedSessionRejectsEveryLateEvent() {
+        tracker.close()
+        val bitmap = createMockBitmap(2, 2)
+
+        assertEquals(0L, tracker.beginOperation("late", "gen1", "base", 1, 0L, "late"))
+        assertEquals(0L, tracker.registerBitmap(bitmap, "late", "late", 0L, "gen1"))
+        assertEquals(0L, tracker.registerTransientContributor(1L, "gen1", "late", 32L))
+        assertEquals(0, tracker.snapshot().bitmapCount)
+        assertTrue(tracker.snapshot().activeOperations.isEmpty())
+        bitmap.recycle()
+    }
+
     private fun publishHistory(
         generation: String = "gen1",
         hotBytes: Long = 0L,

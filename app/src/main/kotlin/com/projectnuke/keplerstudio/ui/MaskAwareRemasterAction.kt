@@ -212,6 +212,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         },
         handoff =
             PreparedResourceHandoff.create(
+                "maskAwareRemaster",
                 {
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null

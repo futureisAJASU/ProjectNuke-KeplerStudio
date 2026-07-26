@@ -10,6 +10,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
 import kotlin.math.roundToInt
 
 private const val FLARE_MASKER_MODEL_ASSET = "models/flare_guard.tflite"
@@ -36,7 +39,39 @@ class FlareGuardModelRunner private constructor(
     private val outputChannels: Int,
     private val outputLayout: TensorLayout,
     private val outputType: DataType
-) : AutoCloseable {
+) : AutoCloseable, ModelRunnerContract {
+    private val closed = AtomicBoolean(false)
+    private val lifecycleState = AtomicReference(ModelRunnerLifecycle.Loaded)
+
+    override val lifecycle: ModelRunnerLifecycle
+        get() = lifecycleState.get()
+
+    override val descriptor =
+        ModelRunnerDescriptor(
+            modelId = "flare-masker",
+            semanticVersion = "1.0.0",
+            assetVersion = "bundled-v1",
+            assetPath = FLARE_MASKER_MODEL_ASSET,
+            tensor =
+                ModelTensorContract(
+                    width = inputWidth,
+                    height = inputHeight,
+                    channels = 3,
+                    bitmapConfig = Bitmap.Config.ARGB_8888,
+                    colorSpace = "sRGB",
+                    channelOrder = ModelChannelOrder.RGB,
+                    normalization = when (inputType) {
+                        DataType.FLOAT32 -> "channel / 255"
+                        DataType.UINT8 -> "uint8 0..255"
+                        DataType.INT8 -> "uint8 - 128"
+                        else -> "unsupported"
+                    },
+                    outputSemantic = ModelOutputSemantic.FlareAlphaMask,
+                    outputRange = 0f..1f,
+                ),
+            knownMemoryBytes = null,
+            hasUnknownRuntimeMemory = true,
+        )
 
     data class MaskResult(
         val mask: Bitmap,
@@ -47,53 +82,142 @@ class FlareGuardModelRunner private constructor(
 
     fun predictMaskOrNull(source: Bitmap): MaskResult? = predictMaskOrNull(source, null)
 
-    internal fun predictMaskOrNull(source: Bitmap, diagnostics: MemoryTrackerScope?): MaskResult? = try {
-        GlobalModelDiagnostics.publish(diagnosticContributorId, DIAGNOSTIC_CATEGORY, "inferring")
-        val resized = if (source.width == inputWidth && source.height == inputHeight) {
-            source
-        } else {
-            createScaledBitmapOrThrow(source, inputWidth, inputHeight, true)
+    internal fun predictMaskOrNull(source: Bitmap, diagnostics: MemoryTrackerScope?): MaskResult? =
+        when (val result = predictMask(source, diagnostics, ModelOperationContext(0L, "unspecified"))) {
+            is ModelRunResult.Success -> result.value
+            is ModelRunResult.Failure -> null
         }
-        val resizedEdge = if (resized !== source) diagnostics?.track(resized, "flareGuard:modelInputBitmap") ?: 0L else 0L
 
-        try {
-            val pixels = IntArray(inputWidth * inputHeight)
-            val pixelsTransient = diagnostics?.trackTransientBytes("flareGuard:inputPixels", pixels.size.toLong() * Int.SIZE_BYTES)
-            resized.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
-
-            val inputBuffer = ByteBuffer
-                .allocateDirect(inputWidth * inputHeight * 3 * bytesPerElement(inputType))
-                .order(ByteOrder.nativeOrder())
-            val inputTransient = diagnostics?.trackTransientBytes("flareGuard:inputTensor", inputBuffer.capacity().toLong())
-            writeInput(inputBuffer, pixels)
-            inputBuffer.rewind()
-
-            val outputElementCount = outputWidth * outputHeight * outputChannels
-            val outputBuffer = ByteBuffer
-                .allocateDirect(outputElementCount * bytesPerElement(outputType))
-                .order(ByteOrder.nativeOrder())
-            val outputTransient = diagnostics?.trackTransientBytes("flareGuard:outputTensor", outputBuffer.capacity().toLong())
-            interpreter.run(inputBuffer, outputBuffer)
-            outputBuffer.rewind()
+    internal fun predictMask(
+        source: Bitmap,
+        diagnostics: MemoryTrackerScope?,
+        operation: ModelOperationContext,
+    ): ModelRunResult<MaskResult> {
+        return try {
+            if (closed.get()) {
+                return ModelRunResult.Failure(
+                    ModelFailure(ModelFailureReason.Closed),
+                    DeterministicModelFallback.ExistingRuleOrNative,
+                )
+            }
+            operation.validateOrThrow()
+            lifecycleState.set(ModelRunnerLifecycle.Inferencing)
+            GlobalModelDiagnostics.publish(diagnosticContributorId, DIAGNOSTIC_CATEGORY, "inferring")
+            val resized =
+                if (source.width == inputWidth && source.height == inputHeight) {
+                    source
+                } else {
+                    createScaledBitmapOrThrow(source, inputWidth, inputHeight, true)
+                }
+            val resizedEdge =
+                if (resized !== source) {
+                    diagnostics?.track(resized, "flareGuard:modelInputBitmap") ?: 0L
+                } else {
+                    0L
+                }
 
             try {
-                readMask(outputBuffer, diagnostics).let {
-                    it.copy(diagnosticEdge = diagnostics?.track(it.mask, "flareGuard:modelMask") ?: 0L)
+                val inputPixelCount = checkedTensorElementCount(inputWidth, inputHeight)
+                val pixels = IntArray(inputPixelCount)
+                val pixelsTransient =
+                    diagnostics?.trackTransientBytes(
+                        "flareGuard:inputPixels",
+                        pixels.size.toLong() * Int.SIZE_BYTES,
+                    )
+                var inputTransient = 0L
+                var outputTransient = 0L
+                try {
+                    resized.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
+
+                    val inputBuffer =
+                        ByteBuffer
+                            .allocateDirect(
+                                checkedTensorElementCount(
+                                    inputWidth,
+                                    inputHeight,
+                                    3,
+                                    bytesPerElement(inputType),
+                                )
+                            )
+                            .order(ByteOrder.nativeOrder())
+                    inputTransient =
+                        diagnostics?.trackTransientBytes(
+                            "flareGuard:inputTensor",
+                            inputBuffer.capacity().toLong(),
+                        ) ?: 0L
+                    writeInput(inputBuffer, pixels)
+                    inputBuffer.rewind()
+
+                    val outputElementCount =
+                        checkedTensorElementCount(outputWidth, outputHeight, outputChannels)
+                    val outputBuffer =
+                        ByteBuffer
+                            .allocateDirect(
+                                checkedTensorElementCount(
+                                    outputElementCount,
+                                    bytesPerElement(outputType),
+                                )
+                            )
+                            .order(ByteOrder.nativeOrder())
+                    outputTransient =
+                        diagnostics?.trackTransientBytes(
+                            "flareGuard:outputTensor",
+                            outputBuffer.capacity().toLong(),
+                        ) ?: 0L
+                    operation.validateOrThrow()
+                    interpreter.run(inputBuffer, outputBuffer)
+                    operation.validateOrThrow()
+                    outputBuffer.rewind()
+
+                    val maskResult =
+                        readMask(outputBuffer, diagnostics).let {
+                            it.copy(
+                                diagnosticEdge =
+                                    diagnostics?.track(it.mask, "flareGuard:modelMask") ?: 0L
+                            )
+                        }
+                    try {
+                        operation.validateOrThrow()
+                        ModelRunResult.Success(
+                            maskResult,
+                            maskResult.maxAlpha.coerceIn(0f, 1f),
+                        )
+                    } catch (failure: Throwable) {
+                        maskResult.mask.takeUnless(Bitmap::isRecycled)?.recycle()
+                        diagnostics?.release(maskResult.diagnosticEdge)
+                        throw failure
+                    }
+                } finally {
+                    diagnostics?.releaseTransient(outputTransient)
+                    diagnostics?.releaseTransient(inputTransient)
+                    diagnostics?.releaseTransient(pixelsTransient ?: 0L)
                 }
             } finally {
-                diagnostics?.releaseTransient(outputTransient ?: 0L)
-                diagnostics?.releaseTransient(inputTransient ?: 0L)
-                diagnostics?.releaseTransient(pixelsTransient ?: 0L)
+                if (resized !== source) resized.recycle()
+                diagnostics?.release(resizedEdge)
             }
+        } catch (t: Throwable) {
+            if (t is BitmapAllocationRejectedException) throw t
+            val reason =
+                when (t) {
+                    is CancellationException -> ModelFailureReason.Cancelled
+                    is IllegalArgumentException -> ModelFailureReason.InvalidInput
+                    else -> ModelFailureReason.InferenceFailed
+                }
+            ModelRunResult.Failure(
+                ModelFailure(reason, t.message),
+                DeterministicModelFallback.ExistingRuleOrNative,
+            )
         } finally {
-            if (resized !== source) resized.recycle()
-            diagnostics?.release(resizedEdge)
+            if (!closed.get()) {
+                lifecycleState.set(ModelRunnerLifecycle.Loaded)
+                GlobalModelDiagnostics.publish(
+                    diagnosticContributorId,
+                    DIAGNOSTIC_CATEGORY,
+                    "loaded",
+                )
+            }
         }
-    } catch (t: Throwable) {
-        if (t is BitmapAllocationRejectedException) throw t
-        null
-    } finally {
-        GlobalModelDiagnostics.publish(diagnosticContributorId, DIAGNOSTIC_CATEGORY, "loaded")
     }
 
     private fun writeInput(buffer: ByteBuffer, pixels: IntArray) {
@@ -130,14 +254,17 @@ class FlareGuardModelRunner private constructor(
     }
 
     private fun readMask(buffer: ByteBuffer, diagnostics: MemoryTrackerScope?): MaskResult {
-        val values = FloatArray(outputWidth * outputHeight * outputChannels)
+        val values =
+            FloatArray(checkedTensorElementCount(outputWidth, outputHeight, outputChannels))
         val valuesTransient = diagnostics?.trackTransientBytes("flareGuard:outputValues", values.size.toLong() * Float.SIZE_BYTES) ?: 0L
         try {
             for (i in values.indices) {
-                values[i] = readOutputValue(buffer).coerceIn(0f, 1f)
+                val value = readOutputValue(buffer)
+                require(value.isFinite()) { "FlareGuard output contains NaN or infinity" }
+                values[i] = value.coerceIn(0f, 1f)
             }
 
-            val outPixels = IntArray(outputWidth * outputHeight)
+            val outPixels = IntArray(checkedTensorElementCount(outputWidth, outputHeight))
             val pixelsTransient = diagnostics?.trackTransientBytes("flareGuard:maskPixels", outPixels.size.toLong() * Int.SIZE_BYTES) ?: 0L
             try {
                 var sum = 0f
@@ -209,10 +336,13 @@ class FlareGuardModelRunner private constructor(
     }
 
     override fun close() {
+        if (!closed.compareAndSet(false, true)) return
+        lifecycleState.set(ModelRunnerLifecycle.Closing)
         GlobalModelDiagnostics.publish(diagnosticContributorId, DIAGNOSTIC_CATEGORY, "closing")
         try {
             interpreter.close()
         } finally {
+            lifecycleState.set(ModelRunnerLifecycle.Unloaded)
             GlobalModelDiagnostics.publish(diagnosticContributorId, DIAGNOSTIC_CATEGORY, "unloaded")
         }
     }
@@ -322,4 +452,14 @@ private fun bytesPerElement(type: DataType): Int {
         DataType.INT8 -> 1
         else -> error("Unsupported FlareGuard tensor type: $type")
     }
+}
+
+private fun checkedTensorElementCount(vararg dimensions: Int): Int {
+    var count = 1L
+    dimensions.forEach { dimension ->
+        require(dimension > 0) { "Tensor dimensions must be positive" }
+        count = Math.multiplyExact(count, dimension.toLong())
+        require(count <= Int.MAX_VALUE) { "Tensor allocation exceeds the supported element count" }
+    }
+    return count.toInt()
 }

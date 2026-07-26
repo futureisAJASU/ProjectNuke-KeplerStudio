@@ -212,6 +212,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         },
         handoff =
             PreparedResourceHandoff.create(
+                "subjectSelection",
                 {
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null
@@ -460,6 +461,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         }
     },
         PreparedResourceHandoff.create(
+            "activeSelectionLocalEdit",
             {
                 undoSnapshot?.let(::recycleHistorySnapshot)
                 undoSnapshot = null
