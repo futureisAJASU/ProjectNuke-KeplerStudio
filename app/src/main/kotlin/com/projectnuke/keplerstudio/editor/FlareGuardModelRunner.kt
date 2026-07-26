@@ -83,7 +83,7 @@ class FlareGuardModelRunner private constructor(
                     layout = outputLayout,
                     dataType = outputType.toContractType(),
                     quantization = outputQuantization,
-                    semantic = ModelOutputSemantic.FlareAlphaMask,
+                    semantic = ModelOutputSemantic.SingleChannelAlphaMask,
                     valueRange = 0f..1f,
                     confidenceMeaning = "mask distribution metrics; not a model-provided score",
                 ),
@@ -371,25 +371,16 @@ class FlareGuardModelRunner private constructor(
         return when (outputLayout) {
             ModelTensorLayout.NHWC -> {
                 val base = (y * outputWidth + x) * outputChannels
-                if (outputChannels == 1) {
-                    values[base]
-                } else {
-                    var sum = 0f
-                    val channels = outputChannels.coerceAtMost(3)
-                    for (c in 0 until channels) sum += values[base + c]
-                    sum / channels
+                require(outputChannels == 1) {
+                    "FlareGuard requires a one-channel alpha-mask output; multichannel output needs an explicit adapter"
                 }
+                values[base]
             }
             ModelTensorLayout.NCHW -> {
-                if (outputChannels == 1) {
-                    values[y * outputWidth + x]
-                } else {
-                    var sum = 0f
-                    val plane = outputWidth * outputHeight
-                    val channels = outputChannels.coerceAtMost(3)
-                    for (c in 0 until channels) sum += values[c * plane + y * outputWidth + x]
-                    sum / channels
+                require(outputChannels == 1) {
+                    "FlareGuard requires a one-channel alpha-mask output; multichannel output needs an explicit adapter"
                 }
+                values[y * outputWidth + x]
             }
             ModelTensorLayout.HW -> values[y * outputWidth + x]
             else -> error("Unsupported FlareGuard output tensor layout: $outputLayout")
@@ -430,11 +421,24 @@ class FlareGuardModelRunner private constructor(
     }
 
     companion object {
-        fun createOrNull(context: Context): FlareGuardModelRunner? {
+        fun create(context: Context): ModelLoadResult<FlareGuardModelRunner> {
             val diagnosticId = GlobalModelDiagnostics.newContributorId(DIAGNOSTIC_CATEGORY)
             GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "loading")
             var ownedInterpreter: Interpreter? = null
             return try {
+                val manifest = checkNotNull(ModelAssetManifest.byId("flare_masker"))
+                when (
+                    val validation =
+                        ModelAssetValidator.validate(manifest) { path ->
+                            runCatching { context.assets.open(path) }.getOrNull()
+                        }
+                ) {
+                    ModelAssetValidation.Missing ->
+                        return ModelLoadResult.AssetMissing("${manifest.asset.assetPath} is not packaged")
+                    is ModelAssetValidation.Invalid ->
+                        return ModelLoadResult.AssetInvalid(validation.detail)
+                    is ModelAssetValidation.Valid -> Unit
+                }
                 val options = Interpreter.Options().apply {
                     setNumThreads(2)
                     setUseXNNPACK(true)
@@ -480,13 +484,25 @@ class FlareGuardModelRunner private constructor(
                     )
                 ownedInterpreter = null
                 GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "loaded")
-                runner
-            } catch (_: Throwable) {
+                ModelLoadResult.Ready(runner)
+            } catch (failure: Throwable) {
                 runCatching { ownedInterpreter?.close() }
                 GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "unloaded")
-                null
+                when (failure) {
+                    is IOException -> ModelLoadResult.AssetMissing(failure.message)
+                    is IllegalArgumentException, is IllegalStateException ->
+                        ModelLoadResult.UnsupportedContract(failure.message ?: "invalid FlareGuard tensor contract")
+                    is UnsatisfiedLinkError, is NoClassDefFoundError ->
+                        ModelLoadResult.RuntimeUnavailable(failure.message ?: "LiteRT runtime unavailable")
+                    else -> ModelLoadResult.LoadFailed(failure.message ?: "FlareGuard runner initialization failed")
+                }
             }
         }
+
+        /** Legacy bitmap-only entry point; production paths must retain the structured reason. */
+        @Deprecated("Use create() so the fallback can distinguish asset and contract failures")
+        fun createOrNull(context: Context): FlareGuardModelRunner? =
+            (create(context) as? ModelLoadResult.Ready)?.runner
 
         private const val DIAGNOSTIC_CATEGORY = "FlareGuardModelRunner"
         private const val MASK_ACTIVE_THRESHOLD = 0.5f
@@ -530,10 +546,10 @@ internal fun parseInputShape(shape: IntArray): TensorImageShape {
 internal fun parseOutputShape(shape: IntArray): TensorImageShape {
     require(shape.all { it > 0 }) { "Dynamic FlareGuard output shape is not supported yet: ${shape.contentToString()}" }
     return when {
-        shape.size == 4 && shape[0] == 1 && shape[3] in 1..4 -> {
+        shape.size == 4 && shape[0] == 1 && shape[3] == 1 -> {
             TensorImageShape(width = shape[2], height = shape[1], channels = shape[3], layout = ModelTensorLayout.NHWC)
         }
-        shape.size == 4 && shape[0] == 1 && shape[1] in 1..4 -> {
+        shape.size == 4 && shape[0] == 1 && shape[1] == 1 -> {
             TensorImageShape(width = shape[3], height = shape[2], channels = shape[1], layout = ModelTensorLayout.NCHW)
         }
         shape.size == 3 && shape[0] == 1 -> {

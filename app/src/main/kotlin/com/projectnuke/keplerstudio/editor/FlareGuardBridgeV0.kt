@@ -53,7 +53,8 @@ internal fun applyFlareGuardModelOrRuleResultV0(
     diagnostics: MemoryTrackerScope? = null,
     operation: ModelOperationContext = ModelOperationContext(0L, "unspecified"),
 ): FlareGuardApplyResult {
-    val runner = FlareGuardModelRunner.createOrNull(context)
+    val loadResult = FlareGuardModelRunner.create(context)
+    val runner = (loadResult as? ModelLoadResult.Ready)?.runner
     if (runner != null) {
         try {
             Log.i(
@@ -113,7 +114,7 @@ internal fun applyFlareGuardModelOrRuleResultV0(
             runner.close()
         }
     } else {
-        Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model asset unavailable")
+        Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model unavailable: $loadResult")
     }
 
     if (!allowRuleFallback) {

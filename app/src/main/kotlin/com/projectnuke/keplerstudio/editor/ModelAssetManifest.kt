@@ -31,7 +31,7 @@ object ModelAssetManifest {
                 id = "flare_masker",
                 path = "models/flare_guard.tflite",
                 runtime = ModelRuntimeType.LiteRT,
-                semantic = ModelOutputSemantic.FlareAlphaMask,
+                semantic = ModelOutputSemantic.SingleChannelAlphaMask,
                 runnerImplemented = true,
                 productionReady = false,
                 minimumBytes = 1_024L,
@@ -155,6 +155,11 @@ object ModelAssetValidator {
                     }
                     val hash = digest.digest().joinToString("") { byte -> "%02x".format(byte) }
                     val expectedHash = entry.asset.sha256
+                    if (entry.asset.runtimeType != ModelRuntimeType.RuleStatistics && expectedHash == null) {
+                        return ModelAssetValidation.Invalid(
+                            "model asset is not pinned by a manifest SHA-256",
+                        )
+                    }
                     if (expectedHash != null && !hash.equals(expectedHash, ignoreCase = true)) {
                         return ModelAssetValidation.Invalid("asset SHA-256 does not match the manifest")
                     }
@@ -180,4 +185,26 @@ object ModelAssetValidator {
             loaded && entry.productionReady -> ModelAvailability.Loaded
             else -> ModelAvailability.ExperimentalOnly
         }
+
+    fun readiness(
+        entry: ModelAssetManifestEntry,
+        validation: ModelAssetValidation,
+        runtimeAvailable: Boolean,
+    ): ModelReadiness {
+        val present = validation !is ModelAssetValidation.Missing
+        val valid = validation is ModelAssetValidation.Valid
+        val contractSupported =
+            entry.asset.requiredContractSchemaVersion == ModelAssetManifest.CONTRACT_SCHEMA_VERSION
+        val inferenceAvailable =
+            entry.inferenceAdapterImplemented && valid && contractSupported && runtimeAvailable
+        return ModelReadiness(
+            runnerImplemented = entry.inferenceAdapterImplemented,
+            assetPresent = present,
+            assetValid = valid,
+            contractSupported = contractSupported,
+            inferenceAvailable = inferenceAvailable,
+            productionReady = inferenceAvailable && entry.productionReady,
+            experimentalOnly = inferenceAvailable && !entry.productionReady,
+        )
+    }
 }

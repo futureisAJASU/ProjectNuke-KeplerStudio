@@ -42,7 +42,7 @@ class ModelRunnerContractTest {
         val balancer = checkNotNull(ModelAssetManifest.byId("universal_balancer"))
 
         assertTrue(flare.inferenceAdapterImplemented)
-        assertEquals(ModelOutputSemantic.FlareAlphaMask, flare.outputSemantic)
+        assertEquals(ModelOutputSemantic.SingleChannelAlphaMask, flare.outputSemantic)
         assertEquals(ModelOutputSemantic.RestorationImage, restorer.outputSemantic)
         assertEquals(ModelOutputSemantic.GlobalAdjustmentVector, balancer.outputSemantic)
         assertEquals(
@@ -60,14 +60,14 @@ class ModelRunnerContractTest {
         assertIs<ModelAssetValidation.Invalid>(
             ModelAssetValidator.validate(entry) { ByteArrayInputStream(ByteArray(8)) },
         )
-        val valid =
+        val unpinned =
             ModelAssetValidator.validate(entry) {
                 ByteArrayInputStream(ByteArray(entry.asset.minimumExpectedBytes.toInt()) { 7 })
             }
-        assertIs<ModelAssetValidation.Valid>(valid)
+        assertIs<ModelAssetValidation.Invalid>(unpinned)
         assertEquals(
-            ModelAvailability.ExperimentalOnly,
-            ModelAssetValidator.availability(entry, valid),
+            ModelAvailability.AssetInvalid,
+            ModelAssetValidator.availability(entry, unpinned),
         )
     }
 
@@ -91,6 +91,36 @@ class ModelRunnerContractTest {
         assertFailsWith<IllegalStateException> {
             parseOutputShape(intArrayOf(1, 2, 3, 5, 7))
         }
+        assertFailsWith<IllegalStateException> {
+            parseOutputShape(intArrayOf(1, 6, 8, 3))
+        }
+    }
+
+    @Test
+    fun structuredLoadResultsKeepFailureClassesDistinct() {
+        assertIs<ModelLoadResult.AssetMissing>(ModelLoadResult.AssetMissing("missing"))
+        assertIs<ModelLoadResult.AssetInvalid>(ModelLoadResult.AssetInvalid("invalid"))
+        assertIs<ModelLoadResult.UnsupportedContract>(ModelLoadResult.UnsupportedContract("unsupported"))
+        assertIs<ModelLoadResult.RuntimeUnavailable>(ModelLoadResult.RuntimeUnavailable("runtime"))
+        assertIs<ModelLoadResult.LoadFailed>(ModelLoadResult.LoadFailed("failed"))
+    }
+
+    @Test
+    fun readinessReportsIndependentAssetAndProductionFacts() {
+        val flare = checkNotNull(ModelAssetManifest.byId("flare_masker"))
+        val missing = ModelAssetValidator.readiness(flare, ModelAssetValidation.Missing, runtimeAvailable = true)
+        assertTrue(missing.runnerImplemented)
+        assertTrue(!missing.assetPresent)
+        assertTrue(!missing.inferenceAvailable)
+
+        val valid = ModelAssetValidation.Valid(flare.asset.minimumExpectedBytes, "test")
+        val experimental = ModelAssetValidator.readiness(flare, valid, runtimeAvailable = true)
+        assertTrue(experimental.assetPresent)
+        assertTrue(experimental.assetValid)
+        assertTrue(experimental.contractSupported)
+        assertTrue(experimental.inferenceAvailable)
+        assertTrue(experimental.experimentalOnly)
+        assertTrue(!experimental.productionReady)
     }
 
     @Test
