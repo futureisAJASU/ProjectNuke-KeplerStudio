@@ -15,6 +15,7 @@ import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
+import com.projectnuke.keplerstudio.editor.RouteResolver
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
 import com.projectnuke.keplerstudio.editor.SelectionPaintMode
@@ -44,7 +45,12 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val sourcePath = state.sourcePath
     val sourceRevision = state.revision
-    val subjectAlgorithm = ExperimentalLabController.snapshot().subjectSelection
+    val documentEngine = state.correctionEngineState.documentEngine
+    val subjectOverride = ExperimentalLabController.debugOverrides().subjectSelection
+    val subjectResolution = RouteResolver.resolveSubjectRoute(
+        documentEngine, subjectOverride, modelAvailable = false,
+    )
+    val subjectAlgorithm = subjectResolution.actualRoute
     val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
             RemasterModelSession.isModelLoaded

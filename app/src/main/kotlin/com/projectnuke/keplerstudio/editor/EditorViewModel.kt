@@ -837,13 +837,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         })
     }
 
-    /** Applies a debug-only feature route and rerenders the current document through the normal path. */
+    /**
+     * Applies a debug-only feature route override. Only rerenders when the [nativeRender]
+     * override changed (since feature-specific override changes only affect future Flare/
+     * Remaster/Subject operations, not the current preview).
+     */
     fun updateExperimentalLab(transform: (ExperimentalLabSelection) -> ExperimentalLabSelection) {
         if (shuttingDown || !BuildConfig.DEBUG) return
-        val before = ExperimentalLabController.snapshot()
+        val engine = _uiState.value.correctionEngineState.documentEngine
+        val before = ExperimentalLabController.resolvedSelection(engine)
         ExperimentalLabController.updateDebug(transform)
-        if (before == ExperimentalLabController.snapshot()) return
-        _uiState.value.correctionEngineState.documentEngine?.let(::applyCorrectionEngineToCurrentDocument)
+        val after = ExperimentalLabController.resolvedSelection(engine)
+        if (before == after) return
+        if (before.nativeRender != after.nativeRender) {
+            applyCorrectionEngineToCurrentDocument(engine)
+        }
     }
 
     internal fun isManagedEditTokenCurrent(token: Long): Boolean =
@@ -3742,7 +3750,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val quickEffects = current.activeQuickEffects
         val appContext = context.applicationContext
         val documentGeneration = historyCoordinator.currentGeneration()
-        val flareAlgorithm = ExperimentalLabController.snapshot().flareGuard
+        val flareOverride = ExperimentalLabController.debugOverrides().flareGuard
+        val flareResolution = RouteResolver.resolveFlareRoute(
+            current.correctionEngineState.documentEngine,
+            flareOverride,
+            modelAvailable = false,
+        )
+        val flareAlgorithm = flareResolution.actualRoute
         updateUiStateAndRecycleReplaced {
             it.copy(
                 isBusy = true,

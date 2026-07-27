@@ -13,7 +13,7 @@ class ExperimentalImagePipelinesTest {
     @Test
     fun productionSelectionDefaultsToV1() {
         ExperimentalLabController.resetForTest()
-        assertEquals(ExperimentalLabSelection(), ExperimentalLabController.snapshot())
+        assertEquals(ExperimentalLabSelection(), ExperimentalLabController.resolvedSelection(CorrectionEngine.Engine1))
     }
 
     @Test

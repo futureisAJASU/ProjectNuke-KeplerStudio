@@ -14,6 +14,7 @@ import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
+import com.projectnuke.keplerstudio.editor.RouteResolver
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.analyzeManualMask
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -35,8 +36,13 @@ import kotlinx.coroutines.withContext
 fun EditorViewModel.applyMaskAwareRemaster() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-    val remasterAlgorithm = ExperimentalLabController.snapshot().remaster
     val stateAtEntry = uiState.value
+    val documentEngine = stateAtEntry.correctionEngineState.documentEngine
+    val remasterOverride = ExperimentalLabController.debugOverrides().remaster
+    val remasterResolution = RouteResolver.resolveRemasterRoute(
+        documentEngine, remasterOverride, modelAvailable = false,
+    )
+    val remasterAlgorithm = remasterResolution.actualRoute
     val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
             RemasterModelSession.isModelLoaded

@@ -26,8 +26,6 @@ data class CorrectionEngineState(
     /** A requested document-engine change that has not adopted a preview yet. */
     val pendingEngine: CorrectionEngine? = null,
     val decision: CorrectionRenderDecision = CorrectionRenderDecision.NoDocument,
-    /** Debug-only routes are never persisted into Drafts or history. */
-    val debugOverrideActive: Boolean = false,
 ) {
     val isSwitching: Boolean get() = pendingEngine != null
     val usedFallback: Boolean get() = decision == CorrectionRenderDecision.Engine2FallbackToEngine1
