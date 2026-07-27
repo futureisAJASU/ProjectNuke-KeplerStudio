@@ -18,11 +18,13 @@ std::size_t activeCancellationTokenCount() noexcept;
 
 class CancellationLease final {
 public:
-    explicit CancellationLease(std::int64_t token) noexcept : token_(token) {}
-    bool cancelled() const noexcept { return isCancellationRequested(token_); }
+    explicit CancellationLease(std::int64_t token) noexcept;
+    bool cancelled() const noexcept;
     std::int64_t token() const noexcept { return token_; }
 private:
     std::int64_t token_;
+    std::shared_ptr<std::atomic_bool> flag_;
+    bool missing_;
 };
 
 }  // namespace kepler_native

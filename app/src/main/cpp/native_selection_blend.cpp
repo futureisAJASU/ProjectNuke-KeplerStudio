@@ -9,6 +9,9 @@
 #include <new>
 #include "native_common.h"
 #include "native_cancellation.h"
+#ifdef KEPLER_HOST_TEST
+#include "native_v1_host_test.h"
+#endif
 
 #define LOG_TAG "KeplerSelectionBlend"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -61,6 +64,60 @@ static float sample_mask(const uint8_t* mask, int maskW, int maskH, int maskStri
 }
 
 } // namespace
+
+#ifdef KEPLER_HOST_TEST
+bool kepler_host::blendSelection(
+    std::uint8_t* target,
+    const std::uint8_t* local,
+    int width,
+    int height,
+    int targetStride,
+    int localStride,
+    const std::uint8_t* mask,
+    int maskWidth,
+    int maskHeight,
+    int maskStride,
+    bool inverted,
+    float opacity
+) {
+    if (target == nullptr || local == nullptr || mask == nullptr || width <= 0 || height <= 0 ||
+        maskWidth <= 0 || maskHeight <= 0) {
+        return false;
+    }
+    const float op = clamp01(opacity);
+    for (int y = 0; y < height; ++y) {
+        auto* targetRow =
+            target + static_cast<std::size_t>(y) * static_cast<std::size_t>(targetStride);
+        const auto* localRow =
+            local + static_cast<std::size_t>(y) * static_cast<std::size_t>(localStride);
+        for (int x = 0; x < width; ++x) {
+            float alpha =
+                sample_mask(
+                    mask,
+                    maskWidth,
+                    maskHeight,
+                    maskStride,
+                    width,
+                    height,
+                    x,
+                    y);
+            if (inverted) alpha = 1.0f - alpha;
+            alpha = clamp01(alpha * op);
+            const float inverseAlpha = 1.0f - alpha;
+            auto* destination = targetRow + static_cast<std::size_t>(x) * 4U;
+            const auto* source = localRow + static_cast<std::size_t>(x) * 4U;
+            destination[0] =
+                to_u8((source[0] / 255.0f) * alpha + (destination[0] / 255.0f) * inverseAlpha);
+            destination[1] =
+                to_u8((source[1] / 255.0f) * alpha + (destination[1] / 255.0f) * inverseAlpha);
+            destination[2] =
+                to_u8((source[2] / 255.0f) * alpha + (destination[2] / 255.0f) * inverseAlpha);
+            destination[3] = 255;
+        }
+    }
+    return true;
+}
+#endif
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeBlendSelectionLayerInPlaceNative(

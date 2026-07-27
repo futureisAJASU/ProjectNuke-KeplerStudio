@@ -3,7 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 
-fun renderBitmapWithSelectionLayers(
+suspend fun renderBitmapWithSelectionLayers(
     base: Bitmap,
     state: EditorUiState,
     revision: Int
@@ -67,7 +67,7 @@ private fun mergeSelectionParams(base: EditParams, local: EditParams): EditParam
     noiseDetailProtection = (base.noiseDetailProtection + local.noiseDetailProtection - 0.50f).coerceIn(0f, 1f)
 )
 
-private fun renderSelectionBitmapWithParams(
+private suspend fun renderSelectionBitmapWithParams(
     base: Bitmap,
     params: EditParams,
     state: EditorUiState,

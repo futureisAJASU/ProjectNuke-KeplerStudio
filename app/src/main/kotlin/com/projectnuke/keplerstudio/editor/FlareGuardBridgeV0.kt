@@ -10,14 +10,16 @@ import kotlin.math.roundToInt
 private const val FLARE_GUARD_BRIDGE_TAG = "KeplerFlareAI"
 
 class FlareGuardApplyResult internal constructor(
-    val bitmap: Bitmap,
+    private val ownedBitmap: TrackedBitmap,
     val status: FlareGuardRuntimeStatus,
-    private val trackedBitmap: TrackedBitmap? = null,
     val fallbackReason: FlareGuardFallbackReason? = null,
 ) {
-    internal fun releaseHelperDiagnosticOwnership() {
-        trackedBitmap?.release()
-    }
+    val bitmap: Bitmap get() = ownedBitmap.bitmap
+
+    internal fun adoptToOrNull(owner: String): Bitmap? =
+        ownedBitmap.adoptToOrNull(owner)
+
+    internal fun recycleIfOwned(): Boolean = ownedBitmap.recycleAndRelease()
 }
 
 enum class FlareGuardRuntimeStatus(val uiText: String) {
@@ -70,21 +72,7 @@ internal fun ModelFailureReason.fallbackReason(): FlareGuardFallbackReason =
         ModelFailureReason.InvalidInput -> FlareGuardFallbackReason.InferenceFailed
     }
 
-fun applyFlareGuardModelOrRuleV0(
-    context: Context,
-    source: Bitmap,
-    mode: FlareGuardMode,
-    strength: Float = when (mode) {
-        FlareGuardMode.NightLight -> 0.28f
-        FlareGuardMode.DaySun -> 0.24f
-    }
-): Bitmap =
-    applyFlareGuardModelOrRuleResultV0(context, source, mode, strength).let { result ->
-        result.releaseHelperDiagnosticOwnership()
-        result.bitmap
-    }
-
-internal fun applyFlareGuardModelOrRuleResultV0(
+internal suspend fun applyFlareGuardModelOrRuleResultV0(
     context: Context,
     source: Bitmap,
     mode: FlareGuardMode,
@@ -94,7 +82,7 @@ internal fun applyFlareGuardModelOrRuleResultV0(
     },
     allowRuleFallback: Boolean = true,
     diagnostics: MemoryTrackerScope? = null,
-    operation: ModelOperationContext = ModelOperationContext(0L, "unspecified"),
+    operation: ModelOperationContext,
 ): FlareGuardApplyResult {
     val loadResult = FlareGuardModelRunner.create(context)
     val runner = (loadResult as? ModelLoadResult.Ready)?.runner
@@ -122,9 +110,8 @@ internal fun applyFlareGuardModelOrRuleResultV0(
                             diagnostics,
                         )
                     return FlareGuardApplyResult(
-                        bitmap = blended.bitmap,
+                        ownedBitmap = blended,
                         status = FlareGuardRuntimeStatus.ModelInferenceSuccess,
-                        trackedBitmap = blended,
                         fallbackReason = null,
                     )
                 } finally {
@@ -145,7 +132,11 @@ internal fun applyFlareGuardModelOrRuleResultV0(
             // A structured inference failure must NOT surface as ModelUnavailableRuleFallback.
             if (!allowRuleFallback) {
                 return FlareGuardApplyResult(
-                    source.copyOrThrow(Bitmap.Config.ARGB_8888, true),
+                    TrackedBitmap.acquire(
+                        source.copyOrThrow(Bitmap.Config.ARGB_8888, true),
+                        diagnostics,
+                        "flareGuard:unavailableCopy",
+                    ),
                     FlareGuardRuntimeStatus.Unavailable,
                     fallbackReason = inferenceReason,
                 )
@@ -153,9 +144,8 @@ internal fun applyFlareGuardModelOrRuleResultV0(
             val fallback = applyFlareGuardRuleFallback(source, mode, strength, diagnostics)
             Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=inference_failure:${failure.failure.reason}")
             return FlareGuardApplyResult(
-                fallback.bitmap,
-                FlareGuardRuntimeStatus.ModelFailedRuleFallback,
                 fallback,
+                FlareGuardRuntimeStatus.ModelFailedRuleFallback,
                 fallbackReason = inferenceReason,
             )
         } catch (ce: CancellationException) {
@@ -164,14 +154,21 @@ internal fun applyFlareGuardModelOrRuleResultV0(
             if (t is BitmapAllocationRejectedException) throw t
             Log.e(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model path failed", t)
             if (!allowRuleFallback) {
-                return FlareGuardApplyResult(source.copyOrThrow(Bitmap.Config.ARGB_8888, true), FlareGuardRuntimeStatus.Unavailable, fallbackReason = FlareGuardFallbackReason.InferenceFailed)
+                return FlareGuardApplyResult(
+                    TrackedBitmap.acquire(
+                        source.copyOrThrow(Bitmap.Config.ARGB_8888, true),
+                        diagnostics,
+                        "flareGuard:unavailableCopy",
+                    ),
+                    FlareGuardRuntimeStatus.Unavailable,
+                    fallbackReason = FlareGuardFallbackReason.InferenceFailed,
+                )
             }
             val fallback = applyFlareGuardRuleFallback(source, mode, strength, diagnostics)
             Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_failed")
             return FlareGuardApplyResult(
-                fallback.bitmap,
-                FlareGuardRuntimeStatus.ModelFailedRuleFallback,
                 fallback,
+                FlareGuardRuntimeStatus.ModelFailedRuleFallback,
                 fallbackReason = FlareGuardFallbackReason.InferenceFailed,
             )
         } finally {
@@ -182,19 +179,26 @@ internal fun applyFlareGuardModelOrRuleResultV0(
     }
 
     if (!allowRuleFallback) {
-        return FlareGuardApplyResult(source.copyOrThrow(Bitmap.Config.ARGB_8888, true), FlareGuardRuntimeStatus.Unavailable, fallbackReason = loadReason)
+        return FlareGuardApplyResult(
+            TrackedBitmap.acquire(
+                source.copyOrThrow(Bitmap.Config.ARGB_8888, true),
+                diagnostics,
+                "flareGuard:unavailableCopy",
+            ),
+            FlareGuardRuntimeStatus.Unavailable,
+            fallbackReason = loadReason,
+        )
     }
     val fallback = applyFlareGuardRuleFallback(source, mode, strength, diagnostics)
     Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard rule fallback path used: mode=$mode reason=model_unavailable:$loadReason")
     return FlareGuardApplyResult(
-        fallback.bitmap,
-        FlareGuardRuntimeStatus.ModelUnavailableRuleFallback,
         fallback,
+        FlareGuardRuntimeStatus.ModelUnavailableRuleFallback,
         fallbackReason = loadReason,
     )
 }
 
-private fun applyFlareGuardRuleFallback(
+private suspend fun applyFlareGuardRuleFallback(
     source: Bitmap,
     mode: FlareGuardMode,
     strength: Float,
@@ -205,7 +209,7 @@ private fun applyFlareGuardRuleFallback(
         FlareGuardMode.DaySun -> applyFlareGuardTracked(source, strength, mode, diagnostics)
     }
 
-internal fun applyFlareGuardMaskBlendV0(
+internal suspend fun applyFlareGuardMaskBlendV0(
     source: Bitmap,
     modelMask: Bitmap,
     mode: FlareGuardMode,

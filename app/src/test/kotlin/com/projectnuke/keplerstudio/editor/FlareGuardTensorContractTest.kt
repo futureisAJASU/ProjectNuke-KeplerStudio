@@ -5,7 +5,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
-import kotlin.test.assertTrue
 
 /**
  * Host-runnable contract checks that don't require a live LiteRT interpreter.
@@ -119,8 +118,7 @@ class FlareGuardTensorContractTest {
 
     @Test
     fun loadResultFallbackReasonsReflectStructuredFailurePath() {
-        // Load-time reasons
-        assertTrue(FlareGuardFallbackReason.AssetMissing is FlareGuardFallbackReason.AssetMissing)
+        // Load-time reasons are mapped through the production classifier.
         assertEquals(
             FlareGuardFallbackReason.UnsupportedContract,
             (ModelLoadResult.UnsupportedContract("x") as ModelLoadResult<*>).fallbackReason(),

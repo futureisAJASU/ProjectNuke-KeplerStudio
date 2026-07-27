@@ -2,9 +2,12 @@ package com.projectnuke.keplerstudio.bridge
 
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 internal interface NativeCancellationBackend {
@@ -33,19 +36,36 @@ class CancellableNativeOperation internal constructor(
     }
 }
 
-/** Runs JNI off Main, forwards Job cancellation, waits for native return, then settles once. */
-internal suspend fun executeCancellableNative(call: (Long) -> Int): Int {
-    val operation = CancellableNativeOperation()
-    val job = currentCoroutineContext()[Job]
-    val cancellation = job?.invokeOnCompletion { cause ->
-        if (cause is CancellationException) operation.signal()
-    }
-    return try {
-        val result = withContext(Dispatchers.Default) { call(operation.token) }
-        if (isNativeCancelledCode(result)) throw CancellationException("native operation cancelled")
+/**
+ * Executes one JNI kernel off Main and owns its native registry entry.
+ *
+ * A cancelled coroutine cannot abandon a still-running JNI call: cancellation first signals
+ * C++, then waits in [NonCancellable] until the kernel has returned and released every Bitmap
+ * lock. The token is unregistered only after that join, so a released token can never race a
+ * kernel which is still polling it.
+ */
+internal suspend fun executeCancellableNative(
+    backend: NativeCancellationBackend = JniCancellationBackend,
+    dispatcher: CoroutineDispatcher = Dispatchers.Default,
+    call: (Long) -> Int,
+): Int = coroutineScope {
+    coroutineContext.ensureActive()
+    val operation = CancellableNativeOperation(backend)
+    val nativeCall = async(dispatcher) { call(operation.token) }
+    try {
+        val result = nativeCall.await()
+        coroutineContext.ensureActive()
+        if (isNativeCancelledCode(result)) {
+            throw CancellationException("native operation cancelled: code=$result")
+        }
         result
     } finally {
-        cancellation?.dispose()
+        if (!nativeCall.isCompleted) {
+            operation.signal()
+        }
+        withContext(NonCancellable) {
+            nativeCall.join()
+        }
         operation.close()
     }
 }

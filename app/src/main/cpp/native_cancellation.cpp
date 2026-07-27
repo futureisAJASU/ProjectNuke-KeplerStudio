@@ -54,6 +54,24 @@ std::size_t activeCancellationTokenCount() noexcept {
     std::lock_guard<std::mutex> guard(registryMutex);
     return registry.size();
 }
+
+CancellationLease::CancellationLease(std::int64_t token) noexcept
+    : token_(token), missing_(false) {
+    if (token == 0) return;
+    std::lock_guard<std::mutex> guard(registryMutex);
+    const auto found = registry.find(token);
+    if (found == registry.end()) {
+        missing_ = true;
+    } else {
+        flag_ = found->second;
+    }
+}
+
+bool CancellationLease::cancelled() const noexcept {
+    if (token_ == 0) return false;
+    if (missing_ || !flag_) return true;
+    return flag_->load(std::memory_order_acquire);
+}
 }
 
 extern "C" JNIEXPORT jlong JNICALL

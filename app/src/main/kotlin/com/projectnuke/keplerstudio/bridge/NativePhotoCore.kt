@@ -29,7 +29,7 @@ object NativePhotoCore {
     /**
      * Preview와 export가 같은 네이티브 픽셀 파이프라인을 사용한다.
      */
-    fun nativeRenderPreviewInPlace(
+    suspend fun nativeRenderPreviewInPlace(
         bitmap: Bitmap,
         exposure: Float,
         contrast: Float,
@@ -54,7 +54,6 @@ object NativePhotoCore {
         hazeEngine: Int,
         revision: Int,
         look: PresetColorLook? = null,
-        operationToken: Long = 0L,
         diagnostics: MemoryTrackerScope? = null,
     ): Int {
         val scratchPlan =
@@ -65,58 +64,59 @@ object NativePhotoCore {
                 needsThreeRows = sharpness > 0.001f,
             )
         // Kotlin keeps highlights signed opposite the native kernel, so pass the negated value here.
-        val result = invokeWithScratch(scratchPlan, diagnostics) { nativeRenderPreviewInPlaceNative(
-            bitmap,
-            exposure,
-            contrast,
-            shadows,
-            -highlights,
-            whites,
-            blacks,
-            temperature,
-            tint,
-            saturation,
-            vibrance,
-            clarity,
-            dehaze,
-            sharpness,
-            noiseReduction,
-            luminanceNoiseReduction,
-            colorNoiseReduction,
-            noiseDetailProtection,
-            noiseEngine,
-            detailEngine,
-            toneEngine,
-            hazeEngine,
-            revision,
-            operationToken,
-        ) }
+        val result =
+            executeNative(scratchPlan, diagnostics) { operationToken ->
+                nativeRenderPreviewInPlaceNative(
+                    bitmap,
+                    exposure,
+                    contrast,
+                    shadows,
+                    -highlights,
+                    whites,
+                    blacks,
+                    temperature,
+                    tint,
+                    saturation,
+                    vibrance,
+                    clarity,
+                    dehaze,
+                    sharpness,
+                    noiseReduction,
+                    luminanceNoiseReduction,
+                    colorNoiseReduction,
+                    noiseDetailProtection,
+                    noiseEngine,
+                    detailEngine,
+                    toneEngine,
+                    hazeEngine,
+                    revision,
+                    operationToken,
+                )
+            }
         if (result >= 0) {
             applyPresetColorLookInPlace(bitmap, look)
         }
         return result
     }
 
-    fun nativeApplySpecialEffectInPlace(
+    suspend fun nativeApplySpecialEffectInPlace(
         bitmap: Bitmap,
         effect: Int,
         strength: Float,
         revision: Int,
-        operationToken: Long = 0L,
         diagnostics: MemoryTrackerScope? = null,
     ): Int {
         val plan = NativeScratchPlanner.specialEffect(bitmap.rowBytes, bitmap.height, effect)
-        return invokeWithScratch(plan, diagnostics) {
+        return executeNative(plan, diagnostics) { operationToken ->
             nativeApplySpecialEffectInPlaceNative(bitmap, effect, strength, revision, operationToken)
         }
     }
 
-    fun nativeApplyFlareGuardInPlace(
+    suspend fun nativeApplyFlareGuardInPlace(
         bitmap: Bitmap,
         mode: Int,
         strength: Float,
         revision: Int,
-        operationToken: Long = 0L,
         diagnostics: MemoryTrackerScope? = null,
     ): Int {
         val plan =
@@ -125,40 +125,46 @@ object NativePhotoCore {
                 bitmap.width,
                 bitmap.height,
             )
-        return invokeWithScratch(plan, diagnostics) {
+        return executeNative(plan, diagnostics) { operationToken ->
             nativeApplyFlareGuardInPlaceNative(bitmap, mode, strength, revision, operationToken)
         }
     }
 
-    fun nativeCreateFlareMask(
+    suspend fun nativeCreateFlareMask(
         source: Bitmap,
         mask: Bitmap,
         threshold: Float,
         radius: Int,
         passes: Int,
-        operationToken: Long = 0L,
         diagnostics: MemoryTrackerScope? = null,
     ): Int {
         val plan =
             NativeScratchPlanner.flareMask(source.width, source.height, radius, passes)
-        return invokeWithScratch(plan, diagnostics) {
+        return executeNative(plan, diagnostics) { operationToken ->
             nativeCreateFlareMaskNative(source, mask, threshold, radius, passes, operationToken)
         }
     }
 
-    fun nativeBlendSelectionLayerInPlace(
+    suspend fun nativeBlendSelectionLayerInPlace(
         target: Bitmap,
         local: Bitmap,
         mask: Bitmap,
         inverted: Boolean,
         opacity: Float,
-        operationToken: Long = 0L,
         diagnostics: MemoryTrackerScope? = null,
-    ): Int = invokeWithScratch(NativeScratchPlanner.selectionBlend(), diagnostics) {
-        nativeBlendSelectionLayerInPlaceNative(target, local, mask, inverted, opacity, operationToken)
-    }
+    ): Int =
+        executeNative(NativeScratchPlanner.selectionBlend(), diagnostics) { operationToken ->
+            nativeBlendSelectionLayerInPlaceNative(
+                target,
+                local,
+                mask,
+                inverted,
+                opacity,
+                operationToken,
+            )
+        }
 
-    fun nativeRenderCropTransform(
+    suspend fun nativeRenderCropTransform(
         source: Bitmap,
         destination: Bitmap,
         cropLeft: Float,
@@ -168,20 +174,22 @@ object NativePhotoCore {
         rotationDegrees: Float,
         flipHorizontal: Boolean,
         revision: Int,
-        operationToken: Long = 0L,
         diagnostics: MemoryTrackerScope? = null,
-    ): Int = invokeWithScratch(NativeScratchPlanner.crop(), diagnostics) { nativeRenderCropTransformNative(
-        source,
-        destination,
-        cropLeft,
-        cropTop,
-        cropRight,
-        cropBottom,
-        rotationDegrees,
-        flipHorizontal,
-        revision,
-        operationToken,
-    ) }
+    ): Int =
+        executeNative(NativeScratchPlanner.crop(), diagnostics) { operationToken ->
+            nativeRenderCropTransformNative(
+                source,
+                destination,
+                cropLeft,
+                cropTop,
+                cropRight,
+                cropBottom,
+                rotationDegrees,
+                flipHorizontal,
+                revision,
+                operationToken,
+            )
+        }
 
     private external fun nativeRenderPreviewInPlaceNative(
         bitmap: Bitmap,
@@ -257,18 +265,38 @@ object NativePhotoCore {
         operationToken: Long,
     ): Int
 }
-    internal fun invokeWithScratch(
-        plan: NativeScratchPlan,
-        diagnostics: MemoryTrackerScope?,
-        call: () -> Int,
-    ): Int {
-        if (!plan.admitted()) return -12
-        val known = diagnostics?.trackTransientBytes("native:${plan.kind}:knownScratch", plan.knownBytes) ?: 0L
-        val opaque = diagnostics?.trackTransientBytes("native:${plan.kind}:opaqueAllocator", null) ?: 0L
-        return try {
-            call()
-        } finally {
-            diagnostics?.releaseTransient(opaque)
-            diagnostics?.releaseTransient(known)
-        }
+
+private suspend fun executeNative(
+    plan: NativeScratchPlan,
+    diagnostics: MemoryTrackerScope?,
+    call: (Long) -> Int,
+): Int {
+    val operationBudget =
+        diagnostics?.availableNativeScratchBytes()
+            ?: com.projectnuke.keplerstudio.editor.BitmapMemoryBudget.operationReserveBytes()
+    if (!plan.admitted(operationBudget)) return -12
+    return executeCancellableNative { token ->
+        invokeWithScratch(plan, diagnostics) { call(token) }
     }
+}
+
+internal fun invokeWithScratch(
+    plan: NativeScratchPlan,
+    diagnostics: MemoryTrackerScope?,
+    call: () -> Int,
+): Int {
+    val operationBudget =
+        diagnostics?.availableNativeScratchBytes()
+            ?: com.projectnuke.keplerstudio.editor.BitmapMemoryBudget.operationReserveBytes()
+    if (!plan.admitted(operationBudget)) return -12
+    val known =
+        diagnostics?.trackTransientBytes("native:${plan.kind}:knownScratch", plan.knownBytes) ?: 0L
+    val opaque =
+        diagnostics?.trackTransientBytes("native:${plan.kind}:opaqueAllocator", null) ?: 0L
+    return try {
+        call()
+    } finally {
+        diagnostics?.releaseTransient(opaque)
+        diagnostics?.releaseTransient(known)
+    }
+}

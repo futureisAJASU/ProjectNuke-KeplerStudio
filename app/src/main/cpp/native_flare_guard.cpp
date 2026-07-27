@@ -12,6 +12,9 @@
 #include <vector>
 #include "native_common.h"
 #include "native_cancellation.h"
+#ifdef KEPLER_HOST_TEST
+#include "native_v1_host_test.h"
+#endif
 
 #define LOG_TAG "KeplerNativeFlare"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -85,13 +88,25 @@ static inline const uint8_t* pixel_at(const std::vector<uint8_t>& src, int strid
 static void sliding_max_row(const float* input, float* output, int length, int radius);
 static void sliding_max_column(const std::vector<float>& input, std::vector<float>& output, int width, int height, int x, int radius);
 
-static std::vector<float> build_luma_plane(const std::vector<uint8_t>& src, int width, int height, int stride, int scale = 1) {
+static std::vector<float> build_luma_plane(
+    const std::vector<uint8_t>& src,
+    int width,
+    int height,
+    int stride,
+    int scale,
+    const kepler_native::CancellationLease& cancellation,
+    bool& completed
+) {
     const int safeScale = std::max(1, scale);
     const int scaledWidth = std::max(1, (width + safeScale - 1) / safeScale);
     const int scaledHeight = std::max(1, (height + safeScale - 1) / safeScale);
     std::vector<float> luma(static_cast<size_t>(scaledWidth) * static_cast<size_t>(scaledHeight), 0.0f);
     if (safeScale == 1) {
         for (int y = 0; y < height; ++y) {
+            if ((y & 15) == 0 && cancellation.cancelled()) {
+                completed = false;
+                return {};
+            }
             for (int x = 0; x < width; ++x) {
                 const uint8_t* p = pixel_at(src, stride, x, y);
                 luma[static_cast<size_t>(y) * width + x] = luma_of(p[0], p[1], p[2]);
@@ -101,6 +116,10 @@ static std::vector<float> build_luma_plane(const std::vector<uint8_t>& src, int 
     }
 
     for (int y = 0; y < scaledHeight; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) {
+            completed = false;
+            return {};
+        }
         const int srcTop = y * safeScale;
         const int srcBottom = std::min(height, srcTop + safeScale);
         for (int x = 0; x < scaledWidth; ++x) {
@@ -156,20 +175,33 @@ static std::vector<float> build_local_max_plane(
     int radius,
     int scale,
     int& outScaledWidth,
-    int& outScaledHeight
+    int& outScaledHeight,
+    const kepler_native::CancellationLease& cancellation,
+    bool& completed
 ) {
     const int safeScale = std::max(1, scale);
     outScaledWidth = std::max(1, (width + safeScale - 1) / safeScale);
     outScaledHeight = std::max(1, (height + safeScale - 1) / safeScale);
-    const std::vector<float> luma = build_luma_plane(src, width, height, stride, safeScale);
+    completed = true;
+    const std::vector<float> luma =
+        build_luma_plane(src, width, height, stride, safeScale, cancellation, completed);
+    if (!completed) return {};
     std::vector<float> temp(static_cast<size_t>(outScaledWidth) * static_cast<size_t>(outScaledHeight), 0.0f);
     std::vector<float> localMax(static_cast<size_t>(outScaledWidth) * static_cast<size_t>(outScaledHeight), 0.0f);
     const int scaledRadius = std::max(0, (radius + safeScale - 1) / safeScale);
     for (int y = 0; y < outScaledHeight; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) {
+            completed = false;
+            return {};
+        }
         const size_t rowStart = static_cast<size_t>(y) * outScaledWidth;
         sliding_max_row(luma.data() + rowStart, temp.data() + rowStart, outScaledWidth, scaledRadius);
     }
     for (int x = 0; x < outScaledWidth; ++x) {
+        if ((x & 15) == 0 && cancellation.cancelled()) {
+            completed = false;
+            return {};
+        }
         sliding_max_column(temp, localMax, outScaledWidth, outScaledHeight, x, scaledRadius);
     }
     return localMax;
@@ -217,18 +249,40 @@ static void sliding_max_column(const std::vector<float>& input, std::vector<floa
     }
 }
 
-static void apply_night_flare(uint8_t* dst, const std::vector<uint8_t>& src, int width, int height, int stride, float strength) {
-    if (width <= 0 || height <= 0) return;
+static bool apply_night_flare(
+    uint8_t* dst,
+    const std::vector<uint8_t>& src,
+    int width,
+    int height,
+    int stride,
+    float strength,
+    const kepler_native::CancellationLease& cancellation
+) {
+    if (width <= 0 || height <= 0) return true;
     const float s = clamp01(strength);
     const int radius = std::max(3, std::max(width, height) / 160);
     const int lumaScale = flare_luma_scale_for_size(width, height);
     int scaledWidth = 1;
     int scaledHeight = 1;
+    bool completed = true;
     const auto localMaxStart = std::chrono::steady_clock::now();
-    const std::vector<float> localMax = build_local_max_plane(src, width, height, stride, radius, lumaScale, scaledWidth, scaledHeight);
+    const std::vector<float> localMax =
+        build_local_max_plane(
+            src,
+            width,
+            height,
+            stride,
+            radius,
+            lumaScale,
+            scaledWidth,
+            scaledHeight,
+            cancellation,
+            completed);
+    if (!completed) return false;
     const auto localMaxEnd = std::chrono::steady_clock::now();
     const auto pixelLoopStart = std::chrono::steady_clock::now();
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* outRow = dst + static_cast<size_t>(y) * stride;
         for (int x = 0; x < width; ++x) {
             const uint8_t* in = pixel_at(src, stride, x, y);
@@ -262,20 +316,43 @@ static void apply_night_flare(uint8_t* dst, const std::vector<uint8_t>& src, int
         std::chrono::duration<double, std::milli>(localMaxEnd - localMaxStart).count(),
         std::chrono::duration<double, std::milli>(pixelLoopEnd - pixelLoopStart).count()
     );
+    return true;
 }
 
-static void apply_day_sun_flare(uint8_t* dst, const std::vector<uint8_t>& src, int width, int height, int stride, float strength) {
-    if (width <= 0 || height <= 0) return;
+static bool apply_day_sun_flare(
+    uint8_t* dst,
+    const std::vector<uint8_t>& src,
+    int width,
+    int height,
+    int stride,
+    float strength,
+    const kepler_native::CancellationLease& cancellation
+) {
+    if (width <= 0 || height <= 0) return true;
     const float s = clamp01(strength);
     const int radius = std::max(6, std::max(width, height) / 96);
     const int lumaScale = flare_luma_scale_for_size(width, height);
     int scaledWidth = 1;
     int scaledHeight = 1;
+    bool completed = true;
     const auto localMaxStart = std::chrono::steady_clock::now();
-    const std::vector<float> localMax = build_local_max_plane(src, width, height, stride, radius, lumaScale, scaledWidth, scaledHeight);
+    const std::vector<float> localMax =
+        build_local_max_plane(
+            src,
+            width,
+            height,
+            stride,
+            radius,
+            lumaScale,
+            scaledWidth,
+            scaledHeight,
+            cancellation,
+            completed);
+    if (!completed) return false;
     const auto localMaxEnd = std::chrono::steady_clock::now();
     const auto pixelLoopStart = std::chrono::steady_clock::now();
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* outRow = dst + static_cast<size_t>(y) * stride;
         for (int x = 0; x < width; ++x) {
             const uint8_t* in = pixel_at(src, stride, x, y);
@@ -314,9 +391,30 @@ static void apply_day_sun_flare(uint8_t* dst, const std::vector<uint8_t>& src, i
         std::chrono::duration<double, std::milli>(localMaxEnd - localMaxStart).count(),
         std::chrono::duration<double, std::milli>(pixelLoopEnd - pixelLoopStart).count()
     );
+    return true;
 }
 
 } // namespace
+
+#ifdef KEPLER_HOST_TEST
+bool kepler_host::applyFlareCorrection(
+    std::uint8_t* rgba,
+    int width,
+    int height,
+    int stride,
+    int mode,
+    float strength
+) {
+    const std::size_t byteCount =
+        static_cast<std::size_t>(stride) * static_cast<std::size_t>(height);
+    std::vector<std::uint8_t> source(byteCount);
+    std::copy(rgba, rgba + byteCount, source.data());
+    kepler_native::CancellationLease cancellation(0);
+    return mode == 1
+        ? apply_day_sun_flare(rgba, source, width, height, stride, strength, cancellation)
+        : apply_night_flare(rgba, source, width, height, stride, strength, cancellation);
+}
+#endif
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplyFlareGuardInPlaceNative(
@@ -369,11 +467,11 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplyFlareGuardIn
         std::vector<uint8_t> src(byteCount);
         std::copy(bytes, bytes + byteCount, src.data());
         const int stride = static_cast<int>(info.stride);
-        if (mode == 1) {
-            apply_day_sun_flare(bytes, src, width, height, stride, strength);
-        } else {
-            apply_night_flare(bytes, src, width, height, stride, strength);
-        }
+        const bool completed =
+            mode == 1
+                ? apply_day_sun_flare(bytes, src, width, height, stride, strength, cancellation)
+                : apply_night_flare(bytes, src, width, height, stride, strength, cancellation);
+        if (!completed) return kepler_native::kCancelledMidPass;
         if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         return revision;
     });

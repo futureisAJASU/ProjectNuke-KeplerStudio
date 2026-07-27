@@ -30,6 +30,7 @@ class MemoryTrackerScope private constructor(
     private val ownershipLock = ReentrantLock()
     private val trackedEdges = ArrayDeque<Long>(8)
     private val transientContributors = ArrayDeque<Long>(4)
+    private val knownTransientBytes = HashMap<Long, Long>(4)
 
     init {
         operationToken = tracker.beginOperation(
@@ -76,7 +77,10 @@ class MemoryTrackerScope private constructor(
             try {
                 if (ended.get()) return 0L
                 tracker.registerTransientContributor(operationToken, documentGeneration, label, bytes).also {
-                    if (it != 0L && !ended.get()) transientContributors.addLast(it)
+                    if (it != 0L && !ended.get()) {
+                        transientContributors.addLast(it)
+                        if (bytes != null) knownTransientBytes[it] = bytes.coerceAtLeast(0L)
+                    }
                     else if (it != 0L) tracker.releaseTransientContributor(it)
                 }
             } finally { ownershipLock.unlock() }
@@ -89,7 +93,26 @@ class MemoryTrackerScope private constructor(
         try {
             tracker.releaseTransientContributor(handle)
             transientContributors.remove(handle)
+            knownTransientBytes.remove(handle)
         } finally { ownershipLock.unlock() }
+    }
+
+    fun availableNativeScratchBytes(): Long {
+        ownershipLock.lock()
+        return try {
+            if (ended.get()) return 0L
+            val operationBudget =
+                transientReserveBytes
+                    .takeIf { it > 0L }
+                    ?: BitmapMemoryBudget.operationReserveBytes()
+            val alreadyKnown =
+                knownTransientBytes.values.fold(0L) { total, bytes ->
+                    BitmapMemoryBudget.saturatingAdd(total, bytes)
+                }
+            (operationBudget - alreadyKnown).coerceAtLeast(0L)
+        } finally {
+            ownershipLock.unlock()
+        }
     }
 
     fun end() {
@@ -98,6 +121,7 @@ class MemoryTrackerScope private constructor(
             if (!ended.compareAndSet(false, true)) return
             while (trackedEdges.isNotEmpty()) tracker.releaseEdge(trackedEdges.removeFirst())
             while (transientContributors.isNotEmpty()) tracker.releaseTransientContributor(transientContributors.removeFirst())
+            knownTransientBytes.clear()
             tracker.endOperation(name, operationToken)
         } finally { ownershipLock.unlock() }
     }

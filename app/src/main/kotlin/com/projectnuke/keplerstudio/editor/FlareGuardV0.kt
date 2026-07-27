@@ -9,11 +9,11 @@ enum class FlareGuardMode {
     DaySun
 }
 
-fun createFlareMaskV0(bitmap: Bitmap, threshold: Float = 0.90f): Bitmap {
-    return createFlareMaskTracked(bitmap, threshold, null).disarmAfterAdoption()
+suspend fun createFlareMaskV0(bitmap: Bitmap, threshold: Float = 0.90f): Bitmap {
+    return createFlareMaskTracked(bitmap, threshold, null).requireAdopt()
 }
 
-internal fun createFlareMaskTracked(
+internal suspend fun createFlareMaskTracked(
     bitmap: Bitmap,
     threshold: Float = 0.90f,
     diagnostics: MemoryTrackerScope?,
@@ -43,12 +43,12 @@ internal fun createFlareMaskTracked(
     }
 }
 
-fun applyFlareGuardV0(source: Bitmap, strength: Float = 0.28f): Bitmap {
+suspend fun applyFlareGuardV0(source: Bitmap, strength: Float = 0.28f): Bitmap {
     return applyFlareGuardTracked(source, strength, FlareGuardMode.NightLight, null)
-        .disarmAfterAdoption()
+        .requireAdopt()
 }
 
-internal fun applyFlareGuardTracked(
+internal suspend fun applyFlareGuardTracked(
     source: Bitmap,
     strength: Float,
     mode: FlareGuardMode,
@@ -78,7 +78,7 @@ internal fun applyFlareGuardTracked(
     }
 }
 
-fun applyDaySunFlareGuardV0(source: Bitmap, strength: Float = 0.24f): Bitmap {
+suspend fun applyDaySunFlareGuardV0(source: Bitmap, strength: Float = 0.24f): Bitmap {
     return applyFlareGuardTracked(source, strength, FlareGuardMode.DaySun, null)
-        .disarmAfterAdoption()
+        .requireAdopt()
 }

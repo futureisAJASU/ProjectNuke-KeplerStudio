@@ -12,6 +12,9 @@
 #include <vector>
 #include "native_common.h"
 #include "native_cancellation.h"
+#ifdef KEPLER_HOST_TEST
+#include "native_v1_host_test.h"
+#endif
 
 #define LOG_TAG "KeplerPhotoCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -255,7 +258,7 @@ static void copy_row(uint8_t* dst, const uint8_t* src, int stride) {
     std::copy(src, src + stride, dst);
 }
 
-static void apply_adjustment_rgba8888(
+static bool apply_adjustment_rgba8888(
     uint8_t* base,
     int width,
     int height,
@@ -272,7 +275,8 @@ static void apply_adjustment_rgba8888(
     float vibrance,
     float clarity,
     float dehaze,
-    float /*colorNoiseReduction*/
+    float /*colorNoiseReduction*/,
+    const kepler_native::CancellationLease& cancellation
 ) {
     const float exposureMul = std::pow(2.0f, exposure);
     const float contrastMul = 1.0f + contrast * 0.72f;
@@ -291,6 +295,7 @@ static void apply_adjustment_rgba8888(
     const float tintB = 1.0f + tint * 0.045f;
 
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* row = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
             auto* px = row + static_cast<size_t>(x) * 4U;
@@ -370,21 +375,23 @@ static void apply_adjustment_rgba8888(
             px[3] = a;
         }
     }
+    return true;
 }
 
-static void apply_edge_aware_noise_reduction_rgba8888(
+static bool apply_edge_aware_noise_reduction_rgba8888(
     uint8_t* base,
     int width,
     int height,
     int stride,
     float luminanceNoiseReduction,
     float colorNoiseReduction,
-    float noiseDetailProtection
+    float noiseDetailProtection,
+    const kepler_native::CancellationLease& cancellation
 ) {
     const float lumaStrength = clamp01(luminanceNoiseReduction);
     const float chromaStrength = clamp01(colorNoiseReduction);
     const float detailProtection = clamp01(noiseDetailProtection);
-    if ((lumaStrength <= 0.001f && chromaStrength <= 0.001f) || width < 3 || height < 3) return;
+    if ((lumaStrength <= 0.001f && chromaStrength <= 0.001f) || width < 3 || height < 3) return true;
 
     std::vector<uint8_t> prev2(static_cast<size_t>(stride));
     std::vector<uint8_t> prev(static_cast<size_t>(stride));
@@ -408,6 +415,7 @@ static void apply_edge_aware_noise_reduction_rgba8888(
     const float sigma2 = std::max(0.0001f, sigma * sigma * 2.0f);
 
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
         if (y + 2 >= height) copy_row(next2.data(), next.data(), stride);
@@ -516,6 +524,7 @@ static void apply_edge_aware_noise_reduction_rgba8888(
             }
         }
     }
+    return true;
 }
 
 static float guided_component_at(const std::vector<uint8_t>& row, int x, int component) {
@@ -567,19 +576,20 @@ static float guided_estimate_component(
     return a * luma_at(curr, x) + b;
 }
 
-static void apply_guided_noise_reduction_rgba8888(
+static bool apply_guided_noise_reduction_rgba8888(
     uint8_t* base,
     int width,
     int height,
     int stride,
     float luminanceNoiseReduction,
     float colorNoiseReduction,
-    float noiseDetailProtection
+    float noiseDetailProtection,
+    const kepler_native::CancellationLease& cancellation
 ) {
     const float lumaStrength = clamp01(luminanceNoiseReduction);
     const float chromaStrength = clamp01(colorNoiseReduction);
     const float detailProtection = clamp01(noiseDetailProtection);
-    if ((lumaStrength <= 0.001f && chromaStrength <= 0.001f) || width < 3 || height < 3) return;
+    if ((lumaStrength <= 0.001f && chromaStrength <= 0.001f) || width < 3 || height < 3) return true;
 
     std::vector<uint8_t> prev2(static_cast<size_t>(stride));
     std::vector<uint8_t> prev(static_cast<size_t>(stride));
@@ -603,6 +613,8 @@ static void apply_guided_noise_reduction_rgba8888(
     const float chromaEps = 0.0012f + (1.0f - maxStrength) * 0.0075f;
 
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
         if (y + 2 >= height) copy_row(next2.data(), next.data(), stride);
@@ -685,18 +697,20 @@ static void apply_guided_noise_reduction_rgba8888(
             }
         }
     }
+    return true;
 }
 
-static void apply_sharpness_rgba8888(
+static bool apply_sharpness_rgba8888(
     uint8_t* base,
     int width,
     int height,
     int stride,
     float sharpness,
-    float noiseReduction
+    float noiseReduction,
+    const kepler_native::CancellationLease& cancellation
 ) {
     const float baseAmount = clamp01(sharpness) * 1.15f;
-    if (baseAmount <= 0.001f || width < 3 || height < 3) return;
+    if (baseAmount <= 0.001f || width < 3 || height < 3) return true;
 
     std::vector<uint8_t> prev(static_cast<size_t>(stride));
     std::vector<uint8_t> curr(static_cast<size_t>(stride));
@@ -707,6 +721,7 @@ static void apply_sharpness_rgba8888(
     copy_row(prev.data(), curr.data(), stride);
 
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         if (y + 1 >= height) copy_row(next.data(), curr.data(), stride);
 
@@ -760,9 +775,95 @@ static void apply_sharpness_rgba8888(
             }
         }
     }
+    return true;
 }
 
 } // namespace
+
+#ifdef KEPLER_HOST_TEST
+bool kepler_host::renderMain(
+    std::uint8_t* rgba,
+    int width,
+    int height,
+    int stride,
+    const MainRenderParams& params
+) {
+    kepler_native::CancellationLease cancellation(0);
+    if (!apply_adjustment_rgba8888(
+            rgba,
+            width,
+            height,
+            stride,
+            params.exposure,
+            params.contrast,
+            params.shadows,
+            params.highlights,
+            params.whites,
+            params.blacks,
+            params.temperature,
+            params.tint,
+            params.saturation,
+            params.vibrance,
+            params.clarity,
+            params.dehaze,
+            params.colorNoiseReduction,
+            cancellation)) {
+        return false;
+    }
+    if (params.noiseEngine == 1) {
+        if (!apply_guided_noise_reduction_rgba8888(
+                rgba,
+                width,
+                height,
+                stride,
+                params.luminanceNoiseReduction,
+                params.colorNoiseReduction,
+                params.noiseDetailProtection,
+                cancellation)) {
+            return false;
+        }
+    } else if (params.noiseEngine == 2) {
+        if (!apply_edge_aware_noise_reduction_rgba8888(
+                rgba,
+                width,
+                height,
+                stride,
+                params.luminanceNoiseReduction * 0.70f,
+                params.colorNoiseReduction * 0.80f,
+                params.noiseDetailProtection,
+                cancellation) ||
+            !apply_guided_noise_reduction_rgba8888(
+                rgba,
+                width,
+                height,
+                stride,
+                params.luminanceNoiseReduction * 0.75f,
+                params.colorNoiseReduction * 0.90f,
+                params.noiseDetailProtection,
+                cancellation)) {
+            return false;
+        }
+    } else if (!apply_edge_aware_noise_reduction_rgba8888(
+                   rgba,
+                   width,
+                   height,
+                   stride,
+                   params.luminanceNoiseReduction,
+                   params.colorNoiseReduction,
+                   params.noiseDetailProtection,
+                   cancellation)) {
+        return false;
+    }
+    return apply_sharpness_rgba8888(
+        rgba,
+        width,
+        height,
+        stride,
+        params.sharpness,
+        params.luminanceNoiseReduction,
+        cancellation);
+}
+#endif
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeVersion(JNIEnv* env, jobject /*thiz*/) {
@@ -870,7 +971,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         const auto totalStart = std::chrono::steady_clock::now();
 
         const auto toneStart = std::chrono::steady_clock::now();
-        apply_adjustment_rgba8888(
+        if (!apply_adjustment_rgba8888(
             bytes,
             width,
             height,
@@ -887,66 +988,72 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             vibrance,
             clarity,
             dehaze,
-            colorNoiseReduction
-        );
+            colorNoiseReduction,
+            cancellation
+        )) return kepler_native::kCancelledMidPass;
         const auto toneEnd = std::chrono::steady_clock::now();
         if (cancellation.cancelled()) return kepler_native::kCancelledMidPass;
 
         const auto denoiseStart = std::chrono::steady_clock::now();
         if (noiseEngine == 1) {
-            apply_guided_noise_reduction_rgba8888(
+            if (!apply_guided_noise_reduction_rgba8888(
                 bytes,
                 width,
                 height,
                 stride,
                 luminanceNoiseReduction,
                 colorNoiseReduction,
-                noiseDetailProtection
-            );
+                noiseDetailProtection,
+                cancellation
+            )) return kepler_native::kCancelledMidPass;
         } else if (noiseEngine == 2) {
             // Kotlin-side NonLocalMeansLite maps to a lightweight approximation here:
             // edge-aware/guided refinement plus 5x5 speckle and chroma cleanup, not a full NLM search.
-            apply_edge_aware_noise_reduction_rgba8888(
+            if (!apply_edge_aware_noise_reduction_rgba8888(
                 bytes,
                 width,
                 height,
                 stride,
                 luminanceNoiseReduction * 0.70f,
                 colorNoiseReduction * 0.80f,
-                noiseDetailProtection
-            );
-            apply_guided_noise_reduction_rgba8888(
+                noiseDetailProtection,
+                cancellation
+            )) return kepler_native::kCancelledMidPass;
+            if (!apply_guided_noise_reduction_rgba8888(
                 bytes,
                 width,
                 height,
                 stride,
                 luminanceNoiseReduction * 0.75f,
                 colorNoiseReduction * 0.90f,
-                noiseDetailProtection
-            );
+                noiseDetailProtection,
+                cancellation
+            )) return kepler_native::kCancelledMidPass;
         } else {
-            apply_edge_aware_noise_reduction_rgba8888(
+            if (!apply_edge_aware_noise_reduction_rgba8888(
                 bytes,
                 width,
                 height,
                 stride,
                 luminanceNoiseReduction,
                 colorNoiseReduction,
-                noiseDetailProtection
-            );
+                noiseDetailProtection,
+                cancellation
+            )) return kepler_native::kCancelledMidPass;
         }
         const auto denoiseEnd = std::chrono::steady_clock::now();
         if (cancellation.cancelled()) return kepler_native::kCancelledMidPass;
 
         const auto sharpenStart = std::chrono::steady_clock::now();
-        apply_sharpness_rgba8888(
+        if (!apply_sharpness_rgba8888(
             bytes,
             width,
             height,
             stride,
             sharpness,
-            luminanceNoiseReduction
-        );
+            luminanceNoiseReduction,
+            cancellation
+        )) return kepler_native::kCancelledMidPass;
         const auto sharpenEnd = std::chrono::steady_clock::now();
         if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         const auto totalEnd = std::chrono::steady_clock::now();

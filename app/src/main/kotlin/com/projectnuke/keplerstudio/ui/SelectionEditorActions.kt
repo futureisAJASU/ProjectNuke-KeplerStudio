@@ -549,7 +549,7 @@ private fun applyPaintStroke(
     return changed
 }
 
-private fun renderSelectionLocalEdit(
+private suspend fun renderSelectionLocalEdit(
     base: Bitmap,
     state: EditorUiState,
     layer: SelectionLayer,
@@ -593,7 +593,7 @@ private fun mergeParams(base: EditParams, local: EditParams): EditParams =
             (base.noiseDetailProtection + local.noiseDetailProtection - 0.50f).coerceIn(0f, 1f),
     )
 
-private fun renderWithParams(
+private suspend fun renderWithParams(
     base: Bitmap,
     params: EditParams,
     state: EditorUiState,

@@ -3496,17 +3496,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     ),
                             )
                         flareGuardResult = r
-                        flareGuardBitmap = r.bitmap
                         r
                     }
-                try {
-                    flareTracker?.track(
-                        flareGuardBitmap!!,
-                        "applyFlareGuard:flareGuardBitmap",
-                    )
-                } finally {
-                    flareGuardResult?.releaseHelperDiagnosticOwnership()
-                }
+                flareGuardBitmap =
+                    result.adoptToOrNull("applyFlareGuard:flareGuardBitmap")
+                        ?: error("FlareGuard result ownership was already settled")
                 renderedPreview =
                     withContext(Dispatchers.Default) {
                         val p =
@@ -3580,6 +3574,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     updateUiState { it.copy(isBusy = false) }
                 }
             } finally {
+                flareGuardResult?.recycleIfOwned()
                 flareGuardBitmap?.takeIf { !it.isRecycled }?.recycle()
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
@@ -5368,7 +5363,7 @@ private fun CropAspectRatio.rotatedForQuarterTurn(): CropAspectRatio =
         else -> this
     }
 
-internal fun renderEditedPreview(
+internal suspend fun renderEditedPreview(
     basePreview: Bitmap,
     params: EditParams,
     engines: EngineSelection,
@@ -5390,7 +5385,7 @@ internal fun renderEditedPreview(
 
 private data class NativeSpecialEffectOp(val effect: Int, val strength: Float)
 
-internal fun applyActiveQuickEffectsToBitmap(
+internal suspend fun applyActiveQuickEffectsToBitmap(
     bitmap: Bitmap,
     quickEffects: List<ActiveQuickEffect>,
     revision: Int,
@@ -5440,7 +5435,7 @@ private fun estimateCleanExportPeakBytes(sourcePath: String, resolution: ExportR
     )
 }
 
-private fun renderEditedExport(
+private suspend fun renderEditedExport(
     sourcePath: String,
     params: EditParams,
     resolution: ExportResolution,
@@ -5474,7 +5469,7 @@ private fun renderEditedExport(
     }
 }
 
-private fun renderEditedExportFromBitmap(
+private suspend fun renderEditedExportFromBitmap(
     ownedBaseBitmap: Bitmap,
     params: EditParams,
     resolution: ExportResolution,
@@ -5506,7 +5501,7 @@ private fun renderEditedExportFromBitmap(
     }
 }
 
-private fun renderBitmapInNative(
+private suspend fun renderBitmapInNative(
     bitmap: Bitmap,
     params: EditParams,
     engines: EngineSelection,

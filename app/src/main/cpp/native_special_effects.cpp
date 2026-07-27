@@ -10,6 +10,9 @@
 #include <vector>
 #include "native_common.h"
 #include "native_cancellation.h"
+#ifdef KEPLER_HOST_TEST
+#include "native_v1_host_test.h"
+#endif
 
 #define LOG_TAG "KeplerNativeFx"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -57,10 +60,18 @@ static inline float smoothstep(float edge0, float edge1, float x) {
     return t * t * (3.0f - 2.0f * t);
 }
 
-static void apply_chroma_fringe_reduce(uint8_t* base, int width, int height, int stride, float strength) {
+static bool apply_chroma_fringe_reduce(
+    uint8_t* base,
+    int width,
+    int height,
+    int stride,
+    float strength,
+    const kepler_native::CancellationLease& cancellation
+) {
     const float s = clamp01(strength);
-    if (s <= 0.001f) return;
+    if (s <= 0.001f) return true;
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* row = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
             auto* px = row + static_cast<size_t>(x) * 4U;
@@ -80,15 +91,24 @@ static void apply_chroma_fringe_reduce(uint8_t* base, int width, int height, int
             px[2] = to_u8(b);
         }
     }
+    return true;
 }
 
-static void apply_vignette_correction(uint8_t* base, int width, int height, int stride, float strength) {
+static bool apply_vignette_correction(
+    uint8_t* base,
+    int width,
+    int height,
+    int stride,
+    float strength,
+    const kepler_native::CancellationLease& cancellation
+) {
     const float s = clamp01(strength);
-    if (s <= 0.001f) return;
+    if (s <= 0.001f) return true;
     const float cx = (width - 1) * 0.5f;
     const float cy = (height - 1) * 0.5f;
     const float invMax = 1.0f / std::max(1.0f, std::sqrt(cx * cx + cy * cy));
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* row = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
             const float dx = x - cx;
@@ -102,14 +122,24 @@ static void apply_vignette_correction(uint8_t* base, int width, int height, int 
             px[2] = to_u8((px[2] / 255.0f) * gain);
         }
     }
+    return true;
 }
 
-static void apply_soft_blur(uint8_t* base, int width, int height, int stride, float strength, size_t byteCount) {
+static bool apply_soft_blur(
+    uint8_t* base,
+    int width,
+    int height,
+    int stride,
+    float strength,
+    size_t byteCount,
+    const kepler_native::CancellationLease& cancellation
+) {
     const float s = clamp01(strength);
-    if (s <= 0.001f || width < 3 || height < 3) return;
+    if (s <= 0.001f || width < 3 || height < 3) return true;
     std::vector<uint8_t> src(byteCount);
     std::copy(base, base + byteCount, src.data());
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
             float sum[3] = {0.0f, 0.0f, 0.0f};
@@ -142,14 +172,24 @@ static void apply_soft_blur(uint8_t* base, int width, int height, int stride, fl
             }
         }
     }
+    return true;
 }
 
-static void apply_small_spot_cleanup(uint8_t* base, int width, int height, int stride, float strength, size_t byteCount) {
+static bool apply_small_spot_cleanup(
+    uint8_t* base,
+    int width,
+    int height,
+    int stride,
+    float strength,
+    size_t byteCount,
+    const kepler_native::CancellationLease& cancellation
+) {
     const float s = clamp01(strength);
-    if (s <= 0.001f || width < 3 || height < 3) return;
+    if (s <= 0.001f || width < 3 || height < 3) return true;
     std::vector<uint8_t> src(byteCount);
     std::copy(base, base + byteCount, src.data());
     for (int y = 0; y < height; ++y) {
+        if ((y & 15) == 0 && cancellation.cancelled()) return false;
         auto* outRow = base + static_cast<size_t>(y) * static_cast<size_t>(stride);
         for (int x = 0; x < width; ++x) {
             const auto* center =
@@ -221,9 +261,41 @@ static void apply_small_spot_cleanup(uint8_t* base, int width, int height, int s
             out[2] = to_u8(cb + (avg[2] - cb) * mix);
         }
     }
+    return true;
 }
 
 } // namespace
+
+#ifdef KEPLER_HOST_TEST
+bool kepler_host::applySpecialEffect(
+    std::uint8_t* rgba,
+    int width,
+    int height,
+    int stride,
+    int effect,
+    float strength
+) {
+    kepler_native::CancellationLease cancellation(0);
+    const std::size_t byteCount =
+        static_cast<std::size_t>(stride) * static_cast<std::size_t>(height);
+    switch (effect) {
+        case 0:
+            return apply_small_spot_cleanup(
+                rgba, width, height, stride, strength, byteCount, cancellation);
+        case 1:
+            return apply_chroma_fringe_reduce(
+                rgba, width, height, stride, strength, cancellation);
+        case 2:
+            return apply_vignette_correction(
+                rgba, width, height, stride, strength, cancellation);
+        case 3:
+            return apply_soft_blur(
+                rgba, width, height, stride, strength, byteCount, cancellation);
+        default:
+            return false;
+    }
+}
+#endif
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplySpecialEffectInPlaceNative(
@@ -267,14 +339,16 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeApplySpecialEffec
         const int width = static_cast<int>(info.width);
         const int height = static_cast<int>(info.height);
         const int stride = static_cast<int>(info.stride);
+        bool completed = false;
         switch (effect) {
-            case 0: apply_small_spot_cleanup(bytes, width, height, stride, strength, byteCount); break;
-            case 1: apply_chroma_fringe_reduce(bytes, width, height, stride, strength); break;
-            case 2: apply_vignette_correction(bytes, width, height, stride, strength); break;
-            case 3: apply_soft_blur(bytes, width, height, stride, strength, byteCount); break;
+            case 0: completed = apply_small_spot_cleanup(bytes, width, height, stride, strength, byteCount, cancellation); break;
+            case 1: completed = apply_chroma_fringe_reduce(bytes, width, height, stride, strength, cancellation); break;
+            case 2: completed = apply_vignette_correction(bytes, width, height, stride, strength, cancellation); break;
+            case 3: completed = apply_soft_blur(bytes, width, height, stride, strength, byteCount, cancellation); break;
             default:
                 return -10;
         }
+        if (!completed) return kepler_native::kCancelledMidPass;
         if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         return revision;
     });

@@ -257,7 +257,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     )
 }
 
-private fun renderMaskAwareRemaster(
+private suspend fun renderMaskAwareRemaster(
     basePreview: Bitmap,
     mask: Bitmap,
     state: EditorUiState,
@@ -329,7 +329,7 @@ private fun renderMaskAwareRemaster(
     }
 }
 
-private fun renderWithState(
+private suspend fun renderWithState(
     basePreview: Bitmap,
     params: EditParams,
     state: EditorUiState,

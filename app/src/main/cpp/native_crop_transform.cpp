@@ -9,6 +9,9 @@
 #include <new>
 #include "native_common.h"
 #include "native_cancellation.h"
+#ifdef KEPLER_HOST_TEST
+#include "native_v1_host_test.h"
+#endif
 
 #define LOG_TAG "KeplerNativeCrop"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -121,6 +124,74 @@ static void sample_bilinear(
 }
 
 } // namespace
+
+#ifdef KEPLER_HOST_TEST
+bool kepler_host::renderCrop(
+    const std::uint8_t* source,
+    int sourceWidth,
+    int sourceHeight,
+    int sourceStride,
+    std::uint8_t* destination,
+    int destinationWidth,
+    int destinationHeight,
+    int destinationStride,
+    float cropLeft,
+    float cropTop,
+    float cropRight,
+    float cropBottom,
+    float rotationDegrees,
+    bool flipHorizontal
+) {
+    if (source == nullptr || destination == nullptr || sourceWidth <= 0 || sourceHeight <= 0 ||
+        destinationWidth <= 0 || destinationHeight <= 0) {
+        return false;
+    }
+    const float radians = rotationDegrees * 3.14159265358979323846f / 180.0f;
+    const Bounds bounds = compute_bounds(sourceWidth, sourceHeight, radians, flipHorizontal);
+    const float wholeW = std::max(1.0f, bounds.maxX - bounds.minX);
+    const float wholeH = std::max(1.0f, bounds.maxY - bounds.minY);
+    const float cl = clampf(std::min(cropLeft, cropRight), 0.0f, 1.0f);
+    const float cr = clampf(std::max(cropLeft, cropRight), cl + 0.001f, 1.0f);
+    const float ct = clampf(std::min(cropTop, cropBottom), 0.0f, 1.0f);
+    const float cb = clampf(std::max(cropTop, cropBottom), ct + 0.001f, 1.0f);
+    const float cropX = cl * wholeW;
+    const float cropY = ct * wholeH;
+    const float cropW = (cr - cl) * wholeW;
+    const float cropH = (cb - ct) * wholeH;
+    const float cx = (sourceWidth - 1) * 0.5f;
+    const float cy = (sourceHeight - 1) * 0.5f;
+    const float cosT = std::cos(radians);
+    const float sinT = std::sin(radians);
+    for (int y = 0; y < destinationHeight; ++y) {
+        auto* outRow =
+            destination +
+            static_cast<std::size_t>(y) * static_cast<std::size_t>(destinationStride);
+        const float ty =
+            cropY +
+            (static_cast<float>(y) + 0.5f) * cropH / std::max(1, destinationHeight);
+        for (int x = 0; x < destinationWidth; ++x) {
+            const float tx =
+                cropX +
+                (static_cast<float>(x) + 0.5f) * cropW / std::max(1, destinationWidth);
+            const float dx = tx + bounds.minX - cx;
+            const float dy = ty + bounds.minY - cy;
+            const float rx = cosT * dx + sinT * dy;
+            const float ry = -sinT * dx + cosT * dy;
+            const float sx = (flipHorizontal ? -rx : rx) + cx;
+            const float sy = ry + cy;
+            sample_bilinear(
+                source,
+                sourceWidth,
+                sourceHeight,
+                sourceStride,
+                sx,
+                sy,
+                outRow + static_cast<std::size_t>(x) * 4U);
+        }
+    }
+    return true;
+}
+#endif
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderCropTransformNative(

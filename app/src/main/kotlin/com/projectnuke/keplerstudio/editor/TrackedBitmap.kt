@@ -3,77 +3,157 @@ package com.projectnuke.keplerstudio.editor
 import android.graphics.Bitmap
 
 /**
- * Short-lived operation ownership for a Bitmap and its exact diagnostic edge.
+ * Exact short-lived ownership of a Bitmap and its diagnostic edge.
  *
- * The wrapper drops its tracker reference as soon as ownership is released or disarmed.
+ * Bitmap ownership, edge ownership, and diagnostic owner are one locked state. A failed
+ * destination registration never releases the source edge, and every settlement is exact-once.
  */
 internal class TrackedBitmap private constructor(
     val bitmap: Bitmap,
-    scope: MemoryTrackerScope?,
+    private val edgeTracker: EdgeTracker?,
     edge: Long,
+    owner: String,
 ) {
+    private sealed interface State {
+        data class Owned(val edge: Long, val owner: String) : State
+        data object Adopted : State
+        data object Recycled : State
+        data object ReleasedWithoutRecycle : State
+    }
+
+    internal interface EdgeTracker {
+        fun track(bitmap: Bitmap, owner: String): Long
+        fun release(edge: Long)
+    }
+
     private val lock = Any()
-    private var scope: MemoryTrackerScope? = scope
-    private var edge: Long = edge
-    private var settled = false
+    private var state: State = State.Owned(edge, owner)
 
-    fun release(): Boolean =
-        synchronized(lock) {
-            if (settled) return false
-            settled = true
-            val ownedScope = scope
-            val ownedEdge = edge
-            scope = null
-            edge = 0L
-            ownedScope?.release(ownedEdge)
-            true
+    fun adoptOrNull(): Bitmap? = synchronized(lock) {
+        val owned = state as? State.Owned ?: return@synchronized null
+        if (bitmap.isRecycled) {
+            state = State.Recycled
+            safeRelease(owned.edge)
+            return@synchronized null
         }
+        state = State.Adopted
+        safeRelease(owned.edge)
+        bitmap
+    }
 
-    fun recycleAndRelease(): Boolean {
-        synchronized(lock) {
-            if (settled) return false
-            settled = true
-            val ownedScope = scope
-            val ownedEdge = edge
-            scope = null
-            edge = 0L
+    fun requireAdopt(): Bitmap =
+        adoptOrNull() ?: throw IllegalStateException("TrackedBitmap was already settled")
+
+    /**
+     * Registers the destination diagnostic owner before settling local ownership.
+     *
+     * The destination edge remains owned by the surrounding tracker scope. If registration
+     * fails, this object remains the bitmap and source-edge owner.
+     */
+    fun adoptToOrNull(destinationOwner: String): Bitmap? = synchronized(lock) {
+        val owned = state as? State.Owned ?: return@synchronized null
+        if (bitmap.isRecycled) {
+            state = State.Recycled
+            safeRelease(owned.edge)
+            return@synchronized null
+        }
+        val tracker = edgeTracker
+        if (tracker != null) {
+            val destination =
+                try {
+                    tracker.track(bitmap, destinationOwner)
+                } catch (_: Throwable) {
+                    return@synchronized null
+                }
+            if (destination == 0L) return@synchronized null
+        }
+        state = State.Adopted
+        safeRelease(owned.edge)
+        bitmap
+    }
+
+    fun transferToOrKeep(destinationOwner: String): Boolean = synchronized(lock) {
+        val owned = state as? State.Owned ?: return@synchronized false
+        if (bitmap.isRecycled) {
+            state = State.Recycled
+            safeRelease(owned.edge)
+            return@synchronized false
+        }
+        val tracker = edgeTracker
+        if (tracker == null) {
+            state = State.Owned(owned.edge, destinationOwner)
+            return@synchronized true
+        }
+        val destination =
             try {
-                if (!bitmap.isRecycled) bitmap.recycle()
-            } finally {
-                ownedScope?.release(ownedEdge)
+                tracker.track(bitmap, destinationOwner)
+            } catch (_: Throwable) {
+                return@synchronized false
             }
-            return true
-        }
+        if (destination == 0L) return@synchronized false
+        state = State.Owned(destination, destinationOwner)
+        safeRelease(owned.edge)
+        true
     }
 
-    fun transferTo(destinationOwner: String): Boolean =
-        synchronized(lock) {
-            if (settled) return false
-            val ownedScope = scope ?: return true
-            val destinationEdge = ownedScope.track(bitmap, destinationOwner)
-            val sourceEdge = edge
-            edge = destinationEdge
-            ownedScope.release(sourceEdge)
-            true
-        }
-
-    fun disarmAfterAdoption(): Bitmap {
-        release()
-        return bitmap
+    fun releaseWithoutRecycle(): Boolean = synchronized(lock) {
+        val owned = state as? State.Owned ?: return@synchronized false
+        state = State.ReleasedWithoutRecycle
+        safeRelease(owned.edge)
+        true
     }
 
-    internal fun exactHandle(): Long = synchronized(lock) { edge }
+    fun recycleAndRelease(): Boolean = synchronized(lock) {
+        val owned = state as? State.Owned ?: return@synchronized false
+        state = State.Recycled
+        try {
+            if (!bitmap.isRecycled) bitmap.recycle()
+        } catch (_: Throwable) {
+            // Cleanup must not mask the operation failure.
+        } finally {
+            safeRelease(owned.edge)
+        }
+        true
+    }
+
+    internal fun exactHandle(): Long = synchronized(lock) {
+        (state as? State.Owned)?.edge ?: 0L
+    }
+
+    private fun safeRelease(edge: Long) {
+        if (edge == 0L) return
+        try {
+            edgeTracker?.release(edge)
+        } catch (_: Throwable) {
+            // Diagnostic cleanup is best effort.
+        }
+    }
 
     companion object {
         fun acquire(
             bitmap: Bitmap,
             scope: MemoryTrackerScope?,
             owner: String,
-        ): TrackedBitmap =
-            TrackedBitmap(
-                bitmap = bitmap,
-                scope = scope,
-                edge = scope?.track(bitmap, owner) ?: 0L,
-            )
+        ): TrackedBitmap {
+            val tracker =
+                scope?.let {
+                    object : EdgeTracker {
+                        override fun track(bitmap: Bitmap, owner: String): Long =
+                            it.track(bitmap, owner)
+
+                        override fun release(edge: Long) = it.release(edge)
+                    }
+                }
+            return acquireForTest(bitmap, tracker, owner)
+        }
+
+        internal fun acquireForTest(
+            bitmap: Bitmap,
+            edgeTracker: EdgeTracker?,
+            owner: String,
+        ): TrackedBitmap {
+            val edge = edgeTracker?.track(bitmap, owner) ?: 0L
+            return TrackedBitmap(bitmap, edgeTracker, edge, owner)
+        }
     }
 }

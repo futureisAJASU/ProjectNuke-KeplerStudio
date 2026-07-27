@@ -8,7 +8,7 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap {
+suspend fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap {
     val state = cropState.normalized()
     val rotation = state.rotationDegrees + state.straightenDegrees
     val size = rotatedCanvasSize(source.width, source.height, rotation)

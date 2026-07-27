@@ -10,6 +10,9 @@
 #include <vector>
 #include "native_common.h"
 #include "native_cancellation.h"
+#ifdef KEPLER_HOST_TEST
+#include "native_v1_host_test.h"
+#endif
 
 #define LOG_TAG "KeplerFlareMask"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
@@ -56,11 +59,19 @@ static inline float luma_of(const uint8_t* p) {
     return (0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2]) / 255.0f;
 }
 
-static void box_blur_u8(std::vector<uint8_t>& data, int width, int height, int radius, int passes) {
-    if (radius <= 0 || passes <= 0 || width <= 1 || height <= 1) return;
+static bool box_blur_u8(
+    std::vector<uint8_t>& data,
+    int width,
+    int height,
+    int radius,
+    int passes,
+    const kepler_native::CancellationLease& cancellation
+) {
+    if (radius <= 0 || passes <= 0 || width <= 1 || height <= 1) return true;
     std::vector<uint8_t> tmp(data.size());
     for (int pass = 0; pass < passes; ++pass) {
         for (int y = 0; y < height; ++y) {
+            if ((y & 15) == 0 && cancellation.cancelled()) return false;
             const size_t rowStart = static_cast<size_t>(y) * width;
             int left = 0;
             int right = std::min(width - 1, radius);
@@ -83,6 +94,7 @@ static void box_blur_u8(std::vector<uint8_t>& data, int width, int height, int r
             }
         }
         for (int x = 0; x < width; ++x) {
+            if ((x & 15) == 0 && cancellation.cancelled()) return false;
             int top = 0;
             int bottom = std::min(height - 1, radius);
             int sum = 0;
@@ -104,9 +116,60 @@ static void box_blur_u8(std::vector<uint8_t>& data, int width, int height, int r
             }
         }
     }
+    return true;
 }
 
 } // namespace
+
+#ifdef KEPLER_HOST_TEST
+bool kepler_host::createFlareMask(
+    const std::uint8_t* source,
+    int width,
+    int height,
+    int sourceStride,
+    std::uint8_t* mask,
+    int maskStride,
+    float threshold,
+    int radius,
+    int passes
+) {
+    const float safeThreshold = std::max(0.70f, std::min(0.98f, threshold));
+    std::vector<std::uint8_t> alpha(
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    kepler_native::CancellationLease cancellation(0);
+    for (int y = 0; y < height; ++y) {
+        const auto* row =
+            source + static_cast<std::size_t>(y) * static_cast<std::size_t>(sourceStride);
+        for (int x = 0; x < width; ++x) {
+            const auto* pixel = row + static_cast<std::size_t>(x) * 4U;
+            alpha[static_cast<std::size_t>(y) * width + x] =
+                to_u8((luma_of(pixel) - safeThreshold) / (1.0f - safeThreshold));
+        }
+    }
+    if (!box_blur_u8(
+            alpha,
+            width,
+            height,
+            std::max(0, radius),
+            std::max(0, passes),
+            cancellation)) {
+        return false;
+    }
+    for (int y = 0; y < height; ++y) {
+        auto* row =
+            mask + static_cast<std::size_t>(y) * static_cast<std::size_t>(maskStride);
+        for (int x = 0; x < width; ++x) {
+            const auto value = alpha[static_cast<std::size_t>(y) * width + x];
+            auto* out = row + static_cast<std::size_t>(x) * 4U;
+            out[0] = value;
+            out[1] = value;
+            out[2] = value;
+            out[3] = 255;
+        }
+    }
+    return true;
+}
+#endif
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNative(
@@ -187,7 +250,15 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateFlareMaskNa
             }
         }
 
-        box_blur_u8(alpha, width, height, std::max(0, radius), std::max(0, passes));
+        if (!box_blur_u8(
+                alpha,
+                width,
+                height,
+                std::max(0, radius),
+                std::max(0, passes),
+                cancellation)) {
+            return kepler_native::kCancelledMidPass;
+        }
 
         for (int y = 0; y < height; ++y) {
             if ((y & 15) == 0 && cancellation.cancelled())

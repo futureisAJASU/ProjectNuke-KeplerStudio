@@ -113,3 +113,51 @@ tasks.register("printModelAssetSummary") {
         }
     }
 }
+
+val hostGoldenExecutable =
+    layout.buildDirectory.file(
+        "host-native/native_v1_exact_golden" +
+            if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) ".exe" else "",
+    )
+
+tasks.register<Exec>("compileHostNativeV1Goldens") {
+    group = "verification"
+    description = "Compile the host harness against the production V1 C++ kernels."
+    val nativeSources =
+        listOf(
+            "src/test/native/native_v1_exact_golden.cpp",
+            "src/main/cpp/native_bridge.cpp",
+            "src/main/cpp/native_special_effects.cpp",
+            "src/main/cpp/native_flare_guard.cpp",
+            "src/main/cpp/native_flare_mask.cpp",
+            "src/main/cpp/native_crop_transform.cpp",
+            "src/main/cpp/native_selection_blend.cpp",
+            "src/main/cpp/native_cancellation.cpp",
+        )
+    inputs.files(nativeSources.map(::file))
+    inputs.dir("src/test/native/stubs")
+    inputs.file("src/main/cpp/native_v1_host_test.h")
+    outputs.file(hostGoldenExecutable)
+    doFirst {
+        hostGoldenExecutable.get().asFile.parentFile.mkdirs()
+    }
+    commandLine(
+        "g++",
+        "-std=c++20",
+        "-O2",
+        "-DKEPLER_HOST_TEST",
+        "-Isrc/test/native/stubs",
+        "-Isrc/main/cpp",
+        *nativeSources.toTypedArray(),
+        "-o",
+        hostGoldenExecutable.get().asFile.absolutePath,
+    )
+}
+
+tasks.register<Exec>("hostNativeV1Goldens") {
+    group = "verification"
+    description = "Run fixed exact hashes through the production V1 host kernels."
+    dependsOn("compileHostNativeV1Goldens")
+    inputs.file(hostGoldenExecutable)
+    commandLine(hostGoldenExecutable.get().asFile.absolutePath)
+}

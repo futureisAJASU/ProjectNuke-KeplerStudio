@@ -3,17 +3,16 @@ package com.projectnuke.keplerstudio.bridge
 import android.graphics.Bitmap
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import kotlin.math.roundToInt
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class NativeExactGoldenTest {
     @Test
-    fun zeroStrengthSpecialEffectsAndFlareCorrectionAreExactIdentity() {
+    fun zeroStrengthSpecialEffectsAndFlareCorrectionAreExactIdentity() = runBlocking {
         for (effect in 0..3) {
             val bitmap = fixture()
             val expected = pixels(bitmap)
@@ -29,7 +28,7 @@ class NativeExactGoldenTest {
     }
 
     @Test
-    fun fullSelectionBlendMatchesRecordedPixels() {
+    fun fullSelectionBlendMatchesRecordedPixels() = runBlocking {
         val target = bitmap(3, 1, intArrayOf(0xff010203.toInt(), 0xff102030.toInt(), 0xff405060.toInt()))
         val local = bitmap(3, 1, intArrayOf(0x80112233.toInt(), 0xffa0b0c0.toInt(), 0x00445566))
         val mask = bitmap(1, 1, intArrayOf(0xffffffff.toInt()))
@@ -43,7 +42,39 @@ class NativeExactGoldenTest {
     }
 
     @Test
-    fun flareMaskWithoutBlurMatchesRecordedLumaMapping() {
+    fun halfOpacitySelectionBlendMatchesRecordedPixels() = runBlocking {
+        val target =
+            bitmap(
+                3,
+                1,
+                intArrayOf(0xff010203.toInt(), 0xff102030.toInt(), 0xff405060.toInt()),
+            )
+        val local =
+            bitmap(
+                3,
+                1,
+                intArrayOf(0x80112233.toInt(), 0xffa0b0c0.toInt(), 0x00445566),
+            )
+        val mask = bitmap(1, 1, intArrayOf(0xffffffff.toInt()))
+
+        assertEquals(
+            0,
+            NativePhotoCore.nativeBlendSelectionLayerInPlace(
+                target,
+                local,
+                mask,
+                false,
+                0.5f,
+            ),
+        )
+        assertArrayEquals(
+            intArrayOf(0xff09121b.toInt(), 0xff586878.toInt(), 0xff425363.toInt()),
+            pixels(target),
+        )
+    }
+
+    @Test
+    fun flareMaskWithoutBlurMatchesRecordedLumaMapping() = runBlocking {
         val source = fixture()
         val mask = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
 
@@ -62,7 +93,7 @@ class NativeExactGoldenTest {
     }
 
     @Test
-    fun cropRotationAndFlipCombinationsAreDeterministicForOddAndNarrowFixtures() {
+    fun cropRotationAndFlipCombinationsAreDeterministicForOddAndNarrowFixtures() = runBlocking {
         val sources = listOf(fixture(), bitmap(1, 5, IntArray(5) { 0xff000000.toInt() or (it * 41 shl 16) }))
         for (source in sources) {
             for (rotation in listOf(0f, 90f, 180f, 270f)) {
@@ -85,7 +116,7 @@ class NativeExactGoldenTest {
     }
 
     @Test
-    fun nonzeroMainRenderHasStableHash() {
+    fun nonzeroMainRenderHasStableHash() = runBlocking {
         val bitmap = fixture()
         val result = NativePhotoCore.nativeRenderPreviewInPlace(
             bitmap,
@@ -112,53 +143,65 @@ class NativeExactGoldenTest {
             hazeEngine = 0,
             revision = 31,
         )
-        assertTrue("main render result >= 0", result >= 0)
-        assertNotEquals(FIXTURE_EXACT_HASH, exactHash(pixels(bitmap)))
+        assertEquals(31, result)
+        assertEquals(8252045260985128563L, exactHash(pixels(bitmap)))
     }
 
     @Test
-    fun nonzeroFlareMaskWithBlurMatchesStableHash() {
+    fun nonzeroFlareMaskWithBlurMatchesStableHash() = runBlocking {
         val source = fixture()
         val mask = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         assertEquals(0, NativePhotoCore.nativeCreateFlareMask(source, mask, 0.92f, 2, 1))
-        assertEquals((-0x7632d90a3d0e241aL), exactHash(pixels(mask)))
+        assertEquals(649638774562468513L, exactHash(pixels(mask)))
     }
 
     @Test
-    fun nonzeroNightModeMapsToPredictablePixels() {
+    fun nonzeroNightModeMapsToPredictablePixels() = runBlocking {
         val bitmap = fixture()
-        assertEquals(0, NativePhotoCore.nativeApplyFlareGuardInPlace(bitmap, 0, 0.28f, 41))
-        assertNotEquals(FIXTURE_EXACT_HASH, exactHash(pixels(bitmap)))
+        assertEquals(41, NativePhotoCore.nativeApplyFlareGuardInPlace(bitmap, 0, 0.28f, 41))
+        assertEquals(-98438237269600328L, exactHash(pixels(bitmap)))
     }
 
     @Test
-    fun nonzeroDayModeMapsToPredictablePixels() {
+    fun nonzeroDayModeMapsToPredictablePixels() = runBlocking {
         val bitmap = fixture()
-        assertEquals(0, NativePhotoCore.nativeApplyFlareGuardInPlace(bitmap, 1, 0.24f, 41))
-        assertNotEquals(FIXTURE_EXACT_HASH, exactHash(pixels(bitmap)))
+        assertEquals(41, NativePhotoCore.nativeApplyFlareGuardInPlace(bitmap, 1, 0.24f, 41))
+        assertEquals(-7628775503570520508L, exactHash(pixels(bitmap)))
     }
 
     @Test
-    fun nonzeroSpecialEffectChromaOffMatchesRecordedHash() {
-        val bitmap = fixture()
-        assertEquals(0, NativePhotoCore.nativeApplySpecialEffectInPlace(bitmap, 2, 0.5f, 17))
-        assertNotEquals(FIXTURE_EXACT_HASH, exactHash(pixels(bitmap)))
+    fun everyNonzeroSpecialEffectMatchesRecordedHash() = runBlocking {
+        val expected =
+            longArrayOf(
+                289374068137732291L,
+                -5217437593436956710L,
+                7403062178545612789L,
+                -7823268298983010661L,
+            )
+        for (effect in 0..3) {
+            val bitmap = fixture()
+            assertEquals(
+                "effect=$effect revision",
+                17,
+                NativePhotoCore.nativeApplySpecialEffectInPlace(bitmap, effect, 0.5f, 17),
+            )
+            assertEquals("effect=$effect", expected[effect], exactHash(pixels(bitmap)))
+        }
     }
 
     @Test
-    fun cropNinetyRotationWithFlipMatchesRecordedHash() {
+    fun cropNinetyRotationWithFlipMatchesRecordedHash() = runBlocking {
         val source = fixture()
         val dest = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
         assertEquals(
             23,
             NativePhotoCore.nativeRenderCropTransform(source, dest, 0f, 0f, 1f, 1f, 90f, true, 23),
         )
-        // Determinism for 90° rotation + flip; actual hash depends on kernel imp.
-        assertEquals(exactHash(pixels(dest)), exactHash(pixels(dest)))
+        assertEquals(2178894102342394339L, exactHash(pixels(dest)))
     }
 
     @Test
-    fun invalidMaskLayoutIsRejectedWithoutChangingSource() {
+    fun invalidMaskLayoutIsRejectedWithoutChangingSource() = runBlocking {
         val source = fixture()
         val before = pixels(source)
         val wrongSize = Bitmap.createBitmap(source.width + 1, source.height, Bitmap.Config.ARGB_8888)
@@ -168,7 +211,7 @@ class NativeExactGoldenTest {
     }
 
     @Test
-    fun unsupportedBitmapAliasesAreRejectedWithoutModification() {
+    fun unsupportedBitmapAliasesAreRejectedWithoutModification() = runBlocking {
         val crop = fixture()
         val cropBefore = pixels(crop)
         assertEquals(
@@ -249,6 +292,5 @@ class NativeExactGoldenTest {
 
     private companion object {
         const val FIXTURE_VERSION = 1
-        const val FIXTURE_EXACT_HASH = 289374068137732291L
     }
 }

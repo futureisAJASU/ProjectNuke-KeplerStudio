@@ -150,5 +150,5 @@ fun EditorViewModel.finishActiveSelectionParamsGesture() {
     finishSelectionParamGesture()
 }
 
-private fun renderLiveSelectionPreview(base: Bitmap, state: EditorUiState, revision: Int): Bitmap =
+private suspend fun renderLiveSelectionPreview(base: Bitmap, state: EditorUiState, revision: Int): Bitmap =
     renderBitmapWithSelectionLayers(base, state, revision)

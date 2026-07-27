@@ -89,8 +89,34 @@ class NativeScratchPlannerTest {
         tracker.close()
     }
 
-    private fun scope(tracker: TrackerSession): MemoryTrackerScope =
+    @Test
+    fun activeOperationContributorsReduceNativeAdmissionBudget() {
+        val tracker = TrackerSession("native-scratch-operation-budget")
+        tracker.activateDocument("gen")
+        val plan = NativeScratchPlanner.mainRender(4096, true, true)
+        val scope = scope(tracker, transientReserveBytes = plan.knownBytes + 64L)
+        val prior = scope.trackTransientBytes("tensor:input", 65L)
+        var invoked = false
+
+        assertEquals(
+            -12,
+            invokeWithScratch(plan, scope) {
+                invoked = true
+                0
+            },
+        )
+        assertFalse(invoked)
+        scope.releaseTransient(prior)
+        assertEquals(plan.knownBytes + 64L, scope.availableNativeScratchBytes())
+        scope.end()
+        tracker.close()
+    }
+
+    private fun scope(
+        tracker: TrackerSession,
+        transientReserveBytes: Long = 0L,
+    ): MemoryTrackerScope =
         MemoryTrackerScope.create(
-            tracker, "native", "gen", "base", 1, "active", 0L,
+            tracker, "native", "gen", "base", 1, "active", transientReserveBytes,
         )
 }
