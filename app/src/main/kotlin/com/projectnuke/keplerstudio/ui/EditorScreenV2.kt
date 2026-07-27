@@ -39,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -71,6 +72,7 @@ import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.ExperimentalLabSelection
+import com.projectnuke.keplerstudio.editor.ExperimentalComparisonStore
 import com.projectnuke.keplerstudio.editor.FlareGuardRoute
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DEHAZE_ENGINES
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DETAIL_ENGINES
@@ -796,8 +798,9 @@ private fun V2SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val experimental by ExperimentalLabController.state.collectAsState()
+    val comparison by ExperimentalComparisonStore.latest.collectAsState()
     Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (BuildConfig.DEBUG) ExperimentalLabSettingsCard(experimental)
+        if (BuildConfig.DEBUG) ExperimentalLabSettingsCard(experimental, comparison)
         if (showRecoveryDebugCard && recoveryDebugInfo != null) {
             V2SettingsCard("복구 확인") {
                 Text("draft_source: ${recoveryDebugInfo.draftSourcePath ?: "없음"}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
@@ -829,7 +832,10 @@ private fun V2SettingsScreen(
 }
 
 @Composable
-private fun ExperimentalLabSettingsCard(selection: ExperimentalLabSelection) {
+private fun ExperimentalLabSettingsCard(
+    selection: ExperimentalLabSelection,
+    comparison: com.projectnuke.keplerstudio.editor.DebugComparisonArtifact?,
+) {
     V2SettingsCard("Experimental Lab") {
         Text(
             "Session only; Draft interpretation remains V1 by default.",
@@ -852,6 +858,50 @@ private fun ExperimentalLabSettingsCard(selection: ExperimentalLabSelection) {
             { it.name },
         ) { value ->
             ExperimentalLabController.updateDebug { it.copy(subjectSelection = value) }
+        }
+        comparison?.let { artifact ->
+            val bitmaps =
+                remember(artifact) {
+                    listOf(
+                        Bitmap.createBitmap(
+                            artifact.baselineArgb,
+                            artifact.width,
+                            artifact.height,
+                            Bitmap.Config.ARGB_8888,
+                        ),
+                        Bitmap.createBitmap(
+                            artifact.experimentalArgb,
+                            artifact.width,
+                            artifact.height,
+                            Bitmap.Config.ARGB_8888,
+                        ),
+                        Bitmap.createBitmap(
+                            artifact.differenceHeatmapArgb,
+                            artifact.width,
+                            artifact.height,
+                            Bitmap.Config.ARGB_8888,
+                        ),
+                    )
+                }
+            DisposableEffect(bitmaps) {
+                onDispose { bitmaps.forEach { if (!it.isRecycled) it.recycle() } }
+            }
+            Text(
+                "${artifact.algorithmDecision} · changed ${(artifact.metrics.changedPixelRatio * 100f).toInt()}% · ${artifact.durationMillis} ms",
+                color = V2TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                bitmaps.forEach { bitmap ->
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "V1 V2 difference comparison",
+                        modifier = Modifier.width(96.dp).heightIn(max = 96.dp),
+                        contentScale = ContentScale.Fit,
+                    )
+                }
+            }
+            TextButton(onClick = ExperimentalComparisonStore::clear) { Text("Clear comparison") }
         }
     }
 }

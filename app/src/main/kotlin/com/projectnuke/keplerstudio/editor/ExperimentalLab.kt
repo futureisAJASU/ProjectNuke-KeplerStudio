@@ -46,3 +46,16 @@ object ExperimentalLabController {
     }
 }
 
+object ExperimentalComparisonStore {
+    private val mutable = MutableStateFlow<DebugComparisonArtifact?>(null)
+    val latest: StateFlow<DebugComparisonArtifact?> = mutable.asStateFlow()
+
+    fun publishDebug(artifact: DebugComparisonArtifact) {
+        check(BuildConfig.DEBUG)
+        mutable.value = artifact
+    }
+
+    fun clear() {
+        mutable.value = null
+    }
+}

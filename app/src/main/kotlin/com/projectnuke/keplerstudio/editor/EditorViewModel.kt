@@ -18,6 +18,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.bridge.NativeCorrectionV2Params
+import com.projectnuke.keplerstudio.bridge.NativeScratchPlanner
 import com.projectnuke.keplerstudio.ui.RemasterModelSession
 import com.projectnuke.keplerstudio.ui.addSubjectSelectionFromEdgeModel
 import com.projectnuke.keplerstudio.ui.applyActiveSelectionLocalEditNativeBaked
@@ -5402,9 +5403,27 @@ internal suspend fun renderEditedPreview(
     quickEffects: List<ActiveQuickEffect> = emptyList(),
 ): Bitmap {
     var working: Bitmap? = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+    var comparisonBaseline: Bitmap? = null
     return try {
-        val plan =
-            RenderPipelinePlanner.create(ExperimentalLabController.snapshot(), params, quickEffects)
+        val selection = ExperimentalLabController.snapshot()
+        val plan = RenderPipelinePlanner.create(selection, params, quickEffects)
+        if (selection.nativeRender == NativeRenderRoute.Compare) {
+            comparisonBaseline = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+            renderBitmapInNative(
+                checkNotNull(comparisonBaseline),
+                params,
+                engines,
+                revision,
+                look,
+            )
+            applyActiveQuickEffectsToBitmap(
+                checkNotNull(comparisonBaseline),
+                quickEffects,
+                revision,
+            )
+            applySelectedToneEngine(checkNotNull(comparisonBaseline), engines.toneEngine)
+        }
+        val v2StartedNanos = System.nanoTime()
         renderBitmapInNative(checkNotNull(working), plan.v1Params, engines, revision, look)
         applyActiveQuickEffectsToBitmap(checkNotNull(working), plan.v1QuickEffects, revision)
         val corrected =
@@ -5417,11 +5436,48 @@ internal suspend fun renderEditedPreview(
             working = corrected
         }
         applySelectedToneEngine(checkNotNull(working), engines.toneEngine)
+        comparisonBaseline?.let { baseline ->
+            val count = checkedPixelCountForComparison(working!!.width, working!!.height)
+            val baselinePixels = IntArray(count)
+            val candidatePixels = IntArray(count)
+            baseline.getPixels(
+                baselinePixels, 0, baseline.width, 0, 0, baseline.width, baseline.height
+            )
+            working!!.getPixels(
+                candidatePixels, 0, working!!.width, 0, 0, working!!.width, working!!.height
+            )
+            ExperimentalComparisonStore.publishDebug(
+                QualityRegressionMetricsV2.debugArtifact(
+                    fixtureVersion = "live-preview-v2",
+                    baseline = baselinePixels,
+                    experimental = candidatePixels,
+                    width = working!!.width,
+                    height = working!!.height,
+                ).copy(
+                    algorithmDecision = "native-render:${plan.route}",
+                    knownTransientBytes =
+                        NativeScratchPlanner.correctionsV2(
+                            working!!.rowBytes,
+                            working!!.height,
+                        ).knownBytes,
+                    durationMillis = (System.nanoTime() - v2StartedNanos) / 1_000_000L,
+                )
+            )
+            baseline.recycle()
+            comparisonBaseline = null
+        }
         checkNotNull(working).also { working = null }
     } catch (t: Throwable) {
+        comparisonBaseline?.takeUnless(Bitmap::isRecycled)?.recycle()
         working?.takeUnless(Bitmap::isRecycled)?.recycle()
         throw t
     }
+}
+
+private fun checkedPixelCountForComparison(width: Int, height: Int): Int {
+    val count = Math.multiplyExact(width.toLong(), height.toLong())
+    require(count in 1..Int.MAX_VALUE)
+    return count.toInt()
 }
 
 private data class NativeSpecialEffectOp(val effect: Int, val strength: Float)

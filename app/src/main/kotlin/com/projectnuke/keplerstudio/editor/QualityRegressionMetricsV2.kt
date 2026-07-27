@@ -31,11 +31,16 @@ data class MaskBoundaryMetrics(
 
 data class DebugComparisonArtifact(
     val fixtureVersion: String,
+    val width: Int,
+    val height: Int,
     val baselineArgb: IntArray,
     val experimentalArgb: IntArray,
     val maskArgb: IntArray?,
     val differenceHeatmapArgb: IntArray,
     val metrics: ImageQualityMetricsV2,
+    val algorithmDecision: String? = null,
+    val knownTransientBytes: Long? = null,
+    val durationMillis: Long? = null,
 ) {
     fun compactMetricJson(): String =
         buildString {
@@ -215,6 +220,8 @@ object QualityRegressionMetricsV2 {
             }
         return DebugComparisonArtifact(
             fixtureVersion,
+            width,
+            height,
             baseline.copyOf(),
             experimental.copyOf(),
             maskArgb?.copyOf(),

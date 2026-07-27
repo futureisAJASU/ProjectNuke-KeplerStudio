@@ -3,12 +3,13 @@
 #include <chrono>
 #include <cstdint>
 #include <iostream>
+#include <algorithm>
 #include <stdexcept>
 #include <vector>
 
 namespace {
 
-void runCase(int width, int height) {
+void runCase(int width, int height, int measuredRuns) {
     const std::size_t bytes =
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4U;
     std::vector<std::uint8_t> source(bytes);
@@ -30,8 +31,9 @@ void runCase(int width, int height) {
         0.32F,
         0.35F,
     };
-    const auto start = std::chrono::steady_clock::now();
-    if (!kepler_host::applyCorrectionsV2(
+    const auto execute = [&]() {
+        const auto start = std::chrono::steady_clock::now();
+        if (!kepler_host::applyCorrectionsV2(
             source.data(),
             width,
             height,
@@ -39,12 +41,24 @@ void runCase(int width, int height) {
             destination.data(),
             width * 4,
             params)) {
-        throw std::runtime_error("V2 benchmark kernel rejected admitted dimensions");
-    }
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start);
+            throw std::runtime_error("V2 benchmark kernel rejected admitted dimensions");
+        }
+        return std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+    };
+    execute();
+    execute();
+    std::vector<double> samples;
+    samples.reserve(static_cast<std::size_t>(measuredRuns));
+    for (int run = 0; run < measuredRuns; ++run) samples.push_back(execute());
+    std::sort(samples.begin(), samples.end());
+    const double median = samples[samples.size() / 2U];
+    const std::size_t p95Index =
+        std::min(samples.size() - 1U, (samples.size() * 95U + 99U) / 100U - 1U);
     std::cout << width << 'x' << height
-              << " elapsedMs=" << elapsed.count()
+              << " runs=" << measuredRuns
+              << " medianMs=" << median
+              << " p95Ms=" << samples[p95Index]
               << " plannedScratchBytes=" << bytes * 2U
               << " sourceDestinationBytes=" << bytes * 2U
               << '\n';
@@ -53,8 +67,13 @@ void runCase(int width, int height) {
 }  // namespace
 
 int main() {
-    runCase(640, 360);
-    runCase(1920, 1080);
-    runCase(4000, 3000);
+    runCase(640, 360, 9);
+    runCase(1920, 1080, 7);
+    runCase(4000, 3000, 5);
+    constexpr std::uint64_t maximumPlanPixels = 8192ULL * 8192ULL;
+    std::cout << "8192x8192 planningOnlyScratchBytes="
+              << maximumPlanPixels * 8ULL
+              << " executionSkipped=safety"
+              << '\n';
     return 0;
 }
