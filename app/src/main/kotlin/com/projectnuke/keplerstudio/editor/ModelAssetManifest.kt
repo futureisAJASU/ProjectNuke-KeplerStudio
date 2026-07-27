@@ -20,6 +20,7 @@ data class ModelAssetManifestEntry(
     val outputSemantic: ModelOutputSemantic,
     val inferenceAdapterImplemented: Boolean,
     val productionReady: Boolean,
+    val foregroundCategoryIds: Set<Int>? = null,
 )
 
 object ModelAssetManifest {
@@ -57,6 +58,7 @@ object ModelAssetManifest {
                 productionReady = false,
                 minimumBytes = 1_024L,
                 maximumBytes = 256L * 1024L * 1024L,
+                foregroundCategoryIds = setOf(1),
             ),
             entry(
                 id = "universal_balancer",
@@ -92,6 +94,7 @@ object ModelAssetManifest {
         minimumBytes: Long,
         maximumBytes: Long?,
         sha256: String? = null,
+        foregroundCategoryIds: Set<Int>? = null,
     ) =
         ModelAssetManifestEntry(
             id = id,
@@ -115,6 +118,7 @@ object ModelAssetManifest {
             outputSemantic = semantic,
             inferenceAdapterImplemented = runnerImplemented,
             productionReady = productionReady,
+            foregroundCategoryIds = foregroundCategoryIds,
         )
 }
 

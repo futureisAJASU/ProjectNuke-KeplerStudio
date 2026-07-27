@@ -60,6 +60,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.projectnuke.keplerstudio.BuildConfig
 import com.projectnuke.keplerstudio.editor.DehazeEngine
 import com.projectnuke.keplerstudio.editor.DetailEngine
 import com.projectnuke.keplerstudio.editor.CropState
@@ -68,15 +69,21 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
+import com.projectnuke.keplerstudio.editor.ExperimentalLabController
+import com.projectnuke.keplerstudio.editor.ExperimentalLabSelection
+import com.projectnuke.keplerstudio.editor.FlareGuardRoute
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DEHAZE_ENGINES
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DETAIL_ENGINES
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_NOISE_ENGINES
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_TONE_ENGINES
 import com.projectnuke.keplerstudio.editor.NoiseEngine
+import com.projectnuke.keplerstudio.editor.NativeRenderRoute
 import com.projectnuke.keplerstudio.editor.PresetColorLook
 import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
+import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ToneEngine
+import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -788,7 +795,9 @@ private fun V2SettingsScreen(
     onClearSavedExports: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val experimental by ExperimentalLabController.state.collectAsState()
     Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (BuildConfig.DEBUG) ExperimentalLabSettingsCard(experimental)
         if (showRecoveryDebugCard && recoveryDebugInfo != null) {
             V2SettingsCard("복구 확인") {
                 Text("draft_source: ${recoveryDebugInfo.draftSourcePath ?: "없음"}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
@@ -815,6 +824,34 @@ private fun V2SettingsScreen(
             V2OptionRow("디테일", IMPLEMENTED_DETAIL_ENGINES, detailEngine, { it.label }, onDetailEngineSelected)
             V2OptionRow("톤", IMPLEMENTED_TONE_ENGINES, toneEngine, { it.label }, onToneEngineSelected)
             V2OptionRow("디헤이즈", IMPLEMENTED_DEHAZE_ENGINES, hazeEngine, { it.label }, onHazeEngineSelected)
+        }
+    }
+}
+
+@Composable
+private fun ExperimentalLabSettingsCard(selection: ExperimentalLabSelection) {
+    V2SettingsCard("Experimental Lab") {
+        Text(
+            "Session only; Draft interpretation remains V1 by default.",
+            color = V2TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        V2OptionRow("Native render", NativeRenderRoute.entries, selection.nativeRender, { it.name }) {
+            value -> ExperimentalLabController.updateDebug { it.copy(nativeRender = value) }
+        }
+        V2OptionRow("FlareGuard", FlareGuardRoute.entries, selection.flareGuard, { it.name }) {
+            value -> ExperimentalLabController.updateDebug { it.copy(flareGuard = value) }
+        }
+        V2OptionRow("Remaster", RemasterRoute.entries, selection.remaster, { it.name }) {
+            value -> ExperimentalLabController.updateDebug { it.copy(remaster = value) }
+        }
+        V2OptionRow(
+            "Subject Selection",
+            SubjectSelectionRoute.entries,
+            selection.subjectSelection,
+            { it.name },
+        ) { value ->
+            ExperimentalLabController.updateDebug { it.copy(subjectSelection = value) }
         }
     }
 }

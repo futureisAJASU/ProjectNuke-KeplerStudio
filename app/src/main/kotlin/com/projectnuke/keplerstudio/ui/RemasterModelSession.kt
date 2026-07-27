@@ -403,6 +403,9 @@ object RemasterModelSession : ModelRunnerContract {
                         operation,
                         modelId,
                         modelVersion,
+                        requireNotNull(ModelAssetManifest.byId(modelId)?.foregroundCategoryIds) {
+                            "Foreground category mapping is not declared for $modelId"
+                        },
                     )
             } finally {
                 if (!rawMask.isRecycled) rawMask.recycle()
@@ -464,7 +467,9 @@ object RemasterModelSession : ModelRunnerContract {
         operation: ModelOperationContext,
         modelId: String,
         modelVersion: String,
+        foregroundCategoryIds: Set<Int>,
     ): TrackedMask {
+        require(foregroundCategoryIds.isNotEmpty())
         var scaledMask: Bitmap? = null
         var out: TrackedMask? = null
         var scaledEdge = 0L
@@ -509,7 +514,7 @@ object RemasterModelSession : ModelRunnerContract {
                     val b = pixel and 0xff
                     val rgbMax = max(r, max(g, b))
                     val category = if (rgbMax > 0) rgbMax else if (alpha in 1..249) alpha else 0
-                    val mask = if (category > 0) 255 else 0
+                    val mask = categoryMaskAlpha(category, foregroundCategoryIds)
                     outRow[x] = -0x1000000 or (mask shl 16) or (mask shl 8) or mask
                 }
                 finalBitmap.setPixels(outRow, 0, targetWidth, 0, y, targetWidth, 1)
@@ -564,4 +569,9 @@ object RemasterModelSession : ModelRunnerContract {
                     ?.invoke(image)
         }
     }
+}
+
+internal fun categoryMaskAlpha(category: Int, foregroundCategoryIds: Set<Int>): Int {
+    require(foregroundCategoryIds.isNotEmpty()) { "Foreground category mapping must be explicit" }
+    return if (category in foregroundCategoryIds) 255 else 0
 }

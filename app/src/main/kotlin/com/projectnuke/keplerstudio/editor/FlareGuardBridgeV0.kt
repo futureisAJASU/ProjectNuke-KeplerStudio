@@ -13,6 +13,7 @@ class FlareGuardApplyResult internal constructor(
     private val ownedBitmap: TrackedBitmap,
     val status: FlareGuardRuntimeStatus,
     val fallbackReason: FlareGuardFallbackReason? = null,
+    val algorithmDecision: FlareGuardV2Decision? = null,
 ) {
     val bitmap: Bitmap get() = ownedBitmap.bitmap
 

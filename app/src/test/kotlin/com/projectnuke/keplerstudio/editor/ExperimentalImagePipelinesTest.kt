@@ -12,8 +12,8 @@ import kotlinx.coroutines.CancellationException
 class ExperimentalImagePipelinesTest {
     @Test
     fun productionSelectionDefaultsToV1() {
-        ExperimentalAlgorithmController.resetForTest()
-        assertEquals(ExperimentalAlgorithmSelection(), ExperimentalAlgorithmController.current())
+        ExperimentalLabController.resetForTest()
+        assertEquals(ExperimentalLabSelection(), ExperimentalLabController.snapshot())
     }
 
     @Test
@@ -27,11 +27,11 @@ class ExperimentalImagePipelinesTest {
 
         assertContentEquals(first.argb, second.argb)
         assertContentEquals(first.mask, second.mask)
-        assertFalse(first.usedModelMask)
+        assertEquals(FlareGuardV2Decision.RuleSelected, first.decision)
         assertTrue(first.argb.indices.any { first.argb[it] != source[it] })
         assertTrue(maximumChannelDelta(source, first.argb) <= 32)
         assertEquals(
-            5605685495406910710L,
+            2929945719209832014L,
             exactHash(first.argb),
             "record frozen experimental fixture hash",
         )
@@ -52,8 +52,8 @@ class ExperimentalImagePipelinesTest {
                 modelMask = noise,
             )
 
-        assertFalse(result.usedModelMask)
-        assertTrue(result.fallbackReason?.contains("rejected") == true)
+        assertEquals(FlareGuardV2Decision.ModelRejectedByQuality, result.decision)
+        assertTrue(result.decisionDetail?.contains("rejected") == true)
     }
 
     @Test

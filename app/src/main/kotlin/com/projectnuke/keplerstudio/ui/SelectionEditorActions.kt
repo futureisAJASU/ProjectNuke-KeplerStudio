@@ -4,12 +4,12 @@ import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
-import com.projectnuke.keplerstudio.editor.AlgorithmMode
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
-import com.projectnuke.keplerstudio.editor.ExperimentalAlgorithmController
+import com.projectnuke.keplerstudio.editor.ExperimentalLabController
+import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
@@ -20,6 +20,7 @@ import com.projectnuke.keplerstudio.editor.SelectionLayerKind
 import com.projectnuke.keplerstudio.editor.SelectionPaintMode
 import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
+import com.projectnuke.keplerstudio.editor.analyzeManualMask
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
@@ -42,12 +43,23 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val sourcePath = state.sourcePath
     val sourceRevision = state.revision
-    val subjectAlgorithm = ExperimentalAlgorithmController.current().subjectSelection
-    val modelAvailable =
+    val subjectAlgorithm = ExperimentalLabController.snapshot().subjectSelection
+    val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
             RemasterModelSession.isModelLoaded
+    val modelAvailable =
+        modelLoaded &&
+            subjectAlgorithm in
+                setOf(
+                    SubjectSelectionRoute.V1,
+                    SubjectSelectionRoute.V2ModelAssisted,
+                    SubjectSelectionRoute.ForcedV1Fallback,
+                    SubjectSelectionRoute.Compare,
+                )
     val manualMaskAtEntry =
-        if (subjectAlgorithm == AlgorithmMode.V1) {
+        if (subjectAlgorithm == SubjectSelectionRoute.V1 ||
+            subjectAlgorithm == SubjectSelectionRoute.ForcedV1Fallback
+        ) {
             null
         } else {
             state.selectionLayers
@@ -162,16 +174,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                                     modelVersion = "v2",
                                     operationToken = operationToken,
                                     documentGeneration = modelOperation.documentGeneration,
-                                    confidenceMetrics =
-                                        com.projectnuke.keplerstudio.editor.ModelConfidence(
-                                            wholeImageMean = 1f,
-                                            peak = 1f,
-                                            activeRegionMean = 1f,
-                                            activeRegionPercentile = 1f,
-                                            affectedAreaRatio = 1f,
-                                            backgroundLeakage = 0f,
-                                            finalPolicy = 1f,
-                                        ),
+                                    confidenceMetrics = analyzeManualMask(manual),
                                 )
                             }
                         val tracked =
@@ -180,7 +183,9 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                                     "\uB9C8\uC2A4\uD06C\uB97C \uC0DD\uC131\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
                                 )
                         val finalTracked =
-                            if (subjectAlgorithm == AlgorithmMode.V1) {
+                            if (subjectAlgorithm == SubjectSelectionRoute.V1 ||
+                                subjectAlgorithm == SubjectSelectionRoute.ForcedV1Fallback
+                            ) {
                                 tracked
                             } else {
                                 refineTrackedSubjectSelectionV2(

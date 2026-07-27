@@ -2,67 +2,69 @@ package com.projectnuke.keplerstudio.editor
 
 import android.content.Context
 import android.graphics.Bitmap
-import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 
-enum class AlgorithmMode {
-    V1,
-    V2,
-    ModelAssistedV2,
-    ForcedFallback,
-}
-
-data class ExperimentalAlgorithmSelection(
-    val flareGuard: AlgorithmMode = AlgorithmMode.V1,
-    val remaster: AlgorithmMode = AlgorithmMode.V1,
-    val subjectSelection: AlgorithmMode = AlgorithmMode.V1,
-    val nativeCorrections: AlgorithmMode = AlgorithmMode.V1,
-)
-
-/**
- * One coherent internal selection point. Production starts and remains on V1.
- *
- * Persistence is deliberately absent until device goldens and manual review approve V2.
- */
-object ExperimentalAlgorithmController {
-    private val selection = AtomicReference(ExperimentalAlgorithmSelection())
-
-    fun current(): ExperimentalAlgorithmSelection = selection.get()
-
-    internal fun updateForDebug(value: ExperimentalAlgorithmSelection) {
-        selection.set(value)
-    }
-
-    internal fun resetForTest() {
-        selection.set(ExperimentalAlgorithmSelection())
-    }
-}
-
 data class ExperimentalPipelinePlan(
     val pixelCount: Int,
     val knownTransientBytes: Long,
     val hasUnknownContributors: Boolean,
+    val stageBytes: Map<String, Long> = emptyMap(),
 )
+
+enum class FlareGuardV2Decision {
+    ModelRuleFused,
+    ModelAccepted,
+    RuleSelected,
+    ModelRejectedByQuality,
+    MaskInsignificant,
+    NoOpZeroStrength,
+    NoOpSafetyFallback,
+}
 
 data class FlareGuardV2Result(
     val argb: IntArray,
     val mask: FloatArray,
     val maskMetrics: MaskQualityMetrics?,
-    val usedModelMask: Boolean,
-    val fallbackReason: String?,
+    val decision: FlareGuardV2Decision,
+    val decisionDetail: String? = null,
 )
 
 object FlareGuardV2 {
     fun plan(width: Int, height: Int): ExperimentalPipelinePlan {
         val count = checkedPixelCount(width, height)
-        // Luma + rule + fused/refined mask + output.
-        val floats = Math.multiplyExact(count.toLong(), 3L * Float.SIZE_BYTES)
-        val output = Math.multiplyExact(count.toLong(), Int.SIZE_BYTES.toLong())
-        return ExperimentalPipelinePlan(count, Math.addExact(floats, output), false)
+        val plane = Math.multiplyExact(count.toLong(), Float.SIZE_BYTES.toLong())
+        val packed = Math.multiplyExact(count.toLong(), Int.SIZE_BYTES.toLong())
+        val refinement =
+            MaskRefinement.plan(
+                width,
+                height,
+                MaskRefinementOptions(
+                    minimumComponentPixels = max(2, count / 50_000),
+                    fillSinglePixelHoles = true,
+                    dilationRadius = if (min(width, height) >= 256) 2 else 1,
+                    featherRadius = if (min(width, height) >= 256) 4 else 1,
+                    connectivity = MaskConnectivity.Eight,
+                    activationThreshold = 0.28f,
+                ),
+            ).knownPeakTransientBytes
+        // Worst model-assisted overlap: packed source/output conversion, luma, rule, model,
+        // fused input, and refinement workspace. The TFLite arena remains unknown.
+        val processPeak = Math.addExact(packed * 2L + plane * 4L, refinement)
+        return ExperimentalPipelinePlan(
+            count,
+            processPeak,
+            hasUnknownContributors = true,
+            stageBytes =
+                mapOf(
+                    "bitmap-conversion" to packed * 2L,
+                    "mask-analysis" to plane * 4L,
+                    "mask-refinement" to refinement,
+                ),
+        )
     }
 
     fun process(
@@ -87,8 +89,7 @@ object FlareGuardV2 {
                 sourceArgb.copyOf(),
                 FloatArray(plan.pixelCount),
                 null,
-                usedModelMask = false,
-                fallbackReason = "zero strength",
+                decision = FlareGuardV2Decision.NoOpZeroStrength,
             )
         }
 
@@ -101,11 +102,31 @@ object FlareGuardV2 {
                 val r = red(color)
                 val g = green(color)
                 val b = blue(color)
-                val value = 0.2126f * r + 0.7152f * g + 0.0722f * b
-                luma[index] = value
+                luma[index] = 0.2126f * r + 0.7152f * g + 0.0722f * b
+            }
+            if ((y and 31) == 0) checkCancelled(isCancelled)
+        }
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val index = y * width + x
+                val color = sourceArgb[index]
+                val r = red(color)
+                val g = green(color)
+                val b = blue(color)
+                val value = luma[index]
                 val peak = max(r, max(g, b)).toFloat()
                 val low = min(r, min(g, b)).toFloat()
                 val chroma = peak - low
+                var neighborhoodLuma = 0f
+                var neighborhoodCount = 0
+                for (yy in max(0, y - 1)..min(height - 1, y + 1)) {
+                    for (xx in max(0, x - 1)..min(width - 1, x + 1)) {
+                        if (xx == x && yy == y) continue
+                        neighborhoodLuma += luma[yy * width + xx]
+                        neighborhoodCount++
+                    }
+                }
+                val surrounding = neighborhoodLuma / neighborhoodCount.coerceAtLeast(1)
                 val highlight =
                     smoothstep(
                         if (mode == FlareGuardMode.NightLight) 150f else 205f,
@@ -118,9 +139,21 @@ object FlareGuardV2 {
                     } else {
                         smoothstep(8f, 72f, (r - min(g, b)).toFloat())
                     }
-                val neutralBloom = smoothstep(18f, 80f, chroma) * highlight
+                val bloomSupport =
+                    smoothstep(
+                        if (mode == FlareGuardMode.NightLight) 75f else 145f,
+                        if (mode == FlareGuardMode.NightLight) 190f else 225f,
+                        surrounding,
+                    )
+                val coloredGhost =
+                    smoothstep(22f, 90f, chroma) *
+                        smoothstep(70f, 210f, value) *
+                        (1f - smoothstep(238f, 255f, peak))
                 rule[index] =
-                    (highlight * (0.55f + 0.35f * contamination + 0.1f * neutralBloom))
+                    max(
+                        highlight * bloomSupport * (0.52f + 0.38f * contamination),
+                        coloredGhost * (0.45f + 0.35f * contamination),
+                    )
                         .coerceIn(0f, 1f)
             }
             if ((y and 31) == 0) checkCancelled(isCancelled)
@@ -211,8 +244,20 @@ object FlareGuardV2 {
                 sourceArgb.copyOf(),
                 refined,
                 metrics,
-                acceptedModel != null,
-                fallbackReason = "mask rejected",
+                decision =
+                    when {
+                        modelMask != null && acceptedModel == null ->
+                            FlareGuardV2Decision.ModelRejectedByQuality
+                        metrics == null || metrics.affectedAreaRatio <= 0.0001f ->
+                            FlareGuardV2Decision.MaskInsignificant
+                        else -> FlareGuardV2Decision.NoOpSafetyFallback
+                    },
+                decisionDetail =
+                    if (modelMask != null && acceptedModel == null) {
+                        "model rejected; final rule mask failed affected-area safety"
+                    } else {
+                        "final mask failed affected-area safety"
+                    },
             )
         }
 
@@ -240,6 +285,28 @@ object FlareGuardV2 {
                 var rr = r * lumaScale
                 var gg = g * lumaScale
                 var bb = b * lumaScale
+                var referenceR = 0f
+                var referenceG = 0f
+                var referenceB = 0f
+                var referenceWeight = 0f
+                for (yy in max(0, y - 2)..min(height - 1, y + 2)) {
+                    for (xx in max(0, x - 2)..min(width - 1, x + 2)) {
+                        val sampleIndex = yy * width + xx
+                        val weight = (1f - refined[sampleIndex]).coerceIn(0f, 1f)
+                        if (weight <= 0.05f) continue
+                        val sample = sourceArgb[sampleIndex]
+                        referenceR += red(sample) * weight
+                        referenceG += green(sample) * weight
+                        referenceB += blue(sample) * weight
+                        referenceWeight += weight
+                    }
+                }
+                if (referenceWeight > 0.5f) {
+                    val reconstruction = applied * 0.22f * (1f - smoothstep(18f, 64f, localGradient))
+                    rr += (referenceR / referenceWeight - rr) * reconstruction
+                    gg += (referenceG / referenceWeight - gg) * reconstruction
+                    bb += (referenceB / referenceWeight - bb) * reconstruction
+                }
                 if (mode == FlareGuardMode.NightLight) {
                     val warm = max(0f, ((r + g) * 0.5f - b))
                     rr -= warm * 0.14f * applied
@@ -265,12 +332,19 @@ object FlareGuardV2 {
             output,
             refined,
             metrics,
-            usedModelMask = acceptedModel != null,
-            fallbackReason =
+            decision =
                 when {
-                    modelMask == null -> "model unavailable; rule mask"
-                    acceptedModel == null -> "model mask rejected; rule mask"
-                    ruleQuality is MaskQualityResult.Invalid -> "model mask with weak rule guidance"
+                    acceptedModel != null && ruleQuality !is MaskQualityResult.Invalid ->
+                        FlareGuardV2Decision.ModelRuleFused
+                    acceptedModel != null -> FlareGuardV2Decision.ModelAccepted
+                    modelMask != null -> FlareGuardV2Decision.ModelRejectedByQuality
+                    else -> FlareGuardV2Decision.RuleSelected
+                },
+            decisionDetail =
+                when {
+                    acceptedModel != null && ruleQuality is MaskQualityResult.Invalid ->
+                        "model accepted with weak rule guidance"
+                    modelMask != null && acceptedModel == null -> "model quality thresholds rejected"
                     else -> null
                 },
         )
@@ -281,16 +355,39 @@ data class RemasterV2Result(
     val argb: IntArray,
     val refinedMask: FloatArray,
     val maskMetrics: MaskQualityMetrics,
+    val decision: RemasterV2Decision = RemasterV2Decision.MaskAccepted,
 )
+
+enum class RemasterV2Decision { MaskAccepted, ManualMaskAccepted, ModelMaskAccepted }
 
 object RemasterV2 {
     fun plan(width: Int, height: Int): ExperimentalPipelinePlan {
         val count = checkedPixelCount(width, height)
-        // Luma, horizontal/local mean, refined mask and output.
+        val plane = Math.multiplyExact(count.toLong(), Float.SIZE_BYTES.toLong())
+        val packed = Math.multiplyExact(count.toLong(), Int.SIZE_BYTES.toLong())
+        val refinement =
+            MaskRefinement.plan(
+                width,
+                height,
+                MaskRefinementOptions(
+                    minimumComponentPixels = max(2, count / 100_000),
+                    fillSinglePixelHoles = true,
+                    featherRadius = 1,
+                    connectivity = MaskConnectivity.Eight,
+                    activationThreshold = 0.42f,
+                ),
+            ).knownPeakTransientBytes
+        val refinementPeak = plane * 2L + refinement
+        val renderPeak = packed * 2L + plane * 5L
         return ExperimentalPipelinePlan(
             count,
-            Math.multiplyExact(count.toLong(), 3L * Float.SIZE_BYTES + Int.SIZE_BYTES),
-            false,
+            maxOf(refinementPeak, renderPeak),
+            hasUnknownContributors = false,
+            stageBytes =
+                mapOf(
+                    "mask-refinement" to refinementPeak,
+                    "luma-local-mean-blend" to renderPeak,
+                ),
         )
     }
 
@@ -389,9 +486,43 @@ data class SubjectSelectionV2Result(
     val metrics: MaskQualityMetrics,
     val operationToken: Long,
     val documentGeneration: String,
+    val decision: SubjectSelectionV2Decision = SubjectSelectionV2Decision.RefinedModelMask,
 )
 
+enum class SubjectSelectionV2Decision {
+    RefinedModelMask,
+    RefinedManualMask,
+    RefinedCombinedMask,
+}
+
 object SubjectSelectionV2 {
+    fun plan(
+        width: Int,
+        height: Int,
+        includesManualMask: Boolean,
+    ): ExperimentalPipelinePlan {
+        val count = checkedPixelCount(width, height)
+        val plane = Math.multiplyExact(count.toLong(), Float.SIZE_BYTES.toLong())
+        val options =
+            MaskRefinementOptions(
+                minimumComponentPixels = max(2, count / 80_000),
+                fillSinglePixelHoles = true,
+                dilationRadius = 1,
+                erosionRadius = 1,
+                featherRadius = 1,
+                connectivity = MaskConnectivity.Eight,
+                activationThreshold = 0.45f,
+            )
+        val refinement = MaskRefinement.plan(width, height, options).knownPeakTransientBytes
+        val inputs = plane * if (includesManualMask) 3L else 1L
+        return ExperimentalPipelinePlan(
+            count,
+            Math.addExact(inputs, refinement),
+            false,
+            mapOf("mask-inputs" to inputs, "mask-refinement" to refinement),
+        )
+    }
+
     fun refine(
         rawMask: FloatArray,
         width: Int,
@@ -463,6 +594,11 @@ object SubjectSelectionV2 {
             metrics,
             operation.operationToken,
             operation.documentGeneration,
+            when {
+                manualMask == null -> SubjectSelectionV2Decision.RefinedModelMask
+                rawMask.all { it == 0f } -> SubjectSelectionV2Decision.RefinedManualMask
+                else -> SubjectSelectionV2Decision.RefinedCombinedMask
+            },
         )
     }
 }
@@ -487,6 +623,11 @@ internal fun refineTrackedSubjectSelectionV2(
     var output: TrackedMask? = null
     try {
         operation.validateOrThrow()
+        val pipelinePlan =
+            SubjectSelectionV2.plan(targetWidth, targetHeight, includesManualMask = false)
+        if (!BitmapMemoryBudget.canAllocate(pipelinePlan.knownTransientBytes)) {
+            throw BitmapAllocationRejectedException(pipelinePlan.knownTransientBytes)
+        }
         ownedSource = source.requireAdopt()
         val readable =
             if (ownedSource.width == targetWidth && ownedSource.height == targetHeight) {
@@ -674,17 +815,55 @@ private fun argb(a: Int, r: Int, g: Int, b: Int) =
 private fun luma(argb: Int) =
     0.2126f * red(argb) + 0.7152f * green(argb) + 0.0722f * blue(argb)
 
+internal fun analyzeManualMask(bitmap: Bitmap): ModelConfidence {
+    val row = IntArray(bitmap.width)
+    var sum = 0.0
+    var activeSum = 0.0
+    var active = 0L
+    var peak = 0f
+    val total = bitmap.width.toLong() * bitmap.height
+    for (y in 0 until bitmap.height) {
+        bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+        for (pixel in row) {
+            val value = max(red(pixel), max(green(pixel), blue(pixel))) / 255f
+            sum += value
+            peak = max(peak, value)
+            if (value >= 0.35f) {
+                active++
+                activeSum += value
+            }
+        }
+    }
+    val mean = (sum / total.coerceAtLeast(1)).toFloat()
+    val activeMean = (activeSum / active.coerceAtLeast(1)).toFloat()
+    val area = active.toFloat() / total.coerceAtLeast(1).toFloat()
+    return ModelConfidence(
+        wholeImageMean = mean,
+        peak = peak,
+        activeRegionMean = activeMean,
+        activeRegionPercentile = peak,
+        affectedAreaRatio = area,
+        backgroundLeakage = if (active == 0L) mean else ((sum - activeSum) / (total - active).coerceAtLeast(1)).toFloat(),
+        modelProvided = null,
+        finalPolicy = activeMean * (1f - area.coerceAtLeast(0.85f).minus(0.85f) / 0.15f),
+    )
+}
+
 internal fun applyExperimentalFlareGuardV2(
     context: Context,
     source: Bitmap,
     flareMode: FlareGuardMode,
-    algorithmMode: AlgorithmMode,
+    algorithmMode: FlareGuardRoute,
     strength: Float,
     diagnostics: MemoryTrackerScope?,
     operation: ModelOperationContext,
 ): FlareGuardApplyResult {
-    require(algorithmMode != AlgorithmMode.V1)
+    require(algorithmMode != FlareGuardRoute.V1)
     operation.validateOrThrow()
+    val pipelinePlan = FlareGuardV2.plan(source.width, source.height)
+    if (!BitmapMemoryBudget.canAllocate(pipelinePlan.knownTransientBytes)) {
+        throw BitmapAllocationRejectedException(pipelinePlan.knownTransientBytes)
+    }
     val sourcePixels = IntArray(checkedPixelCount(source.width, source.height))
     val sourceTransient =
         diagnostics?.trackTransientBytes(
@@ -697,7 +876,7 @@ internal fun applyExperimentalFlareGuardV2(
     var runner: FlareGuardModelRunner? = null
     try {
         source.getPixels(sourcePixels, 0, source.width, 0, 0, source.width, source.height)
-        if (algorithmMode == AlgorithmMode.ModelAssistedV2) {
+        if (algorithmMode == FlareGuardRoute.V2ModelAssisted) {
             when (val loaded = FlareGuardModelRunner.create(context)) {
                 is ModelLoadResult.Ready -> {
                     runner = loaded.runner
@@ -796,12 +975,15 @@ internal fun applyExperimentalFlareGuardV2(
             operation.validateOrThrow()
             return FlareGuardApplyResult(
                 tracked,
-                if (processed.usedModelMask) {
+                if (processed.decision == FlareGuardV2Decision.ModelRuleFused ||
+                    processed.decision == FlareGuardV2Decision.ModelAccepted
+                ) {
                     FlareGuardRuntimeStatus.ExperimentalV2Model
                 } else {
                     FlareGuardRuntimeStatus.ExperimentalV2Rule
                 },
                 fallbackReason,
+                processed.decision,
             )
         } catch (failure: Throwable) {
             tracked.recycleAndRelease()
@@ -822,8 +1004,7 @@ internal fun renderExperimentalRemasterV2(
 ): Bitmap {
     operation.validateOrThrow()
     val plan = RemasterV2.plan(source.width, source.height)
-    val outputBytes = BitmapMemoryBudget.bytes(source.width, source.height)
-    val required = BitmapMemoryBudget.saturatingAdd(plan.knownTransientBytes, outputBytes)
+    val required = plan.knownTransientBytes
     if (!BitmapMemoryBudget.canAllocate(required)) {
         throw BitmapAllocationRejectedException(required)
     }

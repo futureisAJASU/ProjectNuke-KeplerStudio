@@ -3451,7 +3451,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val quickEffects = current.activeQuickEffects
         val appContext = context.applicationContext
         val documentGeneration = historyCoordinator.currentGeneration()
-        val flareAlgorithm = ExperimentalAlgorithmController.current().flareGuard
+        val flareAlgorithm = ExperimentalLabController.snapshot().flareGuard
         updateUiStateAndRecycleReplaced {
             it.copy(
                 isBusy = true,
@@ -3499,7 +3499,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 isCancelled = { inferenceJob?.isActive == false },
                             )
                         val r =
-                            if (flareAlgorithm == AlgorithmMode.V1) {
+                            if (flareAlgorithm == FlareGuardRoute.V1 ||
+                                flareAlgorithm == FlareGuardRoute.ForcedV1Fallback
+                            ) {
                                 applyFlareGuardModelOrRuleResultV0(
                                     appContext,
                                     checkNotNull(ownedBaseOwned),
@@ -5401,17 +5403,14 @@ internal suspend fun renderEditedPreview(
 ): Bitmap {
     var working: Bitmap? = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     return try {
-        renderBitmapInNative(checkNotNull(working), params, engines, revision, look)
-        val mode = ExperimentalAlgorithmController.current().nativeCorrections
-        val legacyEffects =
-            if (mode == AlgorithmMode.V1) quickEffects
-            else quickEffects.filter { it.kind == QuickEffectKind.SoftBlur }
-        applyActiveQuickEffectsToBitmap(checkNotNull(working), legacyEffects, revision)
+        val plan =
+            RenderPipelinePlanner.create(ExperimentalLabController.snapshot(), params, quickEffects)
+        renderBitmapInNative(checkNotNull(working), plan.v1Params, engines, revision, look)
+        applyActiveQuickEffectsToBitmap(checkNotNull(working), plan.v1QuickEffects, revision)
         val corrected =
             applyExperimentalNativeCorrections(
                 checkNotNull(working),
-                params,
-                quickEffects,
+                plan,
             )
         if (corrected !== working) {
             working?.takeUnless(Bitmap::isRecycled)?.recycle()
@@ -5431,6 +5430,7 @@ internal suspend fun applyActiveQuickEffectsToBitmap(
     bitmap: Bitmap,
     quickEffects: List<ActiveQuickEffect>,
     revision: Int,
+    diagnostics: MemoryTrackerScope? = null,
 ) {
     quickEffects.forEach { effect ->
         effect.toNativeOperations().forEach { operation ->
@@ -5440,6 +5440,7 @@ internal suspend fun applyActiveQuickEffectsToBitmap(
                     effect = operation.effect,
                     strength = operation.strength.coerceIn(0f, 1f),
                     revision = revision,
+                    diagnostics = diagnostics,
                 )
             if (result < 0) {
                 throw IllegalStateException(
@@ -5494,17 +5495,14 @@ private suspend fun renderEditedExport(
         decoded =
             decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE, diagnostics)
         working = decoded
-        renderBitmapInNative(checkNotNull(working), params, engines, revision, look)
-        val mode = ExperimentalAlgorithmController.current().nativeCorrections
-        val legacyEffects =
-            if (mode == AlgorithmMode.V1) quickEffects
-            else quickEffects.filter { it.kind == QuickEffectKind.SoftBlur }
-        applyActiveQuickEffectsToBitmap(checkNotNull(working), legacyEffects, revision)
+        val plan =
+            RenderPipelinePlanner.create(ExperimentalLabController.snapshot(), params, quickEffects)
+        renderBitmapInNative(checkNotNull(working), plan.v1Params, engines, revision, look, diagnostics)
+        applyActiveQuickEffectsToBitmap(checkNotNull(working), plan.v1QuickEffects, revision, diagnostics)
         val corrected =
             applyExperimentalNativeCorrections(
                 checkNotNull(working),
-                params,
-                quickEffects,
+                plan,
                 diagnostics,
             )
         if (corrected !== working) {
@@ -5542,17 +5540,14 @@ private suspend fun renderEditedExportFromBitmap(
     var scaled: Bitmap? = null
     try {
         val renderTarget = checkNotNull(working)
-        renderBitmapInNative(renderTarget, params, engines, revision, look)
-        val mode = ExperimentalAlgorithmController.current().nativeCorrections
-        val legacyEffects =
-            if (mode == AlgorithmMode.V1) quickEffects
-            else quickEffects.filter { it.kind == QuickEffectKind.SoftBlur }
-        applyActiveQuickEffectsToBitmap(renderTarget, legacyEffects, revision)
+        val plan =
+            RenderPipelinePlanner.create(ExperimentalLabController.snapshot(), params, quickEffects)
+        renderBitmapInNative(renderTarget, plan.v1Params, engines, revision, look, diagnostics)
+        applyActiveQuickEffectsToBitmap(renderTarget, plan.v1QuickEffects, revision, diagnostics)
         val corrected =
             applyExperimentalNativeCorrections(
                 renderTarget,
-                params,
-                quickEffects,
+                plan,
                 diagnostics,
             )
         if (corrected !== renderTarget) {
@@ -5575,35 +5570,10 @@ private suspend fun renderEditedExportFromBitmap(
 
 private suspend fun applyExperimentalNativeCorrections(
     source: Bitmap,
-    params: EditParams,
-    quickEffects: List<ActiveQuickEffect>,
+    plan: RenderPipelinePlan,
     diagnostics: MemoryTrackerScope? = null,
 ): Bitmap {
-    if (ExperimentalAlgorithmController.current().nativeCorrections == AlgorithmMode.V1) {
-        return source
-    }
-    fun has(kind: QuickEffectKind): Boolean = quickEffects.any { it.kind == kind }
-    val correctionParams =
-        NativeCorrectionV2Params(
-            detail = max(params.sharpness, params.clarity).coerceIn(0f, 1f),
-            luminanceNoise = params.luminanceNoiseReduction.coerceIn(0f, 1f),
-            chromaNoise = params.colorNoiseReduction.coerceIn(0f, 1f),
-            highlightProtection = 0.72f,
-            shadowProtection =
-                (0.55f + params.luminanceNoiseReduction.coerceIn(0f, 1f) * 0.35f)
-                    .coerceIn(0f, 1f),
-            chromaticAberration =
-                if (
-                    has(QuickEffectKind.ChromaticAberrationReduction) ||
-                        has(QuickEffectKind.OpticsCorrection)
-                ) 0.62f else 0f,
-            vignette =
-                if (
-                    has(QuickEffectKind.VignetteCorrection) ||
-                        has(QuickEffectKind.OpticsCorrection)
-                ) 0.45f else 0f,
-            spotCleanup = if (has(QuickEffectKind.SpotCleanup)) 0.58f else 0f,
-        )
+    val correctionParams = plan.v2Params ?: return source
     val destination =
         createBitmapOrThrow(source.width, source.height, Bitmap.Config.ARGB_8888)
     val edge = diagnostics?.track(destination, "nativeCorrectionsV2:transactionalDestination") ?: 0L
@@ -5632,6 +5602,7 @@ private suspend fun renderBitmapInNative(
     engines: EngineSelection,
     revision: Int,
     look: PresetColorLook? = null,
+    diagnostics: MemoryTrackerScope? = null,
 ): Int {
     val result =
         NativePhotoCore.nativeRenderPreviewInPlace(
@@ -5659,6 +5630,7 @@ private suspend fun renderBitmapInNative(
             engines.hazeEngine.nativeId,
             revision,
             look,
+            diagnostics,
         )
     if (result < 0) {
         throw IllegalStateException("native render failed: code=$result")

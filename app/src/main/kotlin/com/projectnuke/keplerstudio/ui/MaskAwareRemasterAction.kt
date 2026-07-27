@@ -2,19 +2,20 @@ package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
-import com.projectnuke.keplerstudio.editor.AlgorithmMode
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
-import com.projectnuke.keplerstudio.editor.ExperimentalAlgorithmController
+import com.projectnuke.keplerstudio.editor.ExperimentalLabController
+import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
+import com.projectnuke.keplerstudio.editor.analyzeManualMask
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
@@ -33,13 +34,24 @@ import kotlinx.coroutines.withContext
 fun EditorViewModel.applyMaskAwareRemaster() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-    val remasterAlgorithm = ExperimentalAlgorithmController.current().remaster
+    val remasterAlgorithm = ExperimentalLabController.snapshot().remaster
     val stateAtEntry = uiState.value
-    val modelAvailable =
+    val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
             RemasterModelSession.isModelLoaded
+    val modelAvailable =
+        modelLoaded &&
+            remasterAlgorithm in
+                setOf(
+                    RemasterRoute.V1,
+                    RemasterRoute.V2ModelAssisted,
+                    RemasterRoute.ForcedV1Fallback,
+                    RemasterRoute.Compare,
+                )
     val manualMaskAtEntry =
-        if (remasterAlgorithm == AlgorithmMode.V1) {
+        if (remasterAlgorithm == RemasterRoute.V1 ||
+            remasterAlgorithm == RemasterRoute.ForcedV1Fallback
+        ) {
             null
         } else {
             stateAtEntry.selectionLayers
@@ -149,17 +161,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                                 checkNotNull(ownedManualMaskOwned).also {
                                     ownedManualMaskOwned = null
                                 }
-                            val confidence =
-                                com.projectnuke.keplerstudio.editor.ModelConfidence(
-                                    wholeImageMean = 1f,
-                                    peak = 1f,
-                                    activeRegionMean = 1f,
-                                    activeRegionPercentile = 1f,
-                                    affectedAreaRatio = 1f,
-                                    backgroundLeakage = 0f,
-                                    modelProvided = null,
-                                    finalPolicy = 1f,
-                                )
+                            val confidence = analyzeManualMask(manual)
                             ModelRunResult.Success(
                                 com.projectnuke.keplerstudio.editor.TrackedMask.acquire(
                                     bitmap = manual,
@@ -180,7 +182,9 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                             ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
                     val created =
                         try {
-                            if (remasterAlgorithm == AlgorithmMode.V1) {
+                            if (remasterAlgorithm == RemasterRoute.V1 ||
+                                remasterAlgorithm == RemasterRoute.ForcedV1Fallback
+                            ) {
                                 renderMaskAwareRemaster(
                                     basePreview = createdBase,
                                     mask = mask.bitmap,
