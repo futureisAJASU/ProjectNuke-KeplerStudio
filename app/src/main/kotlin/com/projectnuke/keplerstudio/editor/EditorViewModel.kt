@@ -16,6 +16,7 @@ import android.util.Log
 import androidx.heifwriter.HeifWriter
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.projectnuke.keplerstudio.BuildConfig
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.bridge.NativeCorrectionV2Params
 import com.projectnuke.keplerstudio.bridge.NativeScratchPlanner
@@ -604,7 +605,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun applyCorrectionEngineToCurrentDocument(engine: CorrectionEngine) {
-        if (shuttingDown || engine == _uiState.value.correctionEngineState.documentEngine) return
+        if (shuttingDown) return
         prepareForMaskInteraction()
         invalidateSelectionPreview()
         invalidateCropOperation()
@@ -638,7 +639,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     else "Rerendering with ${engine.displayName}",
             )
         }
-        val liveBase = before.originalPreviewBitmap ?: before.previewBitmap ?: return
+        val liveBase = before.originalPreviewBitmap ?: before.previewBitmap
+        if (liveBase == null) {
+            updateUiState {
+                if (it.revision == nextRevision && correctionEngineEpoch == identity.engineEpoch) {
+                    it.copy(
+                        isBusy = false,
+                        correctionEngineState =
+                            it.correctionEngineState.copy(
+                                documentEngine = it.correctionEngineState.defaultEngine,
+                                previewEngine = null,
+                                pendingEngine = null,
+                                decision = CorrectionRenderDecision.NoDocument,
+                            ),
+                    )
+                } else it
+            }
+            return
+        }
         val ownedBase =
             runCatching { liveBase.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
                 .getOrElse {
@@ -659,17 +677,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         launchManagedRenderWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
             try {
+                val switchState =
+                    before.copy(
+                        correctionEngineState =
+                            before.correctionEngineState.copy(documentEngine = engine)
+                    )
                 rendered =
                     withContext(Dispatchers.Default) {
-                        renderEditedPreview(
-                            ownedBase,
-                            before.params,
-                            before.engineSelection(),
-                            nextRevision,
-                            before.presetLook,
-                            before.activeQuickEffects,
-                            before.renderRouting(),
-                        )
+                        if (before.selectionLayers.any { it.enabled }) {
+                            renderBitmapWithSelectionLayers(ownedBase, switchState, nextRevision)
+                        } else {
+                            renderEditedPreview(
+                                ownedBase,
+                                before.params,
+                                before.engineSelection(),
+                                nextRevision,
+                                before.presetLook,
+                                before.activeQuickEffects,
+                                switchState.renderRouting(),
+                            )
+                        }
                     }
                 val current = _uiState.value
                 val canAdopt =
@@ -718,15 +745,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     try {
                         rendered =
                             withContext(Dispatchers.Default) {
-                                renderEditedPreview(
-                                    ownedBase,
-                                    before.params,
-                                    before.engineSelection(),
-                                    nextRevision,
-                                    before.presetLook,
-                                    before.activeQuickEffects,
-                                    routingForCorrectionEngine(CorrectionEngine.Engine1),
-                                )
+                                val fallbackState =
+                                    before.copy(
+                                        correctionEngineState =
+                                            before.correctionEngineState.copy(
+                                                documentEngine = CorrectionEngine.Engine1,
+                                                previewEngine = CorrectionEngine.Engine1,
+                                            )
+                                    )
+                                if (before.selectionLayers.any { it.enabled }) {
+                                    renderBitmapWithSelectionLayers(ownedBase, fallbackState, nextRevision)
+                                } else {
+                                    renderEditedPreview(
+                                        ownedBase,
+                                        before.params,
+                                        before.engineSelection(),
+                                        nextRevision,
+                                        before.presetLook,
+                                        before.activeQuickEffects,
+                                        routingForCorrectionEngine(CorrectionEngine.Engine1),
+                                    )
+                                }
                             }
                         val fallbackState = _uiState.value
                         if (
@@ -796,6 +835,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 ownedBase.takeUnless(Bitmap::isRecycled)?.recycle()
             }
         })
+    }
+
+    /** Applies a debug-only feature route and rerenders the current document through the normal path. */
+    fun updateExperimentalLab(transform: (ExperimentalLabSelection) -> ExperimentalLabSelection) {
+        if (shuttingDown || !BuildConfig.DEBUG) return
+        val before = ExperimentalLabController.snapshot()
+        ExperimentalLabController.updateDebug(transform)
+        if (before == ExperimentalLabController.snapshot()) return
+        _uiState.value.correctionEngineState.documentEngine?.let(::applyCorrectionEngineToCurrentDocument)
     }
 
     internal fun isManagedEditTokenCurrent(token: Long): Boolean =
@@ -1728,6 +1776,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             it.copy(isBusy = true, revision = invalidateRevision, message = openingMessage)
         }
+        ExperimentalComparisonStore.clear()
         viewModelScope.launch {
             var preview: Bitmap? = null
             var createdSession = 0L
@@ -4361,6 +4410,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         nextRevision,
                         presetLook,
                         activeQuickEffects,
+                        routingForCorrectionEngine(CorrectionEngine.Engine1),
                     )
                 rendered = result
                 restoreTracker?.track(result, "restoreLegacyDraft:rendered")

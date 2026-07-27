@@ -15,6 +15,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +34,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -60,6 +62,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.BuildConfig
@@ -253,6 +256,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         onHazeEngineSelected = viewModel::setHazeEngine,
                         onDefaultCorrectionEngineSelected = viewModel::setDefaultCorrectionEngine,
                         onApplyCorrectionEngine = viewModel::applyCorrectionEngineToCurrentDocument,
+                        onExperimentalLabChanged = viewModel::updateExperimentalLab,
                         onClearDraft = viewModel::clearDraft,
                         onDismissRecoveryDebugCard = viewModel::dismissRecoveryDebugCard,
                         onCleanupOldTemporarySources = viewModel::cleanupOldTemporarySources,
@@ -351,7 +355,11 @@ private fun V2TopBar(
     Column(
         modifier = Modifier.fillMaxWidth().background(V2TopBarBackground).statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("Kepler Studio", color = V2TextPrimary, style = MaterialTheme.typography.titleMedium, maxLines = 1)
                 Text(
@@ -370,7 +378,7 @@ private fun V2TopBar(
             TextButton(onClick = onReset, enabled = hasImage && !isBusy) { Text("초기화") }
             TextButton(onClick = onSave, enabled = canExport && !isBusy) { Text("저장") }
             }
-            Button(onClick = onOpen, enabled = !isBusy, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
+            Button(onClick = onOpen, enabled = editorActionsVisible && !isBusy, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
                 Text("사진")
             }
         }
@@ -813,6 +821,7 @@ private fun V2SettingsScreen(
     onHazeEngineSelected: (DehazeEngine) -> Unit,
     onDefaultCorrectionEngineSelected: (CorrectionEngine) -> Unit,
     onApplyCorrectionEngine: (CorrectionEngine) -> Unit,
+    onExperimentalLabChanged: ((ExperimentalLabSelection) -> ExperimentalLabSelection) -> Unit,
     onClearDraft: () -> Unit,
     onDismissRecoveryDebugCard: () -> Unit,
     onCleanupOldTemporarySources: () -> Unit,
@@ -837,6 +846,14 @@ private fun V2SettingsScreen(
                 },
                 onDefaultCorrectionEngineSelected,
             )
+            CorrectionEngine.entries.forEach { engine ->
+                CorrectionEngineCard(
+                    engine = engine,
+                    selected = correctionEngineState.defaultEngine == engine,
+                    enabled = !correctionEngineState.isSwitching,
+                    onClick = { onDefaultCorrectionEngineSelected(engine) },
+                )
+            }
             Text(
                 engineSettingsStatus(correctionEngineState),
                 color =
@@ -852,7 +869,7 @@ private fun V2SettingsScreen(
                 ) { Text("현재 사진에 적용") }
             }
         }
-        if (BuildConfig.DEBUG) ExperimentalLabSettingsCard(experimental, comparison)
+        if (BuildConfig.DEBUG) ExperimentalLabSettingsCard(experimental, comparison, onExperimentalLabChanged)
         if (showRecoveryDebugCard && recoveryDebugInfo != null) {
             V2SettingsCard("복구 확인") {
                 Text("draft_source: ${recoveryDebugInfo.draftSourcePath ?: "없음"}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
@@ -884,9 +901,40 @@ private fun V2SettingsScreen(
 }
 
 @Composable
+private fun CorrectionEngineCard(
+    engine: CorrectionEngine,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick),
+        color = if (selected) V2SelectedMenuBackground else V2CardBackground,
+    ) {
+        Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            RadioButton(selected = selected, onClick = null, enabled = enabled)
+            Column(modifier = Modifier.padding(start = 8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(engine.displayName, color = V2TextPrimary, fontWeight = FontWeight.SemiBold)
+                    if (engine.experimental) Text("Experimental", color = Color(0xFFFFC857), style = MaterialTheme.typography.labelSmall)
+                }
+                Text(
+                    if (engine == CorrectionEngine.Engine1) "안정적인 기본 보정 파이프라인" else "실험적 보정 파이프라인(검토 중)",
+                    color = V2TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ExperimentalLabSettingsCard(
     selection: ExperimentalLabSelection,
     comparison: com.projectnuke.keplerstudio.editor.DebugComparisonArtifact?,
+    onSelectionChanged: ((ExperimentalLabSelection) -> ExperimentalLabSelection) -> Unit,
 ) {
     V2SettingsCard("Experimental Lab") {
         Text(
@@ -895,13 +943,13 @@ private fun ExperimentalLabSettingsCard(
             style = MaterialTheme.typography.bodySmall,
         )
         V2OptionRow("Native render", NativeRenderRoute.entries.filterNot { it == NativeRenderRoute.Compare }, selection.nativeRender, { it.name }) {
-            value -> ExperimentalLabController.updateDebug { it.copy(nativeRender = value) }
+            value -> onSelectionChanged { it.copy(nativeRender = value) }
         }
         V2OptionRow("FlareGuard", FlareGuardRoute.entries.filterNot { it == FlareGuardRoute.Compare }, selection.flareGuard, { it.name }) {
-            value -> ExperimentalLabController.updateDebug { it.copy(flareGuard = value) }
+            value -> onSelectionChanged { it.copy(flareGuard = value) }
         }
         V2OptionRow("Remaster", RemasterRoute.entries.filterNot { it == RemasterRoute.Compare }, selection.remaster, { it.name }) {
-            value -> ExperimentalLabController.updateDebug { it.copy(remaster = value) }
+            value -> onSelectionChanged { it.copy(remaster = value) }
         }
         V2OptionRow(
             "Subject Selection",
@@ -909,7 +957,7 @@ private fun ExperimentalLabSettingsCard(
             selection.subjectSelection,
             { it.name },
         ) { value ->
-            ExperimentalLabController.updateDebug { it.copy(subjectSelection = value) }
+            onSelectionChanged { it.copy(subjectSelection = value) }
         }
         comparison?.let { artifact ->
             val bitmaps =

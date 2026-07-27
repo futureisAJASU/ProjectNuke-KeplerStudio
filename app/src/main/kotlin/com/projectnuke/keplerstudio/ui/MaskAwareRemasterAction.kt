@@ -21,6 +21,7 @@ import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
+import com.projectnuke.keplerstudio.editor.renderRouting
 import com.projectnuke.keplerstudio.editor.renderExperimentalRemasterV2
 import kotlin.math.max
 import kotlin.math.min
@@ -216,6 +217,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                             revision = nextRevision,
                             look = presetLook,
                             quickEffects = quickEffects,
+                            routingSelection = current.renderRouting(),
                         )
                     renderedPreview = created
                     remasterTracker?.track(created, "remaster:preview")

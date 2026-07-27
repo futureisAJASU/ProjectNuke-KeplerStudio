@@ -17,6 +17,7 @@ import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
+import com.projectnuke.keplerstudio.editor.renderRouting
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -129,6 +130,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                             revision = nextRevision,
                             look = presetLook,
                             quickEffects = quickEffects,
+                            routingSelection = current.renderRouting(),
                         )
                     renderedPreview = result
                     bakeTracker?.track(result, "selectionBake:preview")

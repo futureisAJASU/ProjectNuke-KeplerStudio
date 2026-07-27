@@ -26,6 +26,7 @@ import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
+import com.projectnuke.keplerstudio.editor.renderRouting
 import com.projectnuke.keplerstudio.editor.refineTrackedSubjectSelectionV2
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -515,6 +516,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                         revision = nextRevision,
                         look = state.presetLook,
                         quickEffects = state.activeQuickEffects,
+                        routingSelection = state.renderRouting(),
                     )
                 }
             selectionTracker?.track(checkNotNull(renderedPreview), "selectionEdit:preview")
