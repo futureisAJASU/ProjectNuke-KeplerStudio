@@ -77,12 +77,38 @@ internal sealed class HistoryNavigationResult {
     data class Busy(val flags: HistoryFlags) : HistoryNavigationResult()
 }
 
+/**
+ * Production-used persistence boundary for the history coordinator.
+ *
+ * Tests can deterministically suspend or fail individual storage stages without duplicating
+ * coordinator ownership logic. The filesystem implementation below is the production backend.
+ */
+internal interface HistoryStorageBackend {
+    fun registerSession(sessionId: String)
+    fun unregisterSession(sessionId: String)
+    suspend fun initializeSession(sessionId: String)
+    suspend fun publish(entry: EditorHistoryEntry, snapshot: EditorHistorySnapshot): ColdHistoryPayload?
+    suspend fun load(
+        entry: EditorHistoryEntry,
+        expectedGeneration: String,
+        register: (EditorHistorySnapshot) -> Unit,
+    ): EditorHistorySnapshot?
+    suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long?
+    suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): DeletionResult
+    suspend fun delete(entry: EditorHistoryEntry): Boolean
+    suspend fun delete(payload: ColdHistoryPayload): Boolean
+    suspend fun deletePayloads(payloads: Collection<ColdHistoryPayload>): DeletionResult
+    suspend fun deleteSession(sessionId: String): Boolean
+}
+
 internal class EditorHistoryCoordinator(
     context: Context,
     private val scope: CoroutineScope,
     private val tracker: TrackerSession? = null,
     settlementDispatcher: CoroutineDispatcher = Dispatchers.Main.immediate,
-    private val storage: EditorHistoryStorage = EditorHistoryStorage(context.applicationContext),
+    private val storage: HistoryStorageBackend = EditorHistoryStorage(context.applicationContext),
+    private val historyRamBudgetBytes: () -> Long = BitmapMemoryBudget::historyBudgetBytes,
+    private val historyDiskBudgetBytes: () -> Long = BitmapMemoryBudget::historyDiskBudgetBytes,
 ) {
     /** Detached settlement survives viewModelScope cancellation and owns all lifecycle IO. */
     private val settlementScope = CoroutineScope(SupervisorJob() + settlementDispatcher)
@@ -222,9 +248,9 @@ internal class EditorHistoryCoordinator(
         try {
             val snapshotBytes = snapshot.bitmapBytes()
             moved = spillUntilFits(snapshotBytes, emptySet(), token, generation)
-            if (isOperationCurrent(token, generation) && (fitsWith(snapshotBytes) || snapshotBytes > BitmapMemoryBudget.historyBudgetBytes())) {
+            if (isOperationCurrent(token, generation) && (fitsWith(snapshotBytes) || snapshotBytes > historyRamBudgetBytes())) {
                 val admittedEntry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
-                if (snapshotBytes > BitmapMemoryBudget.historyBudgetBytes()) {
+                if (snapshotBytes > historyRamBudgetBytes()) {
                     val published = storage.publish(admittedEntry, snapshot)
                     if (published != null && isOperationCurrent(token, generation)) {
                         admittedEntry.coldPayload = published
@@ -280,7 +306,7 @@ internal class EditorHistoryCoordinator(
             return null
         }
         val snapshotBytes = snapshot.bitmapBytes()
-        if (snapshotBytes <= BitmapMemoryBudget.historyBudgetBytes()) {
+        if (snapshotBytes <= historyRamBudgetBytes()) {
             return null // not oversized
         }
         val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
@@ -386,7 +412,7 @@ internal class EditorHistoryCoordinator(
 
             // Handle oversized current snapshot: publish directly to cold storage
             val currentSnapshotBytes = currentSnapshot!!.bitmapBytes()
-            if (currentSnapshotBytes > BitmapMemoryBudget.historyBudgetBytes()) {
+            if (currentSnapshotBytes > historyRamBudgetBytes()) {
                 currentEntry = admitOversizedCurrentSnapshot(currentSnapshot, token, generation)
                 if (currentEntry == null) {
                     return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
@@ -603,7 +629,7 @@ internal class EditorHistoryCoordinator(
                         superseded = true
                     } else {
                         // Physical disk budget includes retained stack cold bytes + remaining debt.
-                        diskBudgetSatisfied = totalColdDiskBytes() <= BitmapMemoryBudget.historyDiskBudgetBytes()
+                        diskBudgetSatisfied = totalColdDiskBytes() <= historyDiskBudgetBytes()
                     }
                 }
             }
@@ -764,7 +790,7 @@ internal class EditorHistoryCoordinator(
     }
 
     private suspend fun rebalanceHot(reserveBytes: Long, token: Long, generation: String): Boolean {
-        val target = (BitmapMemoryBudget.historyBudgetBytes() - reserveBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
+        val target = (historyRamBudgetBytes() - reserveBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
         var moved = false
         while (isOperationCurrent(token, generation) && hotBytes() > target) {
             val recentUndo = undo.lastOrNull()?.id
@@ -846,7 +872,7 @@ internal class EditorHistoryCoordinator(
         generation: String
     ): TrimResult {
         var total = totalColdDiskBytes()
-        val budget = BitmapMemoryBudget.historyDiskBudgetBytes()
+        val budget = historyDiskBudgetBytes()
         if (total <= budget) return TrimResult.Satisfied
         if (diagnosticRecoveryMode != null) {
             diagnosticOperationKind = TrackerSession.HistoryOperationKind.Recovery
@@ -914,12 +940,12 @@ internal class EditorHistoryCoordinator(
     }
 
     private fun fitsWith(requiredBytes: Long): Boolean =
-        requiredBytes <= BitmapMemoryBudget.historyBudgetBytes() &&
-            BitmapMemoryBudget.saturatingAdd(hotBytes(), requiredBytes) <= BitmapMemoryBudget.historyBudgetBytes()
+        requiredBytes <= historyRamBudgetBytes() &&
+            BitmapMemoryBudget.saturatingAdd(hotBytes(), requiredBytes) <= historyRamBudgetBytes()
 
     private fun fitsAfterReplacingTarget(snapshot: EditorHistorySnapshot, target: EditorHistoryEntry): Boolean {
         val withoutTarget = (hotBytes() - target.hotResidentBytes()).coerceAtLeast(0L)
-        return BitmapMemoryBudget.saturatingAdd(withoutTarget, snapshot.bitmapBytes()) <= BitmapMemoryBudget.historyBudgetBytes()
+        return BitmapMemoryBudget.saturatingAdd(withoutTarget, snapshot.bitmapBytes()) <= historyRamBudgetBytes()
     }
 
     private fun hotBytes(): Long {
@@ -1036,18 +1062,18 @@ internal class EditorHistoryCoordinator(
 internal class EditorHistoryStorage(
     context: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-) {
+) : HistoryStorageBackend {
     private val root = File(context.filesDir, "editor_history_v3")
 
-    fun registerSession(sessionId: String) {
+    override fun registerSession(sessionId: String) {
         activeSessions += sessionId
     }
 
-    fun unregisterSession(sessionId: String) {
+    override fun unregisterSession(sessionId: String) {
         activeSessions -= sessionId
     }
 
-    suspend fun initializeSession(sessionId: String) = withContext(ioDispatcher) {
+    override suspend fun initializeSession(sessionId: String): Unit = withContext(ioDispatcher) {
         root.mkdirs()
         sessionDirectory(sessionId).mkdirs()
         root.listFiles()?.filter(File::isDirectory)?.forEach { directory ->
@@ -1059,9 +1085,10 @@ internal class EditorHistoryStorage(
                 }?.forEach(File::deleteRecursively)
             }
         }
+        Unit
     }
 
-    suspend fun publish(entry: EditorHistoryEntry, snapshot: EditorHistorySnapshot): ColdHistoryPayload? = withContext(ioDispatcher) {
+    override suspend fun publish(entry: EditorHistoryEntry, snapshot: EditorHistorySnapshot): ColdHistoryPayload? = withContext(ioDispatcher) {
         val session = sessionDirectory(entry.documentGeneration)
         if (!isSafeId(entry.id) || !isSafeId(entry.documentGeneration)) return@withContext null
         session.mkdirs()
@@ -1090,7 +1117,7 @@ internal class EditorHistoryStorage(
         }
     }
 
-    suspend fun load(
+    override suspend fun load(
         entry: EditorHistoryEntry,
         expectedGeneration: String,
         register: (EditorHistorySnapshot) -> Unit
@@ -1153,7 +1180,7 @@ internal class EditorHistoryStorage(
         }
     }
 
-    suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long? = withContext(ioDispatcher) {
+    override suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long? = withContext(ioDispatcher) {
         runCatching {
             val payload = checkNotNull(entry.coldPayload)
             val directory = payload.directory
@@ -1174,7 +1201,7 @@ internal class EditorHistoryStorage(
      *  Every entry is attempted independently — a single failure does not skip remaining entries.
      *  Ownership-validation failure returns the payload as failed without deleting the path.
      *  Per-payload exceptions are caught and returned as deletion failures; all entries are attempted. */
-    suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): DeletionResult = withContext(ioDispatcher) {
+    override suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): DeletionResult = withContext(ioDispatcher) {
         val failed = ArrayList<ColdHistoryPayload>()
         for (entry in entries) {
             val payload = entry.coldPayload ?: continue
@@ -1187,18 +1214,18 @@ internal class EditorHistoryStorage(
         DeletionResult(failed.isEmpty(), failed)
     }
 
-    suspend fun delete(entry: EditorHistoryEntry): Boolean = withContext(ioDispatcher) {
+    override suspend fun delete(entry: EditorHistoryEntry): Boolean = withContext(ioDispatcher) {
         val payload = entry.coldPayload ?: return@withContext true
         try { deleteInternal(payload) } catch (_: Throwable) { false }
     }
 
-    suspend fun delete(payload: ColdHistoryPayload): Boolean = withContext(ioDispatcher) {
+    override suspend fun delete(payload: ColdHistoryPayload): Boolean = withContext(ioDispatcher) {
         try { deleteInternal(payload) } catch (_: Throwable) { false }
     }
 
     /** Returns the result of batch cold-payload deletion by payload reference.
      *  Per-payload exceptions are caught and returned as deletion failures; all payloads are attempted. */
-    suspend fun deletePayloads(payloads: Collection<ColdHistoryPayload>): DeletionResult = withContext(ioDispatcher) {
+    override suspend fun deletePayloads(payloads: Collection<ColdHistoryPayload>): DeletionResult = withContext(ioDispatcher) {
         val failed = ArrayList<ColdHistoryPayload>()
         for (payload in payloads) {
             try {
@@ -1211,7 +1238,7 @@ internal class EditorHistoryStorage(
     }
 
     /** Returns true when the session directory is confirmed deleted or absent. */
-    suspend fun deleteSession(sessionId: String): Boolean = withContext(ioDispatcher) {
+    override suspend fun deleteSession(sessionId: String): Boolean = withContext(ioDispatcher) {
         val dir = sessionDirectory(sessionId).takeIf { isOwnedSessionDirectory(it, sessionId) } ?: return@withContext true
         dir.deleteRecursively() || !dir.exists()
     }

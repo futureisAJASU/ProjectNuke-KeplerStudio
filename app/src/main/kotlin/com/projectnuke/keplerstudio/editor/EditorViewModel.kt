@@ -2499,13 +2499,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 ) {
                                     return@withContext null
                                 }
-                                insertExportPendingRow(
-                                        context,
-                                        exportResult,
-                                        fileName,
-                                        exportFormat,
-                                    )
-                                    .also { pendingUri = it }
+                                val rows = AndroidExportRowStore(context)
+                                rows.insertPending(ExportRowRequest(fileName, exportFormat)).also {
+                                    pendingUri = it
+                                    rows.encode(it, exportResult, exportFormat)
+                                }
                             }
                         if (pendingUri == null) {
                             return@launch
@@ -5689,9 +5687,31 @@ private fun scaleBitmapForExport(
     }
 }
 
-private fun insertExportPendingRow(
+private class AndroidExportRowStore(
+    private val context: Context,
+) : ExportRowStore {
+    override suspend fun insertPending(request: ExportRowRequest): Uri =
+        withContext(Dispatchers.IO) {
+            createExportPendingRow(context, request.fileName, request.format)
+        }
+
+    override suspend fun encode(uri: Uri, bitmap: Bitmap, format: ExportFormat) {
+        withContext(Dispatchers.IO) {
+            encodeExportRow(context, uri, bitmap, format)
+        }
+    }
+
+    override suspend fun publish(uri: Uri) {
+        withContext(Dispatchers.IO) { publishExportRow(context, uri) }
+    }
+
+    override suspend fun delete(uri: Uri) {
+        withContext(Dispatchers.IO) { deletePendingExportRow(context, uri) }
+    }
+}
+
+private fun createExportPendingRow(
     context: Context,
-    bitmap: Bitmap,
     fileName: String,
     format: ExportFormat,
 ): Uri {
@@ -5709,16 +5729,19 @@ private fun insertExportPendingRow(
     val uri =
         resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             ?: error("저장 위치를 만들 수 없습니다")
-    try {
-        if (format == ExportFormat.Heif) {
-            writeHeifToUri(context, uri, bitmap)
-        } else {
-            writeCompressedBitmapToUri(context, uri, bitmap, format)
-        }
-        return uri
-    } catch (t: Throwable) {
-        runCatching { resolver.delete(uri, null, null) }
-        throw t
+    return uri
+}
+
+private fun encodeExportRow(
+    context: Context,
+    uri: Uri,
+    bitmap: Bitmap,
+    format: ExportFormat,
+) {
+    if (format == ExportFormat.Heif) {
+        writeHeifToUri(context, uri, bitmap)
+    } else {
+        writeCompressedBitmapToUri(context, uri, bitmap, format)
     }
 }
 
