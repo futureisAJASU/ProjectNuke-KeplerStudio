@@ -90,4 +90,54 @@ class QualityRegressionMetricsV2Test {
         assertTrue(artifact.compactMetricJson().contains("\"fixtureVersion\":\"generated-fixtures-v2\""))
         assertEquals(0.5f, artifact.metrics.changedPixelRatio)
     }
+
+    @Test
+    fun clippingFlatNoiseAndNeutralDriftAreSeparated() {
+        val baseline = IntArray(16) { 0xff808080.toInt() }
+        val clipped = baseline.copyOf().also {
+            it[0] = 0xffffffff.toInt()
+            it[1] = 0xff000000.toInt()
+        }
+        val chromaNoise =
+            IntArray(16) { index ->
+                if (index % 2 == 0) 0xff887888.toInt() else 0xff788878.toInt()
+            }
+
+        val clipping = QualityRegressionMetricsV2.compareArgb(baseline, clipped, 4, 4)
+        val noise = QualityRegressionMetricsV2.compareArgb(baseline, chromaNoise, 4, 4)
+
+        assertTrue(clipping.highlightClippingIncrease > 0f)
+        assertTrue(clipping.shadowClippingIncrease > 0f)
+        assertTrue(noise.flatRegionVariationIncrease > 0f)
+        assertTrue(noise.colorNeutralDrift > 0f)
+        assertTrue(noise.chromaMeanAbsoluteError > 0f)
+    }
+
+    @Test
+    fun overshootAndComponentLossAreReported() {
+        val baseline =
+            IntArray(25) { index ->
+                if (index % 5 < 2) 0xff303030.toInt() else 0xffc0c0c0.toInt()
+            }
+        val halo = baseline.copyOf().also {
+            for (y in 0 until 5) {
+                it[y * 5 + 1] = 0xff101010.toInt()
+                it[y * 5 + 2] = 0xfff0f0f0.toInt()
+            }
+        }
+        assertTrue(QualityRegressionMetricsV2.compareArgb(baseline, halo, 5, 5).localEdgeOvershoot > 0f)
+
+        val expected = BooleanArray(35)
+        for (y in 1..3) {
+            expected[y * 7 + 1] = true
+            expected[y * 7 + 5] = true
+        }
+        val lost = expected.copyOf()
+        for (y in 1..3) lost[y * 7 + 5] = false
+        val masks = QualityRegressionMetricsV2.compareMasks(expected, lost, 7, 5)
+        assertEquals(2, masks.expectedComponentCount)
+        assertEquals(1, masks.actualComponentCount)
+        assertTrue(masks.intersectionOverUnion < 1f)
+        assertTrue(masks.affectedAreaDrift < 0f)
+    }
 }
