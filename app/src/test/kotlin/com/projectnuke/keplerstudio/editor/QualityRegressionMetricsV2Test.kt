@@ -73,6 +73,7 @@ class QualityRegressionMetricsV2Test {
     fun debugArtifactIsExplicitAndContainsStableHeatmapAndJson() {
         val baseline = intArrayOf(0xff101010.toInt(), 0xff808080.toInt())
         val candidate = intArrayOf(0xff201010.toInt(), 0xff808080.toInt())
+        val mask = intArrayOf(0xffffffff.toInt(), 0xff000000.toInt())
 
         val artifact =
             QualityRegressionMetricsV2.debugArtifact(
@@ -81,9 +82,11 @@ class QualityRegressionMetricsV2Test {
                 candidate,
                 2,
                 1,
+                mask,
             )
 
         assertEquals(2, artifact.differenceHeatmapArgb.size)
+        assertTrue(artifact.maskArgb?.contentEquals(mask) == true)
         assertTrue(artifact.compactMetricJson().contains("\"fixtureVersion\":\"generated-fixtures-v2\""))
         assertEquals(0.5f, artifact.metrics.changedPixelRatio)
     }

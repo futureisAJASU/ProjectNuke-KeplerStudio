@@ -33,6 +33,7 @@ data class DebugComparisonArtifact(
     val fixtureVersion: String,
     val baselineArgb: IntArray,
     val experimentalArgb: IntArray,
+    val maskArgb: IntArray?,
     val differenceHeatmapArgb: IntArray,
     val metrics: ImageQualityMetricsV2,
 ) {
@@ -194,8 +195,10 @@ object QualityRegressionMetricsV2 {
         experimental: IntArray,
         width: Int,
         height: Int,
+        maskArgb: IntArray? = null,
     ): DebugComparisonArtifact {
         val metrics = compareArgb(baseline, experimental, width, height)
+        maskArgb?.let { require(it.size == baseline.size) }
         val heatmap =
             IntArray(baseline.size) { index ->
                 val before = baseline[index]
@@ -214,6 +217,7 @@ object QualityRegressionMetricsV2 {
             fixtureVersion,
             baseline.copyOf(),
             experimental.copyOf(),
+            maskArgb?.copyOf(),
             heatmap,
             metrics,
         )
