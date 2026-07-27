@@ -26,6 +26,7 @@ internal data class DraftGenerationManifest(
     val thumbnailWidth: Int,
     val thumbnailHeight: Int,
     val params: EditParams,
+    val correctionEngine: String,
     val noiseEngine: String,
     val detailEngine: String,
     val toneEngine: String,
@@ -55,6 +56,9 @@ internal data class DraftSelectionLayerEntry(
     val sourceIdentity: String
 )
 
+internal fun draftCorrectionEngine(value: String?): CorrectionEngine =
+    value?.let(CorrectionEngine::valueOf) ?: CorrectionEngine.Engine1
+
 internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("formatVersion", formatVersion)
     put("generationId", generationId)
@@ -72,6 +76,7 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("thumbnailWidth", thumbnailWidth)
     put("thumbnailHeight", thumbnailHeight)
     put("params", params.toJsonObject())
+    put("correctionEngine", correctionEngine)
     put("noiseEngine", noiseEngine)
     put("detailEngine", detailEngine)
     put("toneEngine", toneEngine)
@@ -183,6 +188,7 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         thumbnailWidth = json.requiredPositiveInt("thumbnailWidth"),
         thumbnailHeight = json.requiredPositiveInt("thumbnailHeight"),
         params = json.requiredEditParams("params"),
+        correctionEngine = draftCorrectionEngine(json.optionalString("correctionEngine")).name,
         noiseEngine = json.requiredEnum<NoiseEngine>("noiseEngine").name,
         detailEngine = json.requiredEnum<DetailEngine>("detailEngine").name,
         toneEngine = json.requiredEnum<ToneEngine>("toneEngine").name,

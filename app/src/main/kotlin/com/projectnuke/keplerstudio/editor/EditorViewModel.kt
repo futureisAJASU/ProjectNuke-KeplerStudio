@@ -73,6 +73,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     val brushPreviewEpoch: StateFlow<Long> = _brushPreviewEpoch.asStateFlow()
     private var nativeSession: Long = 0L
     private var renderJob: Job? = null
+    private val correctionEngineSettings = CorrectionEngineSettings(app.applicationContext)
+    @Volatile private var correctionEngineEpoch: Long = 0L
     private var exportJob: Job? = null
     private var exportToken: Long = 0L
     internal var selectionLivePreviewJob: Job? = null
@@ -121,6 +123,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var strongRetryAttempt: MemoryRetryDescriptor? = null
 
     init {
+        val persistedEngine = correctionEngineSettings.read()
+        ExperimentalLabController.selectGlobalEngine(persistedEngine)
+        _uiState.update {
+            it.copy(
+                correctionEngine = persistedEngine,
+                correctionEngineStatus = correctionEngineStatus(persistedEngine),
+            )
+        }
         BitmapMemoryBudget.initialize(app.applicationContext)
         ThumbnailBitmapCache.setByteBudget(BitmapMemoryBudget.thumbnailBudgetBytes())
         tracker.activateDocument(historyCoordinator.currentGeneration())
@@ -584,6 +594,171 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun isManagedEditCurrent(token: Long, revision: Int): Boolean =
         !shuttingDown && managedEdits.isCurrent(token) && _uiState.value.revision == revision
+
+    fun setCorrectionEngine(engine: CorrectionEngine) {
+        if (shuttingDown || engine == _uiState.value.correctionEngine) return
+        prepareForMaskInteraction()
+        invalidateSelectionPreview()
+        invalidateCropOperation()
+        correctionEngineSettings.write(engine)
+        ExperimentalLabController.selectGlobalEngine(engine)
+        correctionEngineEpoch += 1L
+        invalidateManagedEdits()
+        renderJob?.cancel()
+        renderJob = null
+        activeParamRenderRevision = null
+        invalidateExport()
+
+        val before = _uiState.value
+        val nextRevision = before.revision + 1
+        val identity =
+            CorrectionEngineOperationIdentity(
+                engineEpoch = correctionEngineEpoch,
+                documentGeneration = historyCoordinator.currentGeneration(),
+                baseContentToken = before.baseContentToken,
+                revision = nextRevision,
+            )
+        updateUiStateAndRecycleReplaced {
+            it.copy(
+                correctionEngine = engine,
+                correctionEngineStatus = correctionEngineStatus(engine),
+                revision = nextRevision,
+                isBusy = before.previewBitmap != null,
+                message =
+                    if (before.previewBitmap == null) correctionEngineStatus(engine)
+                    else "Rerendering with ${engine.displayName}",
+            )
+        }
+        val liveBase = before.originalPreviewBitmap ?: before.previewBitmap ?: return
+        val ownedBase =
+            runCatching { liveBase.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
+                .getOrElse {
+                    updateUiState {
+                        if (it.revision == nextRevision && correctionEngineEpoch == identity.engineEpoch)
+                            it.copy(isBusy = false, message = "Unable to prepare engine rerender")
+                        else it
+                    }
+                    return
+                }
+        launchManagedRenderWithPreparedResources({ operationToken ->
+            var rendered: Bitmap? = null
+            try {
+                rendered =
+                    withContext(Dispatchers.Default) {
+                        renderEditedPreview(
+                            ownedBase,
+                            before.params,
+                            before.engineSelection(),
+                            nextRevision,
+                            before.presetLook,
+                            before.activeQuickEffects,
+                        )
+                    }
+                val current = _uiState.value
+                val canAdopt =
+                    isManagedEditCurrent(operationToken, nextRevision) &&
+                        identity.matches(
+                            correctionEngineEpoch,
+                            historyCoordinator.currentGeneration(),
+                            current.baseContentToken,
+                            current.revision,
+                        ) &&
+                        current.correctionEngine == engine
+                if (canAdopt) {
+                    val adopted = checkNotNull(rendered)
+                    updateUiStateAndRecycleReplaced {
+                        it.copy(
+                            previewBitmap = adopted,
+                            isBusy = false,
+                            correctionEngineStatus = correctionEngineStatus(engine),
+                            message = "${engine.displayName} active",
+                        )
+                    }
+                    rendered = null
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                val current = _uiState.value
+                val stillCurrent =
+                    identity.matches(
+                        correctionEngineEpoch,
+                        historyCoordinator.currentGeneration(),
+                        current.baseContentToken,
+                        current.revision,
+                    )
+                if (engine == CorrectionEngine.Engine2 && stillCurrent) {
+                    try {
+                        rendered =
+                            withContext(Dispatchers.Default) {
+                                renderEditedPreview(
+                                    ownedBase,
+                                    before.params,
+                                    before.engineSelection(),
+                                    nextRevision,
+                                    before.presetLook,
+                                    before.activeQuickEffects,
+                                    ExperimentalLabSelection(),
+                                )
+                            }
+                        val fallbackState = _uiState.value
+                        if (
+                            isManagedEditCurrent(operationToken, nextRevision) &&
+                                identity.matches(
+                                    correctionEngineEpoch,
+                                    historyCoordinator.currentGeneration(),
+                                    fallbackState.baseContentToken,
+                                    fallbackState.revision,
+                                )
+                        ) {
+                            val adopted = checkNotNull(rendered)
+                            updateUiStateAndRecycleReplaced {
+                                it.copy(
+                                    previewBitmap = adopted,
+                                    isBusy = false,
+                                    correctionEngineStatus =
+                                        "Engine 2 selected; deterministic Engine 1 fallback active",
+                                    message = "Engine 2 unavailable; Engine 1 fallback rendered",
+                                )
+                            }
+                            rendered = null
+                        }
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Throwable) {
+                        updateUiState {
+                            if (
+                                identity.matches(
+                                    correctionEngineEpoch,
+                                    historyCoordinator.currentGeneration(),
+                                    it.baseContentToken,
+                                    it.revision,
+                                )
+                            ) {
+                                it.copy(
+                                    isBusy = false,
+                                    correctionEngineStatus =
+                                        "Engine 2 and deterministic fallback unavailable; document unchanged",
+                                    message = "Engine rerender failed: ${t.message}",
+                                )
+                            } else it
+                        }
+                    }
+                } else if (stillCurrent) {
+                    updateUiState {
+                        it.copy(
+                            isBusy = false,
+                            correctionEngineStatus = correctionEngineStatus(engine),
+                            message = "Engine rerender failed: ${t.message}",
+                        )
+                    }
+                }
+            } finally {
+                rendered?.takeUnless(Bitmap::isRecycled)?.recycle()
+                ownedBase.takeUnless(Bitmap::isRecycled)?.recycle()
+            }
+        })
+    }
 
     internal fun isManagedEditTokenCurrent(token: Long): Boolean =
         !shuttingDown && managedEdits.isCurrent(token)
@@ -3720,6 +3895,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             withContext(Dispatchers.Default) {
+                val draftRouting =
+                    routingForCorrectionEngine(
+                        runCatching { CorrectionEngine.valueOf(manifest.correctionEngine) }
+                            .getOrDefault(CorrectionEngine.Engine1)
+                    )
                 val restoreState =
                     _uiState.value.copy(
                         params = manifest.params,
@@ -3742,6 +3922,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             nextRevision,
                             manifest.presetLook,
                             manifest.activeQuickEffects,
+                            draftRouting,
                         )
                     }
                 ownedRendered = result
@@ -5401,11 +5582,12 @@ internal suspend fun renderEditedPreview(
     revision: Int,
     look: PresetColorLook? = null,
     quickEffects: List<ActiveQuickEffect> = emptyList(),
+    routingSelection: ExperimentalLabSelection? = null,
 ): Bitmap {
     var working: Bitmap? = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     var comparisonBaseline: Bitmap? = null
     return try {
-        val selection = ExperimentalLabController.snapshot()
+        val selection = routingSelection ?: ExperimentalLabController.snapshot()
         val plan = RenderPipelinePlanner.create(selection, params, quickEffects)
         if (selection.nativeRender == NativeRenderRoute.Compare) {
             comparisonBaseline = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
@@ -6050,6 +6232,7 @@ private data class DraftSavePayload(
     val expectedPointerGenerationId: String?,
     val previousVisibleGenerationId: String?,
     val params: EditParams,
+    val correctionEngine: CorrectionEngine,
     val exportFormat: ExportFormat,
     val exportResolution: ExportResolution,
     val presetLook: PresetColorLook?,
@@ -6115,6 +6298,7 @@ private fun createDraftSavePayload(
             expectedPointerGenerationId = expectedPointerGenerationId,
             previousVisibleGenerationId = state.draftGenerationId,
             params = state.params,
+            correctionEngine = state.correctionEngine,
             exportFormat = state.exportFormat,
             exportResolution = state.exportResolution,
             presetLook = state.presetLook,
@@ -6349,6 +6533,7 @@ private fun persistDraftGenerationInternal(
                 thumbnailWidth = thumbnailDimensions.first,
                 thumbnailHeight = thumbnailDimensions.second,
                 params = payload.params,
+                correctionEngine = payload.correctionEngine.name,
                 noiseEngine = payload.noiseEngine.name,
                 detailEngine = payload.detailEngine.name,
                 toneEngine = payload.toneEngine.name,

@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -46,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -65,6 +67,7 @@ import com.projectnuke.keplerstudio.BuildConfig
 import com.projectnuke.keplerstudio.editor.DehazeEngine
 import com.projectnuke.keplerstudio.editor.DetailEngine
 import com.projectnuke.keplerstudio.editor.CropState
+import com.projectnuke.keplerstudio.editor.CorrectionEngine
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExportFormat
@@ -117,10 +120,15 @@ private val V2DarkColors = darkColorScheme(
     onSurface = V2TextPrimary
 )
 
-private enum class V2MainTab(val label: String) {
+internal enum class EditorDestination(val label: String) {
     Editor("편집"),
     Saved("저장 기록"),
     Settings("설정")
+}
+
+internal object EditorSettingsNavigationPolicy {
+    fun returnDestination(openedFrom: EditorDestination): EditorDestination =
+        if (openedFrom == EditorDestination.Settings) EditorDestination.Editor else openedFrom
 }
 
 private enum class V2EditorTool(val label: String, val description: String) {
@@ -149,15 +157,20 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
             viewModel.openImage(uri)
         }
     }
-    var selectedTab by remember { mutableStateOf(V2MainTab.Editor) }
-    var selectedTool by remember { mutableStateOf(V2EditorTool.Light) }
+    var selectedTab by rememberSaveable { mutableStateOf(EditorDestination.Editor) }
+    var settingsReturnTab by rememberSaveable { mutableStateOf(EditorDestination.Editor) }
+    var selectedTool by rememberSaveable { mutableStateOf(V2EditorTool.Light) }
     var showExportDialog by remember { mutableStateOf(false) }
     var showResetDialog by remember { mutableStateOf(false) }
     var panelCollapsed by remember { mutableStateOf(false) }
     var chromeHidden by remember { mutableStateOf(false) }
-    val hideChromeForPreview = selectedTab == V2MainTab.Editor && chromeHidden
+    val hideChromeForPreview = selectedTab == EditorDestination.Editor && chromeHidden
     val chromeTween = tween<Int>(durationMillis = ChromeAnimationMillis, easing = FastOutSlowInEasing)
     val alphaTween = tween<Float>(durationMillis = 220, easing = FastOutSlowInEasing)
+
+    BackHandler(enabled = selectedTab == EditorDestination.Settings) {
+        selectedTab = settingsReturnTab
+    }
 
     MaterialTheme(colorScheme = V2DarkColors) {
         Surface(modifier = Modifier.fillMaxSize(), color = V2AppBackground) {
@@ -169,6 +182,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                 ) {
                     V2TopBar(
                         nativeVersion = state.nativeVersion,
+                        correctionEngine = state.correctionEngine,
                         selectedTab = selectedTab,
                         hasImage = state.previewBitmap != null,
                         isBusy = state.isBusy,
@@ -177,6 +191,12 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         canRedo = state.canRedo,
                         onTabSelected = {
                             chromeHidden = false
+                            if (it == EditorDestination.Settings &&
+                                selectedTab != EditorDestination.Settings
+                            ) {
+                                settingsReturnTab =
+                                    EditorSettingsNavigationPolicy.returnDestination(selectedTab)
+                            }
                             selectedTab = it
                         },
                         onOpen = { picker.launch("image/*") },
@@ -189,7 +209,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                 }
 
                 when (selectedTab) {
-                    V2MainTab.Editor -> {
+                    EditorDestination.Editor -> {
                         V2PreviewArea(
                             bitmap = state.previewBitmap,
                             originalBitmap = state.originalPreviewBitmap,
@@ -224,13 +244,13 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                             )
                         }
                     }
-                    V2MainTab.Saved -> V2SavedScreen(
+                    EditorDestination.Saved -> V2SavedScreen(
                         savedExports = state.savedExports,
                         onRemoveSavedExport = viewModel::removeSavedExport,
                         onClearSavedExports = viewModel::clearSavedExports,
                         modifier = Modifier.weight(1f).fillMaxWidth()
                     )
-                    V2MainTab.Settings -> V2SettingsScreen(
+                    EditorDestination.Settings -> V2SettingsScreen(
                         exportHistoryRetention = state.exportHistoryRetention,
                         savedExportCount = state.savedExports.size,
                         draftSavedAtMillis = state.draftSavedAtMillis,
@@ -240,15 +260,19 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         detailEngine = state.detailEngine,
                         toneEngine = state.toneEngine,
                         hazeEngine = state.hazeEngine,
+                        correctionEngine = state.correctionEngine,
+                        correctionEngineStatus = state.correctionEngineStatus,
                         onRetentionSelected = viewModel::setExportHistoryRetention,
                         onNoiseEngineSelected = viewModel::setNoiseEngine,
                         onDetailEngineSelected = viewModel::setDetailEngine,
                         onToneEngineSelected = viewModel::setToneEngine,
                         onHazeEngineSelected = viewModel::setHazeEngine,
+                        onCorrectionEngineSelected = viewModel::setCorrectionEngine,
                         onClearDraft = viewModel::clearDraft,
                         onDismissRecoveryDebugCard = viewModel::dismissRecoveryDebugCard,
                         onCleanupOldTemporarySources = viewModel::cleanupOldTemporarySources,
                         onClearSavedExports = viewModel::clearSavedExports,
+                        onCloseSettings = { selectedTab = settingsReturnTab },
                         modifier = Modifier.weight(1f).fillMaxWidth()
                     )
                 }
@@ -324,19 +348,20 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
 @Composable
 private fun V2TopBar(
     nativeVersion: String,
-    selectedTab: V2MainTab,
+    correctionEngine: CorrectionEngine,
+    selectedTab: EditorDestination,
     hasImage: Boolean,
     isBusy: Boolean,
     canExport: Boolean,
     canUndo: Boolean,
     canRedo: Boolean,
-    onTabSelected: (V2MainTab) -> Unit,
+    onTabSelected: (EditorDestination) -> Unit,
     onOpen: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onRotate: () -> Unit,
     onReset: () -> Unit,
-    onSave: () -> Unit
+    onSave: () -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth().background(V2TopBarBackground).statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)
@@ -344,7 +369,15 @@ private fun V2TopBar(
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("Kepler Studio", color = V2TextPrimary, style = MaterialTheme.typography.titleMedium, maxLines = 1)
-                Text(nativeVersion, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                Text(
+                    "$nativeVersion · ${correctionEngine.displayName}" +
+                        if (correctionEngine.experimental) " · Experimental" else "",
+                    color =
+                        if (correctionEngine.experimental) Color(0xFFFFC857)
+                        else V2TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                )
             }
             TextButton(onClick = onUndo, enabled = canUndo && !isBusy) { Text("Undo") }
             TextButton(onClick = onRedo, enabled = canRedo && !isBusy) { Text("Redo") }
@@ -356,7 +389,7 @@ private fun V2TopBar(
             }
         }
         Row(modifier = Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            V2MainTab.values().forEach { tab ->
+            EditorDestination.values().forEach { tab ->
                 val selected = tab == selectedTab
                 TextButton(
                     onClick = { onTabSelected(tab) },
@@ -786,20 +819,47 @@ private fun V2SettingsScreen(
     detailEngine: DetailEngine,
     toneEngine: ToneEngine,
     hazeEngine: DehazeEngine,
+    correctionEngine: CorrectionEngine,
+    correctionEngineStatus: String,
     onRetentionSelected: (ExportHistoryRetention) -> Unit,
     onNoiseEngineSelected: (NoiseEngine) -> Unit,
     onDetailEngineSelected: (DetailEngine) -> Unit,
     onToneEngineSelected: (ToneEngine) -> Unit,
     onHazeEngineSelected: (DehazeEngine) -> Unit,
+    onCorrectionEngineSelected: (CorrectionEngine) -> Unit,
     onClearDraft: () -> Unit,
     onDismissRecoveryDebugCard: () -> Unit,
     onCleanupOldTemporarySources: () -> Unit,
     onClearSavedExports: () -> Unit,
+    onCloseSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val experimental by ExperimentalLabController.state.collectAsState()
     val comparison by ExperimentalComparisonStore.latest.collectAsState()
     Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        TextButton(onClick = onCloseSettings) { Text("편집기로 돌아가기") }
+        V2SettingsCard("Correction Engine") {
+            Text(
+                "Preview and export use the same global correction pipeline.",
+                color = V2TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            V2OptionRow(
+                "Active engine",
+                CorrectionEngine.entries,
+                correctionEngine,
+                {
+                    if (it.experimental) "${it.displayName} · Experimental" else it.displayName
+                },
+                onCorrectionEngineSelected,
+            )
+            Text(
+                correctionEngineStatus,
+                color =
+                    if (correctionEngine.experimental) Color(0xFFFFC857) else V2TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
         if (BuildConfig.DEBUG) ExperimentalLabSettingsCard(experimental, comparison)
         if (showRecoveryDebugCard && recoveryDebugInfo != null) {
             V2SettingsCard("복구 확인") {

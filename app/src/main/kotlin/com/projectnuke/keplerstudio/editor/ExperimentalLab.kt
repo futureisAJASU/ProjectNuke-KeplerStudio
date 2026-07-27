@@ -21,9 +21,21 @@ data class ExperimentalLabSelection(
     val subjectSelection: SubjectSelectionRoute = SubjectSelectionRoute.V1,
 )
 
+internal fun routingForCorrectionEngine(engine: CorrectionEngine): ExperimentalLabSelection =
+    when (engine) {
+        CorrectionEngine.Engine1 -> ExperimentalLabSelection()
+        CorrectionEngine.Engine2 ->
+            ExperimentalLabSelection(
+                nativeRender = NativeRenderRoute.V2,
+                flareGuard = FlareGuardRoute.V2Rule,
+                remaster = RemasterRoute.V2MaskAware,
+                subjectSelection = SubjectSelectionRoute.V2ManualOrSynthetic,
+            )
+    }
+
 /**
- * Debug-session-only routing. Drafts deliberately never persist these values, so an old Draft has
- * the same V1 interpretation until a developer explicitly selects an experimental route again.
+ * Global routing is initialized from application settings. Feature overrides remain debug-session
+ * only; Drafts persist only their global engine and default legacy Drafts to Engine 1.
  */
 object ExperimentalLabController {
     private val current = AtomicReference(ExperimentalLabSelection())
@@ -32,6 +44,12 @@ object ExperimentalLabController {
     val state: StateFlow<ExperimentalLabSelection> = mutableState.asStateFlow()
 
     fun snapshot(): ExperimentalLabSelection = current.get()
+
+    fun selectGlobalEngine(engine: CorrectionEngine) {
+        val updated = routingForCorrectionEngine(engine)
+        current.set(updated)
+        mutableState.value = updated
+    }
 
     fun updateDebug(transform: (ExperimentalLabSelection) -> ExperimentalLabSelection) {
         check(BuildConfig.DEBUG) { "Experimental Lab is unavailable in release builds" }
