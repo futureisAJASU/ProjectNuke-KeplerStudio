@@ -4,10 +4,12 @@ import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
+import com.projectnuke.keplerstudio.editor.AlgorithmMode
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.ExperimentalAlgorithmController
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
@@ -23,6 +25,7 @@ import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
+import com.projectnuke.keplerstudio.editor.refineTrackedSubjectSelectionV2
 import java.util.UUID
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -39,6 +42,18 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val sourcePath = state.sourcePath
     val sourceRevision = state.revision
+    val subjectAlgorithm = ExperimentalAlgorithmController.current().subjectSelection
+    val modelAvailable =
+        RemasterModelSession.activeModel?.id == "edge_masker" &&
+            RemasterModelSession.isModelLoaded
+    val manualMaskAtEntry =
+        if (subjectAlgorithm == AlgorithmMode.V1) {
+            null
+        } else {
+            state.selectionLayers
+                .firstOrNull { it.id == state.activeSelectionLayerId && it.enabled }
+                ?.bitmap
+        }
     val busyMessage =
         "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C\uB97C \uC0DD\uC131\uD558\uB294 \uC911\uC785\uB2C8\uB2E4."
     if (base == null) {
@@ -50,9 +65,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         }
         return
     }
-    if (
-        RemasterModelSession.activeModel?.id != "edge_masker" || !RemasterModelSession.isModelLoaded
-    ) {
+    if (!modelAvailable && manualMaskAtEntry == null) {
         updateUiState {
             it.copy(
                 message =
@@ -83,6 +96,21 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 requestAllocationRecovery(MemoryRetryAction.SubjectSelection, t.requiredBytes)
             return
         }
+    var ownedManualMask: Bitmap? =
+        try {
+            manualMaskAtEntry?.copyOrThrow(mutable = false)?.also {
+                selectionTracker?.track(it, "subjectSelection:manualInput")
+            }
+        } catch (t: Throwable) {
+            ownedBase?.takeUnless(Bitmap::isRecycled)?.recycle()
+            ownedBase = null
+            selectionTracker?.end()
+            undoSnapshot?.let(::recycleHistorySnapshot)
+            updateUiState { it.copy(message = "Selection mask preparation failed.") }
+            if (t is BitmapAllocationRejectedException)
+                requestAllocationRecovery(MemoryRetryAction.SubjectSelection, t.requiredBytes)
+            return
+        }
     updateUiState { it.copy(isBusy = true, message = busyMessage) }
     launchManagedEditWithPreparedResources(
         { operationToken ->
@@ -90,18 +118,20 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             ownedBase = null
             var undoSnapshotOwned = undoSnapshot
             undoSnapshot = null
+            var ownedManualMaskOwned = ownedManualMask
+            ownedManualMask = null
             var pendingLayerBitmap: Bitmap? = null
             try {
                 val inferenceJob = currentCoroutineContext()[Job]
                 val modelOperation =
                     ModelOperationContext(
                         operationToken = operationToken,
-                        documentGeneration = state.baseContentToken.toString(),
+                        documentGeneration = currentDocumentGeneration(),
                         documentIdentity = sourcePath,
                         isCurrent = { token, generation ->
                             val live = uiState.value
                             isManagedEditTokenCurrent(token) &&
-                                generation == state.baseContentToken.toString() &&
+                                generation == currentDocumentGeneration() &&
                                 live.sourcePath == sourcePath &&
                                 live.baseContentToken == state.baseContentToken &&
                                 live.revision == sourceRevision
@@ -110,25 +140,65 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                     )
                 val layer =
                     withContext(Dispatchers.Default) {
-                        val maskResult =
-                            RemasterModelSession.createForegroundMaskResult(
-                                checkNotNull(ownedBaseOwned),
-                                selectionTracker,
-                                modelOperation,
-                            )
+                        val rawTracked =
+                            if (modelAvailable) {
+                                val maskResult =
+                                    RemasterModelSession.createForegroundMaskResult(
+                                        checkNotNull(ownedBaseOwned),
+                                        selectionTracker,
+                                        modelOperation,
+                                    )
+                                (maskResult as? ModelRunResult.Success)?.value
+                            } else {
+                                val manual =
+                                    checkNotNull(ownedManualMaskOwned).also {
+                                        ownedManualMaskOwned = null
+                                    }
+                                com.projectnuke.keplerstudio.editor.TrackedMask.acquire(
+                                    bitmap = manual,
+                                    scope = selectionTracker,
+                                    owner = "subjectSelectionV2:manualInput",
+                                    modelId = "manual-selection",
+                                    modelVersion = "v2",
+                                    operationToken = operationToken,
+                                    documentGeneration = modelOperation.documentGeneration,
+                                    confidenceMetrics =
+                                        com.projectnuke.keplerstudio.editor.ModelConfidence(
+                                            wholeImageMean = 1f,
+                                            peak = 1f,
+                                            activeRegionMean = 1f,
+                                            activeRegionPercentile = 1f,
+                                            affectedAreaRatio = 1f,
+                                            backgroundLeakage = 0f,
+                                            finalPolicy = 1f,
+                                        ),
+                                )
+                            }
                         val tracked =
-                            (maskResult as? ModelRunResult.Success)?.value
+                            rawTracked
                                 ?: error(
                                     "\uB9C8\uC2A4\uD06C\uB97C \uC0DD\uC131\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
                                 )
+                        val finalTracked =
+                            if (subjectAlgorithm == AlgorithmMode.V1) {
+                                tracked
+                            } else {
+                                refineTrackedSubjectSelectionV2(
+                                    tracked,
+                                    checkNotNull(ownedBaseOwned).width,
+                                    checkNotNull(ownedBaseOwned).height,
+                                    selectionTracker,
+                                    modelOperation,
+                                )
+                            }
                         // Subject-selection adoption: copy the validated mask into an
                         // own bitmap, then release the model mask's diagnostic edge
                         // exactly once (and recycle the source bitmap) via TrackedMask.
                         val ownedMask =
                             try {
-                                tracked.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+                                finalTracked.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
                             } finally {
-                                tracked.recycleAndRelease()
+                                finalTracked.recycleAndRelease()
                             }
                         if (!ownedMask.hasForegroundPixel()) {
                             ownedMask.recycle()
@@ -228,6 +298,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 }
             } finally {
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
+                ownedManualMaskOwned?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 selectionTracker?.end()
             }
@@ -238,6 +309,10 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 {
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null
+                },
+                {
+                    ownedManualMask?.takeIf { !it.isRecycled }?.recycle()
+                    ownedManualMask = null
                 },
                 {
                     undoSnapshot?.let(::recycleHistorySnapshot)

@@ -588,6 +588,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun isShuttingDown(): Boolean = shuttingDown
 
+    internal fun currentDocumentGeneration(): String = historyCoordinator.currentGeneration()
+
     internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
         if (shuttingDown) return false
         if (historyCoordinator.flags().busy) return false
@@ -3440,6 +3442,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val quickEffects = current.activeQuickEffects
         val appContext = context.applicationContext
         val documentGeneration = historyCoordinator.currentGeneration()
+        val flareAlgorithm = ExperimentalAlgorithmController.current().flareGuard
         updateUiStateAndRecycleReplaced {
             it.copy(
                 isBusy = true,
@@ -3471,28 +3474,46 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val result =
                     withContext(Dispatchers.Default) {
                         val inferenceJob = currentCoroutineContext()[Job]
-                        val r =
-                            applyFlareGuardModelOrRuleResultV0(
-                                appContext,
-                                checkNotNull(ownedBaseOwned),
-                                mode,
-                                allowRuleFallback = true,
-                                diagnostics = flareTracker,
-                                operation =
-                                    ModelOperationContext(
-                                        operationToken = operationToken,
-                                        documentGeneration = documentGeneration,
-                                        isCurrent = { token, generation ->
-                                            !shuttingDown &&
-                                                managedEdits.isCurrent(token) &&
-                                                historyCoordinator.currentGeneration() == generation &&
-                                                _uiState.value.sourcePath == sourcePath &&
-                                                _uiState.value.baseContentToken == baseContentToken &&
-                                                _uiState.value.revision == nextRevision
-                                        },
-                                        isCancelled = { inferenceJob?.isActive == false },
-                                    ),
+                        val modelOperation =
+                            ModelOperationContext(
+                                operationToken = operationToken,
+                                documentGeneration = documentGeneration,
+                                documentIdentity = sourcePath,
+                                isCurrent = { token, generation ->
+                                    !shuttingDown &&
+                                        managedEdits.isCurrent(token) &&
+                                        historyCoordinator.currentGeneration() == generation &&
+                                        _uiState.value.sourcePath == sourcePath &&
+                                        _uiState.value.baseContentToken == baseContentToken &&
+                                        _uiState.value.revision == nextRevision
+                                },
+                                isCancelled = { inferenceJob?.isActive == false },
                             )
+                        val r =
+                            if (flareAlgorithm == AlgorithmMode.V1) {
+                                applyFlareGuardModelOrRuleResultV0(
+                                    appContext,
+                                    checkNotNull(ownedBaseOwned),
+                                    mode,
+                                    allowRuleFallback = true,
+                                    diagnostics = flareTracker,
+                                    operation = modelOperation,
+                                )
+                            } else {
+                                applyExperimentalFlareGuardV2(
+                                    context = appContext,
+                                    source = checkNotNull(ownedBaseOwned),
+                                    flareMode = mode,
+                                    algorithmMode = flareAlgorithm,
+                                    strength =
+                                        when (mode) {
+                                            FlareGuardMode.NightLight -> 0.52f
+                                            FlareGuardMode.DaySun -> 0.44f
+                                        },
+                                    diagnostics = flareTracker,
+                                    operation = modelOperation,
+                                )
+                            }
                         flareGuardResult = r
                         r
                     }

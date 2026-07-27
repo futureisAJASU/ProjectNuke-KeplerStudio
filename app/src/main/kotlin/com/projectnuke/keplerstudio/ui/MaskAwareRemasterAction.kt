@@ -2,12 +2,14 @@ package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
+import com.projectnuke.keplerstudio.editor.AlgorithmMode
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.ExperimentalAlgorithmController
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelRunResult
@@ -18,6 +20,7 @@ import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.renderEditedPreview
+import com.projectnuke.keplerstudio.editor.renderExperimentalRemasterV2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -30,9 +33,20 @@ import kotlinx.coroutines.withContext
 fun EditorViewModel.applyMaskAwareRemaster() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-    if (
-        RemasterModelSession.activeModel?.id != "edge_masker" || !RemasterModelSession.isModelLoaded
-    ) {
+    val remasterAlgorithm = ExperimentalAlgorithmController.current().remaster
+    val stateAtEntry = uiState.value
+    val modelAvailable =
+        RemasterModelSession.activeModel?.id == "edge_masker" &&
+            RemasterModelSession.isModelLoaded
+    val manualMaskAtEntry =
+        if (remasterAlgorithm == AlgorithmMode.V1) {
+            null
+        } else {
+            stateAtEntry.selectionLayers
+                .firstOrNull { it.id == stateAtEntry.activeSelectionLayerId && it.enabled }
+                ?.bitmap
+        }
+    if (!modelAvailable && manualMaskAtEntry == null) {
         updateUiState { it.copy(message = "Edge Masker 모델 파일과 런타임이 준비된 뒤 사용할 수 있습니다.") }
         return
     }
@@ -52,11 +66,19 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         )
     var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
     var ownedBase: Bitmap? = null
+    var ownedManualMask: Bitmap? = null
     try {
         ownedBase = basePreview.copyOrThrow()
         remasterPrepareTracker?.track(checkNotNull(ownedBase), "remaster:ownedBase")
+        manualMaskAtEntry?.let {
+            ownedManualMask = it.copyOrThrow()
+            remasterPrepareTracker?.track(checkNotNull(ownedManualMask), "remaster:manualMask")
+        }
     } catch (t: Throwable) {
+        ownedBase?.takeUnless(Bitmap::isRecycled)?.recycle()
         ownedBase = null
+        ownedManualMask?.takeUnless(Bitmap::isRecycled)?.recycle()
+        ownedManualMask = null
         undoSnapshot?.let(::recycleHistorySnapshot)
         undoSnapshot = null
         updateUiState { it.copy(message = "모델 마스크 보조 준비에 실패했습니다.") }
@@ -84,6 +106,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             var renderedPreview: Bitmap? = null
             var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
             var ownedBaseOwned: Bitmap? = ownedBase
+            var ownedManualMaskOwned: Bitmap? = ownedManualMask
             val remasterTracker =
                 beginMemoryTracking(
                     "applyMaskAwareRemaster",
@@ -94,17 +117,18 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             remasterPrepareTracker?.end()
             undoSnapshot = null
             ownedBase = null
+            ownedManualMask = null
             try {
                 val inferenceJob = currentCoroutineContext()[Job]
                 val modelOperation =
                     ModelOperationContext(
                         operationToken = operationToken,
-                        documentGeneration = baseContentToken.toString(),
+                        documentGeneration = currentDocumentGeneration(),
                         documentIdentity = sourcePath,
                         isCurrent = { token, generation ->
                             val live = uiState.value
                             isManagedEditTokenCurrent(token) &&
-                                generation == baseContentToken.toString() &&
+                                generation == currentDocumentGeneration() &&
                                 live.sourcePath == sourcePath &&
                                 live.baseContentToken == baseContentToken &&
                                 live.revision == nextRevision
@@ -114,23 +138,64 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 withContext(Dispatchers.Default) {
                     val createdBase = checkNotNull(ownedBaseOwned)
                     val maskResult =
-                        RemasterModelSession.createForegroundMaskResult(
-                            createdBase,
-                            remasterTracker,
-                            modelOperation,
-                        )
+                        if (modelAvailable) {
+                            RemasterModelSession.createForegroundMaskResult(
+                                createdBase,
+                                remasterTracker,
+                                modelOperation,
+                            )
+                        } else {
+                            val manual =
+                                checkNotNull(ownedManualMaskOwned).also {
+                                    ownedManualMaskOwned = null
+                                }
+                            val confidence =
+                                com.projectnuke.keplerstudio.editor.ModelConfidence(
+                                    wholeImageMean = 1f,
+                                    peak = 1f,
+                                    activeRegionMean = 1f,
+                                    activeRegionPercentile = 1f,
+                                    affectedAreaRatio = 1f,
+                                    backgroundLeakage = 0f,
+                                    modelProvided = null,
+                                    finalPolicy = 1f,
+                                )
+                            ModelRunResult.Success(
+                                com.projectnuke.keplerstudio.editor.TrackedMask.acquire(
+                                    bitmap = manual,
+                                    scope = remasterTracker,
+                                    owner = "remasterV2:manualMask",
+                                    modelId = "manual-selection",
+                                    modelVersion = "v2",
+                                    operationToken = operationToken,
+                                    documentGeneration = modelOperation.documentGeneration,
+                                    confidenceMetrics = confidence,
+                                ),
+                                confidence = 1f,
+                                confidenceMetrics = confidence,
+                            )
+                        }
                     val mask =
                         (maskResult as? ModelRunResult.Success)?.value
                             ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
                     val created =
                         try {
-                            renderMaskAwareRemaster(
-                                basePreview = createdBase,
-                                mask = mask.bitmap,
-                                state = current,
-                                revision = nextRevision,
-                                diagnostics = remasterTracker,
-                            )
+                            if (remasterAlgorithm == AlgorithmMode.V1) {
+                                renderMaskAwareRemaster(
+                                    basePreview = createdBase,
+                                    mask = mask.bitmap,
+                                    state = current,
+                                    revision = nextRevision,
+                                    diagnostics = remasterTracker,
+                                )
+                            } else {
+                                renderExperimentalRemasterV2(
+                                    source = createdBase,
+                                    mask = mask.bitmap,
+                                    diagnostics = remasterTracker,
+                                    operation = modelOperation,
+                                )
+                            }
                         } finally {
                             mask.recycleAndRelease()
                         }
@@ -230,6 +295,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
                 remasteredOriginal?.takeIf { !it.isRecycled }?.recycle()
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
+                ownedManualMaskOwned?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 remasterTracker?.end()
             }
@@ -240,6 +306,10 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 {
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null
+                },
+                {
+                    ownedManualMask?.takeIf { !it.isRecycled }?.recycle()
+                    ownedManualMask = null
                 },
                 {
                     undoSnapshot?.let(::recycleHistorySnapshot)

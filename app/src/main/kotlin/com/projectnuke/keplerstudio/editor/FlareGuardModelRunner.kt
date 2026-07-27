@@ -108,14 +108,6 @@ class FlareGuardModelRunner private constructor(
         val ownedMask: TrackedMask get() = trackedMask
     }
 
-    fun predictMaskOrNull(source: Bitmap): MaskResult? = predictMaskOrNull(source, null)
-
-    internal fun predictMaskOrNull(source: Bitmap, diagnostics: MemoryTrackerScope?): MaskResult? =
-        when (val result = predictMask(source, diagnostics, ModelOperationContext(0L, "unspecified"))) {
-            is ModelRunResult.Success -> result.value
-            is ModelRunResult.Failure -> null
-        }
-
     internal fun predictMask(
         source: Bitmap,
         diagnostics: MemoryTrackerScope?,

@@ -23,6 +23,8 @@ class FlareGuardApplyResult internal constructor(
 }
 
 enum class FlareGuardRuntimeStatus(val uiText: String) {
+    ExperimentalV2Rule("Experimental FlareGuard V2 used its rule mask."),
+    ExperimentalV2Model("Experimental FlareGuard V2 fused validated model and rule masks."),
     ModelLoaded("플레어 마스크 모델을 불러왔습니다."),
     ModelInferenceSuccess("번짐 영역을 감지했습니다. 마스크 기반 기본 보정을 적용했습니다."),
     ModelUnavailableRuleFallback("모델 파일이 없어 기본 보정으로 대체했습니다."),
