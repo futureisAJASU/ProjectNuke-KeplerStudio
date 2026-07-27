@@ -9,6 +9,7 @@ internal enum class NativeScratchKind {
     FlareMask,
     Crop,
     SelectionBlend,
+    CorrectionsV2,
 }
 
 internal data class NativeScratchPlan(
@@ -81,6 +82,12 @@ internal object NativeScratchPlanner {
 
     fun selectionBlend(): NativeScratchPlan =
         NativeScratchPlan(NativeScratchKind.SelectionBlend, 0L)
+
+    fun correctionsV2(rowBytes: Int, height: Int): NativeScratchPlan =
+        NativeScratchPlan(
+            NativeScratchKind.CorrectionsV2,
+            checkedMultiply(bitmapBytes(rowBytes, height), 2L),
+        )
 
     private fun bitmapBytes(rowBytes: Int, height: Int): Long =
         checkedMultiply(positive(rowBytes), positive(height))

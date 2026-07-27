@@ -17,6 +17,7 @@ import androidx.heifwriter.HeifWriter
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
+import com.projectnuke.keplerstudio.bridge.NativeCorrectionV2Params
 import com.projectnuke.keplerstudio.ui.RemasterModelSession
 import com.projectnuke.keplerstudio.ui.addSubjectSelectionFromEdgeModel
 import com.projectnuke.keplerstudio.ui.applyActiveSelectionLocalEditNativeBaked
@@ -5390,14 +5391,28 @@ internal suspend fun renderEditedPreview(
     look: PresetColorLook? = null,
     quickEffects: List<ActiveQuickEffect> = emptyList(),
 ): Bitmap {
-    val copy = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+    var working: Bitmap? = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     return try {
-        renderBitmapInNative(copy, params, engines, revision, look)
-        applyActiveQuickEffectsToBitmap(copy, quickEffects, revision)
-        applySelectedToneEngine(copy, engines.toneEngine)
-        copy
+        renderBitmapInNative(checkNotNull(working), params, engines, revision, look)
+        val mode = ExperimentalAlgorithmController.current().nativeCorrections
+        val legacyEffects =
+            if (mode == AlgorithmMode.V1) quickEffects
+            else quickEffects.filter { it.kind == QuickEffectKind.SoftBlur }
+        applyActiveQuickEffectsToBitmap(checkNotNull(working), legacyEffects, revision)
+        val corrected =
+            applyExperimentalNativeCorrections(
+                checkNotNull(working),
+                params,
+                quickEffects,
+            )
+        if (corrected !== working) {
+            working?.takeUnless(Bitmap::isRecycled)?.recycle()
+            working = corrected
+        }
+        applySelectedToneEngine(checkNotNull(working), engines.toneEngine)
+        checkNotNull(working).also { working = null }
     } catch (t: Throwable) {
-        copy.recycle()
+        working?.takeUnless(Bitmap::isRecycled)?.recycle()
         throw t
     }
 }
@@ -5465,25 +5480,42 @@ private suspend fun renderEditedExport(
     diagnostics: MemoryTrackerScope? = null,
 ): Bitmap {
     var decoded: Bitmap? = null
+    var working: Bitmap? = null
     var scaled: Bitmap? = null
     try {
         decoded =
             decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE, diagnostics)
-        val working = decoded!!
-        renderBitmapInNative(working, params, engines, revision, look)
-        applyActiveQuickEffectsToBitmap(working, quickEffects, revision)
-        applySelectedToneEngine(working, engines.toneEngine)
-        scaled = scaleBitmapForExport(working, resolution, diagnostics)
-        if (scaled !== working) {
-            working.recycle()
+        working = decoded
+        renderBitmapInNative(checkNotNull(working), params, engines, revision, look)
+        val mode = ExperimentalAlgorithmController.current().nativeCorrections
+        val legacyEffects =
+            if (mode == AlgorithmMode.V1) quickEffects
+            else quickEffects.filter { it.kind == QuickEffectKind.SoftBlur }
+        applyActiveQuickEffectsToBitmap(checkNotNull(working), legacyEffects, revision)
+        val corrected =
+            applyExperimentalNativeCorrections(
+                checkNotNull(working),
+                params,
+                quickEffects,
+                diagnostics,
+            )
+        if (corrected !== working) {
+            working?.takeUnless(Bitmap::isRecycled)?.recycle()
+            if (decoded === working) decoded = null
+            working = corrected
         }
-        val result = scaled
+        applySelectedToneEngine(checkNotNull(working), engines.toneEngine)
+        scaled = scaleBitmapForExport(checkNotNull(working), resolution, diagnostics)
+        if (scaled !== working) working?.takeUnless(Bitmap::isRecycled)?.recycle()
+        val result = checkNotNull(scaled)
         decoded = null
+        working = null
         scaled = null
         return result
     } catch (t: Throwable) {
-        if (scaled != null && scaled !== decoded && !scaled.isRecycled) scaled.recycle()
-        if (decoded != null && !decoded.isRecycled) decoded.recycle()
+        scaled?.takeIf { it !== working && !it.isRecycled }?.recycle()
+        working?.takeUnless(Bitmap::isRecycled)?.recycle()
+        decoded?.takeIf { it !== working && !it.isRecycled }?.recycle()
         throw t
     }
 }
@@ -5503,13 +5535,26 @@ private suspend fun renderEditedExportFromBitmap(
     try {
         val renderTarget = checkNotNull(working)
         renderBitmapInNative(renderTarget, params, engines, revision, look)
-        applyActiveQuickEffectsToBitmap(renderTarget, quickEffects, revision)
-        applySelectedToneEngine(renderTarget, engines.toneEngine)
-        scaled = scaleBitmapForExport(renderTarget, resolution, diagnostics)
-        if (scaled !== renderTarget) {
-            renderTarget.recycle()
+        val mode = ExperimentalAlgorithmController.current().nativeCorrections
+        val legacyEffects =
+            if (mode == AlgorithmMode.V1) quickEffects
+            else quickEffects.filter { it.kind == QuickEffectKind.SoftBlur }
+        applyActiveQuickEffectsToBitmap(renderTarget, legacyEffects, revision)
+        val corrected =
+            applyExperimentalNativeCorrections(
+                renderTarget,
+                params,
+                quickEffects,
+                diagnostics,
+            )
+        if (corrected !== renderTarget) {
+            renderTarget.takeUnless(Bitmap::isRecycled)?.recycle()
+            working = corrected
         }
-        val result = scaled
+        applySelectedToneEngine(checkNotNull(working), engines.toneEngine)
+        scaled = scaleBitmapForExport(checkNotNull(working), resolution, diagnostics)
+        if (scaled !== working) working?.takeUnless(Bitmap::isRecycled)?.recycle()
+        val result = checkNotNull(scaled)
         working = null
         scaled = null
         return result
@@ -5517,6 +5562,59 @@ private suspend fun renderEditedExportFromBitmap(
         if (scaled != null && scaled !== working && !scaled.isRecycled) scaled.recycle()
         if (working != null && !working.isRecycled) working.recycle()
         throw t
+    }
+}
+
+private suspend fun applyExperimentalNativeCorrections(
+    source: Bitmap,
+    params: EditParams,
+    quickEffects: List<ActiveQuickEffect>,
+    diagnostics: MemoryTrackerScope? = null,
+): Bitmap {
+    if (ExperimentalAlgorithmController.current().nativeCorrections == AlgorithmMode.V1) {
+        return source
+    }
+    fun has(kind: QuickEffectKind): Boolean = quickEffects.any { it.kind == kind }
+    val correctionParams =
+        NativeCorrectionV2Params(
+            detail = max(params.sharpness, params.clarity).coerceIn(0f, 1f),
+            luminanceNoise = params.luminanceNoiseReduction.coerceIn(0f, 1f),
+            chromaNoise = params.colorNoiseReduction.coerceIn(0f, 1f),
+            highlightProtection = 0.72f,
+            shadowProtection =
+                (0.55f + params.luminanceNoiseReduction.coerceIn(0f, 1f) * 0.35f)
+                    .coerceIn(0f, 1f),
+            chromaticAberration =
+                if (
+                    has(QuickEffectKind.ChromaticAberrationReduction) ||
+                        has(QuickEffectKind.OpticsCorrection)
+                ) 0.62f else 0f,
+            vignette =
+                if (
+                    has(QuickEffectKind.VignetteCorrection) ||
+                        has(QuickEffectKind.OpticsCorrection)
+                ) 0.45f else 0f,
+            spotCleanup = if (has(QuickEffectKind.SpotCleanup)) 0.58f else 0f,
+        )
+    val destination =
+        createBitmapOrThrow(source.width, source.height, Bitmap.Config.ARGB_8888)
+    val edge = diagnostics?.track(destination, "nativeCorrectionsV2:transactionalDestination") ?: 0L
+    try {
+        val result =
+            NativePhotoCore.nativeApplyCorrectionsV2(
+                source,
+                destination,
+                correctionParams,
+                diagnostics,
+            )
+        if (result < 0) {
+            throw IllegalStateException("native V2 correction failed: code=$result")
+        }
+        return destination
+    } catch (failure: Throwable) {
+        destination.takeUnless(Bitmap::isRecycled)?.recycle()
+        diagnostics?.release(edge)
+        throw failure
     }
 }
 

@@ -12,6 +12,7 @@ add_library(
     native_flare_mask.cpp
     native_selection_blend.cpp
     native_cancellation.cpp
+    native_corrections_v2.cpp
 )
 
 find_library(log-lib log)

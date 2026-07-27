@@ -51,6 +51,14 @@ class NativeScratchPlannerTest {
         }
         assertTrue(NativeScratchPlanner.crop().withinNativeBudget)
         assertTrue(NativeScratchPlanner.selectionBlend().withinNativeBudget)
+        assertEquals(
+            4096L * 3000L * 2L,
+            NativeScratchPlanner.correctionsV2(4096, 3000).knownBytes,
+        )
+        assertFalse(NativeScratchPlanner.correctionsV2(200_000, 2_000).withinNativeBudget)
+        assertFalse(
+            NativeScratchPlanner.correctionsV2(Int.MAX_VALUE, Int.MAX_VALUE).withinNativeBudget
+        )
     }
 
     @Test

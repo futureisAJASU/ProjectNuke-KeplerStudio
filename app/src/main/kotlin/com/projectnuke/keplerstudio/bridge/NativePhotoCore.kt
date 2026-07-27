@@ -191,6 +191,43 @@ object NativePhotoCore {
             )
         }
 
+    /**
+     * Experimental transactional V2 correction. [destination] is not touched until every
+     * cancellable stage succeeds and the native kernel reaches its final commit boundary.
+     */
+    suspend fun nativeApplyCorrectionsV2(
+        source: Bitmap,
+        destination: Bitmap,
+        params: NativeCorrectionV2Params,
+        diagnostics: MemoryTrackerScope? = null,
+    ): Int {
+        require(source !== destination) { "V2 correction source and destination must not alias" }
+        require(
+            source.width == destination.width &&
+                source.height == destination.height &&
+                source.rowBytes == destination.rowBytes
+        ) {
+            "V2 correction destination layout must match source"
+        }
+        params.requireValid()
+        val plan = NativeScratchPlanner.correctionsV2(source.rowBytes, source.height)
+        return executeNative(plan, diagnostics) { operationToken ->
+            nativeApplyCorrectionsV2Native(
+                source,
+                destination,
+                params.detail,
+                params.luminanceNoise,
+                params.chromaNoise,
+                params.highlightProtection,
+                params.shadowProtection,
+                params.chromaticAberration,
+                params.vignette,
+                params.spotCleanup,
+                operationToken,
+            )
+        }
+    }
+
     private external fun nativeRenderPreviewInPlaceNative(
         bitmap: Bitmap,
         exposure: Float,
@@ -264,6 +301,48 @@ object NativePhotoCore {
         revision: Int,
         operationToken: Long,
     ): Int
+
+    private external fun nativeApplyCorrectionsV2Native(
+        source: Bitmap,
+        destination: Bitmap,
+        detail: Float,
+        luminanceNoise: Float,
+        chromaNoise: Float,
+        highlightProtection: Float,
+        shadowProtection: Float,
+        chromaticAberration: Float,
+        vignette: Float,
+        spotCleanup: Float,
+        operationToken: Long,
+    ): Int
+}
+
+data class NativeCorrectionV2Params(
+    val detail: Float = 0f,
+    val luminanceNoise: Float = 0f,
+    val chromaNoise: Float = 0f,
+    val highlightProtection: Float = 0.5f,
+    val shadowProtection: Float = 0.5f,
+    val chromaticAberration: Float = 0f,
+    val vignette: Float = 0f,
+    val spotCleanup: Float = 0f,
+) {
+    internal fun requireValid() {
+        listOf(
+            detail,
+            luminanceNoise,
+            chromaNoise,
+            highlightProtection,
+            shadowProtection,
+            chromaticAberration,
+            vignette,
+            spotCleanup,
+        ).forEach { value ->
+            require(value.isFinite() && value in 0f..1f) {
+                "Native V2 correction parameters must be finite and within 0..1"
+            }
+        }
+    }
 }
 
 private suspend fun executeNative(

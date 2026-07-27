@@ -161,3 +161,46 @@ tasks.register<Exec>("hostNativeV1Goldens") {
     inputs.file(hostGoldenExecutable)
     commandLine(hostGoldenExecutable.get().asFile.absolutePath)
 }
+
+val hostV2GoldenExecutable =
+    layout.buildDirectory.file(
+        "host-native/native_v2_exact_golden" +
+            if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) ".exe" else "",
+    )
+
+tasks.register<Exec>("compileHostNativeV2Goldens") {
+    group = "verification"
+    description = "Compile the host harness against the production experimental V2 kernel."
+    val nativeSources =
+        listOf(
+            "src/test/native/native_v2_exact_golden.cpp",
+            "src/main/cpp/native_corrections_v2.cpp",
+            "src/main/cpp/native_cancellation.cpp",
+        )
+    inputs.files(nativeSources.map(::file))
+    inputs.dir("src/test/native/stubs")
+    inputs.file("src/main/cpp/native_corrections_v2.h")
+    outputs.file(hostV2GoldenExecutable)
+    doFirst {
+        hostV2GoldenExecutable.get().asFile.parentFile.mkdirs()
+    }
+    commandLine(
+        "g++",
+        "-std=c++20",
+        "-O2",
+        "-DKEPLER_HOST_TEST",
+        "-Isrc/test/native/stubs",
+        "-Isrc/main/cpp",
+        *nativeSources.toTypedArray(),
+        "-o",
+        hostV2GoldenExecutable.get().asFile.absolutePath,
+    )
+}
+
+tasks.register<Exec>("hostNativeV2Goldens") {
+    group = "verification"
+    description = "Run fixed exact and transactional checks through the production V2 kernel."
+    dependsOn("compileHostNativeV2Goldens")
+    inputs.file(hostV2GoldenExecutable)
+    commandLine(hostV2GoldenExecutable.get().asFile.absolutePath)
+}

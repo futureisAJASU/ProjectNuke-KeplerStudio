@@ -258,6 +258,62 @@ class NativeExactGoldenTest {
         assertEquals(289374068137732291L, exactHash(pixels(fixture())))
     }
 
+    @Test
+    fun experimentalV2CorrectionMatchesHostGoldenAndZeroIsIdentity() = runBlocking {
+        val source = v2Fixture()
+        val sourceBefore = pixels(source)
+        val destination =
+            Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        val params =
+            NativeCorrectionV2Params(
+                detail = 0.62f,
+                luminanceNoise = 0.38f,
+                chromaNoise = 0.55f,
+                highlightProtection = 0.72f,
+                shadowProtection = 0.68f,
+                chromaticAberration = 0.46f,
+                vignette = 0.34f,
+                spotCleanup = 0.41f,
+            )
+
+        assertEquals(0, NativePhotoCore.nativeApplyCorrectionsV2(source, destination, params))
+        assertEquals(4995100279895001413L, exactRgbaHash(pixels(destination)))
+        assertArrayEquals(sourceBefore, pixels(source))
+
+        val identity =
+            Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        assertEquals(
+            0,
+            NativePhotoCore.nativeApplyCorrectionsV2(
+                source,
+                identity,
+                NativeCorrectionV2Params(
+                    highlightProtection = 0f,
+                    shadowProtection = 0f,
+                ),
+            ),
+        )
+        assertArrayEquals(sourceBefore, pixels(identity))
+    }
+
+    @Test
+    fun experimentalV2RejectsAliasWithoutChangingSource() = runBlocking {
+        val source = v2Fixture()
+        val before = pixels(source)
+        var rejected = false
+        try {
+            NativePhotoCore.nativeApplyCorrectionsV2(
+                source,
+                source,
+                NativeCorrectionV2Params(detail = 0.5f),
+            )
+        } catch (_: IllegalArgumentException) {
+            rejected = true
+        }
+        org.junit.Assert.assertTrue(rejected)
+        assertArrayEquals(before, pixels(source))
+    }
+
     private fun fixture(): Bitmap =
         bitmap(
             5,
@@ -268,6 +324,21 @@ class NativeExactGoldenTest {
                 0xffff00ff.toInt(), 0xff00ffff.toInt(), 0xffffff00.toInt(), 0xff7f7f7f.toInt(), 0xff010203.toInt(),
             ),
         )
+
+    private fun v2Fixture(): Bitmap {
+        val values =
+            IntArray(9 * 7) { index ->
+                val x = index % 9
+                val y = index / 9
+                val base = 22 + x * 17 + y * 9
+                val r = (base + if (x == 7) 74 else 0).coerceAtMost(255)
+                val g = (base + 6 + if (y == 1) 28 else 0).coerceAtMost(255)
+                val b = (base + 12 + if (x == 1) 52 else 0).coerceAtMost(255)
+                val a = if (x == 0) 96 else 255
+                (a shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        return bitmap(9, 7, values)
+    }
 
     private fun bitmap(width: Int, height: Int, values: IntArray): Bitmap =
         Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
@@ -285,6 +356,23 @@ class NativeExactGoldenTest {
             repeat(4) { byteIndex ->
                 hash = hash xor ((value ushr (byteIndex * 8)) and 0xff).toLong()
                 hash *= 0x100000001b3L
+            }
+        }
+        return hash
+    }
+
+    private fun exactRgbaHash(values: IntArray): Long {
+        var hash = -0x340d631b7bdddcdbL
+        values.forEach { value ->
+            val rgba =
+                intArrayOf(
+                    (value ushr 16) and 0xff,
+                    (value ushr 8) and 0xff,
+                    value and 0xff,
+                    (value ushr 24) and 0xff,
+                )
+            rgba.forEach { channel ->
+                hash = (hash xor channel.toLong()) * 0x100000001b3L
             }
         }
         return hash
