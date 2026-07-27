@@ -4125,10 +4125,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     correctionEngineState =
                         previousState.correctionEngineState.copy(
                             documentEngine = draftCorrectionEngine(manifest.correctionEngine),
-                            previewEngine = draftCorrectionEngine(manifest.correctionEngine),
+                            previewEngine = manifest.previewEngine?.let {
+                                runCatching { CorrectionEngine.valueOf(it) }.getOrDefault(draftCorrectionEngine(manifest.correctionEngine))
+                            } ?: draftCorrectionEngine(manifest.correctionEngine),
                             pendingEngine = null,
-                            previewResultClass =
-                                if (draftCorrectionEngine(manifest.correctionEngine) == CorrectionEngine.Engine1)
+                            previewResultClass = manifest.previewResultClass?.let {
+                                runCatching { PreviewResultClass.valueOf(it) }.getOrNull()
+                            }
+                                ?: if (draftCorrectionEngine(manifest.correctionEngine) == CorrectionEngine.Engine1)
                                     PreviewResultClass.V1
                                 else PreviewResultClass.V2,
                         ),
@@ -6410,6 +6414,7 @@ private data class DraftSavePayload(
     val previousVisibleGenerationId: String?,
     val params: EditParams,
     val correctionEngine: CorrectionEngine,
+    val correctionEngineState: CorrectionEngineState,
     val exportFormat: ExportFormat,
     val exportResolution: ExportResolution,
     val presetLook: PresetColorLook?,
@@ -6476,6 +6481,7 @@ private fun createDraftSavePayload(
             previousVisibleGenerationId = state.draftGenerationId,
             params = state.params,
             correctionEngine = state.correctionEngineState.documentEngine,
+            correctionEngineState = state.correctionEngineState,
             exportFormat = state.exportFormat,
             exportResolution = state.exportResolution,
             presetLook = state.presetLook,
@@ -6711,6 +6717,8 @@ private fun persistDraftGenerationInternal(
                 thumbnailHeight = thumbnailDimensions.second,
                 params = payload.params,
                 correctionEngine = payload.correctionEngine.name,
+                previewEngine = payload.correctionEngineState?.previewEngine?.name,
+                previewResultClass = payload.correctionEngineState?.previewResultClass?.name,
                 noiseEngine = payload.noiseEngine.name,
                 detailEngine = payload.detailEngine.name,
                 toneEngine = payload.toneEngine.name,
@@ -7263,7 +7271,7 @@ internal const val DRAFT_MANIFEST_FILE_NAME = "manifest.json"
 internal const val DRAFT_GENERATION_DIR_PREFIX = "gen_"
 internal const val DRAFT_GENERATION_STAGING_PREFIX = ".staging_"
 internal const val PREF_NAME_DRAFT = "kepler_studio_editor"
-internal const val DRAFT_FORMAT_VERSION = 2
+internal const val DRAFT_FORMAT_VERSION = 3
 internal val IMPLEMENTED_NOISE_ENGINES =
     listOf(NoiseEngine.FastEdgeAware, NoiseEngine.GuidedFilter, NoiseEngine.NonLocalMeansLite)
 internal val IMPLEMENTED_DETAIL_ENGINES = listOf(DetailEngine.MaskedUnsharp)

@@ -27,6 +27,10 @@ internal data class DraftGenerationManifest(
     val thumbnailHeight: Int,
     val params: EditParams,
     val correctionEngine: String,
+    /** Engine that produced the stored preview thumbnail (nullable in v2 manifests). */
+    val previewEngine: String?,
+    /** Result class of the stored preview: V1, V2, V2FallbackToV1, Original, null in v2. */
+    val previewResultClass: String?,
     val noiseEngine: String,
     val detailEngine: String,
     val toneEngine: String,
@@ -77,6 +81,8 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("thumbnailHeight", thumbnailHeight)
     put("params", params.toJsonObject())
     put("correctionEngine", correctionEngine)
+    put("previewEngine", previewEngine ?: JSONObject.NULL)
+    put("previewResultClass", previewResultClass ?: JSONObject.NULL)
     put("noiseEngine", noiseEngine)
     put("detailEngine", detailEngine)
     put("toneEngine", toneEngine)
@@ -189,6 +195,8 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         thumbnailHeight = json.requiredPositiveInt("thumbnailHeight"),
         params = json.requiredEditParams("params"),
         correctionEngine = draftCorrectionEngine(json.optionalString("correctionEngine")).name,
+        previewEngine = json.optionalString("previewEngine"),
+        previewResultClass = json.optionalString("previewResultClass"),
         noiseEngine = json.requiredEnum<NoiseEngine>("noiseEngine").name,
         detailEngine = json.requiredEnum<DetailEngine>("detailEngine").name,
         toneEngine = json.requiredEnum<ToneEngine>("toneEngine").name,
