@@ -116,7 +116,7 @@ tasks.register("printModelAssetSummary") {
 
 val hostGoldenExecutable =
     layout.buildDirectory.file(
-        "host-native/native_v1_exact_golden" +
+        "host-native/kepler_host_goldens_v1" +
             if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) ".exe" else "",
     )
 
@@ -250,7 +250,7 @@ tasks.register<Exec>("hostNativeV2Benchmark") {
 
 val hostCancellationExecutable =
     layout.buildDirectory.file(
-        "host-native/native_cancellation_registry_test" +
+        "host-native/kepler_host_cancellation_registry" +
             if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) ".exe" else "",
     )
 
