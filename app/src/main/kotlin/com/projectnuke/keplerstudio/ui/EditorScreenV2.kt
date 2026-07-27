@@ -71,7 +71,7 @@ import com.projectnuke.keplerstudio.editor.DetailEngine
 import com.projectnuke.keplerstudio.editor.CropState
 import com.projectnuke.keplerstudio.editor.CorrectionEngine
 import com.projectnuke.keplerstudio.editor.CorrectionEngineState
-import com.projectnuke.keplerstudio.editor.CorrectionRenderDecision
+import com.projectnuke.keplerstudio.editor.PreviewResultClass
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExportFormat
@@ -1019,24 +1019,32 @@ private fun V2SettingsCard(title: String, content: @Composable () -> Unit) {
 private fun formatSavedTime2(timestampMillis: Long): String =
     SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.KOREA).format(Date(timestampMillis))
 
-private fun engineChipLabel(state: CorrectionEngineState): String =
-    when (state.decision) {
-        CorrectionRenderDecision.NoDocument -> "E${state.defaultEngine.ordinal + 1}"
-        CorrectionRenderDecision.Switching -> "전환 중"
-        CorrectionRenderDecision.Engine2FallbackToEngine1 -> "E1 · 폴백"
-        CorrectionRenderDecision.SwitchFailedKeepingPreviousPreview ->
-            "E${(state.previewEngine ?: CorrectionEngine.Engine1).ordinal + 1} · 실패"
-        else -> "E${(state.previewEngine ?: state.documentEngine).ordinal + 1}"
+private fun engineChipLabel(state: CorrectionEngineState): String {
+    val result = state.previewResultClass
+    val engine = state.previewEngine ?: state.documentEngine
+    return if (state.isSwitching) "전환 중"
+    else when (result) {
+        PreviewResultClass.NoDocument -> "E${state.defaultEngine.ordinal + 1}"
+        PreviewResultClass.V2FallbackToV1 -> "E2 · E1 폴백"
+        PreviewResultClass.Failed -> "E${engine.ordinal + 1} · 실패"
+        else -> "E${engine.ordinal + 1}"
     }
+}
 
-private fun engineSettingsStatus(state: CorrectionEngineState): String =
-    when (state.decision) {
-        CorrectionRenderDecision.NoDocument -> "새 사진은 선택한 기본 엔진으로 열립니다."
-        CorrectionRenderDecision.Switching -> "현재 사진을 새 엔진으로 다시 렌더링하는 중입니다."
-        CorrectionRenderDecision.Engine1Active -> "현재 미리보기는 Correction Engine 1로 렌더링되었습니다."
-        CorrectionRenderDecision.Engine2Active -> "현재 미리보기는 실험적 Correction Engine 2로 렌더링되었습니다."
-        CorrectionRenderDecision.Engine2FallbackToEngine1 ->
-            "Engine 2가 실패하여 현재 미리보기에는 Engine 1 폴백이 적용되었습니다."
-        CorrectionRenderDecision.SwitchFailedKeepingPreviousPreview ->
-            "엔진 전환에 실패했습니다. 이전 미리보기를 유지합니다."
+private fun engineSettingsStatus(state: CorrectionEngineState): String {
+    if (state.isSwitching) return "현재 사진을 새 엔진으로 다시 렌더링하는 중입니다."
+    val failure = state.lastRenderFailure
+    if (failure != null && !state.isSwitching) {
+        return "렌더링 실패: ${failure.reason} (이전 미리보기 유지)"
     }
+    return when (state.previewResultClass) {
+        PreviewResultClass.NoDocument -> "새 사진은 선택한 기본 엔진으로 열립니다."
+        PreviewResultClass.Original -> "원본 이미지입니다."
+        PreviewResultClass.V1 -> "현재 미리보기는 Correction Engine 1로 렌더링되었습니다."
+        PreviewResultClass.V2 -> "현재 미리보기는 실험적 Correction Engine 2로 렌더링되었습니다."
+        PreviewResultClass.V2FallbackToV1 ->
+            "Engine 2가 실패하여 현재 미리보기에는 Engine 1 폴백이 적용되었습니다."
+        PreviewResultClass.Failed ->
+            "마지막 렌더링이 실패했습니다. 이전 미리보기를 유지합니다."
+    }
+}

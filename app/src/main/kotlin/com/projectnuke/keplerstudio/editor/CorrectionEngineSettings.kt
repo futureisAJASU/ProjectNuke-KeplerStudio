@@ -7,29 +7,146 @@ enum class CorrectionEngine(val displayName: String, val experimental: Boolean) 
     Engine2("Correction Engine 2", true),
 }
 
-enum class CorrectionRenderDecision {
+/**
+ * The actual result class of the visible preview bitmap.
+ *
+ * - [Original]: the preview is the unmodified original (no correction applied).
+ * - [V1]: rendered by Engine 1 / V1 native route.
+ * - [V2]: rendered by Engine 2 / V2 native route (SUCCESSFUL V2 — clears any old fallback).
+ * - [V2FallbackToV1]: document is assigned to Engine 2 but the visible preview is
+ *   actually a V1 render because V2 failed and was deterministically fallen back.
+ * - [Failed]: the last render failed; the visible preview is the previous successful
+ *   result (not relabeled). The failure reason is in [RenderFailureState].
+ */
+enum class PreviewResultClass {
     NoDocument,
-    Engine1Active,
-    Engine2Active,
-    Switching,
-    Engine2FallbackToEngine1,
-    SwitchFailedKeepingPreviousPreview,
+    Original,
+    V1,
+    V2,
+    V2FallbackToV1,
+    Failed,
 }
 
+/**
+ * The fallback reason recorded when [PreviewResultClass.V2FallbackToV1] is active.
+ */
+enum class RenderFallbackReason {
+    V2RenderFailed,
+    ModelUnavailable,
+    DebugForcedV1,
+}
+
+/**
+ * Structured last render failure. A failed render that keeps the old preview MUST set
+ * this and MUST NOT relabel the old preview as a new result class.
+ */
+data class RenderFailureState(
+    val operation: String,
+    val requestedEngine: CorrectionEngine,
+    val requestedRoute: NativeRenderRoute?,
+    val reason: String,
+    val timestampMillis: Long,
+)
+
+/**
+ * The complete, truthful engine/render state for the editor.
+ *
+ * Separates:
+ * - [defaultEngine] — persisted application preference for newly opened documents.
+ * - [documentEngine] — the engine interpretation assigned to the current document.
+ * - [pendingEngine] — a requested engine switch not yet adopted.
+ * - [previewResultClass] — what the visible preview actually is (V1/V2/fallback/original/failed).
+ * - [previewEngine] — the engine that produced the visible preview bitmap.
+ * - [previewRoute] — the native route that produced the visible preview.
+ * - [fallbackReason] — why the preview is a fallback (null when not a fallback).
+ * - [lastRenderFailure] — the last render failure, if any (does not relabel the preview).
+ * - [debugOverrideActive] — whether a debug override influenced the current preview route.
+ * - [algorithmVersion] — the stable algorithm version that produced the visible preview.
+ */
 data class CorrectionEngineState(
-    /** Persisted application preference used only when a new document is opened. */
     val defaultEngine: CorrectionEngine = CorrectionEngine.Engine1,
-    /** The engine interpretation assigned to this document and persisted with it. */
     val documentEngine: CorrectionEngine = CorrectionEngine.Engine1,
-    /** The engine that produced [EditorUiState.previewBitmap]. */
-    val previewEngine: CorrectionEngine? = null,
-    /** A requested document-engine change that has not adopted a preview yet. */
     val pendingEngine: CorrectionEngine? = null,
-    val decision: CorrectionRenderDecision = CorrectionRenderDecision.NoDocument,
+    val previewEngine: CorrectionEngine? = null,
+    val previewRoute: NativeRenderRoute? = null,
+    val previewResultClass: PreviewResultClass = PreviewResultClass.NoDocument,
+    val fallbackReason: RenderFallbackReason? = null,
+    val lastRenderFailure: RenderFailureState? = null,
+    val debugOverrideActive: Boolean = false,
+    val algorithmVersion: String? = null,
 ) {
     val isSwitching: Boolean get() = pendingEngine != null
-    val usedFallback: Boolean get() = decision == CorrectionRenderDecision.Engine2FallbackToEngine1
+
+    /**
+     * True when the visible preview is a V2-fallback-to-V1 situation: document assigned to
+     * Engine 2, previewEngine is Engine 1, and result class is [PreviewResultClass.V2FallbackToV1].
+     */
+    val usedFallback: Boolean
+        get() = previewResultClass == PreviewResultClass.V2FallbackToV1
+
+    /**
+     * True when the visible preview was produced by the requested route without fallback.
+     */
+    val previewIsClean: Boolean
+        get() = previewResultClass == PreviewResultClass.V1 ||
+            previewResultClass == PreviewResultClass.V2 ||
+            previewResultClass == PreviewResultClass.Original
 }
+
+/**
+ * Helper: apply a successful native-render result to the state.
+ * A successful V2 render clears any old fallback indicator.
+ * A successful V1 render clears any old V2-fallback if the document engine is Engine 1.
+ */
+internal fun CorrectionEngineState.withSuccessfulRender(
+    documentEngine: CorrectionEngine,
+    route: NativeRenderRoute,
+    debugOverrideActive: Boolean,
+    algorithmVersion: String? = null,
+): CorrectionEngineState {
+    val resultClass = when {
+        route == NativeRenderRoute.V1 && documentEngine == CorrectionEngine.Engine2 ->
+            PreviewResultClass.V2FallbackToV1
+        route == NativeRenderRoute.V1 -> PreviewResultClass.V1
+        route == NativeRenderRoute.V2 -> PreviewResultClass.V2
+        else -> PreviewResultClass.V1
+    }
+    return copy(
+        documentEngine = documentEngine,
+        previewEngine = if (resultClass == PreviewResultClass.V2FallbackToV1)
+            CorrectionEngine.Engine1 else documentEngine,
+        previewRoute = route,
+        previewResultClass = resultClass,
+        fallbackReason = if (resultClass == PreviewResultClass.V2FallbackToV1) {
+            RenderFallbackReason.V2RenderFailed
+        } else null,
+        lastRenderFailure = null,
+        debugOverrideActive = debugOverrideActive,
+        algorithmVersion = algorithmVersion,
+    )
+}
+
+/**
+ * Helper: apply a failed render. The preview is NOT relabeled — the old result class
+ * is preserved, and the failure is recorded in [lastRenderFailure].
+ */
+internal fun CorrectionEngineState.withFailedRender(
+    operation: String,
+    requestedEngine: CorrectionEngine,
+    requestedRoute: NativeRenderRoute?,
+    reason: String,
+): CorrectionEngineState = copy(
+    pendingEngine = null,
+    previewResultClass = if (previewResultClass == PreviewResultClass.NoDocument)
+        PreviewResultClass.Failed else previewResultClass,
+    lastRenderFailure = RenderFailureState(
+        operation = operation,
+        requestedEngine = requestedEngine,
+        requestedRoute = requestedRoute,
+        reason = reason,
+        timestampMillis = System.currentTimeMillis(),
+    ),
+)
 
 internal class CorrectionEngineSettings(context: Context) {
     private val preferences =

@@ -630,7 +630,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 correctionEngineState =
                     it.correctionEngineState.copy(
                         pendingEngine = engine,
-                        decision = CorrectionRenderDecision.Switching,
+                        previewResultClass = PreviewResultClass.NoDocument,
                     ),
                 revision = nextRevision,
                 isBusy = before.previewBitmap != null,
@@ -650,7 +650,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 documentEngine = it.correctionEngineState.defaultEngine,
                                 previewEngine = null,
                                 pendingEngine = null,
-                                decision = CorrectionRenderDecision.NoDocument,
+                                previewResultClass = PreviewResultClass.NoDocument,
                             ),
                     )
                 } else it
@@ -666,7 +666,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 isBusy = false,
                                 correctionEngineState = it.correctionEngineState.copy(
                                     pendingEngine = null,
-                                    decision = CorrectionRenderDecision.SwitchFailedKeepingPreviousPreview,
+                                    previewResultClass = PreviewResultClass.Failed,
                                 ),
                                 message = "Unable to prepare engine rerender",
                             )
@@ -719,10 +719,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     documentEngine = engine,
                                     previewEngine = engine,
                                     pendingEngine = null,
-                                    decision =
+                                    previewResultClass =
                                         if (engine == CorrectionEngine.Engine1)
-                                            CorrectionRenderDecision.Engine1Active
-                                        else CorrectionRenderDecision.Engine2Active,
+                                            PreviewResultClass.V1
+                                        else PreviewResultClass.V2,
                                 ),
                             message = "${engine.displayName} active",
                         )
@@ -787,7 +787,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                             documentEngine = engine,
                                             previewEngine = CorrectionEngine.Engine1,
                                             pendingEngine = null,
-                                            decision = CorrectionRenderDecision.Engine2FallbackToEngine1,
+                                            previewResultClass = PreviewResultClass.V2FallbackToV1,
                                         ),
                                     message = "Engine 2 unavailable; Engine 1 fallback rendered",
                                 )
@@ -811,7 +811,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     isBusy = false,
                                     correctionEngineState = it.correctionEngineState.copy(
                                         pendingEngine = null,
-                                        decision = CorrectionRenderDecision.SwitchFailedKeepingPreviousPreview,
+                                        previewResultClass = PreviewResultClass.Failed,
                                     ),
                                     message = "Engine rerender failed: ${t.message}",
                                 )
@@ -824,7 +824,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             isBusy = false,
                             correctionEngineState = it.correctionEngineState.copy(
                                 pendingEngine = null,
-                                decision = CorrectionRenderDecision.SwitchFailedKeepingPreviousPreview,
+                                previewResultClass = PreviewResultClass.Failed,
                             ),
                             message = "Engine rerender failed: ${t.message}",
                         )
@@ -1316,10 +1316,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         documentEngine = snapshot.correctionEngine,
                         previewEngine = if (metadataOnly) current.correctionEngineState.previewEngine else snapshot.correctionEngine,
                         pendingEngine = null,
-                        decision =
+                        previewResultClass =
                             if (snapshot.correctionEngine == CorrectionEngine.Engine1)
-                                CorrectionRenderDecision.Engine1Active
-                            else CorrectionRenderDecision.Engine2Active,
+                                PreviewResultClass.V1
+                            else PreviewResultClass.V2,
                     ),
                 noiseEngine = snapshot.noiseEngine,
                 detailEngine = snapshot.detailEngine,
@@ -1867,10 +1867,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 documentEngine = previousState.correctionEngineState.defaultEngine,
                                 previewEngine = previousState.correctionEngineState.defaultEngine,
                                 pendingEngine = null,
-                                decision =
+                                previewResultClass =
                                     if (previousState.correctionEngineState.defaultEngine == CorrectionEngine.Engine1)
-                                        CorrectionRenderDecision.Engine1Active
-                                    else CorrectionRenderDecision.Engine2Active,
+                                        PreviewResultClass.V1
+                                    else PreviewResultClass.V2,
                             ),
                         recoveryDebugInfo = null,
                         showRecoveryDebugCard = false,
@@ -4047,7 +4047,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                         .getOrDefault(CorrectionEngine.Engine1),
                                 previewEngine = null,
                                 pendingEngine = null,
-                                decision = CorrectionRenderDecision.Switching,
+                                previewResultClass = PreviewResultClass.NoDocument,
                             ),
                     )
                 val result =
@@ -4120,10 +4120,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             documentEngine = draftCorrectionEngine(manifest.correctionEngine),
                             previewEngine = draftCorrectionEngine(manifest.correctionEngine),
                             pendingEngine = null,
-                            decision =
+                            previewResultClass =
                                 if (draftCorrectionEngine(manifest.correctionEngine) == CorrectionEngine.Engine1)
-                                    CorrectionRenderDecision.Engine1Active
-                                else CorrectionRenderDecision.Engine2Active,
+                                    PreviewResultClass.V1
+                                else PreviewResultClass.V2,
                         ),
                     draftSavedAtMillis = manifest.savedAtMillis,
                     draftSourcePath = validated.sourceFile.absolutePath,
@@ -4629,10 +4629,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             documentEngine = snapshot.correctionEngine,
                             previewEngine = snapshot.correctionEngine,
                             pendingEngine = null,
-                            decision =
+                            previewResultClass =
                                 if (snapshot.correctionEngine == CorrectionEngine.Engine1)
-                                    CorrectionRenderDecision.Engine1Active
-                                else CorrectionRenderDecision.Engine2Active,
+                                    PreviewResultClass.V1
+                                else PreviewResultClass.V2,
                         ),
                     noiseEngine = snapshot.noiseEngine,
                     detailEngine = snapshot.detailEngine,
