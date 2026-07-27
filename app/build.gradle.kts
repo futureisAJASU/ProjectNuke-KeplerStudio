@@ -204,3 +204,89 @@ tasks.register<Exec>("hostNativeV2Goldens") {
     inputs.file(hostV2GoldenExecutable)
     commandLine(hostV2GoldenExecutable.get().asFile.absolutePath)
 }
+
+val hostV2BenchmarkExecutable =
+    layout.buildDirectory.file(
+        "host-native/native_v2_benchmark" +
+            if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) ".exe" else "",
+    )
+
+tasks.register<Exec>("compileHostNativeV2Benchmark") {
+    group = "verification"
+    description = "Compile the production V2 kernel benchmark harness."
+    val nativeSources =
+        listOf(
+            "src/test/native/native_v2_benchmark.cpp",
+            "src/main/cpp/native_corrections_v2.cpp",
+            "src/main/cpp/native_cancellation.cpp",
+        )
+    inputs.files(nativeSources.map(::file))
+    inputs.dir("src/test/native/stubs")
+    inputs.file("src/main/cpp/native_corrections_v2.h")
+    outputs.file(hostV2BenchmarkExecutable)
+    doFirst {
+        hostV2BenchmarkExecutable.get().asFile.parentFile.mkdirs()
+    }
+    commandLine(
+        "g++",
+        "-std=c++20",
+        "-O2",
+        "-DKEPLER_HOST_TEST",
+        "-Isrc/test/native/stubs",
+        "-Isrc/main/cpp",
+        *nativeSources.toTypedArray(),
+        "-o",
+        hostV2BenchmarkExecutable.get().asFile.absolutePath,
+    )
+}
+
+tasks.register<Exec>("hostNativeV2Benchmark") {
+    group = "verification"
+    description = "Measure production V2 kernel wall time and defended buffer bytes."
+    dependsOn("compileHostNativeV2Benchmark")
+    inputs.file(hostV2BenchmarkExecutable)
+    commandLine(hostV2BenchmarkExecutable.get().asFile.absolutePath)
+}
+
+val hostCancellationExecutable =
+    layout.buildDirectory.file(
+        "host-native/native_cancellation_registry_test" +
+            if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) ".exe" else "",
+    )
+
+tasks.register<Exec>("compileHostNativeCancellationRegistryTest") {
+    group = "verification"
+    description = "Compile and stress the production C++ cancellation registry."
+    val nativeSources =
+        listOf(
+            "src/test/native/native_cancellation_registry_test.cpp",
+            "src/main/cpp/native_cancellation.cpp",
+        )
+    inputs.files(nativeSources.map(::file))
+    inputs.dir("src/test/native/stubs")
+    inputs.file("src/main/cpp/native_cancellation.h")
+    outputs.file(hostCancellationExecutable)
+    doFirst {
+        hostCancellationExecutable.get().asFile.parentFile.mkdirs()
+    }
+    commandLine(
+        "g++",
+        "-std=c++20",
+        "-O2",
+        "-pthread",
+        "-DKEPLER_HOST_TEST",
+        "-Isrc/test/native/stubs",
+        "-Isrc/main/cpp",
+        *nativeSources.toTypedArray(),
+        "-o",
+        hostCancellationExecutable.get().asFile.absolutePath,
+    )
+}
+
+tasks.register<Exec>("hostNativeCancellationRegistryTest") {
+    group = "verification"
+    description = "Run concurrent signal/release stress against the production C++ registry."
+    dependsOn("compileHostNativeCancellationRegistryTest")
+    inputs.file(hostCancellationExecutable)
+    commandLine(hostCancellationExecutable.get().asFile.absolutePath)
+}
