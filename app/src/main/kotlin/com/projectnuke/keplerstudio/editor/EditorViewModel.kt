@@ -2074,6 +2074,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             nextRevision,
                             presetLook,
                             quickEffects,
+                            current.renderRouting(),
                         )
                 }
                 autoEnhanceTracker?.track(rendered!!, "applyAutoEnhance:rendered")
@@ -2227,6 +2228,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             nextRevision,
                             presetLook,
                             quickEffects,
+                            current.renderRouting(),
                         )
                     rendered = result
                 }
@@ -2442,6 +2444,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             nextRevision,
                             look,
                             quickEffects,
+                            current.renderRouting(),
                         )
                     rendered = result
                 }
@@ -3597,6 +3600,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             nextRevision,
                             presetLook,
                             requestedQuickEffects,
+                            current.renderRouting(),
                         )
                     renderedPreview = result
                 }
@@ -3779,6 +3783,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 nextRevision,
                                 presetLook,
                                 quickEffects,
+                                current.renderRouting(),
                             )
                         renderedPreview = p
                         p
