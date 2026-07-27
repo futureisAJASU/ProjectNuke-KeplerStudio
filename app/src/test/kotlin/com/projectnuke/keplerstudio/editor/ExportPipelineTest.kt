@@ -66,6 +66,32 @@ class ExportPipelineTest {
     }
 
     @Test
+    fun cancellationDuringInsertionStillRecoversUriAndDeletesPendingRow() = runTest {
+        val rows = FakeRows().also { it.insertGate = CompletableDeferred() }
+        val rendered = bitmap()
+        val job =
+            launch {
+                executeExportPipeline(
+                    request("insert-race"),
+                    rows,
+                    isCurrent = { true },
+                    render = { rendered },
+                    persistMetadata = { _, _, _ -> Unit },
+                )
+            }
+        rows.insertStarted.await()
+
+        job.cancel()
+        rows.insertGate?.complete(Unit)
+        job.join()
+
+        assertEquals(1, rows.inserted.get())
+        assertEquals(1, rows.deleted.get())
+        assertEquals(0, rows.published.get())
+        assertTrue(rendered.isRecycled)
+    }
+
+    @Test
     fun renderFailureNeverCreatesPendingRow() = runTest {
         val rows = FakeRows()
 
@@ -224,6 +250,24 @@ class ExportPipelineTest {
         assertEquals(1, newRows.published.get())
     }
 
+    @Test
+    fun productionRowOwnerRetriesDeletionFailureAndRepeatedSettlementIsExactOnce() = runTest {
+        val rows = FakeRows().also { it.failDelete = true }
+        val transaction = ExportRowTransaction(rows)
+        transaction.insert(request("retry"))
+
+        assertTrue(transaction.rollbackNoThrow() is IllegalStateException)
+        assertEquals(1, rows.deleteAttempts.get())
+        assertEquals(0, rows.deleted.get())
+        rows.failDelete = false
+
+        assertEquals(null, transaction.rollbackNoThrow())
+        assertEquals(2, rows.deleteAttempts.get())
+        assertEquals(1, rows.deleted.get())
+        assertEquals(null, transaction.rollbackNoThrow())
+        assertEquals(2, rows.deleteAttempts.get())
+    }
+
     private fun request(name: String = "export") =
         ExportRowRequest("$name.png", ExportFormat.Png)
 
@@ -234,14 +278,20 @@ class ExportPipelineTest {
         val encoded = AtomicInteger()
         val published = AtomicInteger()
         val deleted = AtomicInteger()
+        val deleteAttempts = AtomicInteger()
         val encodeStarted = CompletableDeferred<Unit>()
+        val insertStarted = CompletableDeferred<Unit>()
+        var insertGate: CompletableDeferred<Unit>? = null
         var encodeGate: CompletableDeferred<Unit>? = null
         var failEncode = false
         var failPublish = false
+        var failDelete = false
         var afterEncode: () -> Unit = {}
 
         override suspend fun insertPending(request: ExportRowRequest): Uri {
             inserted.incrementAndGet()
+            insertStarted.complete(Unit)
+            insertGate?.await()
             return Uri.parse("content://exports/${request.fileName}")
         }
 
@@ -259,6 +309,8 @@ class ExportPipelineTest {
         }
 
         override suspend fun delete(uri: Uri) {
+            deleteAttempts.incrementAndGet()
+            if (failDelete) error("delete")
             deleted.incrementAndGet()
         }
     }

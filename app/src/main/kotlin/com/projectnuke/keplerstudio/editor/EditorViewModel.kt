@@ -2439,6 +2439,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val exportCoroutine = currentCoroutineContext()[Job] ?: return@launch
                     var ownedExportResult: Bitmap? = null
                     var pendingUri: Uri? = null
+                    var rowTransaction: ExportRowTransaction? = null
                     var published = false
                     var historySaved = false
                     var historyError: Throwable? = null
@@ -2503,9 +2504,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     return@withContext null
                                 }
                                 val rows = AndroidExportRowStore(context)
-                                rows.insertPending(ExportRowRequest(fileName, exportFormat)).also {
+                                val transaction = ExportRowTransaction(rows)
+                                rowTransaction = transaction
+                                transaction.insert(ExportRowRequest(fileName, exportFormat)).also {
                                     pendingUri = it
-                                    rows.encode(it, exportResult, exportFormat)
+                                    transaction.encode(exportResult, exportFormat)
                                 }
                             }
                         if (pendingUri == null) {
@@ -2514,7 +2517,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         if (!isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
                             // Before commit, a stale export must remain invisible and be removed.
                             withContext(NonCancellable + Dispatchers.IO) {
-                                deletePendingExportRow(context, pendingUri!!)
+                                rowTransaction?.rollbackNoThrow()
                             }
                             return@launch
                         }
@@ -2536,10 +2539,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     exportCoroutine,
                                 )
                             ) {
-                                deletePendingExportRow(context, pendingUri!!)
+                                rowTransaction?.rollbackNoThrow()
                                 return@withContext
                             }
-                            publishExportRow(context, pendingUri!!)
+                            checkNotNull(rowTransaction).publish()
                             published = true
                             try {
                                 val historyResult =
@@ -2613,18 +2616,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     } catch (ce: kotlinx.coroutines.CancellationException) {
                         if (!published) {
-                            pendingUri?.let { uri ->
+                            rowTransaction?.let { transaction ->
                                 withContext(NonCancellable + Dispatchers.IO) {
-                                    deletePendingExportRow(getApplication<Application>(), uri)
+                                    transaction.rollbackNoThrow()
                                 }
                             }
                         }
                         throw ce
                     } catch (t: Throwable) {
                         if (!published)
-                            pendingUri?.let { uri ->
+                            rowTransaction?.let { transaction ->
                                 withContext(NonCancellable + Dispatchers.IO) {
-                                    deletePendingExportRow(getApplication<Application>(), uri)
+                                    transaction.rollbackNoThrow()
                                 }
                             }
                         if (
@@ -2645,6 +2648,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 )
                         }
                     } finally {
+                        if (!published) {
+                            withContext(NonCancellable + Dispatchers.IO) {
+                                rowTransaction?.rollbackNoThrow()
+                            }
+                        }
                         val owned = identityBitmapSet()
                         ownedExportResult?.let(owned::add)
                         ownedDirtyBase?.let(owned::add)
@@ -5872,7 +5880,8 @@ private fun publishExportRow(context: Context, uri: Uri) {
 }
 
 private fun deletePendingExportRow(context: Context, uri: Uri) {
-    runCatching { context.contentResolver.delete(uri, null, null) }
+    val deleted = context.contentResolver.delete(uri, null, null)
+    require(deleted > 0) { "failed to delete pending media store row" }
 }
 
 private fun writeCompressedBitmapToUri(
