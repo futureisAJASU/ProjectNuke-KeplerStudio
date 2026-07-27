@@ -617,6 +617,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         invalidateExport()
 
         val before = _uiState.value
+        var engineUndoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.MetadataOnly)
         val nextRevision = before.revision + 1
         val identity =
             CorrectionEngineOperationIdentity(
@@ -660,6 +661,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val ownedBase =
             runCatching { liveBase.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
                 .getOrElse {
+                    engineUndoSnapshot?.let(::recycleHistorySnapshot)
+                    engineUndoSnapshot = null
                     updateUiState {
                         if (it.revision == nextRevision && correctionEngineEpoch == identity.engineEpoch)
                             it.copy(
@@ -728,6 +731,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                     rendered = null
+                    settleAdoptedEditHistory(engineUndoSnapshot)
+                    engineUndoSnapshot = null
                     forceDraftSaveAsync()
                 }
             } catch (ce: CancellationException) {
@@ -793,6 +798,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 )
                             }
                             rendered = null
+                            settleAdoptedEditHistory(engineUndoSnapshot)
+                            engineUndoSnapshot = null
                             forceDraftSaveAsync()
                         }
                     } catch (ce: CancellationException) {
