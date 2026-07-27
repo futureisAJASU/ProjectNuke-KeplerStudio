@@ -1268,6 +1268,7 @@ internal class EditorHistoryStorage(
         }
         val metadata = JSONObject().apply {
             put("params", snapshot.params.toJsonObject())
+            put("correctionEngine", snapshot.correctionEngine.name)
             put("noiseEngine", snapshot.noiseEngine.name)
             put("detailEngine", snapshot.detailEngine.name)
             put("toneEngine", snapshot.toneEngine.name)
@@ -1363,6 +1364,9 @@ internal class EditorHistoryStorage(
         }
         return EditorHistorySnapshot(
             params = checkNotNull(parseEditParamsFromJson(json.getJSONObject("params"))),
+            correctionEngine =
+                json.optString("correctionEngine", CorrectionEngine.Engine1.name)
+                    .let(CorrectionEngine::valueOf),
             noiseEngine = enumValueStrict(json.getString("noiseEngine")),
             detailEngine = enumValueStrict(json.getString("detailEngine")),
             toneEngine = enumValueStrict(json.getString("toneEngine")),

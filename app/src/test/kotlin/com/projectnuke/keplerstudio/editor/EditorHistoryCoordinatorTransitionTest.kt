@@ -503,6 +503,7 @@ class EditorHistoryCoordinatorTransitionTest {
     ): EditorHistorySnapshot =
         EditorHistorySnapshot(
             params = EditParams(),
+            correctionEngine = CorrectionEngine.Engine1,
             noiseEngine = NoiseEngine.FastEdgeAware,
             detailEngine = DetailEngine.MaskedUnsharp,
             toneEngine = ToneEngine.HistogramAuto,

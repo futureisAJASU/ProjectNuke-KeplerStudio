@@ -73,39 +73,13 @@ private suspend fun renderSelectionBitmapWithParams(
     state: EditorUiState,
     revision: Int
 ): Bitmap {
-    val out = base.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-    try {
-        val result = NativePhotoCore.nativeRenderPreviewInPlace(
-        out,
-        params.exposure,
-        params.contrast,
-        params.shadows,
-        params.highlights,
-        params.whites,
-        params.blacks,
-        params.temperature,
-        params.tint,
-        params.saturation,
-        params.vibrance,
-        params.clarity,
-        params.dehaze,
-        params.sharpness,
-        params.noiseReduction,
-        params.luminanceNoiseReduction,
-        params.colorNoiseReduction,
-        params.noiseDetailProtection,
-        state.noiseEngine.nativeId,
-        state.detailEngine.nativeId,
-        state.toneEngine.nativeId,
-        state.hazeEngine.nativeId,
-        revision
-        )
-        if (result < 0) {
-            throw IllegalStateException("native selection render failed: code=$result")
-        }
-    } catch (t: Throwable) {
-        if (!out.isRecycled) out.recycle()
-        throw t
-    }
-    return out
+    return renderEditedPreview(
+        basePreview = base,
+        params = params,
+        engines = state.engineSelection(),
+        revision = revision,
+        look = state.presetLook,
+        quickEffects = emptyList(),
+        routingSelection = state.renderRouting(),
+    )
 }

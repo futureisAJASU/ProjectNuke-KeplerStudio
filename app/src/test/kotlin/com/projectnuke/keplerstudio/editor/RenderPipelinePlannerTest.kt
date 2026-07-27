@@ -76,6 +76,25 @@ class RenderPipelinePlannerTest {
     }
 
     @Test
+    fun v2KeepsNegativeClarityAndMapsEffectStrengths() {
+        val weak =
+            RenderPipelinePlanner.create(
+                ExperimentalLabSelection(nativeRender = NativeRenderRoute.V2),
+                EditParams(clarity = -0.4f),
+                listOf(ActiveQuickEffect(QuickEffectKind.SpotCleanup, QuickEffectStrength.Weak)),
+            )
+        val strong =
+            RenderPipelinePlanner.create(
+                ExperimentalLabSelection(nativeRender = NativeRenderRoute.V2),
+                EditParams(),
+                listOf(ActiveQuickEffect(QuickEffectKind.SpotCleanup, QuickEffectStrength.Strong)),
+            )
+        assertEquals(-0.4f, weak.v1Params.clarity)
+        assertEquals(RenderStageOwner.V1, weak.stageOwners["negative-clarity"])
+        assertTrue(assertNotNull(strong.v2Params).spotCleanup > assertNotNull(weak.v2Params).spotCleanup)
+    }
+
+    @Test
     fun previewAndExportCanShareOneImmutablePlan() {
         val selection = ExperimentalLabSelection(nativeRender = NativeRenderRoute.Compare)
         val params = EditParams(clarity = 0.25f, dehaze = 0.3f)
@@ -87,4 +106,3 @@ class RenderPipelinePlannerTest {
         assertEquals(RenderStageOwner.V1, preview.stageOwners["dehaze"])
     }
 }
-

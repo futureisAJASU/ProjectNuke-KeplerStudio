@@ -33,6 +33,12 @@ internal fun routingForCorrectionEngine(engine: CorrectionEngine): ExperimentalL
             )
     }
 
+internal fun EditorUiState.renderRouting(): ExperimentalLabSelection {
+    val debug = ExperimentalLabController.snapshot()
+    val assigned = routingForCorrectionEngine(correctionEngineState.documentEngine)
+    return assigned.copy(nativeRender = debug.nativeRender)
+}
+
 /**
  * Global routing is initialized from application settings. Feature overrides remain debug-session
  * only; Drafts persist only their global engine and default legacy Drafts to Engine 1.

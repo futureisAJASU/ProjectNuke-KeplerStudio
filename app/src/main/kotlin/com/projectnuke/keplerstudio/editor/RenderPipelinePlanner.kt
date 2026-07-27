@@ -36,10 +36,18 @@ object RenderPipelinePlanner {
                     ),
             )
         }
-        fun has(kind: QuickEffectKind): Boolean = quickEffects.any { it.kind == kind }
+        fun strength(kind: QuickEffectKind): Float =
+            quickEffects.firstOrNull { it.kind == kind }?.strength?.let {
+                when (it) {
+                    QuickEffectStrength.Weak -> 0.28f
+                    QuickEffectStrength.Medium -> 0.58f
+                    QuickEffectStrength.Strong -> 0.86f
+                }
+            } ?: 0f
         val v1Params =
             params.copy(
-                clarity = 0f,
+                // Negative clarity remains a V1 softening operation; V2 owns only positive detail.
+                clarity = params.clarity.coerceAtMost(0f),
                 sharpness = 0f,
                 noiseReduction = 0f,
                 luminanceNoiseReduction = 0f,
@@ -56,16 +64,16 @@ object RenderPipelinePlanner {
                     (0.55f + params.luminanceNoiseReduction.coerceIn(0f, 1f) * 0.35f)
                         .coerceIn(0f, 1f),
                 chromaticAberration =
-                    if (
-                        has(QuickEffectKind.ChromaticAberrationReduction) ||
-                            has(QuickEffectKind.OpticsCorrection)
-                    ) 0.62f else 0f,
+                    max(
+                        strength(QuickEffectKind.ChromaticAberrationReduction),
+                        strength(QuickEffectKind.OpticsCorrection),
+                    ),
                 vignette =
-                    if (
-                        has(QuickEffectKind.VignetteCorrection) ||
-                            has(QuickEffectKind.OpticsCorrection)
-                    ) 0.45f else 0f,
-                spotCleanup = if (has(QuickEffectKind.SpotCleanup)) 0.58f else 0f,
+                    max(
+                        strength(QuickEffectKind.VignetteCorrection),
+                        strength(QuickEffectKind.OpticsCorrection),
+                    ),
+                spotCleanup = strength(QuickEffectKind.SpotCleanup),
             )
         return RenderPipelinePlan(
             route = selection.nativeRender,
@@ -77,6 +85,7 @@ object RenderPipelinePlanner {
                     "tone-color" to RenderStageOwner.V1,
                     "dehaze" to RenderStageOwner.V1,
                     "clarity-detail" to RenderStageOwner.V2,
+                    "negative-clarity" to RenderStageOwner.V1,
                     "noise" to RenderStageOwner.V2,
                     "optics-spot" to RenderStageOwner.V2,
                     "soft-blur" to RenderStageOwner.V1,

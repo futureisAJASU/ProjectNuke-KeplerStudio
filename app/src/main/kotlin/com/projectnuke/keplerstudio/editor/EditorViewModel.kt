@@ -124,11 +124,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     init {
         val persistedEngine = correctionEngineSettings.read()
-        ExperimentalLabController.selectGlobalEngine(persistedEngine)
         _uiState.update {
             it.copy(
-                correctionEngine = persistedEngine,
-                correctionEngineStatus = correctionEngineStatus(persistedEngine),
+                correctionEngineState =
+                    it.correctionEngineState.copy(defaultEngine = persistedEngine),
             )
         }
         BitmapMemoryBudget.initialize(app.applicationContext)
@@ -595,13 +594,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun isManagedEditCurrent(token: Long, revision: Int): Boolean =
         !shuttingDown && managedEdits.isCurrent(token) && _uiState.value.revision == revision
 
-    fun setCorrectionEngine(engine: CorrectionEngine) {
-        if (shuttingDown || engine == _uiState.value.correctionEngine) return
+    /** Changes the persisted default only; the current document is unchanged until explicitly applied. */
+    fun setDefaultCorrectionEngine(engine: CorrectionEngine) {
+        if (shuttingDown || engine == _uiState.value.correctionEngineState.defaultEngine) return
+        correctionEngineSettings.write(engine)
+        updateUiState {
+            it.copy(correctionEngineState = it.correctionEngineState.copy(defaultEngine = engine))
+        }
+    }
+
+    fun applyCorrectionEngineToCurrentDocument(engine: CorrectionEngine) {
+        if (shuttingDown || engine == _uiState.value.correctionEngineState.documentEngine) return
         prepareForMaskInteraction()
         invalidateSelectionPreview()
         invalidateCropOperation()
-        correctionEngineSettings.write(engine)
-        ExperimentalLabController.selectGlobalEngine(engine)
         correctionEngineEpoch += 1L
         invalidateManagedEdits()
         renderJob?.cancel()
@@ -620,12 +626,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         updateUiStateAndRecycleReplaced {
             it.copy(
-                correctionEngine = engine,
-                correctionEngineStatus = correctionEngineStatus(engine),
+                correctionEngineState =
+                    it.correctionEngineState.copy(
+                        pendingEngine = engine,
+                        decision = CorrectionRenderDecision.Switching,
+                    ),
                 revision = nextRevision,
                 isBusy = before.previewBitmap != null,
                 message =
-                    if (before.previewBitmap == null) correctionEngineStatus(engine)
+                    if (before.previewBitmap == null) "No document loaded"
                     else "Rerendering with ${engine.displayName}",
             )
         }
@@ -635,7 +644,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 .getOrElse {
                     updateUiState {
                         if (it.revision == nextRevision && correctionEngineEpoch == identity.engineEpoch)
-                            it.copy(isBusy = false, message = "Unable to prepare engine rerender")
+                            it.copy(
+                                isBusy = false,
+                                correctionEngineState = it.correctionEngineState.copy(
+                                    pendingEngine = null,
+                                    decision = CorrectionRenderDecision.SwitchFailedKeepingPreviousPreview,
+                                ),
+                                message = "Unable to prepare engine rerender",
+                            )
                         else it
                     }
                     return
@@ -652,6 +668,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             nextRevision,
                             before.presetLook,
                             before.activeQuickEffects,
+                            before.renderRouting(),
                         )
                     }
                 val current = _uiState.value
@@ -663,18 +680,28 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             current.baseContentToken,
                             current.revision,
                         ) &&
-                        current.correctionEngine == engine
+                        current.correctionEngineState.pendingEngine == engine
                 if (canAdopt) {
                     val adopted = checkNotNull(rendered)
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             previewBitmap = adopted,
                             isBusy = false,
-                            correctionEngineStatus = correctionEngineStatus(engine),
+                            correctionEngineState =
+                                it.correctionEngineState.copy(
+                                    documentEngine = engine,
+                                    previewEngine = engine,
+                                    pendingEngine = null,
+                                    decision =
+                                        if (engine == CorrectionEngine.Engine1)
+                                            CorrectionRenderDecision.Engine1Active
+                                        else CorrectionRenderDecision.Engine2Active,
+                                ),
                             message = "${engine.displayName} active",
                         )
                     }
                     rendered = null
+                    forceDraftSaveAsync()
                 }
             } catch (ce: CancellationException) {
                 throw ce
@@ -698,7 +725,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     nextRevision,
                                     before.presetLook,
                                     before.activeQuickEffects,
-                                    ExperimentalLabSelection(),
+                                    routingForCorrectionEngine(CorrectionEngine.Engine1),
                                 )
                             }
                         val fallbackState = _uiState.value
@@ -716,12 +743,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 it.copy(
                                     previewBitmap = adopted,
                                     isBusy = false,
-                                    correctionEngineStatus =
-                                        "Engine 2 selected; deterministic Engine 1 fallback active",
+                                    correctionEngineState =
+                                        it.correctionEngineState.copy(
+                                            documentEngine = engine,
+                                            previewEngine = CorrectionEngine.Engine1,
+                                            pendingEngine = null,
+                                            decision = CorrectionRenderDecision.Engine2FallbackToEngine1,
+                                        ),
                                     message = "Engine 2 unavailable; Engine 1 fallback rendered",
                                 )
                             }
                             rendered = null
+                            forceDraftSaveAsync()
                         }
                     } catch (ce: CancellationException) {
                         throw ce
@@ -737,8 +770,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             ) {
                                 it.copy(
                                     isBusy = false,
-                                    correctionEngineStatus =
-                                        "Engine 2 and deterministic fallback unavailable; document unchanged",
+                                    correctionEngineState = it.correctionEngineState.copy(
+                                        pendingEngine = null,
+                                        decision = CorrectionRenderDecision.SwitchFailedKeepingPreviousPreview,
+                                    ),
                                     message = "Engine rerender failed: ${t.message}",
                                 )
                             } else it
@@ -748,7 +783,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     updateUiState {
                         it.copy(
                             isBusy = false,
-                            correctionEngineStatus = correctionEngineStatus(engine),
+                            correctionEngineState = it.correctionEngineState.copy(
+                                pendingEngine = null,
+                                decision = CorrectionRenderDecision.SwitchFailedKeepingPreviousPreview,
+                            ),
                             message = "Engine rerender failed: ${t.message}",
                         )
                     }
@@ -1217,6 +1255,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiState { current ->
             current.copy(
                 params = snapshot.params,
+                correctionEngineState =
+                    current.correctionEngineState.copy(
+                        documentEngine = snapshot.correctionEngine,
+                        previewEngine = if (metadataOnly) current.correctionEngineState.previewEngine else snapshot.correctionEngine,
+                        pendingEngine = null,
+                        decision =
+                            if (snapshot.correctionEngine == CorrectionEngine.Engine1)
+                                CorrectionRenderDecision.Engine1Active
+                            else CorrectionRenderDecision.Engine2Active,
+                    ),
                 noiseEngine = snapshot.noiseEngine,
                 detailEngine = snapshot.detailEngine,
                 toneEngine = snapshot.toneEngine,
@@ -1757,6 +1805,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         canUndo = false,
                         canRedo = false,
                         flareGuardRuntimeStatus = null,
+                        correctionEngineState =
+                            previousState.correctionEngineState.copy(
+                                documentEngine = previousState.correctionEngineState.defaultEngine,
+                                previewEngine = previousState.correctionEngineState.defaultEngine,
+                                pendingEngine = null,
+                                decision =
+                                    if (previousState.correctionEngineState.defaultEngine == CorrectionEngine.Engine1)
+                                        CorrectionRenderDecision.Engine1Active
+                                    else CorrectionRenderDecision.Engine2Active,
+                            ),
                         recoveryDebugInfo = null,
                         showRecoveryDebugCard = false,
                         revision = invalidateRevision + 1,
@@ -1893,6 +1951,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             nextRevision,
                             current.presetLook,
                             current.activeQuickEffects,
+                            current.renderRouting(),
                         )
                     }
                 paramTracker?.track(rendered!!, "updateParams:rendered")
@@ -2510,6 +2569,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val exportEngines = state.engineSelection()
         val exportLook = state.presetLook
         val exportQuickEffects = state.activeQuickEffects.toList()
+        val exportRouting = state.renderRouting()
         val exportRevision = state.revision
         val exportBaseToken = state.baseContentToken
         val exportDirty = state.baseBitmapDirty
@@ -2640,6 +2700,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                             revision = exportRevision + 1,
                                             look = exportLook,
                                             quickEffects = exportQuickEffects,
+                                            routingSelection = exportRouting,
                                             diagnostics = exportTracker,
                                         )
                                     } else {
@@ -2651,6 +2712,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                             revision = exportRevision + 1,
                                             look = exportLook,
                                             quickEffects = exportQuickEffects,
+                                            routingSelection = exportRouting,
                                             diagnostics = exportTracker,
                                         )
                                     }
@@ -3910,6 +3972,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         detailEngine = engines.detailEngine,
                         toneEngine = engines.toneEngine,
                         hazeEngine = engines.hazeEngine,
+                        correctionEngineState =
+                            _uiState.value.correctionEngineState.copy(
+                                documentEngine =
+                                    runCatching { CorrectionEngine.valueOf(manifest.correctionEngine) }
+                                        .getOrDefault(CorrectionEngine.Engine1),
+                                previewEngine = null,
+                                pendingEngine = null,
+                                decision = CorrectionRenderDecision.Switching,
+                            ),
                     )
                 val result =
                     if (layers.any { it.enabled }) {
@@ -3976,6 +4047,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     detailEngine = engines.detailEngine,
                     toneEngine = engines.toneEngine,
                     hazeEngine = engines.hazeEngine,
+                    correctionEngineState =
+                        previousState.correctionEngineState.copy(
+                            documentEngine = draftCorrectionEngine(manifest.correctionEngine),
+                            previewEngine = draftCorrectionEngine(manifest.correctionEngine),
+                            pendingEngine = null,
+                            decision =
+                                if (draftCorrectionEngine(manifest.correctionEngine) == CorrectionEngine.Engine1)
+                                    CorrectionRenderDecision.Engine1Active
+                                else CorrectionRenderDecision.Engine2Active,
+                        ),
                     draftSavedAtMillis = manifest.savedAtMillis,
                     draftSourcePath = validated.sourceFile.absolutePath,
                     draftBaseContentToken = manifest.baseContentToken,
@@ -4474,6 +4555,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             updateUiStateAndRecycleReplaced {
                 it.copy(
                     params = snapshot.params,
+                    correctionEngineState =
+                        it.correctionEngineState.copy(
+                            documentEngine = snapshot.correctionEngine,
+                            previewEngine = snapshot.correctionEngine,
+                            pendingEngine = null,
+                            decision =
+                                if (snapshot.correctionEngine == CorrectionEngine.Engine1)
+                                    CorrectionRenderDecision.Engine1Active
+                                else CorrectionRenderDecision.Engine2Active,
+                        ),
                     noiseEngine = snapshot.noiseEngine,
                     detailEngine = snapshot.detailEngine,
                     toneEngine = snapshot.toneEngine,
@@ -4590,6 +4681,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         current.revision + 1,
                         snapshot.presetLook,
                         snapshot.activeQuickEffects,
+                        routingForCorrectionEngine(snapshot.correctionEngine),
                     )
                 renderedEdge =
                     diagnostics?.track(checkNotNull(rendered), "navigateHistory:metadataRendered")
@@ -4737,6 +4829,7 @@ private fun MemoryRetryDescriptor?.matchesRetryFailure(
 
 internal data class EditorHistorySnapshot(
     val params: EditParams,
+    val correctionEngine: CorrectionEngine,
     val noiseEngine: NoiseEngine,
     val detailEngine: DetailEngine,
     val toneEngine: ToneEngine,
@@ -4871,6 +4964,7 @@ private fun EditorUiState.toHistorySnapshot(
         check(supportsMetadataOnlyHistory())
         return EditorHistorySnapshot(
             params = params,
+            correctionEngine = correctionEngineState.documentEngine,
             noiseEngine = noiseEngine,
             detailEngine = detailEngine,
             toneEngine = toneEngine,
@@ -4910,6 +5004,7 @@ private fun EditorUiState.toHistorySnapshot(
         }
         return EditorHistorySnapshot(
             params = params,
+            correctionEngine = correctionEngineState.documentEngine,
             noiseEngine = noiseEngine,
             detailEngine = detailEngine,
             toneEngine = toneEngine,
@@ -5587,7 +5682,7 @@ internal suspend fun renderEditedPreview(
     var working: Bitmap? = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
     var comparisonBaseline: Bitmap? = null
     return try {
-        val selection = routingSelection ?: ExperimentalLabController.snapshot()
+        val selection = routingSelection ?: routingForCorrectionEngine(CorrectionEngine.Engine1)
         val plan = RenderPipelinePlanner.create(selection, params, quickEffects)
         if (selection.nativeRender == NativeRenderRoute.Compare) {
             comparisonBaseline = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
@@ -5619,22 +5714,28 @@ internal suspend fun renderEditedPreview(
         }
         applySelectedToneEngine(checkNotNull(working), engines.toneEngine)
         comparisonBaseline?.let { baseline ->
-            val count = checkedPixelCountForComparison(working!!.width, working!!.height)
+            val sampleWidth = minOf(working!!.width, 256)
+            val sampleHeight = (working!!.height.toLong() * sampleWidth / working!!.width).toInt().coerceAtLeast(1)
+            val sampledBaseline = Bitmap.createScaledBitmap(baseline, sampleWidth, sampleHeight, true)
+            val sampledCandidate = Bitmap.createScaledBitmap(working!!, sampleWidth, sampleHeight, true)
+            val count = checkedPixelCountForComparison(sampleWidth, sampleHeight)
             val baselinePixels = IntArray(count)
             val candidatePixels = IntArray(count)
-            baseline.getPixels(
-                baselinePixels, 0, baseline.width, 0, 0, baseline.width, baseline.height
+            sampledBaseline.getPixels(
+                baselinePixels, 0, sampleWidth, 0, 0, sampleWidth, sampleHeight
             )
-            working!!.getPixels(
-                candidatePixels, 0, working!!.width, 0, 0, working!!.width, working!!.height
+            sampledCandidate.getPixels(
+                candidatePixels, 0, sampleWidth, 0, 0, sampleWidth, sampleHeight
             )
+            sampledBaseline.recycle()
+            sampledCandidate.recycle()
             ExperimentalComparisonStore.publishDebug(
                 QualityRegressionMetricsV2.debugArtifact(
                     fixtureVersion = "live-preview-v2",
                     baseline = baselinePixels,
                     experimental = candidatePixels,
-                    width = working!!.width,
-                    height = working!!.height,
+                    width = sampleWidth,
+                    height = sampleHeight,
                 ).copy(
                     algorithmDecision = "native-render:${plan.route}",
                     knownTransientBytes =
@@ -5725,6 +5826,7 @@ private suspend fun renderEditedExport(
     look: PresetColorLook? = null,
     quickEffects: List<ActiveQuickEffect> = emptyList(),
     diagnostics: MemoryTrackerScope? = null,
+    routingSelection: ExperimentalLabSelection,
 ): Bitmap {
     var decoded: Bitmap? = null
     var working: Bitmap? = null
@@ -5733,8 +5835,7 @@ private suspend fun renderEditedExport(
         decoded =
             decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE, diagnostics)
         working = decoded
-        val plan =
-            RenderPipelinePlanner.create(ExperimentalLabController.snapshot(), params, quickEffects)
+        val plan = RenderPipelinePlanner.create(routingSelection, params, quickEffects)
         renderBitmapInNative(checkNotNull(working), plan.v1Params, engines, revision, look, diagnostics)
         applyActiveQuickEffectsToBitmap(checkNotNull(working), plan.v1QuickEffects, revision, diagnostics)
         val corrected =
@@ -5773,13 +5874,13 @@ private suspend fun renderEditedExportFromBitmap(
     look: PresetColorLook? = null,
     quickEffects: List<ActiveQuickEffect> = emptyList(),
     diagnostics: MemoryTrackerScope? = null,
+    routingSelection: ExperimentalLabSelection,
 ): Bitmap {
     var working: Bitmap? = ownedBaseBitmap
     var scaled: Bitmap? = null
     try {
         val renderTarget = checkNotNull(working)
-        val plan =
-            RenderPipelinePlanner.create(ExperimentalLabController.snapshot(), params, quickEffects)
+        val plan = RenderPipelinePlanner.create(routingSelection, params, quickEffects)
         renderBitmapInNative(renderTarget, plan.v1Params, engines, revision, look, diagnostics)
         applyActiveQuickEffectsToBitmap(renderTarget, plan.v1QuickEffects, revision, diagnostics)
         val corrected =
@@ -6298,7 +6399,7 @@ private fun createDraftSavePayload(
             expectedPointerGenerationId = expectedPointerGenerationId,
             previousVisibleGenerationId = state.draftGenerationId,
             params = state.params,
-            correctionEngine = state.correctionEngine,
+            correctionEngine = state.correctionEngineState.documentEngine,
             exportFormat = state.exportFormat,
             exportResolution = state.exportResolution,
             presetLook = state.presetLook,

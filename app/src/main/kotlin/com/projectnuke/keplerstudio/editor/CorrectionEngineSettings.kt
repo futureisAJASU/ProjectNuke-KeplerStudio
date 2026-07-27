@@ -7,11 +7,31 @@ enum class CorrectionEngine(val displayName: String, val experimental: Boolean) 
     Engine2("Correction Engine 2", true),
 }
 
-internal fun correctionEngineStatus(engine: CorrectionEngine): String =
-    when (engine) {
-        CorrectionEngine.Engine1 -> "Stable V1 pipeline"
-        CorrectionEngine.Engine2 -> "Experimental V2 rule/native pipeline; deterministic V1 fallback"
-    }
+enum class CorrectionRenderDecision {
+    NoDocument,
+    Engine1Active,
+    Engine2Active,
+    Switching,
+    Engine2FallbackToEngine1,
+    SwitchFailedKeepingPreviousPreview,
+}
+
+data class CorrectionEngineState(
+    /** Persisted application preference used only when a new document is opened. */
+    val defaultEngine: CorrectionEngine = CorrectionEngine.Engine1,
+    /** The engine interpretation assigned to this document and persisted with it. */
+    val documentEngine: CorrectionEngine = CorrectionEngine.Engine1,
+    /** The engine that produced [EditorUiState.previewBitmap]. */
+    val previewEngine: CorrectionEngine? = null,
+    /** A requested document-engine change that has not adopted a preview yet. */
+    val pendingEngine: CorrectionEngine? = null,
+    val decision: CorrectionRenderDecision = CorrectionRenderDecision.NoDocument,
+    /** Debug-only routes are never persisted into Drafts or history. */
+    val debugOverrideActive: Boolean = false,
+) {
+    val isSwitching: Boolean get() = pendingEngine != null
+    val usedFallback: Boolean get() = decision == CorrectionRenderDecision.Engine2FallbackToEngine1
+}
 
 internal class CorrectionEngineSettings(context: Context) {
     private val preferences =

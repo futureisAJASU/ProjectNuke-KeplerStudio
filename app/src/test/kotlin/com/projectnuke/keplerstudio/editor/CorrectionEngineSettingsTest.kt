@@ -1,8 +1,6 @@
 package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
-import com.projectnuke.keplerstudio.ui.EditorDestination
-import com.projectnuke.keplerstudio.ui.EditorSettingsNavigationPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -71,7 +69,7 @@ class CorrectionEngineSettingsTest {
         assertEquals(FlareGuardRoute.V2Rule, selection.flareGuard)
         assertEquals(RemasterRoute.V2MaskAware, selection.remaster)
         assertEquals(SubjectSelectionRoute.V2ManualOrSynthetic, selection.subjectSelection)
-        assertFalse(correctionEngineStatus(CorrectionEngine.Engine2).contains("model-assisted"))
+        assertFalse(routingForCorrectionEngine(CorrectionEngine.Engine2).flareGuard == FlareGuardRoute.V2ModelAssisted)
     }
 
     @Test
@@ -90,15 +88,4 @@ class CorrectionEngineSettingsTest {
         assertFalse(identity.matches(7, "document-a", "base-a", 13))
     }
 
-    @Test
-    fun settingsNavigationReturnsToPreviousEditorDestination() {
-        assertEquals(
-            EditorDestination.Editor,
-            EditorSettingsNavigationPolicy.returnDestination(EditorDestination.Editor),
-        )
-        assertEquals(
-            EditorDestination.Saved,
-            EditorSettingsNavigationPolicy.returnDestination(EditorDestination.Saved),
-        )
-    }
 }
