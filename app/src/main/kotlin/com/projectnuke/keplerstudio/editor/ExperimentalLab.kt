@@ -64,6 +64,17 @@ internal fun EditorUiState.renderRouting(): ExperimentalLabSelection {
 }
 
 /**
+ * Export routing must match the visible preview, not just the document engine.
+ * When the preview is a V2-fallback-to-V1, export uses V1 to match what the user sees.
+ * When a debug override produced the visible preview, export uses the same override.
+ */
+internal fun EditorUiState.renderRoutingForExport(): ExperimentalLabSelection {
+    val overrides = ExperimentalLabController.debugOverridesCompat()
+    val effectiveEngine = correctionEngineState.previewEngine ?: correctionEngineState.documentEngine
+    return RouteResolver.toLegacySelection(effectiveEngine, overrides)
+}
+
+/**
  * Debug-only experimental lab controller. Stores per-feature debug overrides as nullable
  * values (null = follow document engine). In release builds, all mutations are refused
  * and the controller always returns [DebugFeatureOverrides.None].

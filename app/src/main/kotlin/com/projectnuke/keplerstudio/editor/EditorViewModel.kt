@@ -2636,7 +2636,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val exportEngines = state.engineSelection()
         val exportLook = state.presetLook
         val exportQuickEffects = state.activeQuickEffects.toList()
-        val exportRouting = state.renderRouting()
+        val exportRouting = state.renderRoutingForExport()
         val exportRevision = state.revision
         val exportBaseToken = state.baseContentToken
         val exportDirty = state.baseBitmapDirty
