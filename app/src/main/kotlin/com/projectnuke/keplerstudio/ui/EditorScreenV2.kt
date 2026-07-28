@@ -830,44 +830,80 @@ private fun V2SettingsScreen(
 ) {
     val experimental by ExperimentalLabController.state.collectAsState()
     val comparison by ExperimentalComparisonStore.latest.collectAsState()
-    Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         V2SettingsCard("보정 엔진") {
-            Text(
-                "기본 엔진은 새 사진에 적용됩니다. 현재 사진은 아래에서 명시적으로 적용합니다.",
-                color = V2TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-            )
             V2OptionRow(
-                "새 사진의 기본 엔진",
-                CorrectionEngine.entries,
-                correctionEngineState.defaultEngine,
-                {
-                    if (it.experimental) "${it.displayName} · Experimental" else it.displayName
-                },
-                onDefaultCorrectionEngineSelected,
+                title = "새 사진의 기본 엔진",
+                values = CorrectionEngine.entries,
+                selected = correctionEngineState.defaultEngine,
+                label = { if (it.experimental) "${it.displayName} · Experimental" else it.displayName },
+                onSelected = onDefaultCorrectionEngineSelected,
             )
-            CorrectionEngine.entries.forEach { engine ->
-                CorrectionEngineCard(
-                    engine = engine,
-                    selected = correctionEngineState.defaultEngine == engine,
-                    enabled = !correctionEngineState.isSwitching,
-                    onClick = { onDefaultCorrectionEngineSelected(engine) },
-                )
-            }
             Text(
-                engineSettingsStatus(correctionEngineState),
-                color =
-                    if (correctionEngineState.usedFallback) Color(0xFFFFC857) else V2TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
+                "현재 사진 상태",
+                color = V2TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodyLarge,
             )
-            if (correctionEngineState.previewEngine != null &&
-                correctionEngineState.documentEngine != correctionEngineState.defaultEngine
-            ) {
+            val docEngine = correctionEngineState.documentEngine
+            val prevEngine = correctionEngineState.previewEngine
+            val resultClass = correctionEngineState.previewResultClass
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("지정 엔진: ", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text(docEngine.displayName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
+            }
+            if (prevEngine != null && prevEngine != docEngine) {
+                Text("실제 미리보기: ${prevEngine.displayName}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+            }
+            if (correctionEngineState.fallbackReason != null) {
+                Surface(
+                    color = Color(0xFFFFC857).copy(alpha = 0.17f),
+                    shape = MaterialTheme.shapes.small,
+                ) {
+                    Text(
+                        "폴백: ${correctionEngineState.fallbackReason?.name ?: "알 수 없음"}",
+                        color = Color(0xFFFFC857),
+                        modifier = Modifier.padding(4.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+            }
+            if (correctionEngineState.usedFallback) {
                 TextButton(
                     onClick = { onApplyCorrectionEngine(correctionEngineState.defaultEngine) },
                     enabled = !correctionEngineState.isSwitching,
-                ) { Text("현재 사진에 적용") }
+                ) { Text("기본 엔진으로 다시 시도") }
             }
+            CorrectionEngine.entries.forEach { engine ->
+                Surface(
+                    modifier = Modifier.fillMaxWidth().selectable(
+                        selected = correctionEngineState.documentEngine == engine,
+                        enabled = !correctionEngineState.isSwitching && correctionEngineState.documentEngine != engine,
+                        role = Role.RadioButton,
+                        onClick = { onApplyCorrectionEngine(engine) },
+                    ),
+                    color = V2CardBackground,
+                    shape = MaterialTheme.shapes.small,
+                ) {
+                    Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(
+                            selected = correctionEngineState.documentEngine == engine,
+                            onClick = null,
+                            enabled = !correctionEngineState.isSwitching,
+                        )
+                        Text(
+                            "${engine.displayName}${if (correctionEngineState.documentEngine == engine) "\u2018 (현재)" else ""}${if (engine.experimental) " · Experimental" else ""}",
+                            color = V2TextPrimary,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+            }
+            Text(
+                engineSettingsStatus(correctionEngineState),
+                color = if (correctionEngineState.usedFallback) Color(0xFFFFC857) else V2TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         if (BuildConfig.DEBUG) ExperimentalLabSettingsCard(experimental, comparison, onExperimentalLabChanged)
         if (showRecoveryDebugCard && recoveryDebugInfo != null) {
