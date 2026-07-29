@@ -45,24 +45,22 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val sourcePath = state.sourcePath
     val sourceRevision = state.revision
-    val documentEngine = state.correctionEngineState.previewEngine ?: state.correctionEngineState.documentEngine
+val documentEngine = state.correctionEngineState.previewEngine ?: state.correctionEngineState.documentEngine
     val subjectOverride = ExperimentalLabController.debugOverrides().subjectSelection
-    val subjectResolution = RouteResolver.resolveSubjectRoute(
-        documentEngine, subjectOverride, modelAvailable = false,
-    )
-    val subjectAlgorithm = subjectResolution.actualRoute
     val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
             RemasterModelSession.isModelLoaded
+    val subjectResolution = RouteResolver.resolveSubjectRoute(
+        documentEngine, subjectOverride, modelAvailable = modelLoaded,
+    )
+    val subjectAlgorithm = subjectResolution.actualRoute
     val modelAvailable =
-        modelLoaded &&
-            subjectAlgorithm in
-                setOf(
-                    SubjectSelectionRoute.V1,
-                    SubjectSelectionRoute.V2ModelAssisted,
-                    SubjectSelectionRoute.ForcedV1Fallback,
-                    SubjectSelectionRoute.Compare,
-                )
+        when (subjectAlgorithm) {
+            SubjectSelectionRoute.V1, SubjectSelectionRoute.ForcedV1Fallback -> true
+            SubjectSelectionRoute.V2ModelAssisted -> modelLoaded
+            SubjectSelectionRoute.V2ManualOrSynthetic -> true
+            SubjectSelectionRoute.Compare -> modelLoaded
+        }
     val manualMaskAtEntry =
         if (subjectAlgorithm == SubjectSelectionRoute.V1 ||
             subjectAlgorithm == SubjectSelectionRoute.ForcedV1Fallback

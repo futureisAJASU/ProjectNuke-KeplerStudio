@@ -36,25 +36,23 @@ import kotlinx.coroutines.withContext
 fun EditorViewModel.applyMaskAwareRemaster() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-    val stateAtEntry = uiState.value
+val stateAtEntry = uiState.value
     val documentEngine = stateAtEntry.correctionEngineState.previewEngine ?: stateAtEntry.correctionEngineState.documentEngine
     val remasterOverride = ExperimentalLabController.debugOverrides().remaster
-    val remasterResolution = RouteResolver.resolveRemasterRoute(
-        documentEngine, remasterOverride, modelAvailable = false,
-    )
-    val remasterAlgorithm = remasterResolution.actualRoute
     val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
             RemasterModelSession.isModelLoaded
-    val modelAvailable =
-        modelLoaded &&
-            remasterAlgorithm in
-                setOf(
-                    RemasterRoute.V1,
-                    RemasterRoute.V2ModelAssisted,
-                    RemasterRoute.ForcedV1Fallback,
-                    RemasterRoute.Compare,
-                )
+    val remasterResolution = RouteResolver.resolveRemasterRoute(
+        documentEngine, remasterOverride, modelAvailable = modelLoaded,
+    )
+    val remasterAlgorithm = remasterResolution.actualRoute
+val modelAvailable =
+        when (remasterAlgorithm) {
+            RemasterRoute.V1, RemasterRoute.ForcedV1Fallback -> true
+            RemasterRoute.V2ModelAssisted -> modelLoaded
+            RemasterRoute.V2MaskAware -> true
+            RemasterRoute.Compare -> modelLoaded
+        }
     val manualMaskAtEntry =
         if (remasterAlgorithm == RemasterRoute.V1 ||
             remasterAlgorithm == RemasterRoute.ForcedV1Fallback
