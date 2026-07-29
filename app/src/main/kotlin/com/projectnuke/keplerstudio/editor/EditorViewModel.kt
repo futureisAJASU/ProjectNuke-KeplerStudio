@@ -632,7 +632,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 correctionEngineState =
                     it.correctionEngineState.copy(
                         pendingEngine = engine,
-                        previewResultClass = PreviewResultClass.NoDocument,
                     ),
                 revision = nextRevision,
                 isBusy = before.previewBitmap != null,
@@ -668,9 +667,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         if (it.revision == nextRevision && correctionEngineEpoch == identity.engineEpoch)
                             it.copy(
                                 isBusy = false,
-                                correctionEngineState = it.correctionEngineState.copy(
-                                    pendingEngine = null,
-                                    previewResultClass = PreviewResultClass.Failed,
+                                correctionEngineState = it.correctionEngineState.withFailedRender(
+                                    operation = "engineSwitch",
+                                    requestedEngine = engine,
+                                    requestedRoute = null,
+                                    reason = "Unable to prepare engine rerender",
                                 ),
                                 message = "Unable to prepare engine rerender",
                             )
@@ -686,6 +687,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         correctionEngineState =
                             before.correctionEngineState.copy(documentEngine = engine)
                     )
+                val switchRouting = switchState.renderRouting()
+                val switchNativeRoute = switchRouting.nativeRender
                 rendered =
                     withContext(Dispatchers.Default) {
                         if (before.selectionLayers.any { it.enabled }) {
@@ -698,7 +701,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 nextRevision,
                                 before.presetLook,
                                 before.activeQuickEffects,
-                                switchState.renderRouting(),
+                                switchRouting,
                             )
                         }
                     }
@@ -719,14 +722,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             previewBitmap = adopted,
                             isBusy = false,
                             correctionEngineState =
-                                it.correctionEngineState.copy(
+                                it.correctionEngineState.withSuccessfulRender(
                                     documentEngine = engine,
-                                    previewEngine = engine,
-                                    pendingEngine = null,
-                                    previewResultClass =
-                                        if (engine == CorrectionEngine.Engine1)
-                                            PreviewResultClass.V1
-                                        else PreviewResultClass.V2,
+                                    route = switchNativeRoute,
+                                    debugOverrideActive = false,
                                 ),
                             message = "${engine.displayName} active",
                         )
@@ -756,7 +755,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                         correctionEngineState =
                                             before.correctionEngineState.copy(
                                                 documentEngine = CorrectionEngine.Engine1,
-                                                previewEngine = CorrectionEngine.Engine1,
                                             )
                                     )
                                 if (before.selectionLayers.any { it.enabled }) {
@@ -769,7 +767,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                         nextRevision,
                                         before.presetLook,
                                         before.activeQuickEffects,
-                                        routingForCorrectionEngine(CorrectionEngine.Engine1),
+                                        fallbackState.renderRouting(),
                                     )
                                 }
                             }
@@ -789,11 +787,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     previewBitmap = adopted,
                                     isBusy = false,
                                     correctionEngineState =
-                                        it.correctionEngineState.copy(
+                                        it.correctionEngineState.withSuccessfulRender(
                                             documentEngine = engine,
-                                            previewEngine = CorrectionEngine.Engine1,
-                                            pendingEngine = null,
-                                            previewResultClass = PreviewResultClass.V2FallbackToV1,
+                                            route = NativeRenderRoute.V1,
+                                            debugOverrideActive = false,
                                         ),
                                     message = "Engine 2 unavailable; Engine 1 fallback rendered",
                                 )
@@ -816,13 +813,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 )
                             ) {
                                 it.copy(
-                                    isBusy = false,
-                                    correctionEngineState = it.correctionEngineState.copy(
-                                        pendingEngine = null,
-                                        previewResultClass = PreviewResultClass.Failed,
-                                    ),
-                                    message = "Engine rerender failed: ${t.message}",
-                                )
+                                            isBusy = false,
+                                            correctionEngineState = it.correctionEngineState.withFailedRender(
+                                                operation = "engineSwitch",
+                                                requestedEngine = engine,
+                                                requestedRoute = null,
+                                                reason = "Engine rerender failed: ${t.message}",
+                                            ),
+                                            message = "Engine rerender failed: ${t.message}",
+                                        )
                             } else it
                         }
                     }
@@ -830,9 +829,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     updateUiState {
                         it.copy(
                             isBusy = false,
-                            correctionEngineState = it.correctionEngineState.copy(
-                                pendingEngine = null,
-                                previewResultClass = PreviewResultClass.Failed,
+                            correctionEngineState = it.correctionEngineState.withFailedRender(
+                                operation = "engineSwitch",
+                                requestedEngine = engine,
+                                requestedRoute = null,
+                                reason = "Engine rerender failed: ${t.message}",
                             ),
                             message = "Engine rerender failed: ${t.message}",
                         )
@@ -841,6 +842,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 rendered?.takeUnless(Bitmap::isRecycled)?.recycle()
                 ownedBase.takeUnless(Bitmap::isRecycled)?.recycle()
+                engineUndoSnapshot?.let(::recycleHistorySnapshot)
+                engineUndoSnapshot = null
             }
         })
     }
