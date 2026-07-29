@@ -828,7 +828,7 @@ private fun V2SettingsScreen(
     onClearSavedExports: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val experimental by ExperimentalLabController.state.collectAsState()
+    val experimental by ExperimentalLabController.stateFor(correctionEngineState.documentEngine).collectAsState()
     val comparison by ExperimentalComparisonStore.latest.collectAsState()
 Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         V2SettingsCard("보정 엔진") {
@@ -974,7 +974,7 @@ private fun ExperimentalLabSettingsCard(
 ) {
     V2SettingsCard("Experimental Lab") {
         Text(
-            "Session only; Draft interpretation remains V1 by default.",
+            "Session only; defaults follow the document engine. Overrides are ignored in release builds.",
             color = V2TextSecondary,
             style = MaterialTheme.typography.bodySmall,
         )
