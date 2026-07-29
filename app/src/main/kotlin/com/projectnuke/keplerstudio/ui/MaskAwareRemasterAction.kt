@@ -37,7 +37,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
     val stateAtEntry = uiState.value
-    val documentEngine = stateAtEntry.correctionEngineState.documentEngine
+    val documentEngine = stateAtEntry.correctionEngineState.previewEngine ?: stateAtEntry.correctionEngineState.documentEngine
     val remasterOverride = ExperimentalLabController.debugOverrides().remaster
     val remasterResolution = RouteResolver.resolveRemasterRoute(
         documentEngine, remasterOverride, modelAvailable = false,

@@ -50,17 +50,23 @@ internal fun routingForCorrectionEngine(engine: CorrectionEngine): ExperimentalL
  * Authoritative route resolver entry point for production native preview renders.
  *
  * Derives the effective [ExperimentalLabSelection] from:
- * - the current document engine ([CorrectionEngineState.documentEngine])
+ * - the effective preview engine ([CorrectionEngineState.previewEngine], falling back to
+ *   [CorrectionEngineState.documentEngine] when no preview has been rendered yet)
  * - optional debug-only per-feature overrides from [ExperimentalLabController]
  * - the deterministic fallback policy in [RouteResolver]
  *
- * No override means the document engine route is used. An explicit debug V1 override
+ * Using the effective preview engine ensures that when a V2 document falls back to V1,
+ * subsequent param adjustments render with V1 matching what the user sees, rather than
+ * retrying V2 (which would fail and fall back again, causing flicker).
+ *
+ * No override means the effective engine route is used. An explicit debug V1 override
  * deliberately forces V1 for that feature. One feature override does not modify
  * unrelated features. Release builds ignore debug overrides.
  */
 internal fun EditorUiState.renderRouting(): ExperimentalLabSelection {
     val overrides = ExperimentalLabController.debugOverridesCompat()
-    return RouteResolver.toLegacySelection(correctionEngineState.documentEngine, overrides)
+    val effectiveEngine = correctionEngineState.previewEngine ?: correctionEngineState.documentEngine
+    return RouteResolver.toLegacySelection(effectiveEngine, overrides)
 }
 
 /**

@@ -3759,7 +3759,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val documentGeneration = historyCoordinator.currentGeneration()
         val flareOverride = ExperimentalLabController.debugOverrides().flareGuard
         val flareResolution = RouteResolver.resolveFlareRoute(
-            current.correctionEngineState.documentEngine,
+            current.correctionEngineState.previewEngine ?: current.correctionEngineState.documentEngine,
             flareOverride,
             modelAvailable = false,
         )

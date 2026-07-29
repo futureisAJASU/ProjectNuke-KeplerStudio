@@ -45,7 +45,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val sourcePath = state.sourcePath
     val sourceRevision = state.revision
-    val documentEngine = state.correctionEngineState.documentEngine
+    val documentEngine = state.correctionEngineState.previewEngine ?: state.correctionEngineState.documentEngine
     val subjectOverride = ExperimentalLabController.debugOverrides().subjectSelection
     val subjectResolution = RouteResolver.resolveSubjectRoute(
         documentEngine, subjectOverride, modelAvailable = false,
