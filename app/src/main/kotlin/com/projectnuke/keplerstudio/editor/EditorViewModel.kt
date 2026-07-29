@@ -4918,6 +4918,11 @@ private fun MemoryRetryDescriptor?.matchesRetryFailure(
 internal data class EditorHistorySnapshot(
     val params: EditParams,
     val correctionEngine: CorrectionEngine,
+    val previewEngine: CorrectionEngine? = null,
+    val previewRoute: NativeRenderRoute? = null,
+    val previewResultClass: PreviewResultClass? = null,
+    val fallbackReason: RenderFallbackReason? = null,
+    val algorithmVersion: String? = null,
     val noiseEngine: NoiseEngine,
     val detailEngine: DetailEngine,
     val toneEngine: ToneEngine,
@@ -5053,6 +5058,11 @@ private fun EditorUiState.toHistorySnapshot(
         return EditorHistorySnapshot(
             params = params,
             correctionEngine = correctionEngineState.documentEngine,
+            previewEngine = correctionEngineState.previewEngine,
+            previewRoute = correctionEngineState.previewRoute,
+            previewResultClass = correctionEngineState.previewResultClass,
+            fallbackReason = correctionEngineState.fallbackReason,
+            algorithmVersion = correctionEngineState.algorithmVersion,
             noiseEngine = noiseEngine,
             detailEngine = detailEngine,
             toneEngine = toneEngine,
