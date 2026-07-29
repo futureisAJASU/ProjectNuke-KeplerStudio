@@ -4032,11 +4032,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
             withContext(Dispatchers.Default) {
-                val draftRouting =
-                    routingForCorrectionEngine(
-                        runCatching { CorrectionEngine.valueOf(manifest.correctionEngine) }
-                            .getOrDefault(CorrectionEngine.Engine1)
-                    )
+                val draftDocumentEngine =
+                    runCatching { CorrectionEngine.valueOf(manifest.correctionEngine) }
+                        .getOrDefault(CorrectionEngine.Engine1)
+                val manifestPreviewEngine =
+                    manifest.previewEngine?.let {
+                        runCatching { CorrectionEngine.valueOf(it) }.getOrNull()
+                    } ?: draftDocumentEngine
                 val restoreState =
                     _uiState.value.copy(
                         params = manifest.params,
@@ -4049,10 +4051,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         hazeEngine = engines.hazeEngine,
                         correctionEngineState =
                             _uiState.value.correctionEngineState.copy(
-                                documentEngine =
-                                    runCatching { CorrectionEngine.valueOf(manifest.correctionEngine) }
-                                        .getOrDefault(CorrectionEngine.Engine1),
-                                previewEngine = null,
+                                documentEngine = draftDocumentEngine,
+                                previewEngine = manifestPreviewEngine,
                                 pendingEngine = null,
                                 previewResultClass = PreviewResultClass.NoDocument,
                             ),
@@ -4068,7 +4068,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             nextRevision,
                             manifest.presetLook,
                             manifest.activeQuickEffects,
-                            draftRouting,
+                            restoreState.renderRoutingForExport(),
                         )
                     }
                 ownedRendered = result
