@@ -1,6 +1,7 @@
 package com.projectnuke.keplerstudio.editor
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.json.JSONObject
@@ -19,8 +20,11 @@ class DraftManifestVersion3Test {
 
     private fun baselineManifest(
         previewEngine: String? = null,
+        previewRoute: String? = null,
         previewResultClass: String? = null,
+        fallbackReason: String? = null,
         correctionEngine: String = CorrectionEngine.Engine1.name,
+        algorithmVersion: String? = null,
     ) = DraftGenerationManifest(
         formatVersion = DRAFT_FORMAT_VERSION,
         generationId = "test-gen-001",
@@ -40,7 +44,9 @@ class DraftManifestVersion3Test {
         params = EditParams(),
         correctionEngine = correctionEngine,
         previewEngine = previewEngine,
+        previewRoute = previewRoute,
         previewResultClass = previewResultClass,
+        fallbackReason = fallbackReason,
         noiseEngine = NoiseEngine.FastEdgeAware.name,
         detailEngine = DetailEngine.MaskedUnsharp.name,
         toneEngine = ToneEngine.HistogramAuto.name,
@@ -54,6 +60,7 @@ class DraftManifestVersion3Test {
         activeSelectionLayerId = null,
         selectionPaintSettings = SelectionPaintSettings(),
         showSelectionOverlay = false,
+        algorithmVersion = algorithmVersion,
     )
 
     @Test
@@ -89,10 +96,58 @@ class DraftManifestVersion3Test {
     }
 
     @Test
-    fun v2ManifestIsRejected() {
-        val v3Manifest = baselineManifest()
+    fun v2ManifestIsAcceptedWithDefaultPreviewFields() {
+        val v3Manifest = baselineManifest(
+            previewEngine = null,
+            previewResultClass = null,
+        )
         val json = v3Manifest.toJson()
         json.put("formatVersion", 2)
+        json.remove("previewEngine")
+        json.remove("previewResultClass")
+
+        val parsed = parseDraftGenerationManifest(json)
+        assertNotNull(parsed)
+        assertEquals(2, parsed!!.formatVersion)
+        assertEquals(CorrectionEngine.Engine1.name, parsed.correctionEngine)
+        assertNull(parsed.previewEngine)
+        assertNull(parsed.previewResultClass)
+    }
+
+    @Test
+    fun v2ManifestWithV2EnginePreservesEngine() {
+        val v3Manifest = baselineManifest(
+            correctionEngine = CorrectionEngine.Engine2.name,
+            previewEngine = null,
+            previewResultClass = null,
+        )
+        val json = v3Manifest.toJson()
+        json.put("formatVersion", 2)
+        json.remove("previewEngine")
+        json.remove("previewResultClass")
+
+        val parsed = parseDraftGenerationManifest(json)
+        assertNotNull(parsed)
+        assertEquals(CorrectionEngine.Engine2.name, parsed!!.correctionEngine)
+        assertNull(parsed.previewEngine)
+        assertNull(parsed.previewResultClass)
+    }
+
+    @Test
+    fun formatVersion0IsRejected() {
+        val v3Manifest = baselineManifest()
+        val json = v3Manifest.toJson()
+        json.put("formatVersion", 0)
+
+        val parsed = parseDraftGenerationManifest(json)
+        assertNull(parsed)
+    }
+
+    @Test
+    fun futureVersionIsRejected() {
+        val v3Manifest = baselineManifest()
+        val json = v3Manifest.toJson()
+        json.put("formatVersion", 99)
 
         val parsed = parseDraftGenerationManifest(json)
         assertNull(parsed)

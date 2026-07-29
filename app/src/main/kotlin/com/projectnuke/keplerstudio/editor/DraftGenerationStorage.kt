@@ -198,7 +198,7 @@ internal fun validateCurrentDraftGeneration(context: Context): ValidatedDraftGen
 
 internal fun validateDraftGeneration(directory: DraftGenerationDirectory, expectedId: String): ValidatedDraftGeneration? = runCatching {
     val manifest = loadDraftGenerationManifest(directory) ?: return null
-    if (manifest.generationId != expectedId || manifest.formatVersion != DRAFT_FORMAT_VERSION) return null
+    if (manifest.generationId != expectedId || manifest.formatVersion < 2 || manifest.formatVersion > DRAFT_FORMAT_VERSION) return null
     if (manifest.savedAtMillis <= 0L || manifest.draftOperationEpoch < 0L || manifest.editorRevision < 0) return null
     if (manifest.sourceWidth <= 0 || manifest.sourceHeight <= 0 || manifest.thumbnailWidth <= 0 || manifest.thumbnailHeight <= 0) return null
     if (manifest.thumbnailWidth > 512 || manifest.thumbnailHeight > 512) return null

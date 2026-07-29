@@ -29,8 +29,12 @@ internal data class DraftGenerationManifest(
     val correctionEngine: String,
     /** Engine that produced the stored preview thumbnail (nullable in v2 manifests). */
     val previewEngine: String?,
+    /** Native route that produced the stored preview. Null in v2 manifests. */
+    val previewRoute: String?,
     /** Result class of the stored preview: V1, V2, V2FallbackToV1, Original, null in v2. */
     val previewResultClass: String?,
+    /** Reason for fallback if preview is V2FallbackToV1. Null if no fallback. */
+    val fallbackReason: String?,
     val noiseEngine: String,
     val detailEngine: String,
     val toneEngine: String,
@@ -43,7 +47,8 @@ internal data class DraftGenerationManifest(
     val selectionLayers: List<DraftSelectionLayerEntry>,
     val activeSelectionLayerId: String?,
     val selectionPaintSettings: SelectionPaintSettings,
-    val showSelectionOverlay: Boolean
+    val showSelectionOverlay: Boolean,
+    val algorithmVersion: String?,
 )
 
 internal data class DraftSelectionLayerEntry(
@@ -82,7 +87,10 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("params", params.toJsonObject())
     put("correctionEngine", correctionEngine)
     put("previewEngine", previewEngine ?: JSONObject.NULL)
+    put("previewRoute", previewRoute ?: JSONObject.NULL)
     put("previewResultClass", previewResultClass ?: JSONObject.NULL)
+    put("fallbackReason", fallbackReason ?: JSONObject.NULL)
+    put("algorithmVersion", algorithmVersion ?: JSONObject.NULL)
     put("noiseEngine", noiseEngine)
     put("detailEngine", detailEngine)
     put("toneEngine", toneEngine)
@@ -123,7 +131,8 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
 
 internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationManifest? = runCatching {
     val formatVersion = json.requiredInt("formatVersion")
-    if (formatVersion != DRAFT_FORMAT_VERSION) return null
+    if (formatVersion < 2) return null
+    if (formatVersion > DRAFT_FORMAT_VERSION) return null
     val layerArray = json.requiredArray("selectionLayers")
     val layers = ArrayList<DraftSelectionLayerEntry>(layerArray.length())
     for (i in 0 until layerArray.length()) {
@@ -196,7 +205,9 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         params = json.requiredEditParams("params"),
         correctionEngine = draftCorrectionEngine(json.optionalString("correctionEngine")).name,
         previewEngine = json.optionalString("previewEngine"),
+        previewRoute = json.optionalString("previewRoute"),
         previewResultClass = json.optionalString("previewResultClass"),
+        fallbackReason = json.optionalString("fallbackReason"),
         noiseEngine = json.requiredEnum<NoiseEngine>("noiseEngine").name,
         detailEngine = json.requiredEnum<DetailEngine>("detailEngine").name,
         toneEngine = json.requiredEnum<ToneEngine>("toneEngine").name,
@@ -209,7 +220,8 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         selectionLayers = layers,
         activeSelectionLayerId = activeLayerId,
         selectionPaintSettings = paintSettings,
-        showSelectionOverlay = json.requiredBoolean("showSelectionOverlay")
+        showSelectionOverlay = json.requiredBoolean("showSelectionOverlay"),
+        algorithmVersion = json.optionalString("algorithmVersion"),
     )
 }.getOrNull()
 

@@ -6726,7 +6726,9 @@ private fun persistDraftGenerationInternal(
                 params = payload.params,
                 correctionEngine = payload.correctionEngine.name,
                 previewEngine = payload.correctionEngineState?.previewEngine?.name,
+                previewRoute = payload.correctionEngineState?.previewRoute?.name,
                 previewResultClass = payload.correctionEngineState?.previewResultClass?.name,
+                fallbackReason = payload.correctionEngineState?.fallbackReason?.name,
                 noiseEngine = payload.noiseEngine.name,
                 detailEngine = payload.detailEngine.name,
                 toneEngine = payload.toneEngine.name,
@@ -6740,6 +6742,7 @@ private fun persistDraftGenerationInternal(
                 activeSelectionLayerId = payload.activeSelectionLayerId,
                 selectionPaintSettings = payload.selectionPaintSettings,
                 showSelectionOverlay = payload.showSelectionOverlay,
+                algorithmVersion = payload.correctionEngineState?.algorithmVersion,
             )
         if (
             !writeDraftGeneration(
