@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 
 data class EditorUiState(
     val isBusy: Boolean = false,
+    val maintenanceBusy: Boolean = false,
     val sourcePath: String? = null,
     val baseBitmapDirty: Boolean = false,
     val baseContentToken: String = "",

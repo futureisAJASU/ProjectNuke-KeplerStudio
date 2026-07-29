@@ -2,7 +2,6 @@ package com.projectnuke.keplerstudio.editor
 
 import com.projectnuke.keplerstudio.BuildConfig
 import java.util.concurrent.atomic.AtomicReference
-import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -18,8 +17,7 @@ enum class SubjectSelectionRoute { V1, V2ManualOrSynthetic, V2ModelAssisted, For
 /**
  * Resolved route selection for all features. This is the output of route resolution —
  * the actual routes that will be used for rendering. Production callers should obtain
- * this via [EditorUiState.renderRouting()] or [RouteResolver], not via direct
- * [ExperimentalLabController] reads.
+ * this via [RouteResolver], not via direct global state inference.
  *
  * The `nativeRender` field drives [RenderPipelinePlanner]. The feature-specific fields
  * are consumed by Flare, Remaster, and Subject Selection after route resolution.
@@ -29,20 +27,6 @@ data class ExperimentalLabSelection(
     val flareGuard: FlareGuardRoute = FlareGuardRoute.V1,
     val remaster: RemasterRoute = RemasterRoute.V1,
     val subjectSelection: SubjectSelectionRoute = SubjectSelectionRoute.V1,
-)
-
-/**
- * Convert a resolved [ExperimentalLabSelection] back to nullable [DebugFeatureOverrides]
- * for the given document engine. A field matching the engine's default becomes null
- * (Follow Document Engine); a field that differs becomes an explicit override.
- */
-internal fun ExperimentalLabSelection.toDebugOverrides(
-    engine: CorrectionEngine,
-): DebugFeatureOverrides = DebugFeatureOverrides(
-    nativeRender = nativeRender.takeIf { it != RouteResolver.defaultNativeRoute(engine) },
-    flareGuard = flareGuard.takeIf { it != RouteResolver.defaultFlareRoute(engine) },
-    remaster = remaster.takeIf { it != RouteResolver.defaultRemasterRoute(engine) },
-    subjectSelection = subjectSelection.takeIf { it != RouteResolver.defaultSubjectRoute(engine) },
 )
 
 /**
@@ -62,36 +46,11 @@ internal fun routingForCorrectionEngine(engine: CorrectionEngine): ExperimentalL
     }
 
 /**
- * Authoritative route resolver entry point for production native preview renders.
- *
- * Derives the effective [ExperimentalLabSelection] from:
- * - the **assigned document engine** ([CorrectionEngineState.documentEngine])
- * - optional debug-only per-feature overrides from [ExperimentalLabController]
- * - the deterministic fallback policy in [RouteResolver]
- *
- * The requested route is always derived from the assigned document engine, never
- * from the old visible-preview engine. This means:
- * - A switch to Engine 2 requests V2 (regardless of what the old preview was).
- * - A switch to Engine 1 requests V1.
- * - After a V2→V1 fallback, subsequent param adjustments still **retry Engine 2**
- *   (matching the fallback policy in Phase 5) unless the policy is sticky.
- *
- * No override means the document engine route is used. An explicit debug V1
- * override deliberately forces V1 for that feature only. Release builds ignore
- * debug overrides.
- */
-internal fun EditorUiState.renderRouting(): ExperimentalLabSelection {
-    val overrides = ExperimentalLabController.debugOverridesCompat()
-    val availability = RouteModelAvailability()
-    return RouteResolver.toLegacySelection(correctionEngineState.documentEngine, overrides, availability)
-}
-
-/**
  * Debug-only experimental lab controller. Stores per-feature debug overrides as nullable
  * values (null = follow document engine). In release builds, all mutations are refused
  * and the controller always returns [DebugFeatureOverrides.None].
  *
- * The state exposed as [overrides] is a flow of raw [DebugFeatureOverrides] objects —
+ * The state exposed as [overridesState] is a flow of raw [DebugFeatureOverrides] objects —
  * not a global resolved selection mutated by whichever engine last queried it. The UI
  * resolves display state from the current engine + raw overrides + model availability.
  */
@@ -120,21 +79,6 @@ object ExperimentalLabController {
         val o = debugOverrides()
         return RouteResolver.toLegacySelection(engine, o, RouteModelAvailability())
     }
-
-    /**
-     * Legacy state flow: resolved selection for the raw overrides, using Engine 1.
-     * This is a simple derivation from the raw overrides flow. The value is recomputed
-     * each time the overrides change.
-     */
-    val state: StateFlow<ExperimentalLabSelection> get() = ResolvedStateFlow(CorrectionEngine.Engine1)
-
-    /**
-     * Returns a [StateFlow] that maps the raw overrides flow into a resolved
-     * [ExperimentalLabSelection] for the given engine. Each call creates a lightweight
-     * wrapper; collect() delegates to the source flow.
-     */
-    fun stateFor(engine: CorrectionEngine): StateFlow<ExperimentalLabSelection> =
-        ResolvedStateFlow(engine)
 
     /**
      * Update debug overrides. Only callable in debug builds. The transform receives
@@ -169,31 +113,6 @@ object ExperimentalLabController {
     internal fun resetForTest() {
         overrides.set(DebugFeatureOverrides.None)
         overridesFlow.value = DebugFeatureOverrides.None
-    }
-
-    /**
-     * Lightweight [StateFlow] that resolves raw overrides to an
-     * [ExperimentalLabSelection] for a fixed engine.
-     */
-    class ResolvedStateFlow(
-        private val engine: CorrectionEngine,
-    ) : StateFlow<ExperimentalLabSelection> {
-        override val value: ExperimentalLabSelection
-            get() = ExperimentalLabController.resolvedSelection(engine)
-
-        @Suppress("RedundantSuspendModifier")
-        override suspend fun collect(
-            collector: FlowCollector<ExperimentalLabSelection>,
-        ): Nothing {
-            collector.emit(value)
-            overridesFlow.collect { overrides ->
-                collector.emit(
-                    RouteResolver.toLegacySelection(engine, overrides, RouteModelAvailability()),
-                )
-            }
-        }
-
-        override val replayCache: List<ExperimentalLabSelection> get() = listOf(value)
     }
 }
 

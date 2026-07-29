@@ -804,18 +804,32 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * override changed (since feature-specific override changes only affect future Flare/
      * Remaster/Subject operations, not the current preview).
      */
-    fun updateExperimentalLab(transform: (ExperimentalLabSelection) -> ExperimentalLabSelection) {
+    fun updateExperimentalLab(transform: (DebugFeatureOverrides) -> DebugFeatureOverrides) {
         if (shuttingDown || !BuildConfig.DEBUG) return
         val engine = _uiState.value.correctionEngineState.documentEngine
-        val before = ExperimentalLabController.resolvedSelection(engine)
-        ExperimentalLabController.updateDebugOverrides { currentOverrides ->
-            val currentSelection = RouteResolver.toLegacySelection(engine, currentOverrides, RouteModelAvailability())
-            val updatedSelection = transform(currentSelection)
-            updatedSelection.toDebugOverrides(engine)
-        }
-        val after = ExperimentalLabController.resolvedSelection(engine)
+        val before = ExperimentalLabController.debugOverrides()
+        val after = transform(before)
         if (before == after) return
-        if (before.nativeRender != after.nativeRender) {
+        ExperimentalLabController.updateDebugOverrides { after }
+        val beforeNative =
+            RouteResolver.resolveNativeRoute(
+                RouteRequest(
+                    assignedDocumentEngine = engine,
+                    operation = RenderOperation.EngineSwitch,
+                    debugOverride = before.nativeRender,
+                    fallbackPolicy = _uiState.value.correctionEngineState.fallbackPolicy,
+                ),
+            )
+        val afterNative =
+            RouteResolver.resolveNativeRoute(
+                RouteRequest(
+                    assignedDocumentEngine = engine,
+                    operation = RenderOperation.EngineSwitch,
+                    debugOverride = after.nativeRender,
+                    fallbackPolicy = _uiState.value.correctionEngineState.fallbackPolicy,
+                ),
+            )
+        if (beforeNative != afterNative && _uiState.value.previewBitmap != null) {
             applyCorrectionEngineToCurrentDocument(engine)
         }
     }
@@ -3189,7 +3203,30 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (launchedJob.isCompleted && exportJob === launchedJob) exportJob = null
     }
 
+    private fun beginMaintenance(message: String): Boolean {
+        var current = _uiState.value
+        while (true) {
+            if (current.maintenanceBusy) return false
+            if (
+                commitUiState(
+                    current,
+                    current.copy(maintenanceBusy = true, message = message),
+                )
+            ) {
+                return true
+            }
+            current = _uiState.value
+        }
+    }
+
+    private fun finishMaintenance() {
+        updateUiStateAndRecycleReplaced {
+            if (it.maintenanceBusy) it.copy(maintenanceBusy = false) else it
+        }
+    }
+
     fun clearDraft() {
+        if (!beginMaintenance("임시 저장을 삭제하는 중입니다")) return
         val context = getApplication<Application>()
         invalidateDraftOperations()
         val clearEpoch = draftOperationEpoch
@@ -3447,6 +3484,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.")
                     else it
                 }
+            } finally {
+                finishMaintenance()
             }
         }
     }
@@ -3456,73 +3495,106 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cleanupOldTemporarySources() {
+        if (!beginMaintenance("오래된 임시 원본을 정리하는 중입니다")) return
         val context = getApplication<Application>()
         val activeSourcePath = _uiState.value.sourcePath
         viewModelScope.launch {
-            val removedCount =
-                withContext(Dispatchers.IO) {
-                    cleanupTemporarySourceFiles(context, activeSourcePath = activeSourcePath)
+            try {
+                val removedCount =
+                    withContext(Dispatchers.IO) {
+                        cleanupTemporarySourceFiles(context, activeSourcePath = activeSourcePath)
+                    }
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "7일이 지난 임시 원본 캐시를 정리했습니다. 삭제된 파일: ${removedCount}개")
                 }
-            updateUiStateAndRecycleReplaced {
-                it.copy(message = "7일이 지난 임시 원본 캐시를 정리했습니다. 삭제된 파일: ${removedCount}개")
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "임시 원본 정리에 실패했습니다: ${t.message ?: "알 수 없는 오류"}")
+                }
+            } finally {
+                finishMaintenance()
             }
         }
     }
 
     fun clearSavedExports() {
+        if (!beginMaintenance("저장 기록을 비우는 중입니다")) return
         val context = getApplication<Application>()
         viewModelScope.launch {
-            val result =
-                withContext(Dispatchers.IO) {
-                    savedExportHistoryMutex.withLock {
-                        val current = loadSavedExportsFromPrefs(context)
-                        clearSavedExportsPrefs(context)
-                        SavedExportHistoryResult(
-                            ++savedExportHistoryRevision,
-                            emptyList(),
-                            current.map { it.uriString }.toSet(),
-                        )
+            try {
+                val result =
+                    withContext(Dispatchers.IO) {
+                        savedExportHistoryMutex.withLock {
+                            val current = loadSavedExportsFromPrefs(context)
+                            clearSavedExportsPrefs(context)
+                            SavedExportHistoryResult(
+                                ++savedExportHistoryRevision,
+                                emptyList(),
+                                current.map { it.uriString }.toSet(),
+                            )
+                        }
                     }
+                invalidateRemovedHistoryThumbnails(context, result)
+                updateUiStateAndRecycleReplaced {
+                    if (result.revision != savedExportHistoryRevision) it
+                    else
+                        it.copy(
+                            savedExports = result.items,
+                            message =
+                                if (it.isBusy) it.message else "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다",
+                        )
                 }
-            invalidateRemovedHistoryThumbnails(context, result)
-            updateUiStateAndRecycleReplaced {
-                if (result.revision != savedExportHistoryRevision) it
-                else
-                    it.copy(
-                        savedExports = result.items,
-                        message =
-                            if (it.isBusy) it.message else "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다",
-                    )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "저장 기록을 비우지 못했습니다: ${t.message ?: "알 수 없는 오류"}")
+                }
+            } finally {
+                finishMaintenance()
             }
         }
     }
 
     fun removeSavedExport(uriString: String) {
+        if (!beginMaintenance("저장 기록을 삭제하는 중입니다")) return
         val context = getApplication<Application>()
         viewModelScope.launch {
-            val result =
-                withContext(Dispatchers.IO) {
-                    savedExportHistoryMutex.withLock {
-                        val current = loadSavedExportsFromPrefs(context)
-                        val next = current.filterNot { it.uriString == uriString }
-                        saveSavedExportsToPrefs(context, next)
-                        SavedExportHistoryResult(
-                            ++savedExportHistoryRevision,
-                            next,
-                            if (next.size != current.size) setOf(uriString) else emptySet(),
-                        )
+            try {
+                val result =
+                    withContext(Dispatchers.IO) {
+                        savedExportHistoryMutex.withLock {
+                            val current = loadSavedExportsFromPrefs(context)
+                            val next = current.filterNot { it.uriString == uriString }
+                            saveSavedExportsToPrefs(context, next)
+                            SavedExportHistoryResult(
+                                ++savedExportHistoryRevision,
+                                next,
+                                if (next.size != current.size) setOf(uriString) else emptySet(),
+                            )
+                        }
                     }
+                invalidateRemovedHistoryThumbnails(context, result)
+                updateUiStateAndRecycleReplaced {
+                    if (result.revision != savedExportHistoryRevision) it
+                    else
+                        it.copy(
+                            savedExports = result.items,
+                            message =
+                                if (it.isBusy) it.message
+                                else "선택한 내보낸 사진 기록을 삭제했습니다. 갤러리 파일은 삭제되지 않습니다",
+                        )
                 }
-            invalidateRemovedHistoryThumbnails(context, result)
-            updateUiStateAndRecycleReplaced {
-                if (result.revision != savedExportHistoryRevision) it
-                else
-                    it.copy(
-                        savedExports = result.items,
-                        message =
-                            if (it.isBusy) it.message
-                            else "선택한 내보낸 사진 기록을 삭제했습니다. 갤러리 파일은 삭제되지 않습니다",
-                    )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (t: Throwable) {
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "저장 기록 삭제에 실패했습니다: ${t.message ?: "알 수 없는 오류"}")
+                }
+            } finally {
+                finishMaintenance()
             }
         }
     }

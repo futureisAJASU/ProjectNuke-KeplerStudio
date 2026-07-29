@@ -1,6 +1,7 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -29,10 +30,22 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Redo
+import androidx.compose.material.icons.automirrored.outlined.RotateRight
+import androidx.compose.material.icons.automirrored.outlined.Undo
+import androidx.compose.material.icons.outlined.AddPhotoAlternate
+import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.RestartAlt
+import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
@@ -61,8 +74,9 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.BuildConfig
@@ -71,6 +85,7 @@ import com.projectnuke.keplerstudio.editor.DetailEngine
 import com.projectnuke.keplerstudio.editor.CropState
 import com.projectnuke.keplerstudio.editor.CorrectionEngine
 import com.projectnuke.keplerstudio.editor.CorrectionEngineState
+import com.projectnuke.keplerstudio.editor.DebugFeatureOverrides
 import com.projectnuke.keplerstudio.editor.PreviewResultClass
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
@@ -78,7 +93,6 @@ import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
-import com.projectnuke.keplerstudio.editor.ExperimentalLabSelection
 import com.projectnuke.keplerstudio.editor.ExperimentalComparisonStore
 import com.projectnuke.keplerstudio.editor.FlareGuardRoute
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DEHAZE_ENGINES
@@ -166,6 +180,14 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     val chromeTween = tween<Int>(durationMillis = ChromeAnimationMillis, easing = FastOutSlowInEasing)
     val alphaTween = tween<Float>(durationMillis = 220, easing = FastOutSlowInEasing)
 
+    BackHandler(enabled = selectedTab != EditorDestination.Editor || chromeHidden) {
+        if (chromeHidden) {
+            chromeHidden = false
+        } else {
+            selectedTab = EditorDestination.Editor
+        }
+    }
+
     MaterialTheme(colorScheme = V2DarkColors) {
         Surface(modifier = Modifier.fillMaxSize(), color = V2AppBackground) {
             Column(modifier = Modifier.fillMaxSize().background(V2AppBackground)) {
@@ -234,6 +256,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                     }
                     EditorDestination.Saved -> V2SavedScreen(
                         savedExports = state.savedExports,
+                        maintenanceBusy = state.maintenanceBusy,
                         onRemoveSavedExport = viewModel::removeSavedExport,
                         onClearSavedExports = viewModel::clearSavedExports,
                         modifier = Modifier.weight(1f).fillMaxWidth()
@@ -249,6 +272,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         toneEngine = state.toneEngine,
                         hazeEngine = state.hazeEngine,
                         correctionEngineState = state.correctionEngineState,
+                        maintenanceBusy = state.maintenanceBusy,
                         onRetentionSelected = viewModel::setExportHistoryRetention,
                         onNoiseEngineSelected = viewModel::setNoiseEngine,
                         onDetailEngineSelected = viewModel::setDetailEngine,
@@ -334,7 +358,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
 }
 
 @Composable
-private fun V2TopBar(
+internal fun V2TopBar(
     nativeVersion: String,
     correctionEngineState: CorrectionEngineState,
     selectedTab: EditorDestination,
@@ -352,13 +376,13 @@ private fun V2TopBar(
     onSave: () -> Unit,
 ) {
     val editorActionsVisible = selectedTab == EditorDestination.Editor
+    var overflowExpanded by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier.fillMaxWidth().background(V2TopBarBackground).statusBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text("Kepler Studio", color = V2TextPrimary, style = MaterialTheme.typography.titleMedium, maxLines = 1)
@@ -369,27 +393,77 @@ private fun V2TopBar(
                         else V2TextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             if (editorActionsVisible) {
-            TextButton(onClick = onUndo, enabled = canUndo && !isBusy) { Text("Undo") }
-            TextButton(onClick = onRedo, enabled = canRedo && !isBusy) { Text("Redo") }
-            TextButton(onClick = onRotate, enabled = hasImage && !isBusy) { Text("회전") }
-            TextButton(onClick = onReset, enabled = hasImage && !isBusy) { Text("초기화") }
-            TextButton(onClick = onSave, enabled = canExport && !isBusy) { Text("저장") }
-            }
-            Button(onClick = onOpen, enabled = editorActionsVisible && !isBusy, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
-                Text("사진")
+                IconButton(onClick = onOpen, enabled = !isBusy) {
+                    Icon(Icons.Outlined.AddPhotoAlternate, contentDescription = "사진 열기")
+                }
+                IconButton(onClick = onUndo, enabled = canUndo && !isBusy) {
+                    Icon(Icons.AutoMirrored.Outlined.Undo, contentDescription = "실행 취소")
+                }
+                IconButton(onClick = onRedo, enabled = canRedo && !isBusy) {
+                    Icon(Icons.AutoMirrored.Outlined.Redo, contentDescription = "다시 실행")
+                }
+                Box {
+                    IconButton(
+                        onClick = { overflowExpanded = true },
+                        enabled = !isBusy,
+                    ) {
+                        Icon(Icons.Outlined.MoreVert, contentDescription = "편집 작업 더보기")
+                    }
+                    DropdownMenu(
+                        expanded = overflowExpanded,
+                        onDismissRequest = { overflowExpanded = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("회전") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Outlined.RotateRight, contentDescription = null) },
+                            enabled = hasImage && !isBusy,
+                            onClick = {
+                                overflowExpanded = false
+                                onRotate()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("초기화") },
+                            leadingIcon = { Icon(Icons.Outlined.RestartAlt, contentDescription = null) },
+                            enabled = hasImage && !isBusy,
+                            onClick = {
+                                overflowExpanded = false
+                                onReset()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("내보내기") },
+                            leadingIcon = { Icon(Icons.Outlined.Save, contentDescription = null) },
+                            enabled = canExport && !isBusy,
+                            onClick = {
+                                overflowExpanded = false
+                                onSave()
+                            },
+                        )
+                    }
+                }
             }
         }
-        Row(modifier = Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
             EditorDestination.values().forEach { tab ->
                 val selected = tab == selectedTab
                 TextButton(
                     onClick = { onTabSelected(tab) },
-                    modifier = Modifier.background(if (selected) V2SelectedMenuBackground else Color.Transparent)
+                    modifier =
+                        Modifier
+                            .weight(1f)
+                            .background(if (selected) V2SelectedMenuBackground else Color.Transparent),
                 ) {
-                    Text(tab.label, color = if (selected) V2Accent else V2TextSecondary, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+                    Text(
+                        tab.label,
+                        color = if (selected) V2Accent else V2TextSecondary,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1,
+                    )
                 }
             }
         }
@@ -756,7 +830,7 @@ private fun V2ExportSettingsDialog(
 }
 
 @Composable
-private fun <T> V2OptionRow(
+internal fun <T> V2OptionRow(
     title: String,
     values: List<T>,
     selected: T,
@@ -767,8 +841,24 @@ private fun <T> V2OptionRow(
         Text(title, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
         Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             values.forEach { value ->
-                TextButton(onClick = { onSelected(value) }) {
-                    Text(label(value), color = if (value == selected) V2Accent else V2TextSecondary)
+                val isSelected = value == selected
+                Surface(
+                    modifier =
+                        Modifier.selectable(
+                            selected = isSelected,
+                            role = Role.RadioButton,
+                            onClick = { onSelected(value) },
+                        ),
+                    color = if (isSelected) V2SelectedMenuBackground else Color.Transparent,
+                    shape = MaterialTheme.shapes.small,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(selected = isSelected, onClick = null)
+                        Text(label(value), color = if (isSelected) V2Accent else V2TextSecondary)
+                    }
                 }
             }
         }
@@ -778,14 +868,20 @@ private fun <T> V2OptionRow(
 @Composable
 private fun V2SavedScreen(
     savedExports: List<SavedExport>,
+    maintenanceBusy: Boolean,
     onRemoveSavedExport: (String) -> Unit,
     onClearSavedExports: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var pendingRemoval by remember { mutableStateOf<SavedExport?>(null) }
+    var confirmClear by remember { mutableStateOf(false) }
     Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("저장 기록", color = V2TextPrimary, style = MaterialTheme.typography.titleMedium)
-            TextButton(onClick = onClearSavedExports, enabled = savedExports.isNotEmpty()) { Text("기록 비우기") }
+            TextButton(
+                onClick = { confirmClear = true },
+                enabled = savedExports.isNotEmpty() && !maintenanceBusy,
+            ) { Text(if (maintenanceBusy) "처리 중…" else "기록 비우기") }
         }
         if (savedExports.isEmpty()) {
             Text("저장 기록이 없습니다", color = V2TextMuted, modifier = Modifier.padding(top = 12.dp))
@@ -795,15 +891,62 @@ private fun V2SavedScreen(
                     Text(item.displayName, color = V2TextPrimary, fontWeight = FontWeight.SemiBold)
                     Text("${item.formatLabel} · ${item.resolutionLabel}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
                     Text(formatSavedTime2(item.timestampMillis), color = V2TextMuted, style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = { onRemoveSavedExport(item.uriString) }) { Text("기록 삭제") }
+                    TextButton(
+                        onClick = { pendingRemoval = item },
+                        enabled = !maintenanceBusy,
+                    ) { Text("기록 삭제") }
                 }
             }
         }
     }
+    pendingRemoval?.let { item ->
+        AlertDialog(
+            onDismissRequest = { pendingRemoval = null },
+            title = { Text("저장 기록을 삭제할까요?") },
+            text = {
+                Text(
+                    "‘${item.displayName}’ 기록만 목록에서 삭제합니다. 갤러리에 저장된 사진 파일은 유지됩니다.",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingRemoval = null
+                        onRemoveSavedExport(item.uriString)
+                    },
+                    enabled = !maintenanceBusy,
+                ) { Text("기록 삭제") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemoval = null }) { Text("취소") }
+            },
+        )
+    }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("저장 기록을 모두 비울까요?") },
+            text = {
+                Text("목록의 ${savedExports.size}개 기록을 지웁니다. 갤러리에 저장된 사진 파일은 삭제하지 않습니다.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmClear = false
+                        onClearSavedExports()
+                    },
+                    enabled = !maintenanceBusy,
+                ) { Text("모두 비우기") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClear = false }) { Text("취소") }
+            },
+        )
+    }
 }
 
 @Composable
-private fun V2SettingsScreen(
+internal fun V2SettingsScreen(
     exportHistoryRetention: ExportHistoryRetention,
     savedExportCount: Int,
     draftSavedAtMillis: Long?,
@@ -814,6 +957,7 @@ private fun V2SettingsScreen(
     toneEngine: ToneEngine,
     hazeEngine: DehazeEngine,
     correctionEngineState: CorrectionEngineState,
+    maintenanceBusy: Boolean,
     onRetentionSelected: (ExportHistoryRetention) -> Unit,
     onNoiseEngineSelected: (NoiseEngine) -> Unit,
     onDetailEngineSelected: (DetailEngine) -> Unit,
@@ -821,23 +965,30 @@ private fun V2SettingsScreen(
     onHazeEngineSelected: (DehazeEngine) -> Unit,
     onDefaultCorrectionEngineSelected: (CorrectionEngine) -> Unit,
     onApplyCorrectionEngine: (CorrectionEngine) -> Unit,
-    onExperimentalLabChanged: ((ExperimentalLabSelection) -> ExperimentalLabSelection) -> Unit,
+    onExperimentalLabChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
     onClearDraft: () -> Unit,
     onDismissRecoveryDebugCard: () -> Unit,
     onCleanupOldTemporarySources: () -> Unit,
     onClearSavedExports: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val experimental by ExperimentalLabController.stateFor(correctionEngineState.documentEngine).collectAsState()
+    val overrides by ExperimentalLabController.overridesState.collectAsState()
     val comparison by ExperimentalComparisonStore.latest.collectAsState()
-Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    var confirmDestructiveAction by remember { mutableStateOf<SettingsDestructiveAction?>(null) }
+    var showRecoveryDetails by rememberSaveable { mutableStateOf(false) }
+    Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         V2SettingsCard("보정 엔진") {
             V2OptionRow(
-                title = "새 사진의 기본 엔진",
+                title = "새 사진 기본 엔진",
                 values = CorrectionEngine.entries,
                 selected = correctionEngineState.defaultEngine,
-                label = { if (it.experimental) "${it.displayName} · Experimental" else it.displayName },
+                label = { if (it.experimental) "${it.displayName} · 실험적" else it.displayName },
                 onSelected = onDefaultCorrectionEngineSelected,
+            )
+            Text(
+                "기본 엔진을 바꿔도 현재 사진은 자동으로 변경되지 않습니다.",
+                color = V2TextMuted,
+                style = MaterialTheme.typography.labelSmall,
             )
             Text(
                 "현재 사진 상태",
@@ -847,57 +998,77 @@ Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp),
             )
             val docEngine = correctionEngineState.documentEngine
             val prevEngine = correctionEngineState.previewEngine
-            val resultClass = correctionEngineState.previewResultClass
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("지정 엔진: ", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
-                Text(docEngine.displayName, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
-            }
-            if (prevEngine != null && prevEngine != docEngine) {
-                Text("실제 미리보기: ${prevEngine.displayName}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
-            }
-            if (correctionEngineState.fallbackReason != null) {
-                Surface(
-                    color = Color(0xFFFFC857).copy(alpha = 0.17f),
-                    shape = MaterialTheme.shapes.small,
-                ) {
+            Text(
+                "지정 엔진: ${docEngine.displayName}",
+                color = V2TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(
+                buildString {
+                    append("보이는 결과: ")
+                    append(prevEngine?.displayName ?: "원본")
+                    correctionEngineState.previewRoute?.let { append(" · ${nativeRouteLabel(it)}") }
+                    append(" · ${previewResultLabel(correctionEngineState.previewResultClass)}")
+                },
+                color = V2TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            val participation =
+                (correctionEngineState.visiblePreview as? com.projectnuke.keplerstudio.editor.VisiblePreviewState.Rendered)
+                    ?.participation
+            participation?.let {
+                val renderParticipation = it
+                val indicators =
+                    listOfNotNull(
+                        "모델".takeIf { renderParticipation.model },
+                        "규칙".takeIf { renderParticipation.rule },
+                        "수동".takeIf { renderParticipation.manual },
+                    )
+                if (indicators.isNotEmpty()) {
                     Text(
-                        "폴백: ${correctionEngineState.fallbackReason?.name ?: "알 수 없음"}",
-                        color = Color(0xFFFFC857),
-                        modifier = Modifier.padding(4.dp),
+                        "처리 참여: ${indicators.joinToString(" · ")}",
+                        color = V2TextSecondary,
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
             }
             if (correctionEngineState.usedFallback) {
-                TextButton(
-                    onClick = { onApplyCorrectionEngine(correctionEngineState.defaultEngine) },
-                    enabled = !correctionEngineState.isSwitching,
-                ) { Text("기본 엔진으로 다시 시도") }
-            }
-            CorrectionEngine.entries.forEach { engine ->
                 Surface(
-                    modifier = Modifier.fillMaxWidth().selectable(
-                        selected = correctionEngineState.documentEngine == engine,
-                        enabled = !correctionEngineState.isSwitching && correctionEngineState.documentEngine != engine,
-                        role = Role.RadioButton,
-                        onClick = { onApplyCorrectionEngine(engine) },
-                    ),
-                    color = V2CardBackground,
+                    color = Color(0xFFFFC857).copy(alpha = 0.17f),
                     shape = MaterialTheme.shapes.small,
                 ) {
-                    Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(
-                            selected = correctionEngineState.documentEngine == engine,
-                            onClick = null,
-                            enabled = !correctionEngineState.isSwitching,
-                        )
-                        Text(
-                            "${engine.displayName}${if (correctionEngineState.documentEngine == engine) "\u2018 (현재)" else ""}${if (engine.experimental) " · Experimental" else ""}",
-                            color = V2TextPrimary,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
+                    Text(
+                        "엔진 2 처리 실패로 이번 결과만 엔진 1을 사용했습니다. 다음 보정은 엔진 2를 다시 시도합니다.",
+                        color = Color(0xFFFFC857),
+                        modifier = Modifier.padding(8.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                    )
                 }
+            }
+            val hasDocument = correctionEngineState.previewResultClass != PreviewResultClass.NoDocument
+            val engineActionEnabled = hasDocument && !correctionEngineState.isSwitching
+            if (docEngine == CorrectionEngine.Engine1) {
+                Button(
+                    onClick = { onApplyCorrectionEngine(CorrectionEngine.Engine2) },
+                    enabled = engineActionEnabled,
+                ) { Text("엔진 2로 전환") }
+            } else if (correctionEngineState.usedFallback || correctionEngineState.lastRenderFailure != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { onApplyCorrectionEngine(CorrectionEngine.Engine2) },
+                        enabled = engineActionEnabled,
+                    ) { Text("엔진 2 다시 시도") }
+                    TextButton(
+                        onClick = { onApplyCorrectionEngine(CorrectionEngine.Engine1) },
+                        enabled = engineActionEnabled,
+                    ) { Text("엔진 1로 되돌리기") }
+                }
+            } else {
+                TextButton(
+                    onClick = { onApplyCorrectionEngine(CorrectionEngine.Engine1) },
+                    enabled = engineActionEnabled,
+                ) { Text("엔진 1로 전환") }
             }
             Text(
                 engineSettingsStatus(correctionEngineState),
@@ -905,141 +1076,276 @@ Column(modifier = modifier.verticalScroll(rememberScrollState()).padding(16.dp),
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        if (BuildConfig.DEBUG) ExperimentalLabSettingsCard(experimental, comparison, onExperimentalLabChanged)
+        if (BuildConfig.DEBUG) {
+            ExperimentalLabSettingsCard(
+                assignedEngine = correctionEngineState.documentEngine,
+                overrides = overrides,
+                comparison = comparison,
+                onOverridesChanged = onExperimentalLabChanged,
+            )
+        }
         if (showRecoveryDebugCard && recoveryDebugInfo != null) {
-            V2SettingsCard("복구 확인") {
-                Text("draft_source: ${recoveryDebugInfo.draftSourcePath ?: "없음"}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
-                Text("draft_source 파일 존재: ${if (recoveryDebugInfo.draftSourceExists) "예" else "아니오"}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
-                Text("filesDir draft 존재: ${if (recoveryDebugInfo.filesDirDraftExists) "예" else "아니오"}", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
-                Text("filesDir 경로: ${recoveryDebugInfo.filesDirDraftPath}", color = V2TextMuted, style = MaterialTheme.typography.bodySmall)
+            V2SettingsCard("복구 상태") {
+                Text(
+                    if (recoveryDebugInfo.draftSourceExists) "임시 저장 원본을 확인했습니다." else "임시 저장 원본을 찾지 못했습니다.",
+                    color = V2TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                TextButton(onClick = { showRecoveryDetails = !showRecoveryDetails }) {
+                    Text(if (showRecoveryDetails) "개발자 진단 숨기기" else "개발자 진단 보기")
+                }
+                if (showRecoveryDetails) {
+                    Text("draft_source: ${recoveryDebugInfo.draftSourcePath ?: "없음"}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
+                    Text("draft_source 파일 존재: ${if (recoveryDebugInfo.draftSourceExists) "예" else "아니오"}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
+                    Text("filesDir draft 존재: ${if (recoveryDebugInfo.filesDirDraftExists) "예" else "아니오"}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
+                    Text("filesDir 경로: ${recoveryDebugInfo.filesDirDraftPath}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
+                }
                 TextButton(onClick = onDismissRecoveryDebugCard) { Text("닫기") }
             }
         }
         V2SettingsCard("저장 기록") {
             Text("현재 기록 수: $savedExportCount", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
             V2OptionRow("보관 정책", ExportHistoryRetention.values().toList(), exportHistoryRetention, { it.label }, onRetentionSelected)
-            TextButton(onClick = onClearSavedExports, enabled = savedExportCount > 0) { Text("저장 기록 비우기") }
+            TextButton(
+                onClick = { confirmDestructiveAction = SettingsDestructiveAction.ClearSavedHistory },
+                enabled = savedExportCount > 0 && !maintenanceBusy,
+            ) { Text(if (maintenanceBusy) "처리 중…" else "저장 기록 비우기") }
         }
         V2SettingsCard("임시 저장") {
             Text(draftSavedAtMillis?.let { "마지막 임시 저장: ${formatSavedTime2(it)}" } ?: "현재 임시 저장 기록이 없습니다", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onClearDraft, enabled = draftSavedAtMillis != null) { Text("임시 저장 삭제") }
-                TextButton(onClick = onCleanupOldTemporarySources) { Text("임시 원본 정리") }
+                TextButton(
+                    onClick = { confirmDestructiveAction = SettingsDestructiveAction.ClearDraft },
+                    enabled = draftSavedAtMillis != null && !maintenanceBusy,
+                ) { Text("임시 저장 삭제") }
+                TextButton(
+                    onClick = { confirmDestructiveAction = SettingsDestructiveAction.CleanupTemporarySources },
+                    enabled = !maintenanceBusy,
+                ) { Text("임시 원본 정리") }
+            }
+            if (maintenanceBusy) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.width(20.dp))
+                    Text(" 정리 작업을 처리하는 중입니다.", color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
-        V2SettingsCard("엔진 선택") {
+        V2SettingsCard("세부 보정 방식") {
             V2OptionRow("노이즈 감소", IMPLEMENTED_NOISE_ENGINES, noiseEngine, { it.label }, onNoiseEngineSelected)
             V2OptionRow("디테일", IMPLEMENTED_DETAIL_ENGINES, detailEngine, { it.label }, onDetailEngineSelected)
             V2OptionRow("톤", IMPLEMENTED_TONE_ENGINES, toneEngine, { it.label }, onToneEngineSelected)
             V2OptionRow("디헤이즈", IMPLEMENTED_DEHAZE_ENGINES, hazeEngine, { it.label }, onHazeEngineSelected)
         }
     }
+
+    confirmDestructiveAction?.let { action ->
+        AlertDialog(
+            onDismissRequest = { confirmDestructiveAction = null },
+            title = { Text(action.title) },
+            text = { Text(action.consequence) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmDestructiveAction = null
+                        when (action) {
+                            SettingsDestructiveAction.ClearSavedHistory -> onClearSavedExports()
+                            SettingsDestructiveAction.ClearDraft -> onClearDraft()
+                            SettingsDestructiveAction.CleanupTemporarySources -> onCleanupOldTemporarySources()
+                        }
+                    },
+                    enabled = !maintenanceBusy,
+                ) { Text(action.confirmLabel) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDestructiveAction = null }) { Text("취소") }
+            },
+        )
+    }
 }
 
 @Composable
-private fun CorrectionEngineCard(
-    engine: CorrectionEngine,
-    selected: Boolean,
-    enabled: Boolean,
-    onClick: () -> Unit,
+private fun ExperimentalLabSettingsCard(
+    assignedEngine: CorrectionEngine,
+    overrides: DebugFeatureOverrides,
+    comparison: com.projectnuke.keplerstudio.editor.DebugComparisonArtifact?,
+    onOverridesChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
 ) {
-    Surface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onClick),
-        color = if (selected) V2SelectedMenuBackground else V2CardBackground,
-    ) {
-        Row(modifier = Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            RadioButton(selected = selected, onClick = null, enabled = enabled)
-            Column(modifier = Modifier.padding(start = 8.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(engine.displayName, color = V2TextPrimary, fontWeight = FontWeight.SemiBold)
-                    if (engine.experimental) Text("Experimental", color = Color(0xFFFFC857), style = MaterialTheme.typography.labelSmall)
+    val effective = ExperimentalLabController.resolvedSelection(assignedEngine)
+    V2SettingsCard("실험실") {
+        Text(
+            "개발 빌드의 현재 세션에서만 적용됩니다. ‘사진 엔진 따르기’는 현재 사진에 지정된 엔진을 사용합니다.",
+            color = V2TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        LabRouteRow(
+            title = "사진 렌더링",
+            values =
+                listOf(
+                    LabRouteOption(null, "사진 엔진 따르기"),
+                    LabRouteOption(NativeRenderRoute.V1, "엔진 1 강제"),
+                    LabRouteOption(NativeRenderRoute.V2, "엔진 2 강제"),
+                ),
+            selectedValue = overrides.nativeRender,
+        ) { value ->
+            onOverridesChanged { it.copy(nativeRender = value) }
+        }
+        Text(
+            "현재 사진 렌더링 경로: ${nativeRouteLabel(effective.nativeRender)}",
+            color = V2TextMuted,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        LabRouteRow(
+            title = "플레어 가드",
+            values =
+                listOf(
+                    LabRouteOption(null, "사진 엔진 따르기"),
+                    LabRouteOption(FlareGuardRoute.V1, "V1 강제"),
+                    LabRouteOption(FlareGuardRoute.V2Rule, "규칙 기반 V2"),
+                    LabRouteOption(FlareGuardRoute.V2ModelAssisted, "모델 보조 V2 · 실행 시 검증"),
+                ),
+            selectedValue = overrides.flareGuard,
+        ) { value ->
+            onOverridesChanged { it.copy(flareGuard = value) }
+        }
+        LabRouteRow(
+            title = "리마스터",
+            values =
+                listOf(
+                    LabRouteOption(null, "사진 엔진 따르기"),
+                    LabRouteOption(RemasterRoute.V1, "V1 강제"),
+                    LabRouteOption(RemasterRoute.V2MaskAware, "수동 마스크 V2"),
+                    LabRouteOption(RemasterRoute.V2ModelAssisted, "모델 보조 V2 · 모델 필요"),
+                ),
+            selectedValue = overrides.remaster,
+        ) { value ->
+            onOverridesChanged { it.copy(remaster = value) }
+        }
+        LabRouteRow(
+            title = "피사체 선택",
+            values =
+                listOf(
+                    LabRouteOption(null, "사진 엔진 따르기"),
+                    LabRouteOption(SubjectSelectionRoute.V1, "V1 강제"),
+                    LabRouteOption(SubjectSelectionRoute.V2ManualOrSynthetic, "수동·합성 V2"),
+                    LabRouteOption(SubjectSelectionRoute.V2ModelAssisted, "모델 보조 V2 · 모델 필요"),
+                ),
+            selectedValue = overrides.subjectSelection,
+        ) { value ->
+            onOverridesChanged { it.copy(subjectSelection = value) }
+        }
+        comparison?.let { artifact ->
+            val comparisonBitmaps =
+                remember(artifact) {
+                    (
+                        listOf(
+                            "V1" to artifact.baselineArgb,
+                            "V2" to artifact.experimentalArgb,
+                            "차이" to artifact.differenceHeatmapArgb,
+                        ) +
+                            listOfNotNull(artifact.maskArgb?.let { "마스크" to it })
+                    ).map { (label, pixels) ->
+                        LabeledComparisonBitmap(
+                            label = label,
+                            bitmap =
+                                Bitmap.createBitmap(
+                                    pixels,
+                                    artifact.width,
+                                    artifact.height,
+                                    Bitmap.Config.ARGB_8888,
+                                ),
+                        )
+                    }
                 }
-                Text(
-                    if (engine == CorrectionEngine.Engine1) "안정적인 기본 보정 파이프라인" else "실험적 보정 파이프라인(검토 중)",
-                    color = V2TextSecondary,
-                    style = MaterialTheme.typography.bodySmall,
+            DisposableEffect(comparisonBitmaps) {
+                onDispose {
+                    comparisonBitmaps.forEach { item ->
+                        if (!item.bitmap.isRecycled) item.bitmap.recycle()
+                    }
+                }
+            }
+            Text(
+                "${artifact.algorithmDecision ?: "비교"} · 변경 ${(artifact.metrics.changedPixelRatio * 100f).toInt()}% · ${artifact.durationMillis ?: 0L} ms",
+                color = V2TextSecondary,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                comparisonBitmaps.forEach { item ->
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(item.label, color = V2TextSecondary, style = MaterialTheme.typography.labelSmall)
+                        Image(
+                            bitmap = item.bitmap.asImageBitmap(),
+                            contentDescription = "${item.label} 비교 미리보기",
+                            modifier = Modifier.width(72.dp).heightIn(max = 88.dp),
+                            contentScale = ContentScale.Fit,
+                        )
+                    }
+                }
+            }
+            var toggledVersion by remember(artifact) { mutableStateOf("V1") }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(onClick = { toggledVersion = "V1" }) { Text("V1 보기") }
+                TextButton(onClick = { toggledVersion = "V2" }) { Text("V2 보기") }
+                TextButton(onClick = ExperimentalComparisonStore::clear) { Text("비교 지우기") }
+            }
+            comparisonBitmaps.firstOrNull { it.label == toggledVersion }?.let { item ->
+                Image(
+                    bitmap = item.bitmap.asImageBitmap(),
+                    contentDescription = "${item.label} 전환 비교",
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
+                    contentScale = ContentScale.Fit,
                 )
             }
         }
     }
 }
 
-@Composable
-private fun ExperimentalLabSettingsCard(
-    selection: ExperimentalLabSelection,
-    comparison: com.projectnuke.keplerstudio.editor.DebugComparisonArtifact?,
-    onSelectionChanged: ((ExperimentalLabSelection) -> ExperimentalLabSelection) -> Unit,
+private data class LabRouteOption<T>(
+    val value: T?,
+    val label: String,
+)
+
+private data class LabeledComparisonBitmap(
+    val label: String,
+    val bitmap: Bitmap,
+)
+
+private enum class SettingsDestructiveAction(
+    val title: String,
+    val consequence: String,
+    val confirmLabel: String,
 ) {
-    V2SettingsCard("Experimental Lab") {
-        Text(
-            "Session only; defaults follow the document engine. Overrides are ignored in release builds.",
-            color = V2TextSecondary,
-            style = MaterialTheme.typography.bodySmall,
-        )
-        V2OptionRow("Native render", NativeRenderRoute.entries.filterNot { it == NativeRenderRoute.Compare }, selection.nativeRender, { it.name }) {
-            value -> onSelectionChanged { it.copy(nativeRender = value) }
-        }
-        V2OptionRow("FlareGuard", FlareGuardRoute.entries.filterNot { it == FlareGuardRoute.Compare }, selection.flareGuard, { it.name }) {
-            value -> onSelectionChanged { it.copy(flareGuard = value) }
-        }
-        V2OptionRow("Remaster", RemasterRoute.entries.filterNot { it == RemasterRoute.Compare }, selection.remaster, { it.name }) {
-            value -> onSelectionChanged { it.copy(remaster = value) }
-        }
-        V2OptionRow(
-            "Subject Selection",
-            SubjectSelectionRoute.entries.filterNot { it == SubjectSelectionRoute.Compare },
-            selection.subjectSelection,
-            { it.name },
-        ) { value ->
-            onSelectionChanged { it.copy(subjectSelection = value) }
-        }
-        comparison?.let { artifact ->
-            val bitmaps =
-                remember(artifact) {
-                    listOf(
-                        Bitmap.createBitmap(
-                            artifact.baselineArgb,
-                            artifact.width,
-                            artifact.height,
-                            Bitmap.Config.ARGB_8888,
-                        ),
-                        Bitmap.createBitmap(
-                            artifact.experimentalArgb,
-                            artifact.width,
-                            artifact.height,
-                            Bitmap.Config.ARGB_8888,
-                        ),
-                        Bitmap.createBitmap(
-                            artifact.differenceHeatmapArgb,
-                            artifact.width,
-                            artifact.height,
-                            Bitmap.Config.ARGB_8888,
-                        ),
-                    )
-                }
-            DisposableEffect(bitmaps) {
-                onDispose { bitmaps.forEach { if (!it.isRecycled) it.recycle() } }
-            }
-            Text(
-                "${artifact.algorithmDecision} · changed ${(artifact.metrics.changedPixelRatio * 100f).toInt()}% · ${artifact.durationMillis} ms",
-                color = V2TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                bitmaps.forEach { bitmap ->
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "V1 V2 difference comparison",
-                        modifier = Modifier.width(96.dp).heightIn(max = 96.dp),
-                        contentScale = ContentScale.Fit,
-                    )
-                }
-            }
-            TextButton(onClick = ExperimentalComparisonStore::clear) { Text("Clear comparison") }
-        }
-    }
+    ClearSavedHistory(
+        title = "저장 기록을 비울까요?",
+        consequence = "앱 안의 내보내기 기록만 삭제합니다. 갤러리에 저장된 사진 파일은 유지됩니다.",
+        confirmLabel = "기록 비우기",
+    ),
+    ClearDraft(
+        title = "임시 저장을 삭제할까요?",
+        consequence = "자동 복구용 임시 저장을 삭제합니다. 현재 열려 있는 편집 화면은 유지됩니다.",
+        confirmLabel = "임시 저장 삭제",
+    ),
+    CleanupTemporarySources(
+        title = "오래된 임시 원본을 정리할까요?",
+        consequence = "7일이 지난 앱 내부 임시 원본만 정리합니다. 현재 사진, 임시 저장 원본, 내보낸 사진은 유지됩니다.",
+        confirmLabel = "임시 원본 정리",
+    ),
+}
+
+@Composable
+private fun <T> LabRouteRow(
+    title: String,
+    values: List<LabRouteOption<T>>,
+    selectedValue: T?,
+    onSelected: (T?) -> Unit,
+) {
+    val selected = values.first { it.value == selectedValue }
+    V2OptionRow(
+        title = title,
+        values = values,
+        selected = selected,
+        label = LabRouteOption<T>::label,
+        onSelected = { onSelected(it.value) },
+    )
 }
 
 @Composable
@@ -1085,3 +1391,21 @@ private fun engineSettingsStatus(state: CorrectionEngineState): String {
             "개발자 설정으로 현재 미리보기를 Engine 2로 렌더링했습니다."
     }
 }
+
+private fun nativeRouteLabel(route: NativeRenderRoute): String =
+    when (route) {
+        NativeRenderRoute.V1 -> "V1"
+        NativeRenderRoute.V2 -> "V2"
+        NativeRenderRoute.Compare -> "비교"
+    }
+
+private fun previewResultLabel(result: PreviewResultClass): String =
+    when (result) {
+        PreviewResultClass.NoDocument -> "사진 없음"
+        PreviewResultClass.Original -> "원본"
+        PreviewResultClass.V1 -> "V1 결과"
+        PreviewResultClass.V2 -> "V2 결과"
+        PreviewResultClass.V2FallbackToV1 -> "실행 실패 후 V1 대체"
+        PreviewResultClass.DebugForcedV1 -> "개발자 설정으로 V1 강제"
+        PreviewResultClass.DebugForcedV2 -> "개발자 설정으로 V2 강제"
+    }

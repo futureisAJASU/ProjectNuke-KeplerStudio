@@ -317,6 +317,3 @@ object RouteResolver {
             )
         ).primaryRoute != otherRoute
 }
-
-internal fun ExperimentalLabController.debugOverridesCompat(): DebugFeatureOverrides =
-    debugOverrides()
