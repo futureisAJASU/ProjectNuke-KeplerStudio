@@ -1,156 +1,208 @@
 package com.projectnuke.keplerstudio.editor
 
-import org.junit.After
+import android.graphics.Bitmap
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
-/**
- * Integration tests for [CorrectionEngineState] state transitions:
- * - [withSuccessfulRender] correctly classifies V1, V2, and V2-fallback-to-V1
- * - [withFailedRender] preserves the old preview class and records the failure
- * - Fallback state is cleared when a subsequent V2 render succeeds
- * - The effective preview engine drives routing decisions
- */
+@RunWith(RobolectricTestRunner::class)
 class CorrectionEngineStateTransitionTest {
+    @Test
+    fun openingDocumentStartsAsOriginalAndClearsPriorState() {
+        val stale =
+            CorrectionEngineState(
+                documentEngine = CorrectionEngine.Engine2,
+                pendingEngine = CorrectionEngine.Engine1,
+                visiblePreview =
+                    rendered(
+                        requested = NativeRenderRoute.V2,
+                        actual = NativeRenderRoute.V1,
+                        decision = RenderRouteDecision.RuntimeFallbackToV1,
+                    ),
+                lastRenderFailure = failureResult().let {
+                    CorrectionEngineState().withFailedRender(CorrectionEngine.Engine2, it)
+                        .lastRenderFailure
+                },
+            )
 
-    @After
-    fun tearDown() {
-        ExperimentalLabController.resetForTest()
+        val opened = stale.forOpenedDocument(CorrectionEngine.Engine1)
+
+        assertEquals(CorrectionEngine.Engine1, opened.documentEngine)
+        assertEquals(PreviewResultClass.Original, opened.previewResultClass)
+        assertTrue(opened.previewIsOriginal)
+        assertNull(opened.previewEngine)
+        assertNull(opened.pendingEngine)
+        assertNull(opened.lastRenderFailure)
     }
 
     @Test
-    fun successfulV2RenderOnEngine2DocumentProducesV2ResultClass() {
-        val state = CorrectionEngineState(
-            documentEngine = CorrectionEngine.Engine2,
-            previewResultClass = PreviewResultClass.NoDocument,
-        )
-        val updated = state.withSuccessfulRender(
-            documentEngine = CorrectionEngine.Engine2,
-            route = NativeRenderRoute.V2,
-            debugOverrideActive = false,
-        )
-        assertEquals(PreviewResultClass.V2, updated.previewResultClass)
-        assertEquals(CorrectionEngine.Engine2, updated.previewEngine)
-        assertEquals(NativeRenderRoute.V2, updated.previewRoute)
-        assertNull(updated.fallbackReason)
-        assertFalse(updated.usedFallback)
-        assertFalse(updated.debugOverrideActive)
+    fun successfulV2SettlementPublishesTruthAndClearsPending() {
+        val state =
+            CorrectionEngineState(
+                documentEngine = CorrectionEngine.Engine1,
+                pendingEngine = CorrectionEngine.Engine2,
+                visiblePreview = VisiblePreviewState.Original,
+            )
+        val result =
+            successResult(
+                requested = NativeRenderRoute.V2,
+                actual = NativeRenderRoute.V2,
+                decision = RenderRouteDecision.FollowDocument,
+            )
+
+        val settled = state.withSuccessfulRender(CorrectionEngine.Engine2, result)
+
+        assertEquals(CorrectionEngine.Engine2, settled.documentEngine)
+        assertEquals(CorrectionEngine.Engine2, settled.previewEngine)
+        assertEquals(NativeRenderRoute.V2, settled.previewRoute)
+        assertEquals(PreviewResultClass.V2, settled.previewResultClass)
+        assertFalse(settled.previewIsOriginal)
+        assertNull(settled.pendingEngine)
+        assertNull(settled.lastRenderFailure)
+        result.output.recycle()
     }
 
     @Test
-    fun successfulV1RenderOnEngine2DocumentProducesV2FallbackToV1() {
-        val state = CorrectionEngineState(
-            documentEngine = CorrectionEngine.Engine2,
-            previewResultClass = PreviewResultClass.NoDocument,
-        )
-        val updated = state.withSuccessfulRender(
-            documentEngine = CorrectionEngine.Engine2,
-            route = NativeRenderRoute.V1,
-            debugOverrideActive = false,
-        )
-        assertEquals(PreviewResultClass.V2FallbackToV1, updated.previewResultClass)
-        assertEquals(CorrectionEngine.Engine1, updated.previewEngine)
-        assertEquals(NativeRenderRoute.V1, updated.previewRoute)
-        assertEquals(RenderFallbackReason.V2RenderFailed, updated.fallbackReason)
-        assertTrue(updated.usedFallback)
+    fun runtimeFallbackIsDistinctFromDebugForcedV1() {
+        val fallback =
+            CorrectionEngineState(documentEngine = CorrectionEngine.Engine2)
+                .withSuccessfulRender(
+                    CorrectionEngine.Engine2,
+                    successResult(
+                        requested = NativeRenderRoute.V2,
+                        actual = NativeRenderRoute.V1,
+                        decision = RenderRouteDecision.RuntimeFallbackToV1,
+                    ),
+                )
+        val forced =
+            CorrectionEngineState(documentEngine = CorrectionEngine.Engine2)
+                .withSuccessfulRender(
+                    CorrectionEngine.Engine2,
+                    successResult(
+                        requested = NativeRenderRoute.V1,
+                        actual = NativeRenderRoute.V1,
+                        decision = RenderRouteDecision.DebugForcedV1,
+                    ),
+                )
+
+        assertEquals(PreviewResultClass.V2FallbackToV1, fallback.previewResultClass)
+        assertEquals(RenderFallbackReason.V2RenderFailed, fallback.fallbackReason)
+        assertTrue(fallback.usedFallback)
+        assertEquals(PreviewResultClass.DebugForcedV1, forced.previewResultClass)
+        assertNull(forced.fallbackReason)
+        assertFalse(forced.usedFallback)
     }
 
     @Test
-    fun successfulV1RenderOnEngine1DocumentProducesV1ResultClass() {
-        val state = CorrectionEngineState(
-            documentEngine = CorrectionEngine.Engine1,
-            previewResultClass = PreviewResultClass.NoDocument,
-        )
-        val updated = state.withSuccessfulRender(
-            documentEngine = CorrectionEngine.Engine1,
-            route = NativeRenderRoute.V1,
-            debugOverrideActive = false,
-        )
-        assertEquals(PreviewResultClass.V1, updated.previewResultClass)
-        assertEquals(CorrectionEngine.Engine1, updated.previewEngine)
-        assertNull(updated.fallbackReason)
-        assertFalse(updated.usedFallback)
+    fun debugForcedV2NeverBecomesForcedV1() {
+        val result =
+            successResult(
+                requested = NativeRenderRoute.V2,
+                actual = NativeRenderRoute.V2,
+                decision = RenderRouteDecision.DebugForcedV2,
+            )
+        val state =
+            CorrectionEngineState(documentEngine = CorrectionEngine.Engine1)
+                .withSuccessfulRender(CorrectionEngine.Engine1, result)
+
+        assertEquals(PreviewResultClass.DebugForcedV2, state.previewResultClass)
+        assertEquals(CorrectionEngine.Engine2, state.previewEngine)
+        result.output.recycle()
     }
 
     @Test
-    fun subsequentV2SuccessClearsOldFallback() {
-        val fallbackState = CorrectionEngineState(
-            documentEngine = CorrectionEngine.Engine2,
-            previewEngine = CorrectionEngine.Engine1,
-            previewResultClass = PreviewResultClass.V2FallbackToV1,
-            fallbackReason = RenderFallbackReason.V2RenderFailed,
-        )
-        assertTrue(fallbackState.usedFallback)
+    fun failurePreservesVisiblePreviewAndSettlesPending() {
+        val visible =
+            rendered(
+                requested = NativeRenderRoute.V1,
+                actual = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+            )
+        val state =
+            CorrectionEngineState(
+                documentEngine = CorrectionEngine.Engine2,
+                pendingEngine = CorrectionEngine.Engine2,
+                visiblePreview = visible,
+            )
 
-        val recovered = fallbackState.withSuccessfulRender(
-            documentEngine = CorrectionEngine.Engine2,
-            route = NativeRenderRoute.V2,
-            debugOverrideActive = false,
-        )
-        assertEquals(PreviewResultClass.V2, recovered.previewResultClass)
-        assertEquals(CorrectionEngine.Engine2, recovered.previewEngine)
-        assertNull(recovered.fallbackReason)
-        assertFalse(recovered.usedFallback)
-    }
+        val failed = state.withFailedRender(CorrectionEngine.Engine2, failureResult())
 
-    @Test
-    fun failedRenderPreservesOldPreviewClassAndRecordsFailure() {
-        val v1State = CorrectionEngineState(
-            documentEngine = CorrectionEngine.Engine1,
-            previewEngine = CorrectionEngine.Engine1,
-            previewResultClass = PreviewResultClass.V1,
-        )
-        val failed = v1State.withFailedRender(
-            operation = "test",
-            requestedEngine = CorrectionEngine.Engine1,
-            requestedRoute = NativeRenderRoute.V1,
-            reason = "simulated failure",
-        )
+        assertEquals(visible, failed.visiblePreview)
         assertEquals(PreviewResultClass.V1, failed.previewResultClass)
         assertNotNull(failed.lastRenderFailure)
-        assertEquals("simulated failure", failed.lastRenderFailure!!.reason)
         assertNull(failed.pendingEngine)
     }
 
     @Test
-    fun failedRenderOnNoDocumentTransitionsToFailed() {
-        val noDocState = CorrectionEngineState(
-            previewResultClass = PreviewResultClass.NoDocument,
+    fun laterV2SuccessClearsFallbackAndFailure() {
+        val fallback =
+            CorrectionEngineState(
+                documentEngine = CorrectionEngine.Engine2,
+                visiblePreview =
+                    rendered(
+                        requested = NativeRenderRoute.V2,
+                        actual = NativeRenderRoute.V1,
+                        decision = RenderRouteDecision.RuntimeFallbackToV1,
+                    ),
+            ).withFailedRender(CorrectionEngine.Engine2, failureResult())
+        val success =
+            successResult(
+                requested = NativeRenderRoute.V2,
+                actual = NativeRenderRoute.V2,
+                decision = RenderRouteDecision.FollowDocument,
+            )
+
+        val recovered = fallback.withSuccessfulRender(CorrectionEngine.Engine2, success)
+
+        assertEquals(PreviewResultClass.V2, recovered.previewResultClass)
+        assertNull(recovered.fallbackReason)
+        assertNull(recovered.lastRenderFailure)
+        success.output.recycle()
+    }
+
+    private fun rendered(
+        requested: NativeRenderRoute,
+        actual: NativeRenderRoute,
+        decision: RenderRouteDecision,
+    ) =
+        VisiblePreviewState.Rendered(
+            requestedRoute = requested,
+            actualRoute = actual,
+            decision = decision,
+            algorithmVersion = if (actual == NativeRenderRoute.V2) "native-v2" else "native-v1",
         )
-        val failed = noDocState.withFailedRender(
-            operation = "test",
-            requestedEngine = CorrectionEngine.Engine2,
+
+    private fun successResult(
+        requested: NativeRenderRoute,
+        actual: NativeRenderRoute,
+        decision: RenderRouteDecision,
+    ) =
+        RenderResult.Success(
+            operation = RenderOperation.NativePreview,
+            requestedRoute = requested,
+            output = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
+            actualRoute = actual,
+            decision = decision,
+            usedDebugOverride =
+                decision == RenderRouteDecision.DebugForcedV1 ||
+                    decision == RenderRouteDecision.DebugForcedV2,
+            algorithmVersion = if (actual == NativeRenderRoute.V2) "native-v2" else "native-v1",
+            participation = RenderParticipation(),
+            durationMillis = 1L,
+            knownTransientBytes = 4L,
+        )
+
+    private fun failureResult() =
+        RenderResult.Failure(
+            operation = RenderOperation.NativePreview,
             requestedRoute = NativeRenderRoute.V2,
-            reason = "V2 unavailable",
+            attemptedRoute = NativeRenderRoute.V2,
+            kind = RenderFailureKind.NativeV2Failed,
+            message = "simulated failure",
         )
-        assertEquals(PreviewResultClass.Failed, failed.previewResultClass)
-        assertNotNull(failed.lastRenderFailure)
-    }
-
-    @Test
-    fun isSwitchingTrueWhenPendingEngineIsNonNull() {
-        val switching = CorrectionEngineState(
-            pendingEngine = CorrectionEngine.Engine2,
-        )
-        assertTrue(switching.isSwitching)
-
-        val notSwitching = CorrectionEngineState(
-            pendingEngine = null,
-        )
-        assertFalse(notSwitching.isSwitching)
-    }
-
-    @Test
-    fun previewIsCleanTrueForV1V2AndOriginal() {
-        assertTrue(CorrectionEngineState(previewResultClass = PreviewResultClass.V1).previewIsClean)
-        assertTrue(CorrectionEngineState(previewResultClass = PreviewResultClass.V2).previewIsClean)
-        assertTrue(CorrectionEngineState(previewResultClass = PreviewResultClass.Original).previewIsClean)
-        assertFalse(CorrectionEngineState(previewResultClass = PreviewResultClass.V2FallbackToV1).previewIsClean)
-        assertFalse(CorrectionEngineState(previewResultClass = PreviewResultClass.Failed).previewIsClean)
-        assertFalse(CorrectionEngineState(previewResultClass = PreviewResultClass.NoDocument).previewIsClean)
-    }
 }

@@ -1062,7 +1062,6 @@ private fun engineChipLabel(state: CorrectionEngineState): String {
     else when (result) {
         PreviewResultClass.NoDocument -> "E${state.defaultEngine.ordinal + 1}"
         PreviewResultClass.V2FallbackToV1 -> "E2 · E1 폴백"
-        PreviewResultClass.Failed -> "E${engine.ordinal + 1} · 실패"
         else -> "E${engine.ordinal + 1}"
     }
 }
@@ -1080,7 +1079,9 @@ private fun engineSettingsStatus(state: CorrectionEngineState): String {
         PreviewResultClass.V2 -> "현재 미리보기는 실험적 Correction Engine 2로 렌더링되었습니다."
         PreviewResultClass.V2FallbackToV1 ->
             "Engine 2가 실패하여 현재 미리보기에는 Engine 1 폴백이 적용되었습니다."
-        PreviewResultClass.Failed ->
-            "마지막 렌더링이 실패했습니다. 이전 미리보기를 유지합니다."
+        PreviewResultClass.DebugForcedV1 ->
+            "개발자 설정으로 현재 미리보기를 Engine 1로 렌더링했습니다."
+        PreviewResultClass.DebugForcedV2 ->
+            "개발자 설정으로 현재 미리보기를 Engine 2로 렌더링했습니다."
     }
 }

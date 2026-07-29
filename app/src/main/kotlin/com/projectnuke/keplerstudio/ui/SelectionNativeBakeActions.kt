@@ -4,20 +4,25 @@ import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
+import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.FallbackPolicy
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.SelectionLayer
+import com.projectnuke.keplerstudio.editor.RenderFailedException
+import com.projectnuke.keplerstudio.editor.RenderOperation
+import com.projectnuke.keplerstudio.editor.RenderResult
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
-import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
-import com.projectnuke.keplerstudio.editor.renderEditedPreview
-import com.projectnuke.keplerstudio.editor.renderRouting
+import com.projectnuke.keplerstudio.editor.successOrThrow
+import com.projectnuke.keplerstudio.editor.withFailedRender
+import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -97,6 +102,8 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
             undoSnapshot = null
             var bakedOriginal: Bitmap? = null
             var renderedPreview: Bitmap? = null
+            var bakeSuccess: RenderResult.Success? = null
+            var previewSuccess: RenderResult.Success? = null
             val bakeTracker =
                 beginMemoryTracking(
                     "selectionNativeBake",
@@ -112,28 +119,42 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 withContext(Dispatchers.Default) {
                     val localOnlyState =
                         current.copy(params = EditParams(), activeQuickEffects = emptyList())
-                    val result =
-                        renderBitmapWithSelectionLayers(
-                            checkNotNull(ownedBaseOwned),
-                            localOnlyState.copy(selectionLayers = ownedLayersOwned),
-                            nextRevision,
-                        )
-                    bakedOriginal = result
-                    bakeTracker?.track(result, "selectionBake:original")
+                    bakeSuccess =
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = localOnlyState,
+                                operation = RenderOperation.SelectionNativeBake,
+                                basePreview = checkNotNull(ownedBaseOwned),
+                                revision = nextRevision,
+                                params = EditParams(),
+                                quickEffects = emptyList(),
+                                selectionLayers = ownedLayersOwned,
+                                diagnostics = bakeTracker,
+                            )
+                        ).successOrThrow()
+                    bakedOriginal = checkNotNull(bakeSuccess).output
+                    bakeTracker?.track(checkNotNull(bakedOriginal), "selectionBake:original")
                 }
                 withContext(Dispatchers.Default) {
-                    val result =
-                        renderEditedPreview(
-                            basePreview = checkNotNull(bakedOriginal),
-                            params = params,
-                            engines = engines,
-                            revision = nextRevision,
-                            look = presetLook,
-                            quickEffects = quickEffects,
-                            routingSelection = current.renderRouting(),
-                        )
-                    renderedPreview = result
-                    bakeTracker?.track(result, "selectionBake:preview")
+                    previewSuccess =
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = current,
+                                operation = RenderOperation.SelectionNativeBake,
+                                basePreview = checkNotNull(bakedOriginal),
+                                revision = nextRevision,
+                                params = params,
+                                engines = engines,
+                                look = presetLook,
+                                quickEffects = quickEffects,
+                                selectionLayers = emptyList(),
+                                exactRoute = checkNotNull(bakeSuccess).actualRoute,
+                                fallbackPolicy = FallbackPolicy.NoFallback,
+                                diagnostics = bakeTracker,
+                            )
+                        ).successOrThrow()
+                    renderedPreview = checkNotNull(previewSuccess).output
+                    bakeTracker?.track(checkNotNull(renderedPreview), "selectionBake:preview")
                 }
                 val adoptedOriginal = bakedOriginal ?: error("missing baked original")
                 val adoptedPreview = renderedPreview ?: error("missing rendered preview")
@@ -154,6 +175,11 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                             selectionLayers = emptyList(),
                             activeSelectionLayerId = null,
                             isBusy = false,
+                            correctionEngineState =
+                                it.correctionEngineState.withSuccessfulRender(
+                                    current.correctionEngineState.documentEngine,
+                                    checkNotNull(previewSuccess),
+                                ),
                             message = "선택 마스크 보정을 원본에 적용했습니다. 저장 결과에도 반영됩니다.",
                         )
                     }
@@ -167,7 +193,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 }
             } catch (ce: CancellationException) {
                 throw ce
-            } catch (_: Throwable) {
+            } catch (failure: Throwable) {
                 if (
                     isManagedEditCurrent(operationToken, nextRevision) &&
                         uiState.value.sourcePath == sourcePath &&
@@ -175,6 +201,17 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                         uiState.value.selectionLayers == capturedSelectionLayers &&
                         uiState.value.activeSelectionLayerId == capturedActiveSelectionLayerId
                 ) {
+                    (failure as? RenderFailedException)?.failure?.let { renderFailure ->
+                        updateUiState {
+                            it.copy(
+                                correctionEngineState =
+                                    it.correctionEngineState.withFailedRender(
+                                        current.correctionEngineState.documentEngine,
+                                        renderFailure,
+                                    )
+                            )
+                        }
+                    }
                     updateUiState { it.copy(isBusy = false, message = "선택 마스크 보정 적용에 실패했습니다.") }
                 } else if (isManagedEditTokenCurrent(operationToken)) {
                     updateUiState { it.copy(isBusy = false) }

@@ -646,16 +646,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (it.revision == nextRevision && correctionEngineEpoch == identity.engineEpoch) {
                     it.copy(
                         isBusy = false,
-                        correctionEngineState =
-                            it.correctionEngineState.copy(
-                                documentEngine = it.correctionEngineState.defaultEngine,
-                                previewEngine = null,
-                                pendingEngine = null,
-                                previewResultClass = PreviewResultClass.NoDocument,
-                            ),
+                        correctionEngineState = it.correctionEngineState.withoutDocument(),
                     )
                 } else it
             }
+            engineUndoSnapshot?.let(::recycleHistorySnapshot)
             return
         }
         val ownedBase =
@@ -664,46 +659,46 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     engineUndoSnapshot?.let(::recycleHistorySnapshot)
                     engineUndoSnapshot = null
                     updateUiState {
-                        if (it.revision == nextRevision && correctionEngineEpoch == identity.engineEpoch)
+                        if (it.revision == nextRevision && correctionEngineEpoch == identity.engineEpoch) {
+                            val failure =
+                                RenderResult.Failure(
+                                    operation = RenderOperation.EngineSwitch,
+                                    requestedRoute = RouteResolver.defaultNativeRoute(engine),
+                                    attemptedRoute = RouteResolver.defaultNativeRoute(engine),
+                                    kind = RenderFailureKind.AllocationRejected,
+                                    message = "Unable to prepare engine rerender",
+                                )
                             it.copy(
                                 isBusy = false,
-                                correctionEngineState = it.correctionEngineState.withFailedRender(
-                                    operation = "engineSwitch",
-                                    requestedEngine = engine,
-                                    requestedRoute = null,
-                                    reason = "Unable to prepare engine rerender",
-                                ),
+                                correctionEngineState =
+                                    it.correctionEngineState.withFailedRender(engine, failure),
                                 message = "Unable to prepare engine rerender",
                             )
-                        else it
+                        } else {
+                            it
+                        }
                     }
                     return
                 }
         launchManagedRenderWithPreparedResources({ operationToken ->
-            var rendered: Bitmap? = null
+            var renderedOwner: Bitmap? = null
             try {
                 val switchState =
                     before.copy(
                         correctionEngineState =
                             before.correctionEngineState.copy(documentEngine = engine)
                     )
-                val switchRouting = switchState.renderRouting()
-                val switchNativeRoute = switchRouting.nativeRender
-                rendered =
+                val renderResult =
                     withContext(Dispatchers.Default) {
-                        if (before.selectionLayers.any { it.enabled }) {
-                            renderBitmapWithSelectionLayers(ownedBase, switchState, nextRevision)
-                        } else {
-                            renderEditedPreview(
-                                ownedBase,
-                                before.params,
-                                before.engineSelection(),
-                                nextRevision,
-                                before.presetLook,
-                                before.activeQuickEffects,
-                                switchRouting,
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = switchState,
+                                operation = RenderOperation.EngineSwitch,
+                                basePreview = ownedBase,
+                                revision = nextRevision,
+                                assignedEngine = engine,
                             )
-                        }
+                        )
                     }
                 val current = _uiState.value
                 val canAdopt =
@@ -715,73 +710,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             current.revision,
                         ) &&
                         current.correctionEngineState.pendingEngine == engine
-                if (canAdopt) {
-                    val adopted = checkNotNull(rendered)
-                    updateUiStateAndRecycleReplaced {
-                        it.copy(
-                            previewBitmap = adopted,
-                            isBusy = false,
-                            correctionEngineState =
-                                it.correctionEngineState.withSuccessfulRender(
-                                    documentEngine = engine,
-                                    route = switchNativeRoute,
-                                    debugOverrideActive = false,
-                                ),
-                            message = "${engine.displayName} active",
-                        )
-                    }
-                    rendered = null
-                    settleAdoptedEditHistory(engineUndoSnapshot)
-                    engineUndoSnapshot = null
-                    forceDraftSaveAsync()
-                }
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (t: Throwable) {
-                val current = _uiState.value
-                val stillCurrent =
-                    identity.matches(
-                        correctionEngineEpoch,
-                        historyCoordinator.currentGeneration(),
-                        current.baseContentToken,
-                        current.revision,
-                    )
-                if (engine == CorrectionEngine.Engine2 && stillCurrent) {
-                    try {
-                        rendered =
-                            withContext(Dispatchers.Default) {
-                                val fallbackState =
-                                    before.copy(
-                                        correctionEngineState =
-                                            before.correctionEngineState.copy(
-                                                documentEngine = CorrectionEngine.Engine1,
-                                            )
-                                    )
-                                if (before.selectionLayers.any { it.enabled }) {
-                                    renderBitmapWithSelectionLayers(ownedBase, fallbackState, nextRevision)
-                                } else {
-                                    renderEditedPreview(
-                                        ownedBase,
-                                        before.params,
-                                        before.engineSelection(),
-                                        nextRevision,
-                                        before.presetLook,
-                                        before.activeQuickEffects,
-                                        fallbackState.renderRouting(),
-                                    )
-                                }
-                            }
-                        val fallbackState = _uiState.value
-                        if (
-                            isManagedEditCurrent(operationToken, nextRevision) &&
-                                identity.matches(
-                                    correctionEngineEpoch,
-                                    historyCoordinator.currentGeneration(),
-                                    fallbackState.baseContentToken,
-                                    fallbackState.revision,
-                                )
-                        ) {
-                            val adopted = checkNotNull(rendered)
+                when (renderResult) {
+                    is RenderResult.Success -> {
+                        renderedOwner = renderResult.output
+                        if (canAdopt) {
+                            val adopted = checkNotNull(renderedOwner)
                             updateUiStateAndRecycleReplaced {
                                 it.copy(
                                     previewBitmap = adopted,
@@ -789,58 +722,76 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     correctionEngineState =
                                         it.correctionEngineState.withSuccessfulRender(
                                             documentEngine = engine,
-                                            route = NativeRenderRoute.V1,
-                                            debugOverrideActive = false,
+                                            result = renderResult,
                                         ),
-                                    message = "Engine 2 unavailable; Engine 1 fallback rendered",
+                                    message =
+                                        if (
+                                            renderResult.decision ==
+                                                RenderRouteDecision.RuntimeFallbackToV1
+                                        ) {
+                                            "엔진 2 처리에 실패해 이번 결과만 엔진 1로 표시합니다."
+                                        } else {
+                                            "${engine.displayName} 활성"
+                                        },
                                 )
                             }
-                            rendered = null
+                            renderedOwner = null
                             settleAdoptedEditHistory(engineUndoSnapshot)
                             engineUndoSnapshot = null
                             forceDraftSaveAsync()
                         }
-                    } catch (ce: CancellationException) {
-                        throw ce
-                    } catch (_: Throwable) {
-                        updateUiState {
-                            if (
-                                identity.matches(
-                                    correctionEngineEpoch,
-                                    historyCoordinator.currentGeneration(),
-                                    it.baseContentToken,
-                                    it.revision,
-                                )
-                            ) {
+                    }
+                    is RenderResult.Failure -> {
+                        if (canAdopt) {
+                            updateUiState {
                                 it.copy(
-                                            isBusy = false,
-                                            correctionEngineState = it.correctionEngineState.withFailedRender(
-                                                operation = "engineSwitch",
-                                                requestedEngine = engine,
-                                                requestedRoute = null,
-                                                reason = "Engine rerender failed: ${t.message}",
-                                            ),
-                                            message = "Engine rerender failed: ${t.message}",
-                                        )
-                            } else it
+                                    isBusy = false,
+                                    correctionEngineState =
+                                        it.correctionEngineState.withFailedRender(
+                                            requestedEngine = engine,
+                                            result = renderResult,
+                                        ),
+                                    message = "엔진 전환에 실패했습니다: ${renderResult.message}",
+                                )
+                            }
                         }
                     }
-                } else if (stillCurrent) {
+                    is RenderResult.Cancelled -> {
+                        if (canAdopt) {
+                            updateUiState {
+                                it.copy(
+                                    isBusy = false,
+                                    correctionEngineState =
+                                        it.correctionEngineState.copy(pendingEngine = null),
+                                    message = "엔진 전환이 취소되었습니다.",
+                                )
+                            }
+                        }
+                    }
+                    is RenderResult.Stale -> Unit
+                }
+            } catch (ce: CancellationException) {
+                val current = _uiState.value
+                if (
+                    identity.matches(
+                        correctionEngineEpoch,
+                        historyCoordinator.currentGeneration(),
+                        current.baseContentToken,
+                        current.revision,
+                    ) &&
+                        current.correctionEngineState.pendingEngine == engine
+                ) {
                     updateUiState {
                         it.copy(
                             isBusy = false,
-                            correctionEngineState = it.correctionEngineState.withFailedRender(
-                                operation = "engineSwitch",
-                                requestedEngine = engine,
-                                requestedRoute = null,
-                                reason = "Engine rerender failed: ${t.message}",
-                            ),
-                            message = "Engine rerender failed: ${t.message}",
+                            correctionEngineState =
+                                it.correctionEngineState.copy(pendingEngine = null),
                         )
                     }
                 }
+                throw ce
             } finally {
-                rendered?.takeUnless(Bitmap::isRecycled)?.recycle()
+                renderedOwner?.takeUnless(Bitmap::isRecycled)?.recycle()
                 ownedBase.takeUnless(Bitmap::isRecycled)?.recycle()
                 engineUndoSnapshot?.let(::recycleHistorySnapshot)
                 engineUndoSnapshot = null
@@ -875,6 +826,48 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun isShuttingDown(): Boolean = shuttingDown
 
     internal fun currentDocumentGeneration(): String = historyCoordinator.currentGeneration()
+
+    internal fun createRenderRequest(
+        state: EditorUiState,
+        operation: RenderOperation,
+        basePreview: Bitmap,
+        revision: Int,
+        assignedEngine: CorrectionEngine = state.correctionEngineState.documentEngine,
+        params: EditParams = state.params,
+        engines: EngineSelection = state.engineSelection(),
+        look: PresetColorLook? = state.presetLook,
+        quickEffects: List<ActiveQuickEffect> = state.activeQuickEffects,
+        selectionLayers: List<SelectionLayer> = state.selectionLayers,
+        exactRoute: NativeRenderRoute? = null,
+        fallbackPolicy: FallbackPolicy = state.correctionEngineState.fallbackPolicy,
+        diagnostics: MemoryTrackerScope? = null,
+    ): RenderRequest {
+        val generation = currentDocumentGeneration()
+        return RenderRequest(
+            operation = operation,
+            basePreview = basePreview,
+            params = params,
+            engines = engines,
+            assignedDocumentEngine = assignedEngine,
+            identity =
+                RenderIdentity(
+                    documentGeneration = generation,
+                    baseContentToken = state.baseContentToken,
+                    revision = revision,
+                    nativeCancellationIdentity =
+                        "$generation:${state.baseContentToken}:$revision:${operation.name}",
+                ),
+            debugOverride =
+                ExperimentalLabController.debugOverrides().nativeRender
+                    .takeIf { exactRoute == null },
+            exactRoute = exactRoute,
+            fallbackPolicy = fallbackPolicy,
+            look = look,
+            quickEffects = quickEffects,
+            selectionLayers = selectionLayers,
+            diagnostics = diagnostics,
+        )
+    }
 
     internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
         if (shuttingDown) return false
@@ -1329,12 +1322,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 correctionEngineState =
                     current.correctionEngineState.copy(
                         documentEngine = snapshot.correctionEngine,
-                        previewEngine = if (metadataOnly) current.correctionEngineState.previewEngine else snapshot.correctionEngine,
                         pendingEngine = null,
-                        previewResultClass =
-                            if (snapshot.correctionEngine == CorrectionEngine.Engine1)
-                                PreviewResultClass.V1
-                            else PreviewResultClass.V2,
+                        visiblePreview = snapshot.toVisiblePreviewState(),
+                        lastRenderFailure = null,
                     ),
                 noiseEngine = snapshot.noiseEngine,
                 detailEngine = snapshot.detailEngine,
@@ -1878,14 +1868,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         canRedo = false,
                         flareGuardRuntimeStatus = null,
                         correctionEngineState =
-                            previousState.correctionEngineState.copy(
-                                documentEngine = previousState.correctionEngineState.defaultEngine,
-                                previewEngine = previousState.correctionEngineState.defaultEngine,
-                                pendingEngine = null,
-                                previewResultClass =
-                                    if (previousState.correctionEngineState.defaultEngine == CorrectionEngine.Engine1)
-                                        PreviewResultClass.V1
-                                    else PreviewResultClass.V2,
+                            previousState.correctionEngineState.forOpenedDocument(
+                                previousState.correctionEngineState.defaultEngine
                             ),
                         recoveryDebugInfo = null,
                         showRecoveryDebugCard = false,
@@ -2013,19 +1997,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         activeParamRenderRevision = nextRevision
         launchManagedRenderWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
+            var renderSuccess: RenderResult.Success? = null
             try {
-                rendered =
+                renderSuccess =
                     withContext(Dispatchers.Default) {
-                        renderEditedPreview(
-                            ownedBase,
-                            nextParams,
-                            current.engineSelection(),
-                            nextRevision,
-                            current.presetLook,
-                            current.activeQuickEffects,
-                            current.renderRouting(),
-                        )
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = current,
+                                operation = RenderOperation.NativePreview,
+                                basePreview = ownedBase,
+                                revision = nextRevision,
+                                params = nextParams,
+                                diagnostics = paramTracker,
+                            )
+                        ).successOrThrow()
                     }
+                rendered = checkNotNull(renderSuccess).output
                 paramTracker?.track(rendered!!, "updateParams:rendered")
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
                     val adopted = rendered!!
@@ -2036,6 +2023,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             params = nextParams,
                             previewBitmap = adopted,
                             isBusy = false,
+                            correctionEngineState =
+                                it.correctionEngineState.withSuccessfulRender(
+                                    documentEngine =
+                                        current.correctionEngineState.documentEngine,
+                                    result = checkNotNull(renderSuccess),
+                                ),
                             message = "미리보기 렌더링이 완료되었습니다",
                         )
                     }
@@ -2055,6 +2048,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 rendered?.recycle()
                 if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
+                    (t as? RenderFailedException)?.failure?.let { failure ->
+                        updateUiState {
+                            it.copy(
+                                correctionEngineState =
+                                    it.correctionEngineState.withFailedRender(
+                                        current.correctionEngineState.documentEngine,
+                                        failure,
+                                    )
+                            )
+                        }
+                    }
                     if (paramUndoSnapshotCommitted) {
                         closeParamUndoWindow()
                         updateUiState {
@@ -2134,20 +2138,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         launchManagedEditWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
+            var renderSuccess: RenderResult.Success? = null
             try {
                 val nextParams =
                     withContext(Dispatchers.Default) { computeAutoEnhanceParams(ownedBase) }
                 withContext(Dispatchers.Default) {
-                    rendered =
-                        renderEditedPreview(
-                            ownedBase,
-                            nextParams,
-                            engines,
-                            nextRevision,
-                            presetLook,
-                            quickEffects,
-                            current.renderRouting(),
-                        )
+                    renderSuccess =
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = current,
+                                operation = RenderOperation.AutoEnhance,
+                                basePreview = ownedBase,
+                                revision = nextRevision,
+                                params = nextParams,
+                                engines = engines,
+                                look = presetLook,
+                                quickEffects = quickEffects,
+                                diagnostics = autoEnhanceTracker,
+                            )
+                        ).successOrThrow()
+                    rendered = checkNotNull(renderSuccess).output
                 }
                 autoEnhanceTracker?.track(rendered!!, "applyAutoEnhance:rendered")
                 if (
@@ -2163,6 +2173,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             params = nextParams,
                             previewBitmap = adopted,
                             isBusy = false,
+                            correctionEngineState =
+                                it.correctionEngineState.withSuccessfulRender(
+                                    current.correctionEngineState.documentEngine,
+                                    checkNotNull(renderSuccess),
+                                ),
                             message = "자동 보정이 적용되었습니다",
                         )
                     }
@@ -2181,6 +2196,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         uiState.value.sourcePath == sourcePath &&
                         uiState.value.baseContentToken == baseContentToken
                 ) {
+                    (t as? RenderFailedException)?.failure?.let { failure ->
+                        updateUiState {
+                            it.copy(
+                                correctionEngineState =
+                                    it.correctionEngineState.withFailedRender(
+                                        current.correctionEngineState.documentEngine,
+                                        failure,
+                                    )
+                            )
+                        }
+                    }
                     updateUiStateAndRecycleReplaced {
                         it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}")
                     }
@@ -2290,19 +2316,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob?.cancel()
         launchManagedRenderWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
+            var renderSuccess: RenderResult.Success? = null
             try {
                 withContext(Dispatchers.Default) {
-                    val result =
-                        renderEditedPreview(
-                            checkNotNull(ownedBase),
-                            params,
-                            nextEngines,
-                            nextRevision,
-                            presetLook,
-                            quickEffects,
-                            current.renderRouting(),
-                        )
-                    rendered = result
+                    renderSuccess =
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = current,
+                                operation = RenderOperation.ProcessingEngineChange,
+                                basePreview = checkNotNull(ownedBase),
+                                revision = nextRevision,
+                                params = params,
+                                engines = nextEngines,
+                                look = presetLook,
+                                quickEffects = quickEffects,
+                                diagnostics = engineTracker,
+                            )
+                        ).successOrThrow()
+                    rendered = checkNotNull(renderSuccess).output
                 }
                 engineTracker?.track(rendered!!, "applyEngineChange:rendered")
                 val identityUnchanged =
@@ -2319,6 +2350,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             hazeEngine = nextEngines.hazeEngine,
                             previewBitmap = adopted,
                             isBusy = false,
+                            correctionEngineState =
+                                it.correctionEngineState.withSuccessfulRender(
+                                    current.correctionEngineState.documentEngine,
+                                    checkNotNull(renderSuccess),
+                                ),
                             message = message,
                         )
                     }
@@ -2338,6 +2374,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (
                     isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged
                 ) {
+                    (t as? RenderFailedException)?.failure?.let { failure ->
+                        updateUiState {
+                            it.copy(
+                                correctionEngineState =
+                                    it.correctionEngineState.withFailedRender(
+                                        current.correctionEngineState.documentEngine,
+                                        failure,
+                                    )
+                            )
+                        }
+                    }
                     updateUiStateAndRecycleReplaced {
                         it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}")
                     }
@@ -2416,6 +2463,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             showSelectionOverlay = true,
                             flareGuardRuntimeStatus = null,
                             isBusy = false,
+                            correctionEngineState =
+                                it.correctionEngineState.copy(
+                                    pendingEngine = null,
+                                    visiblePreview = VisiblePreviewState.Original,
+                                    lastRenderFailure = null,
+                                ),
                             message = "초기화가 완료되었습니다",
                         )
                     }
@@ -2435,6 +2488,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (
                     isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged
                 ) {
+                    (t as? RenderFailedException)?.failure?.let { failure ->
+                        updateUiState {
+                            it.copy(
+                                correctionEngineState =
+                                    it.correctionEngineState.withFailedRender(
+                                        current.correctionEngineState.documentEngine,
+                                        failure,
+                                    )
+                            )
+                        }
+                    }
                     updateUiStateAndRecycleReplaced {
                         it.copy(isBusy = false, message = "초기화에 실패했습니다: ${t.message}")
                     }
@@ -2506,19 +2570,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
+            var renderSuccess: RenderResult.Success? = null
             try {
                 withContext(Dispatchers.Default) {
-                    val result =
-                        renderEditedPreview(
-                            checkNotNull(ownedBase),
-                            params,
-                            engines,
-                            nextRevision,
-                            look,
-                            quickEffects,
-                            current.renderRouting(),
-                        )
-                    rendered = result
+                    renderSuccess =
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = current,
+                                operation = RenderOperation.Preset,
+                                basePreview = checkNotNull(ownedBase),
+                                revision = nextRevision,
+                                params = params,
+                                engines = engines,
+                                look = look,
+                                quickEffects = quickEffects,
+                                diagnostics = presetTracker,
+                            )
+                        ).successOrThrow()
+                    rendered = checkNotNull(renderSuccess).output
                 }
                 presetTracker?.track(rendered!!, "applyPresetLook:rendered")
                 val identityUnchanged =
@@ -2532,6 +2601,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             presetLook = look,
                             previewBitmap = adopted,
                             isBusy = false,
+                            correctionEngineState =
+                                it.correctionEngineState.withSuccessfulRender(
+                                    current.correctionEngineState.documentEngine,
+                                    checkNotNull(renderSuccess),
+                                ),
                             message = message,
                         )
                     }
@@ -2552,6 +2626,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (
                     isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged
                 ) {
+                    (t as? RenderFailedException)?.failure?.let { failure ->
+                        updateUiState {
+                            it.copy(
+                                correctionEngineState =
+                                    it.correctionEngineState.withFailedRender(
+                                        current.correctionEngineState.documentEngine,
+                                        failure,
+                                    )
+                            )
+                        }
+                    }
                     updateUiStateAndRecycleReplaced {
                         it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.")
                     }
@@ -3651,6 +3736,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
             var renderedPreview: Bitmap? = null
+            var renderSuccess: RenderResult.Success? = null
             val effectsTracker =
                 beginMemoryTracking(
                     "applyNativeSpecialEffects:$title",
@@ -3664,17 +3750,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     "applyNativeSpecialEffects:ownedBase",
                 )
                 withContext(Dispatchers.Default) {
-                    val result =
-                        renderEditedPreview(
-                            checkNotNull(ownedBase),
-                            params,
-                            engines,
-                            nextRevision,
-                            presetLook,
-                            requestedQuickEffects,
-                            current.renderRouting(),
-                        )
-                    renderedPreview = result
+                    renderSuccess =
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = current,
+                                operation = RenderOperation.QuickEffect,
+                                basePreview = checkNotNull(ownedBase),
+                                revision = nextRevision,
+                                params = params,
+                                engines = engines,
+                                look = presetLook,
+                                quickEffects = requestedQuickEffects,
+                                diagnostics = effectsTracker,
+                            )
+                        ).successOrThrow()
+                    renderedPreview = checkNotNull(renderSuccess).output
                 }
                 effectsTracker?.track(renderedPreview!!, "applyNativeSpecialEffects:rendered")
                 val identityUnchanged =
@@ -3687,6 +3777,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             previewBitmap = adoptedPreview,
                             activeQuickEffects = requestedQuickEffects,
                             isBusy = false,
+                            correctionEngineState =
+                                it.correctionEngineState.withSuccessfulRender(
+                                    current.correctionEngineState.documentEngine,
+                                    checkNotNull(renderSuccess),
+                                ),
                             message =
                                 if (
                                     requestedQuickEffects.any { active -> active.matches(effect) }
@@ -3714,6 +3809,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (
                     isManagedEditCurrent(operationToken, nextRevision) && failureIdentityUnchanged
                 ) {
+                    (t as? RenderFailedException)?.failure?.let { failure ->
+                        updateUiState {
+                            it.copy(
+                                correctionEngineState =
+                                    it.correctionEngineState.withFailedRender(
+                                        current.correctionEngineState.documentEngine,
+                                        failure,
+                                    )
+                            )
+                        }
+                    }
                     updateUiStateAndRecycleReplaced {
                         it.copy(isBusy = false, message = failureMessage)
                     }
@@ -3788,6 +3894,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var flareGuardResult: FlareGuardApplyResult? = null
             var flareGuardBitmap: Bitmap? = null
             var renderedPreview: Bitmap? = null
+            var renderSuccess: RenderResult.Success? = null
             var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
             undoSnapshot = null
             var ownedBaseOwned: Bitmap? = null
@@ -3853,18 +3960,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         ?: error("FlareGuard result ownership was already settled")
                 renderedPreview =
                     withContext(Dispatchers.Default) {
-                        val p =
-                            renderEditedPreview(
-                                checkNotNull(flareGuardBitmap),
-                                params,
-                                engines,
-                                nextRevision,
-                                presetLook,
-                                quickEffects,
-                                current.renderRouting(),
-                            )
-                        renderedPreview = p
-                        p
+                        renderSuccess =
+                            EditorRenderer.render(
+                                createRenderRequest(
+                                    state = current,
+                                    operation = RenderOperation.FlareGuard,
+                                    basePreview = checkNotNull(flareGuardBitmap),
+                                    revision = nextRevision,
+                                    params = params,
+                                    engines = engines,
+                                    look = presetLook,
+                                    quickEffects = quickEffects,
+                                    diagnostics = flareTracker,
+                                )
+                            ).successOrThrow()
+                        checkNotNull(renderSuccess).output.also { renderedPreview = it }
                     }
                 flareTracker?.track(renderedPreview!!, "applyFlareGuard:renderedPreview")
                 val adoptionIdentityUnchanged =
@@ -3885,6 +3995,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             baseBitmapDirty = true,
                             baseContentToken = newBaseContentToken(),
                             isBusy = false,
+                            correctionEngineState =
+                                it.correctionEngineState.withSuccessfulRender(
+                                    current.correctionEngineState.documentEngine,
+                                    checkNotNull(renderSuccess),
+                                ),
                             message = flareGuardResult!!.status.uiText,
                             flareGuardRuntimeStatus = flareGuardResult!!.status.uiText,
                         )
@@ -3987,6 +4102,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         var ownedBase: Bitmap? = null
         var ownedRendered: Bitmap? = null
+        var restoreRenderSuccess: RenderResult.Success? = null
         val ownedMasks = ArrayList<Bitmap>(validated.maskFiles.size)
         var createdSession = 0L
         var ownedWorkingSource: File? = null
@@ -4043,10 +4159,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val draftDocumentEngine =
                     runCatching { CorrectionEngine.valueOf(manifest.correctionEngine) }
                         .getOrDefault(CorrectionEngine.Engine1)
-                val manifestPreviewEngine =
-                    manifest.previewEngine?.let {
-                        runCatching { CorrectionEngine.valueOf(it) }.getOrNull()
-                    } ?: draftDocumentEngine
                 val restoreState =
                     _uiState.value.copy(
                         params = manifest.params,
@@ -4060,27 +4172,35 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         correctionEngineState =
                             _uiState.value.correctionEngineState.copy(
                                 documentEngine = draftDocumentEngine,
-                                previewEngine = manifestPreviewEngine,
                                 pendingEngine = null,
-                                previewResultClass = PreviewResultClass.NoDocument,
+                                visiblePreview = VisiblePreviewState.NoDocument,
+                                lastRenderFailure = null,
                             ),
                     )
-                val result =
-                    if (layers.any { it.enabled }) {
-                        renderBitmapWithSelectionLayers(base, restoreState, nextRevision)
-                    } else {
-                        renderEditedPreview(
-                            base,
-                            manifest.params,
-                            engines,
-                            nextRevision,
-                            manifest.presetLook,
-                            manifest.activeQuickEffects,
-                            restoreState.renderRoutingForExport(),
+                val storedRoute =
+                    manifest.previewRoute
+                        ?.let { runCatching { NativeRenderRoute.valueOf(it) }.getOrNull() }
+                        ?.takeUnless { it == NativeRenderRoute.Compare }
+                        ?: NativeRenderRoute.V1
+                restoreRenderSuccess =
+                    EditorRenderer.render(
+                        createRenderRequest(
+                            state = restoreState,
+                            operation = RenderOperation.DraftRestore,
+                            basePreview = base,
+                            revision = nextRevision,
+                            assignedEngine = draftDocumentEngine,
+                            params = manifest.params,
+                            engines = engines,
+                            look = manifest.presetLook,
+                            quickEffects = manifest.activeQuickEffects,
+                            selectionLayers = layers,
+                            exactRoute = storedRoute,
+                            diagnostics = restoreTracker,
                         )
-                    }
-                ownedRendered = result
-                restoreTracker?.track(result, "restoreDraft:rendered")
+                    ).successOrThrow()
+                ownedRendered = checkNotNull(restoreRenderSuccess).output
+                restoreTracker?.track(checkNotNull(ownedRendered), "restoreDraft:rendered")
             }
             withContext(Dispatchers.IO) {
                 val session =
@@ -4131,18 +4251,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     toneEngine = engines.toneEngine,
                     hazeEngine = engines.hazeEngine,
                     correctionEngineState =
-                        previousState.correctionEngineState.copy(
+                        previousState.correctionEngineState.withSuccessfulRender(
                             documentEngine = draftCorrectionEngine(manifest.correctionEngine),
-                            previewEngine = manifest.previewEngine?.let {
-                                runCatching { CorrectionEngine.valueOf(it) }.getOrDefault(draftCorrectionEngine(manifest.correctionEngine))
-                            } ?: draftCorrectionEngine(manifest.correctionEngine),
-                            pendingEngine = null,
-                            previewResultClass = manifest.previewResultClass?.let {
-                                runCatching { PreviewResultClass.valueOf(it) }.getOrNull()
-                            }
-                                ?: if (draftCorrectionEngine(manifest.correctionEngine) == CorrectionEngine.Engine1)
-                                    PreviewResultClass.V1
-                                else PreviewResultClass.V2,
+                            result = checkNotNull(restoreRenderSuccess),
                         ),
                     draftSavedAtMillis = manifest.savedAtMillis,
                     draftSourcePath = validated.sourceFile.absolutePath,
@@ -4408,6 +4519,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         var preview: Bitmap? = null
         var rendered: Bitmap? = null
+        var restoreRenderSuccess: RenderResult.Success? = null
         var createdSession = 0L
         var expectedRestoreRevision: Int? = null
         val restoreTracker =
@@ -4435,18 +4547,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val activeQuickEffects =
                 draftPrefs.getString(KEY_DRAFT_QUICK_EFFECTS, null).parseQuickEffects()
             withContext(Dispatchers.Default) {
-                val result =
-                    renderEditedPreview(
-                        preview!!,
-                        params,
-                        engines,
-                        nextRevision,
-                        presetLook,
-                        activeQuickEffects,
-                        routingForCorrectionEngine(CorrectionEngine.Engine1),
-                    )
-                rendered = result
-                restoreTracker?.track(result, "restoreLegacyDraft:rendered")
+                val restoreState = _uiState.value
+                restoreRenderSuccess =
+                    EditorRenderer.render(
+                        createRenderRequest(
+                            state = restoreState,
+                            operation = RenderOperation.DraftRestore,
+                            basePreview = checkNotNull(preview),
+                            revision = nextRevision,
+                            assignedEngine = CorrectionEngine.Engine1,
+                            params = params,
+                            engines = engines,
+                            look = presetLook,
+                            quickEffects = activeQuickEffects,
+                            selectionLayers = emptyList(),
+                            exactRoute = NativeRenderRoute.V1,
+                            diagnostics = restoreTracker,
+                        )
+                    ).successOrThrow()
+                rendered = checkNotNull(restoreRenderSuccess).output
+                restoreTracker?.track(checkNotNull(rendered), "restoreLegacyDraft:rendered")
             }
             if (
                 shuttingDown ||
@@ -4504,6 +4624,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     draftGenerationSourcePath = null,
                     draftGenerationThumbnailPath = null,
                     flareGuardRuntimeStatus = null,
+                    correctionEngineState =
+                        previousState.correctionEngineState.withSuccessfulRender(
+                            documentEngine = CorrectionEngine.Engine1,
+                            result = checkNotNull(restoreRenderSuccess),
+                        ),
                     revision = nextRevision,
                     message =
                         "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4",
@@ -4646,12 +4771,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     correctionEngineState =
                         it.correctionEngineState.copy(
                             documentEngine = snapshot.correctionEngine,
-                            previewEngine = snapshot.correctionEngine,
                             pendingEngine = null,
-                            previewResultClass =
-                                if (snapshot.correctionEngine == CorrectionEngine.Engine1)
-                                    PreviewResultClass.V1
-                                else PreviewResultClass.V2,
+                            visiblePreview = snapshot.toVisiblePreviewState(),
+                            lastRenderFailure = null,
                         ),
                     noiseEngine = snapshot.noiseEngine,
                     detailEngine = snapshot.detailEngine,
@@ -4748,6 +4870,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return null
         var ownedBase: Bitmap? = null
         var rendered: Bitmap? = null
+        var renderSuccess: RenderResult.Success? = null
         var baseEdge = 0L
         var renderedEdge = 0L
         return try {
@@ -4756,26 +4879,71 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 baseEdge =
                     diagnostics?.track(checkNotNull(ownedBase), "navigateHistory:metadataBase")
                         ?: 0L
-                rendered =
-                    renderEditedPreview(
-                        checkNotNull(ownedBase),
-                        snapshot.params,
-                        EngineSelection(
-                            snapshot.noiseEngine,
-                            snapshot.detailEngine,
-                            snapshot.toneEngine,
-                            snapshot.hazeEngine,
-                        ),
-                        current.revision + 1,
-                        snapshot.presetLook,
-                        snapshot.activeQuickEffects,
-                        routingForCorrectionEngine(snapshot.correctionEngine),
-                    )
+                val storedRoute =
+                    snapshot.previewRoute
+                        ?: when (snapshot.previewEngine) {
+                            CorrectionEngine.Engine2 -> NativeRenderRoute.V2
+                            else -> NativeRenderRoute.V1
+                        }
+                renderSuccess =
+                    EditorRenderer.render(
+                        createRenderRequest(
+                            state = current,
+                            operation = RenderOperation.HistoryMaterialization,
+                            basePreview = checkNotNull(ownedBase),
+                            revision = current.revision + 1,
+                            assignedEngine = snapshot.correctionEngine,
+                            params = snapshot.params,
+                            engines =
+                                EngineSelection(
+                                    snapshot.noiseEngine,
+                                    snapshot.detailEngine,
+                                    snapshot.toneEngine,
+                                    snapshot.hazeEngine,
+                                ),
+                            look = snapshot.presetLook,
+                            quickEffects = snapshot.activeQuickEffects,
+                            selectionLayers = emptyList(),
+                            exactRoute = storedRoute,
+                            diagnostics = diagnostics,
+                        )
+                    ).successOrThrow()
+                rendered = checkNotNull(renderSuccess).output
                 renderedEdge =
                     diagnostics?.track(checkNotNull(rendered), "navigateHistory:metadataRendered")
                         ?: 0L
             }
-            snapshot.copy(previewBitmap = rendered, resourcesReleased = false).also {
+            val success = checkNotNull(renderSuccess)
+            snapshot.copy(
+                requestedRoute = success.requestedRoute,
+                previewEngine =
+                    if (success.actualRoute == NativeRenderRoute.V2)
+                        CorrectionEngine.Engine2
+                    else CorrectionEngine.Engine1,
+                previewRoute = success.actualRoute,
+                previewResultClass =
+                    when (success.decision) {
+                        RenderRouteDecision.RuntimeFallbackToV1 ->
+                            PreviewResultClass.V2FallbackToV1
+                        RenderRouteDecision.DebugForcedV1 ->
+                            PreviewResultClass.DebugForcedV1
+                        RenderRouteDecision.DebugForcedV2 ->
+                            PreviewResultClass.DebugForcedV2
+                        else ->
+                            if (success.actualRoute == NativeRenderRoute.V2)
+                                PreviewResultClass.V2
+                            else PreviewResultClass.V1
+                    },
+                fallbackReason =
+                    if (success.decision == RenderRouteDecision.RuntimeFallbackToV1)
+                        RenderFallbackReason.V2RenderFailed
+                    else null,
+                renderDecision = success.decision,
+                renderParticipation = success.participation,
+                algorithmVersion = success.algorithmVersion,
+                previewBitmap = rendered,
+                resourcesReleased = false,
+            ).also {
                 it.coordinatorGeneration = snapshot.coordinatorGeneration
                 it.attachLocalDiagnostics(
                     trackerSession,
@@ -4918,10 +5086,13 @@ private fun MemoryRetryDescriptor?.matchesRetryFailure(
 internal data class EditorHistorySnapshot(
     val params: EditParams,
     val correctionEngine: CorrectionEngine,
+    val requestedRoute: NativeRenderRoute? = null,
     val previewEngine: CorrectionEngine? = null,
     val previewRoute: NativeRenderRoute? = null,
     val previewResultClass: PreviewResultClass? = null,
     val fallbackReason: RenderFallbackReason? = null,
+    val renderDecision: RenderRouteDecision? = null,
+    val renderParticipation: RenderParticipation = RenderParticipation(),
     val algorithmVersion: String? = null,
     val noiseEngine: NoiseEngine,
     val detailEngine: DetailEngine,
@@ -5058,10 +5229,15 @@ private fun EditorUiState.toHistorySnapshot(
         return EditorHistorySnapshot(
             params = params,
             correctionEngine = correctionEngineState.documentEngine,
+            requestedRoute = correctionEngineState.requestedRoute,
             previewEngine = correctionEngineState.previewEngine,
             previewRoute = correctionEngineState.previewRoute,
             previewResultClass = correctionEngineState.previewResultClass,
             fallbackReason = correctionEngineState.fallbackReason,
+            renderDecision =
+                (correctionEngineState.visiblePreview as? VisiblePreviewState.Rendered)?.decision,
+            renderParticipation =
+                correctionEngineState.participation ?: RenderParticipation(),
             algorithmVersion = correctionEngineState.algorithmVersion,
             noiseEngine = noiseEngine,
             detailEngine = detailEngine,
@@ -5103,6 +5279,16 @@ private fun EditorUiState.toHistorySnapshot(
         return EditorHistorySnapshot(
             params = params,
             correctionEngine = correctionEngineState.documentEngine,
+            requestedRoute = correctionEngineState.requestedRoute,
+            previewEngine = correctionEngineState.previewEngine,
+            previewRoute = correctionEngineState.previewRoute,
+            previewResultClass = correctionEngineState.previewResultClass,
+            fallbackReason = correctionEngineState.fallbackReason,
+            renderDecision =
+                (correctionEngineState.visiblePreview as? VisiblePreviewState.Rendered)?.decision,
+            renderParticipation =
+                correctionEngineState.participation ?: RenderParticipation(),
+            algorithmVersion = correctionEngineState.algorithmVersion,
             noiseEngine = noiseEngine,
             detailEngine = detailEngine,
             toneEngine = toneEngine,
@@ -5128,6 +5314,45 @@ private fun EditorUiState.toHistorySnapshot(
         throw t
     }
 }
+
+private fun EditorHistorySnapshot.toVisiblePreviewState(): VisiblePreviewState =
+    when (previewResultClass) {
+        PreviewResultClass.NoDocument -> VisiblePreviewState.NoDocument
+        PreviewResultClass.Original -> VisiblePreviewState.Original
+        else -> {
+            val actual =
+                previewRoute
+                    ?: when (previewEngine) {
+                        CorrectionEngine.Engine2 -> NativeRenderRoute.V2
+                        else -> NativeRenderRoute.V1
+                    }
+            val requested =
+                requestedRoute
+                    ?: if (previewResultClass == PreviewResultClass.V2FallbackToV1)
+                        NativeRenderRoute.V2
+                    else actual
+            val decision =
+                renderDecision
+                    ?: when (previewResultClass) {
+                        PreviewResultClass.V2FallbackToV1 ->
+                            RenderRouteDecision.RuntimeFallbackToV1
+                        PreviewResultClass.DebugForcedV1 ->
+                            RenderRouteDecision.DebugForcedV1
+                        PreviewResultClass.DebugForcedV2 ->
+                            RenderRouteDecision.DebugForcedV2
+                        else -> RenderRouteDecision.StoredVisibleTruth
+                    }
+            VisiblePreviewState.Rendered(
+                requestedRoute = requested,
+                actualRoute = actual,
+                decision = decision,
+                algorithmVersion =
+                    algorithmVersion
+                        ?: if (actual == NativeRenderRoute.V2) "native-v2" else "native-v1",
+                participation = renderParticipation,
+            )
+        }
+    }
 
 private fun buildHistoryAppliedMessage(
     current: EditorUiState,
@@ -5768,97 +5993,60 @@ private fun CropAspectRatio.rotatedForQuarterTurn(): CropAspectRatio =
         else -> this
     }
 
-internal suspend fun renderEditedPreview(
+internal suspend fun renderEditedBitmap(
     basePreview: Bitmap,
     params: EditParams,
     engines: EngineSelection,
     revision: Int,
     look: PresetColorLook? = null,
     quickEffects: List<ActiveQuickEffect> = emptyList(),
-    routingSelection: ExperimentalLabSelection? = null,
+    route: NativeRenderRoute,
+    diagnostics: MemoryTrackerScope? = null,
 ): Bitmap {
     var working: Bitmap? = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-    var comparisonBaseline: Bitmap? = null
     return try {
-        val selection = routingSelection ?: routingForCorrectionEngine(CorrectionEngine.Engine1)
+        check(route != NativeRenderRoute.Compare)
+        val selection =
+            routingForCorrectionEngine(CorrectionEngine.Engine1).copy(nativeRender = route)
         val plan = RenderPipelinePlanner.create(selection, params, quickEffects)
-        if (selection.nativeRender == NativeRenderRoute.Compare) {
-            comparisonBaseline = basePreview.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-            renderBitmapInNative(
-                checkNotNull(comparisonBaseline),
-                params,
-                engines,
-                revision,
-                look,
-            )
-            applyActiveQuickEffectsToBitmap(
-                checkNotNull(comparisonBaseline),
-                quickEffects,
-                revision,
-            )
-            applySelectedToneEngine(checkNotNull(comparisonBaseline), engines.toneEngine)
-        }
-        val v2StartedNanos = System.nanoTime()
-        renderBitmapInNative(checkNotNull(working), plan.v1Params, engines, revision, look)
-        applyActiveQuickEffectsToBitmap(checkNotNull(working), plan.v1QuickEffects, revision)
+        renderBitmapInNative(
+            checkNotNull(working),
+            plan.v1Params,
+            engines,
+            revision,
+            look,
+            diagnostics,
+        )
+        applyActiveQuickEffectsToBitmap(
+            checkNotNull(working),
+            plan.v1QuickEffects,
+            revision,
+            diagnostics,
+        )
         val corrected =
-            applyExperimentalNativeCorrections(
-                checkNotNull(working),
-                plan,
-            )
+            try {
+                applyExperimentalNativeCorrections(
+                    checkNotNull(working),
+                    plan,
+                    diagnostics,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (allocation: BitmapAllocationRejectedException) {
+                throw allocation
+            } catch (failure: Throwable) {
+                throw V2RenderException(failure)
+            }
         if (corrected !== working) {
             working?.takeUnless(Bitmap::isRecycled)?.recycle()
             working = corrected
         }
         applySelectedToneEngine(checkNotNull(working), engines.toneEngine)
-        comparisonBaseline?.let { baseline ->
-            val sampleWidth = minOf(working!!.width, 256)
-            val sampleHeight = (working!!.height.toLong() * sampleWidth / working!!.width).toInt().coerceAtLeast(1)
-            val sampledBaseline = Bitmap.createScaledBitmap(baseline, sampleWidth, sampleHeight, true)
-            val sampledCandidate = Bitmap.createScaledBitmap(working!!, sampleWidth, sampleHeight, true)
-            val count = checkedPixelCountForComparison(sampleWidth, sampleHeight)
-            val baselinePixels = IntArray(count)
-            val candidatePixels = IntArray(count)
-            sampledBaseline.getPixels(
-                baselinePixels, 0, sampleWidth, 0, 0, sampleWidth, sampleHeight
-            )
-            sampledCandidate.getPixels(
-                candidatePixels, 0, sampleWidth, 0, 0, sampleWidth, sampleHeight
-            )
-            sampledBaseline.recycle()
-            sampledCandidate.recycle()
-            ExperimentalComparisonStore.publishDebug(
-                QualityRegressionMetricsV2.debugArtifact(
-                    fixtureVersion = "live-preview-v2",
-                    baseline = baselinePixels,
-                    experimental = candidatePixels,
-                    width = sampleWidth,
-                    height = sampleHeight,
-                ).copy(
-                    algorithmDecision = "native-render:${plan.route}",
-                    knownTransientBytes =
-                        NativeScratchPlanner.correctionsV2(
-                            working!!.rowBytes,
-                            working!!.height,
-                        ).knownBytes,
-                    durationMillis = (System.nanoTime() - v2StartedNanos) / 1_000_000L,
-                )
-            )
-            baseline.recycle()
-            comparisonBaseline = null
-        }
         checkNotNull(working).also { working = null }
     } catch (t: Throwable) {
-        comparisonBaseline?.takeUnless(Bitmap::isRecycled)?.recycle()
         working?.takeUnless(Bitmap::isRecycled)?.recycle()
         throw t
     }
-}
-
-private fun checkedPixelCountForComparison(width: Int, height: Int): Int {
-    val count = Math.multiplyExact(width.toLong(), height.toLong())
-    require(count in 1..Int.MAX_VALUE)
-    return count.toInt()
 }
 
 private data class NativeSpecialEffectOp(val effect: Int, val strength: Float)

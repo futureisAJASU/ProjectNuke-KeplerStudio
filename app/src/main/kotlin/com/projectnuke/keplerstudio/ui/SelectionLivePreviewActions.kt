@@ -3,15 +3,21 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.EditParams
+import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
-import com.projectnuke.keplerstudio.editor.renderBitmapWithSelectionLayers
+import com.projectnuke.keplerstudio.editor.RenderFailedException
+import com.projectnuke.keplerstudio.editor.RenderOperation
+import com.projectnuke.keplerstudio.editor.RenderResult
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
+import com.projectnuke.keplerstudio.editor.successOrThrow
+import com.projectnuke.keplerstudio.editor.withFailedRender
+import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -102,9 +108,18 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         prepareTracker?.end()
         try {
             delay(120L)
-            preview = withContext(Dispatchers.Default) {
-                renderLiveSelectionPreview(ownedBase, nextState.copy(selectionLayers = ownedLayers), nextRevision)
-            }
+            var renderSuccess: RenderResult.Success? = null
+            preview =
+                withContext(Dispatchers.Default) {
+                    renderSuccess =
+                        renderLiveSelectionPreview(
+                            ownedBase,
+                            nextState.copy(selectionLayers = ownedLayers),
+                            nextRevision,
+                            previewTracker,
+                        )
+                    checkNotNull(renderSuccess).output
+                }
             previewTracker?.track(checkNotNull(preview), "selectionPreview:result")
             if (isSelectionPreviewCurrent(transaction, previewToken, nextRevision, baseToken, activeId)) {
                 val adopted = preview ?: error("missing selection live preview")
@@ -112,6 +127,11 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
                     it.copy(
                         previewBitmap = adopted,
                         isBusy = false,
+                        correctionEngineState =
+                            it.correctionEngineState.withSuccessfulRender(
+                                nextState.correctionEngineState.documentEngine,
+                                checkNotNull(renderSuccess),
+                            ),
                         message = "선택 마스크 미리보기가 적용되었습니다."
                     )
                 }
@@ -131,6 +151,13 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
                 updateUiState {
                     it.copy(
                         isBusy = false,
+                        correctionEngineState =
+                            (t as? RenderFailedException)?.failure?.let { failure ->
+                                it.correctionEngineState.withFailedRender(
+                                    nextState.correctionEngineState.documentEngine,
+                                    failure,
+                                )
+                            } ?: it.correctionEngineState,
                         message = "선택 마스크 미리보기를 적용하지 못했습니다: ${t.message}"
                     )
                 }
@@ -150,5 +177,18 @@ fun EditorViewModel.finishActiveSelectionParamsGesture() {
     finishSelectionParamGesture()
 }
 
-private suspend fun renderLiveSelectionPreview(base: Bitmap, state: EditorUiState, revision: Int): Bitmap =
-    renderBitmapWithSelectionLayers(base, state, revision)
+private suspend fun EditorViewModel.renderLiveSelectionPreview(
+    base: Bitmap,
+    state: EditorUiState,
+    revision: Int,
+    diagnostics: com.projectnuke.keplerstudio.editor.MemoryTrackerScope?,
+): RenderResult.Success =
+    EditorRenderer.render(
+        createRenderRequest(
+            state = state,
+            operation = RenderOperation.SelectionLivePreview,
+            basePreview = base,
+            revision = revision,
+            diagnostics = diagnostics,
+        )
+    ).successOrThrow()

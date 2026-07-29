@@ -1,10 +1,10 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
-import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
+import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
@@ -15,6 +15,9 @@ import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
+import com.projectnuke.keplerstudio.editor.RenderFailedException
+import com.projectnuke.keplerstudio.editor.RenderOperation
+import com.projectnuke.keplerstudio.editor.RenderResult
 import com.projectnuke.keplerstudio.editor.RouteResolver
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
@@ -23,12 +26,12 @@ import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.analyzeManualMask
 import com.projectnuke.keplerstudio.editor.copyOrThrow
-import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
-import com.projectnuke.keplerstudio.editor.renderEditedPreview
-import com.projectnuke.keplerstudio.editor.renderRouting
 import com.projectnuke.keplerstudio.editor.refineTrackedSubjectSelectionV2
+import com.projectnuke.keplerstudio.editor.successOrThrow
+import com.projectnuke.keplerstudio.editor.withFailedRender
+import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import java.util.UUID
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -45,7 +48,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val sourcePath = state.sourcePath
     val sourceRevision = state.revision
-val documentEngine = state.correctionEngineState.previewEngine ?: state.correctionEngineState.documentEngine
+    val documentEngine = state.correctionEngineState.documentEngine
     val subjectOverride = ExperimentalLabController.debugOverrides().subjectSelection
     val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
@@ -499,6 +502,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         { operationToken ->
         var renderedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
+        var previewSuccess: RenderResult.Success? = null
         val selectionTracker =
             beginMemoryTracking(
                 "applyActiveSelectionLocalEdit",
@@ -508,20 +512,36 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         try {
             renderedOriginal =
                 withContext(Dispatchers.Default) {
-                    renderSelectionLocalEdit(base, state, layer, nextRevision)
+                    EditorRenderer.render(
+                        createRenderRequest(
+                            state = state,
+                            operation = RenderOperation.SelectionLocal,
+                            basePreview = base,
+                            revision = nextRevision,
+                            look = null,
+                            quickEffects = emptyList(),
+                            selectionLayers = listOf(layer),
+                            diagnostics = selectionTracker,
+                        )
+                    ).successOrThrow().output
                 }
             selectionTracker?.track(checkNotNull(renderedOriginal), "selectionEdit:original")
             renderedPreview =
                 withContext(Dispatchers.Default) {
-                    renderEditedPreview(
-                        basePreview = renderedOriginal ?: error("missing selection render"),
-                        params = EditParams(),
-                        engines = state.engineSelection(),
-                        revision = nextRevision,
-                        look = state.presetLook,
-                        quickEffects = state.activeQuickEffects,
-                        routingSelection = state.renderRouting(),
-                    )
+                    previewSuccess =
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = state,
+                                operation = RenderOperation.SelectionNativeBake,
+                                basePreview =
+                                    renderedOriginal ?: error("missing selection render"),
+                                revision = nextRevision,
+                                params = EditParams(),
+                                selectionLayers = emptyList(),
+                                diagnostics = selectionTracker,
+                            )
+                        ).successOrThrow()
+                    checkNotNull(previewSuccess).output
                 }
             selectionTracker?.track(checkNotNull(renderedPreview), "selectionEdit:preview")
             if (isManagedEditCurrent(operationToken, nextRevision)) {
@@ -537,6 +557,11 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                         baseBitmapDirty = true,
                         baseContentToken = newBaseContentToken(),
                         isBusy = false,
+                        correctionEngineState =
+                            it.correctionEngineState.withSuccessfulRender(
+                                state.correctionEngineState.documentEngine,
+                                checkNotNull(previewSuccess),
+                            ),
                         message = "선택한 마스크 보정을 적용했습니다.",
                     )
                 }
@@ -559,7 +584,19 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         } catch (t: Throwable) {
             renderedOriginal?.recycle()
             renderedPreview?.recycle()
+            val renderFailure = (t as? RenderFailedException)?.failure
             if (isManagedEditCurrent(operationToken, nextRevision)) {
+                if (renderFailure != null) {
+                    updateUiState {
+                        it.copy(
+                            correctionEngineState =
+                                it.correctionEngineState.withFailedRender(
+                                    state.correctionEngineState.documentEngine,
+                                    renderFailure,
+                                )
+                        )
+                    }
+                }
                 updateUiState {
                     it.copy(isBusy = false, message = "마스크 보정 적용에 실패했습니다: ${t.message}")
                 }
@@ -633,137 +670,6 @@ private fun applyPaintStroke(
         bitmap.setPixels(row, 0, width, left, y, width, 1)
     }
     return changed
-}
-
-private suspend fun renderSelectionLocalEdit(
-    base: Bitmap,
-    state: EditorUiState,
-    layer: SelectionLayer,
-    revision: Int,
-): Bitmap {
-    var global: Bitmap? = null
-    var local: Bitmap? = null
-    try {
-        global = renderWithParams(base, state.params, state, revision)
-        local =
-            renderWithParams(base, mergeParams(state.params, layer.localParams), state, revision)
-        return blendWithSelectionMask(local, global, layer)
-    } catch (t: Throwable) {
-        global?.recycle()
-        local?.recycle()
-        throw t
-    }
-}
-
-private fun mergeParams(base: EditParams, local: EditParams): EditParams =
-    EditParams(
-        exposure = (base.exposure + local.exposure).coerceIn(-1f, 1f),
-        contrast = (base.contrast + local.contrast).coerceIn(-1f, 1f),
-        shadows = (base.shadows + local.shadows).coerceIn(-1f, 1f),
-        highlights = (base.highlights + local.highlights).coerceIn(-1f, 1f),
-        whites = (base.whites + local.whites).coerceIn(-1f, 1f),
-        blacks = (base.blacks + local.blacks).coerceIn(-1f, 1f),
-        temperature = (base.temperature + local.temperature).coerceIn(-1f, 1f),
-        tint = (base.tint + local.tint).coerceIn(-1f, 1f),
-        saturation = (base.saturation + local.saturation).coerceIn(-1f, 1f),
-        vibrance = (base.vibrance + local.vibrance).coerceIn(-1f, 1f),
-        clarity = (base.clarity + local.clarity).coerceIn(-1f, 1f),
-        dehaze = (base.dehaze + local.dehaze).coerceIn(-1f, 1f),
-        sharpness = (base.sharpness + local.sharpness).coerceIn(0f, 1f),
-        noiseReduction = (base.noiseReduction + local.noiseReduction).coerceIn(0f, 1f),
-        luminanceNoiseReduction =
-            (base.luminanceNoiseReduction + local.luminanceNoiseReduction).coerceIn(0f, 1f),
-        colorNoiseReduction =
-            (base.colorNoiseReduction + local.colorNoiseReduction).coerceIn(0f, 1f),
-        noiseDetailProtection =
-            (base.noiseDetailProtection + local.noiseDetailProtection - 0.50f).coerceIn(0f, 1f),
-    )
-
-private suspend fun renderWithParams(
-    base: Bitmap,
-    params: EditParams,
-    state: EditorUiState,
-    revision: Int,
-): Bitmap {
-    val out = base.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-    val result =
-        NativePhotoCore.nativeRenderPreviewInPlace(
-            out,
-            params.exposure,
-            params.contrast,
-            params.shadows,
-            params.highlights,
-            params.whites,
-            params.blacks,
-            params.temperature,
-            params.tint,
-            params.saturation,
-            params.vibrance,
-            params.clarity,
-            params.dehaze,
-            params.sharpness,
-            params.noiseReduction,
-            params.luminanceNoiseReduction,
-            params.colorNoiseReduction,
-            params.noiseDetailProtection,
-            state.noiseEngine.nativeId,
-            state.detailEngine.nativeId,
-            state.toneEngine.nativeId,
-            state.hazeEngine.nativeId,
-            revision,
-        )
-    if (result < 0) {
-        out.recycle()
-        throw IllegalStateException("native selection render failed: code=$result")
-    }
-    return out
-}
-
-private fun blendWithSelectionMask(local: Bitmap, global: Bitmap, layer: SelectionLayer): Bitmap {
-    val width = global.width
-    val height = global.height
-    val scaledMask =
-        if (layer.bitmap.width == width && layer.bitmap.height == height) {
-            layer.bitmap
-        } else {
-            createScaledBitmapOrThrow(layer.bitmap, width, height, true)
-        }
-    val localRow = IntArray(width)
-    val globalRow = IntArray(width)
-    val maskRow = IntArray(width)
-    try {
-        for (y in 0 until height) {
-            local.getPixels(localRow, 0, width, 0, y, width, 1)
-            global.getPixels(globalRow, 0, width, 0, y, width, 1)
-            scaledMask.getPixels(maskRow, 0, width, 0, y, width, 1)
-            for (x in 0 until width) {
-                val raw = ((maskRow[x] ushr 16) and 0xff) / 255f
-                val a = (if (layer.inverted) 1f - raw else raw) * layer.opacity.coerceIn(0f, 1f)
-                globalRow[x] = blendArgb(localRow[x], globalRow[x], a)
-            }
-            global.setPixels(globalRow, 0, width, 0, y, width, 1)
-        }
-    } finally {
-        if (scaledMask !== layer.bitmap) scaledMask.recycle()
-    }
-    local.recycle()
-    return global
-}
-
-private fun blendArgb(foreground: Int, background: Int, alpha: Float): Int {
-    val inv = 1f - alpha.coerceIn(0f, 1f)
-    val a = 0xff
-    val r =
-        (((foreground ushr 16) and 0xff) * alpha + ((background ushr 16) and 0xff) * inv)
-            .roundToInt()
-            .coerceIn(0, 255)
-    val g =
-        (((foreground ushr 8) and 0xff) * alpha + ((background ushr 8) and 0xff) * inv)
-            .roundToInt()
-            .coerceIn(0, 255)
-    val b =
-        ((foreground and 0xff) * alpha + (background and 0xff) * inv).roundToInt().coerceIn(0, 255)
-    return (a shl 24) or (r shl 16) or (g shl 8) or b
 }
 
 private fun Bitmap.hasForegroundPixel(): Boolean {

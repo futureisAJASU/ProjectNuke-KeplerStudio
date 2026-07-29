@@ -5,6 +5,7 @@ import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
+import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
@@ -14,6 +15,9 @@ import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
+import com.projectnuke.keplerstudio.editor.RenderFailedException
+import com.projectnuke.keplerstudio.editor.RenderOperation
+import com.projectnuke.keplerstudio.editor.RenderResult
 import com.projectnuke.keplerstudio.editor.RouteResolver
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.analyzeManualMask
@@ -21,9 +25,10 @@ import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.createScaledBitmapOrThrow
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
-import com.projectnuke.keplerstudio.editor.renderEditedPreview
-import com.projectnuke.keplerstudio.editor.renderRouting
 import com.projectnuke.keplerstudio.editor.renderExperimentalRemasterV2
+import com.projectnuke.keplerstudio.editor.successOrThrow
+import com.projectnuke.keplerstudio.editor.withFailedRender
+import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -36,8 +41,8 @@ import kotlinx.coroutines.withContext
 fun EditorViewModel.applyMaskAwareRemaster() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-val stateAtEntry = uiState.value
-    val documentEngine = stateAtEntry.correctionEngineState.previewEngine ?: stateAtEntry.correctionEngineState.documentEngine
+    val stateAtEntry = uiState.value
+    val documentEngine = stateAtEntry.correctionEngineState.documentEngine
     val remasterOverride = ExperimentalLabController.debugOverrides().remaster
     val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
@@ -46,7 +51,7 @@ val stateAtEntry = uiState.value
         documentEngine, remasterOverride, modelAvailable = modelLoaded,
     )
     val remasterAlgorithm = remasterResolution.actualRoute
-val modelAvailable =
+    val modelAvailable =
         when (remasterAlgorithm) {
             RemasterRoute.V1, RemasterRoute.ForcedV1Fallback -> true
             RemasterRoute.V2ModelAssisted -> modelLoaded
@@ -107,9 +112,6 @@ val modelAvailable =
 
     val sourcePath = current.sourcePath
     val baseContentToken = current.baseContentToken
-    val engines = current.engineSelection()
-    val presetLook = current.presetLook
-    val quickEffects = current.activeQuickEffects
     val startRevision = current.revision
     val nextRevision = startRevision + 1
 
@@ -121,6 +123,7 @@ val modelAvailable =
         { operationToken ->
             var remasteredOriginal: Bitmap? = null
             var renderedPreview: Bitmap? = null
+            var previewSuccess: RenderResult.Success? = null
             var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
             var ownedBaseOwned: Bitmap? = ownedBase
             var ownedManualMaskOwned: Bitmap? = ownedManualMask
@@ -213,16 +216,19 @@ val modelAvailable =
 
                 withContext(Dispatchers.Default) {
                     val base = remasteredOriginal ?: error("missing mask-aware render")
-                    val created =
-                        renderEditedPreview(
-                            basePreview = base,
-                            params = EditParams(),
-                            engines = engines,
-                            revision = nextRevision,
-                            look = presetLook,
-                            quickEffects = quickEffects,
-                            routingSelection = current.renderRouting(),
-                        )
+                    previewSuccess =
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = current,
+                                operation = RenderOperation.Remaster,
+                                basePreview = base,
+                                revision = nextRevision,
+                                params = EditParams(),
+                                selectionLayers = emptyList(),
+                                diagnostics = remasterTracker,
+                            )
+                        ).successOrThrow()
+                    val created = checkNotNull(previewSuccess).output
                     renderedPreview = created
                     remasterTracker?.track(created, "remaster:preview")
                 }
@@ -250,6 +256,11 @@ val modelAvailable =
                                 baseBitmapDirty = true,
                                 baseContentToken = newBaseContentToken(),
                                 isBusy = false,
+                                correctionEngineState =
+                                    it.correctionEngineState.withSuccessfulRender(
+                                        current.correctionEngineState.documentEngine,
+                                        checkNotNull(previewSuccess),
+                                    ),
                                 message = "Edge Masker 기반 마스크 보정을 적용했습니다.",
                             )
                         }
@@ -292,6 +303,13 @@ val modelAvailable =
                     updateUiState {
                         it.copy(
                             isBusy = false,
+                            correctionEngineState =
+                                (t as? RenderFailedException)?.failure?.let { failure ->
+                                    it.correctionEngineState.withFailedRender(
+                                        current.correctionEngineState.documentEngine,
+                                        failure,
+                                    )
+                                } ?: it.correctionEngineState,
                             message = "Edge Masker 기반 마스크 보정 적용에 실패했습니다: ${t.message}",
                         )
                     }

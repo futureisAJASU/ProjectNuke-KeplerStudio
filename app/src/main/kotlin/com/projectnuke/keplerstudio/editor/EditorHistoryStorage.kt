@@ -1269,6 +1269,21 @@ internal class EditorHistoryStorage(
         val metadata = JSONObject().apply {
             put("params", snapshot.params.toJsonObject())
             put("correctionEngine", snapshot.correctionEngine.name)
+            put("requestedRoute", snapshot.requestedRoute?.name ?: JSONObject.NULL)
+            put("previewEngine", snapshot.previewEngine?.name ?: JSONObject.NULL)
+            put("previewRoute", snapshot.previewRoute?.name ?: JSONObject.NULL)
+            put("previewResultClass", snapshot.previewResultClass?.name ?: JSONObject.NULL)
+            put("fallbackReason", snapshot.fallbackReason?.name ?: JSONObject.NULL)
+            put("renderDecision", snapshot.renderDecision?.name ?: JSONObject.NULL)
+            put("algorithmVersion", snapshot.algorithmVersion ?: JSONObject.NULL)
+            put(
+                "renderParticipation",
+                JSONObject().apply {
+                    put("model", snapshot.renderParticipation.model)
+                    put("rule", snapshot.renderParticipation.rule)
+                    put("manual", snapshot.renderParticipation.manual)
+                },
+            )
             put("noiseEngine", snapshot.noiseEngine.name)
             put("detailEngine", snapshot.detailEngine.name)
             put("toneEngine", snapshot.toneEngine.name)
@@ -1367,6 +1382,33 @@ internal class EditorHistoryStorage(
             correctionEngine =
                 json.optString("correctionEngine", CorrectionEngine.Engine1.name)
                     .let(CorrectionEngine::valueOf),
+            requestedRoute =
+                nullableString("requestedRoute")
+                    ?.let { runCatching { NativeRenderRoute.valueOf(it) }.getOrNull() },
+            previewEngine =
+                nullableString("previewEngine")
+                    ?.let { runCatching { CorrectionEngine.valueOf(it) }.getOrNull() },
+            previewRoute =
+                nullableString("previewRoute")
+                    ?.let { runCatching { NativeRenderRoute.valueOf(it) }.getOrNull() },
+            previewResultClass =
+                nullableString("previewResultClass")
+                    ?.let { runCatching { PreviewResultClass.valueOf(it) }.getOrNull() },
+            fallbackReason =
+                nullableString("fallbackReason")
+                    ?.let { runCatching { RenderFallbackReason.valueOf(it) }.getOrNull() },
+            renderDecision =
+                nullableString("renderDecision")
+                    ?.let { runCatching { RenderRouteDecision.valueOf(it) }.getOrNull() },
+            renderParticipation =
+                json.optJSONObject("renderParticipation")?.let {
+                    RenderParticipation(
+                        model = it.optBoolean("model", false),
+                        rule = it.optBoolean("rule", false),
+                        manual = it.optBoolean("manual", false),
+                    )
+                } ?: RenderParticipation(),
+            algorithmVersion = nullableString("algorithmVersion"),
             noiseEngine = enumValueStrict(json.getString("noiseEngine")),
             detailEngine = enumValueStrict(json.getString("detailEngine")),
             toneEngine = enumValueStrict(json.getString("toneEngine")),
