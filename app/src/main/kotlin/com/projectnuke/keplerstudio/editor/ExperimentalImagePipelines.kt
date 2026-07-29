@@ -857,6 +857,7 @@ internal fun applyExperimentalFlareGuardV2(
     strength: Float,
     diagnostics: MemoryTrackerScope?,
     operation: ModelOperationContext,
+    preloadedModel: ModelLoadResult<FlareGuardModelRunner>? = null,
 ): FlareGuardApplyResult {
     require(algorithmMode != FlareGuardRoute.V1)
     operation.validateOrThrow()
@@ -877,7 +878,7 @@ internal fun applyExperimentalFlareGuardV2(
     try {
         source.getPixels(sourcePixels, 0, source.width, 0, 0, source.width, source.height)
         if (algorithmMode == FlareGuardRoute.V2ModelAssisted) {
-            when (val loaded = FlareGuardModelRunner.create(context)) {
+            when (val loaded = preloadedModel ?: FlareGuardModelRunner.create(context)) {
                 is ModelLoadResult.Ready -> {
                     runner = loaded.runner
                     when (val inference = loaded.runner.predictMask(source, diagnostics, operation)) {

@@ -31,10 +31,13 @@ internal data class DraftGenerationManifest(
     val previewEngine: String?,
     /** Native route that produced the stored preview. Null in v2 manifests. */
     val previewRoute: String?,
+    /** Route requested before a runtime fallback. Defaults to [previewRoute] for old manifests. */
+    val requestedRoute: String?,
     /** Result class of the stored preview: V1, V2, V2FallbackToV1, Original, null in v2. */
     val previewResultClass: String?,
     /** Reason for fallback if preview is V2FallbackToV1. Null if no fallback. */
     val fallbackReason: String?,
+    val renderDecision: String?,
     val noiseEngine: String,
     val detailEngine: String,
     val toneEngine: String,
@@ -49,6 +52,7 @@ internal data class DraftGenerationManifest(
     val selectionPaintSettings: SelectionPaintSettings,
     val showSelectionOverlay: Boolean,
     val algorithmVersion: String?,
+    val renderParticipation: RenderParticipation?,
 )
 
 internal data class DraftSelectionLayerEntry(
@@ -66,7 +70,7 @@ internal data class DraftSelectionLayerEntry(
 )
 
 internal fun draftCorrectionEngine(value: String?): CorrectionEngine =
-    value?.let(CorrectionEngine::valueOf) ?: CorrectionEngine.Engine1
+    CorrectionEngine.entries.firstOrNull { it.name == value } ?: CorrectionEngine.Engine1
 
 internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("formatVersion", formatVersion)
@@ -88,9 +92,21 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("correctionEngine", correctionEngine)
     put("previewEngine", previewEngine ?: JSONObject.NULL)
     put("previewRoute", previewRoute ?: JSONObject.NULL)
+    put("requestedRoute", requestedRoute ?: JSONObject.NULL)
     put("previewResultClass", previewResultClass ?: JSONObject.NULL)
     put("fallbackReason", fallbackReason ?: JSONObject.NULL)
+    put("renderDecision", renderDecision ?: JSONObject.NULL)
     put("algorithmVersion", algorithmVersion ?: JSONObject.NULL)
+    put(
+        "renderParticipation",
+        renderParticipation?.let { participation ->
+            JSONObject().apply {
+                put("model", participation.model)
+                put("rule", participation.rule)
+                put("manual", participation.manual)
+            }
+        } ?: JSONObject.NULL,
+    )
     put("noiseEngine", noiseEngine)
     put("detailEngine", detailEngine)
     put("toneEngine", toneEngine)
@@ -131,8 +147,9 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
 
 internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationManifest? = runCatching {
     val formatVersion = json.requiredInt("formatVersion")
-    if (formatVersion < 2) return null
+    if (formatVersion < 1) return null
     if (formatVersion > DRAFT_FORMAT_VERSION) return null
+    val legacyV1 = formatVersion == 1
     val layerArray = json.requiredArray("selectionLayers")
     val layers = ArrayList<DraftSelectionLayerEntry>(layerArray.length())
     for (i in 0 until layerArray.length()) {
@@ -190,24 +207,53 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         formatVersion = formatVersion,
         generationId = json.requiredString("generationId"),
         savedAtMillis = json.requiredPositiveLong("savedAtMillis"),
-        draftOperationEpoch = json.requiredNonNegativeLong("draftOperationEpoch"),
-        editorRevision = json.requiredNonNegativeInt("editorRevision"),
-        originalSourceIdentity = json.optionalString("originalSourceIdentity"),
-        sourceIdentity = json.requiredString("sourceIdentity"),
+        draftOperationEpoch =
+            if (legacyV1) json.optionalNonNegativeLong("draftOperationEpoch") ?: 0L
+            else json.requiredNonNegativeLong("draftOperationEpoch"),
+        editorRevision =
+            if (legacyV1) json.optionalNonNegativeInt("editorRevision") ?: 0
+            else json.requiredNonNegativeInt("editorRevision"),
+        originalSourceIdentity =
+            json.optionalString("originalSourceIdentity")
+                ?: if (legacyV1) json.optionalString("originalSourcePath") else null,
+        sourceIdentity =
+            if (legacyV1) json.optionalString("sourceIdentity")
+            else json.requiredString("sourceIdentity"),
         baseContentToken = json.requiredString("baseContentToken"),
         baseBitmapDirty = json.requiredBoolean("baseBitmapDirty"),
         sourceFileName = json.requiredString("sourceFileName"),
         sourceWidth = json.requiredPositiveInt("sourceWidth"),
         sourceHeight = json.requiredPositiveInt("sourceHeight"),
         thumbnailFileName = json.requiredString("thumbnailFileName"),
-        thumbnailWidth = json.requiredPositiveInt("thumbnailWidth"),
-        thumbnailHeight = json.requiredPositiveInt("thumbnailHeight"),
+        thumbnailWidth =
+            if (legacyV1)
+                json.optionalPositiveInt("thumbnailWidth")
+                    ?: json.requiredPositiveInt("sourceWidth")
+            else json.requiredPositiveInt("thumbnailWidth"),
+        thumbnailHeight =
+            if (legacyV1)
+                json.optionalPositiveInt("thumbnailHeight")
+                    ?: json.requiredPositiveInt("sourceHeight")
+            else json.requiredPositiveInt("thumbnailHeight"),
         params = json.requiredEditParams("params"),
         correctionEngine = draftCorrectionEngine(json.optionalString("correctionEngine")).name,
-        previewEngine = json.optionalString("previewEngine"),
-        previewRoute = json.optionalString("previewRoute"),
-        previewResultClass = json.optionalString("previewResultClass"),
-        fallbackReason = json.optionalString("fallbackReason"),
+        previewEngine =
+            json.optionalEnumName<CorrectionEngine>("previewEngine")
+                ?: if (legacyV1) CorrectionEngine.Engine1.name else null,
+        previewRoute =
+            json.optionalEnumName<NativeRenderRoute>("previewRoute")
+                ?: if (legacyV1) NativeRenderRoute.V1.name else null,
+        requestedRoute =
+            json.optionalEnumName<NativeRenderRoute>("requestedRoute")
+                ?: json.optionalEnumName<NativeRenderRoute>("previewRoute")
+                ?: if (legacyV1) NativeRenderRoute.V1.name else null,
+        previewResultClass =
+            json.optionalEnumName<PreviewResultClass>("previewResultClass")
+                ?: if (legacyV1) PreviewResultClass.V1.name else null,
+        fallbackReason = json.optionalEnumName<RenderFallbackReason>("fallbackReason"),
+        renderDecision =
+            json.optionalEnumName<RenderRouteDecision>("renderDecision")
+                ?: if (legacyV1) RenderRouteDecision.FollowDocument.name else null,
         noiseEngine = json.requiredEnum<NoiseEngine>("noiseEngine").name,
         detailEngine = json.requiredEnum<DetailEngine>("detailEngine").name,
         toneEngine = json.requiredEnum<ToneEngine>("toneEngine").name,
@@ -221,7 +267,17 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         activeSelectionLayerId = activeLayerId,
         selectionPaintSettings = paintSettings,
         showSelectionOverlay = json.requiredBoolean("showSelectionOverlay"),
-        algorithmVersion = json.optionalString("algorithmVersion"),
+        algorithmVersion =
+            json.optionalString("algorithmVersion")
+                ?: if (legacyV1) "native-v1" else null,
+        renderParticipation =
+            json.optJSONObject("renderParticipation")?.let {
+                RenderParticipation(
+                    model = it.optBoolean("model", false),
+                    rule = it.optBoolean("rule", false),
+                    manual = it.optBoolean("manual", false),
+                )
+            },
     )
 }.getOrNull()
 
@@ -244,6 +300,10 @@ private fun JSONObject.requiredInt(key: String): Int {
 }
 private fun JSONObject.requiredPositiveInt(key: String): Int = requiredInt(key).also { check(it > 0) }
 private fun JSONObject.requiredNonNegativeInt(key: String): Int = requiredInt(key).also { check(it >= 0) }
+private fun JSONObject.optionalPositiveInt(key: String): Int? =
+    if (!has(key) || isNull(key)) null else requiredPositiveInt(key)
+private fun JSONObject.optionalNonNegativeInt(key: String): Int? =
+    if (!has(key) || isNull(key)) null else requiredNonNegativeInt(key)
 private fun JSONObject.requiredLong(key: String): Long {
     val number = requiredNumber(key)
     val value = number.toDouble()
@@ -252,11 +312,16 @@ private fun JSONObject.requiredLong(key: String): Long {
 }
 private fun JSONObject.requiredPositiveLong(key: String): Long = requiredLong(key).also { check(it > 0L) }
 private fun JSONObject.requiredNonNegativeLong(key: String): Long = requiredLong(key).also { check(it >= 0L) }
+private fun JSONObject.optionalNonNegativeLong(key: String): Long? =
+    if (!has(key) || isNull(key)) null else requiredNonNegativeLong(key)
 private fun JSONObject.requiredFloat(key: String, range: ClosedFloatingPointRange<Float>): Float =
     requiredNumber(key).toFloat().also { check(it.isFinite() && it in range) }
 
 private inline fun <reified T : Enum<T>> JSONObject.requiredEnum(key: String): T =
     enumValueOf<T>(requiredString(key))
+
+private inline fun <reified T : Enum<T>> JSONObject.optionalEnumName(key: String): String? =
+    optionalString(key)?.let { value -> enumValues<T>().firstOrNull { it.name == value }?.name }
 
 private fun QuickEffectKind.manifestGroup(): Int = when (this) {
     QuickEffectKind.SpotCleanup -> 0

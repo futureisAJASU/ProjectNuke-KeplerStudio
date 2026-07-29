@@ -335,6 +335,54 @@ class EditorHistoryCoordinatorTransitionTest {
     }
 
     @Test
+    fun exactUndoPreservesFallbackRouteMetadataWithItsBitmap() = testScope.runTest {
+        val targetBitmap = bitmap(0xff102030.toInt())
+        val target =
+            snapshot(targetBitmap).copy(
+                correctionEngine = CorrectionEngine.Engine2,
+                requestedRoute = NativeRenderRoute.V2,
+                previewEngine = CorrectionEngine.Engine1,
+                previewRoute = NativeRenderRoute.V1,
+                previewResultClass = PreviewResultClass.V2FallbackToV1,
+                fallbackReason = RenderFallbackReason.V2RenderFailed,
+                renderDecision = RenderRouteDecision.RuntimeFallbackToV1,
+                algorithmVersion = "native-v1",
+                renderParticipation = RenderParticipation(rule = true),
+            )
+        coordinator.admitAdoptedSnapshot(target, true, 0L)
+        var adopted: EditorHistorySnapshot? = null
+        val currentBitmap = bitmap(0xff405060.toInt())
+
+        val result =
+            coordinator.navigate(
+                undoDirection = true,
+                currentCaptureBytes = BitmapMemoryBudget.bytes(currentBitmap),
+                captureCurrent = { storageKind, _ -> snapshot(currentBitmap, storageKind) },
+                materialize = { value, register -> value.also(register) },
+                adopt = {
+                    adopted = it
+                    true
+                },
+            )
+
+        assertTrue(result is HistoryNavigationResult.Adopted)
+        val restored = checkNotNull(adopted)
+        assertSame(targetBitmap, restored.previewBitmap)
+        assertEquals(CorrectionEngine.Engine2, restored.correctionEngine)
+        assertEquals(NativeRenderRoute.V2, restored.requestedRoute)
+        assertEquals(NativeRenderRoute.V1, restored.previewRoute)
+        assertEquals(PreviewResultClass.V2FallbackToV1, restored.previewResultClass)
+        assertEquals(RenderRouteDecision.RuntimeFallbackToV1, restored.renderDecision)
+        assertEquals("native-v1", restored.algorithmVersion)
+        assertEquals(RenderParticipation(rule = true), restored.renderParticipation)
+
+        coordinator.close()
+        advanceUntilIdle()
+        currentBitmap.recycle()
+        targetBitmap.recycle()
+    }
+
+    @Test
     fun automaticRecoverySpillsUnprotectedEntriesAndKeepsUndoTarget() = testScope.runTest {
         val first = bitmap(0xff010101.toInt())
         val second = bitmap(0xff020202.toInt())

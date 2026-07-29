@@ -76,11 +76,16 @@ data class RouteRequest(
     val operation: RenderOperation,
     val assignedDocumentEngine: CorrectionEngine,
     val debugOverride: NativeRenderRoute? = null,
+    val storedRequestedRoute: NativeRenderRoute? = null,
     val exactRoute: NativeRenderRoute? = null,
+    val storedDecision: RenderRouteDecision? = null,
     val fallbackPolicy: FallbackPolicy = FallbackPolicy.RetryV2OnNextOperation,
 ) {
     init {
         require(debugOverride == null || exactRoute == null)
+        require(storedRequestedRoute == null || exactRoute != null)
+        require(storedDecision == null || exactRoute != null)
+        require(storedRequestedRoute != NativeRenderRoute.Compare)
         require(exactRoute != NativeRenderRoute.Compare)
     }
 }
@@ -136,15 +141,15 @@ object RouteResolver {
         val exact = request.exactRoute
         val debug = request.debugOverride?.takeUnless { it == NativeRenderRoute.Compare }
         val requested =
-            exact ?: debug ?: defaultNativeRoute(request.assignedDocumentEngine)
+            request.storedRequestedRoute ?: exact ?: debug
+                ?: defaultNativeRoute(request.assignedDocumentEngine)
         val decision =
             when {
-                exact != null -> RenderRouteDecision.StoredVisibleTruth
-                debug == NativeRenderRoute.V1 &&
-                    request.assignedDocumentEngine == CorrectionEngine.Engine2 ->
+                exact != null ->
+                    request.storedDecision ?: RenderRouteDecision.StoredVisibleTruth
+                debug == NativeRenderRoute.V1 ->
                     RenderRouteDecision.DebugForcedV1
-                debug == NativeRenderRoute.V2 &&
-                    request.assignedDocumentEngine == CorrectionEngine.Engine1 ->
+                debug == NativeRenderRoute.V2 ->
                     RenderRouteDecision.DebugForcedV2
                 else -> RenderRouteDecision.FollowDocument
             }
@@ -260,6 +265,8 @@ object RouteResolver {
         availability: RouteModelAvailability,
         operation: RenderOperation = RenderOperation.NativePreview,
         exactNativeRoute: NativeRenderRoute? = null,
+        storedRequestedRoute: NativeRenderRoute? = null,
+        storedDecision: RenderRouteDecision? = null,
         fallbackPolicy: FallbackPolicy = FallbackPolicy.RetryV2OnNextOperation,
     ): ExperimentalLabSelection {
         val native =
@@ -268,7 +275,9 @@ object RouteResolver {
                     operation = operation,
                     assignedDocumentEngine = engine,
                     debugOverride = overrides.nativeRender.takeIf { exactNativeRoute == null },
+                    storedRequestedRoute = storedRequestedRoute,
                     exactRoute = exactNativeRoute,
+                    storedDecision = storedDecision,
                     fallbackPolicy = fallbackPolicy,
                 )
             )

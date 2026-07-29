@@ -1381,7 +1381,10 @@ internal class EditorHistoryStorage(
             params = checkNotNull(parseEditParamsFromJson(json.getJSONObject("params"))),
             correctionEngine =
                 json.optString("correctionEngine", CorrectionEngine.Engine1.name)
-                    .let(CorrectionEngine::valueOf),
+                    .let { value ->
+                        CorrectionEngine.entries.firstOrNull { it.name == value }
+                            ?: CorrectionEngine.Engine1
+                    },
             requestedRoute =
                 nullableString("requestedRoute")
                     ?.let { runCatching { NativeRenderRoute.valueOf(it) }.getOrNull() },

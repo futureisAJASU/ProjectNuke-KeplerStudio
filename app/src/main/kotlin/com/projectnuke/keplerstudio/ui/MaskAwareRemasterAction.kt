@@ -17,6 +17,7 @@ import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.RenderFailedException
 import com.projectnuke.keplerstudio.editor.RenderOperation
+import com.projectnuke.keplerstudio.editor.RenderParticipation
 import com.projectnuke.keplerstudio.editor.RenderResult
 import com.projectnuke.keplerstudio.editor.RouteResolver
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
@@ -51,24 +52,23 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         documentEngine, remasterOverride, modelAvailable = modelLoaded,
     )
     val remasterAlgorithm = remasterResolution.actualRoute
-    val modelAvailable =
+    val useModel =
         when (remasterAlgorithm) {
-            RemasterRoute.V1, RemasterRoute.ForcedV1Fallback -> true
-            RemasterRoute.V2ModelAssisted -> modelLoaded
-            RemasterRoute.V2MaskAware -> true
-            RemasterRoute.Compare -> modelLoaded
+            RemasterRoute.V1,
+            RemasterRoute.ForcedV1Fallback,
+            RemasterRoute.V2ModelAssisted -> true
+            RemasterRoute.V2MaskAware -> false
+            RemasterRoute.Compare -> true
         }
     val manualMaskAtEntry =
-        if (remasterAlgorithm == RemasterRoute.V1 ||
-            remasterAlgorithm == RemasterRoute.ForcedV1Fallback
-        ) {
-            null
-        } else {
+        if (!useModel) {
             stateAtEntry.selectionLayers
                 .firstOrNull { it.id == stateAtEntry.activeSelectionLayerId && it.enabled }
                 ?.bitmap
+        } else {
+            null
         }
-    if (!modelAvailable && manualMaskAtEntry == null) {
+    if (useModel && !modelLoaded || !useModel && manualMaskAtEntry == null) {
         updateUiState { it.copy(message = "Edge Masker 모델 파일과 런타임이 준비된 뒤 사용할 수 있습니다.") }
         return
     }
@@ -158,7 +158,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 withContext(Dispatchers.Default) {
                     val createdBase = checkNotNull(ownedBaseOwned)
                     val maskResult =
-                        if (modelAvailable) {
+                        if (useModel) {
                             RemasterModelSession.createForegroundMaskResult(
                                 createdBase,
                                 remasterTracker,
@@ -227,7 +227,17 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                                 selectionLayers = emptyList(),
                                 diagnostics = remasterTracker,
                             )
-                        ).successOrThrow()
+                        ).successOrThrow().let { success ->
+                            success.copy(
+                                algorithmVersion =
+                                    "${success.algorithmVersion}+remaster-${remasterAlgorithm.name}",
+                                participation =
+                                    RenderParticipation(
+                                        model = useModel,
+                                        manual = !useModel,
+                                    ),
+                            )
+                        }
                     val created = checkNotNull(previewSuccess).output
                     renderedPreview = created
                     remasterTracker?.track(created, "remaster:preview")

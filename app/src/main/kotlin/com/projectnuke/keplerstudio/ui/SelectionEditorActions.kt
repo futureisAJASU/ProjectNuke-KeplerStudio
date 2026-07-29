@@ -57,22 +57,21 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         documentEngine, subjectOverride, modelAvailable = modelLoaded,
     )
     val subjectAlgorithm = subjectResolution.actualRoute
-    val modelAvailable =
+    val useModel =
         when (subjectAlgorithm) {
-            SubjectSelectionRoute.V1, SubjectSelectionRoute.ForcedV1Fallback -> true
-            SubjectSelectionRoute.V2ModelAssisted -> modelLoaded
-            SubjectSelectionRoute.V2ManualOrSynthetic -> true
-            SubjectSelectionRoute.Compare -> modelLoaded
+            SubjectSelectionRoute.V1,
+            SubjectSelectionRoute.ForcedV1Fallback,
+            SubjectSelectionRoute.V2ModelAssisted -> true
+            SubjectSelectionRoute.V2ManualOrSynthetic -> false
+            SubjectSelectionRoute.Compare -> true
         }
     val manualMaskAtEntry =
-        if (subjectAlgorithm == SubjectSelectionRoute.V1 ||
-            subjectAlgorithm == SubjectSelectionRoute.ForcedV1Fallback
-        ) {
-            null
-        } else {
+        if (!useModel) {
             state.selectionLayers
                 .firstOrNull { it.id == state.activeSelectionLayerId && it.enabled }
                 ?.bitmap
+        } else {
+            null
         }
     val busyMessage =
         "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C\uB97C \uC0DD\uC131\uD558\uB294 \uC911\uC785\uB2C8\uB2E4."
@@ -85,7 +84,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         }
         return
     }
-    if (!modelAvailable && manualMaskAtEntry == null) {
+    if (useModel && !modelLoaded || !useModel && manualMaskAtEntry == null) {
         updateUiState {
             it.copy(
                 message =
@@ -161,7 +160,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 val layer =
                     withContext(Dispatchers.Default) {
                         val rawTracked =
-                            if (modelAvailable) {
+                            if (useModel) {
                                 val maskResult =
                                     RemasterModelSession.createForegroundMaskResult(
                                         checkNotNull(ownedBaseOwned),

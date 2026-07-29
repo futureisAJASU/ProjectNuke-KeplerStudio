@@ -25,7 +25,11 @@ internal data class RenderRequest(
     val assignedDocumentEngine: CorrectionEngine,
     val identity: RenderIdentity,
     val debugOverride: NativeRenderRoute? = null,
+    val storedRequestedRoute: NativeRenderRoute? = null,
     val exactRoute: NativeRenderRoute? = null,
+    val storedDecision: RenderRouteDecision? = null,
+    val storedAlgorithmVersion: String? = null,
+    val storedParticipation: RenderParticipation? = null,
     val fallbackPolicy: FallbackPolicy = FallbackPolicy.RetryV2OnNextOperation,
     val look: PresetColorLook? = null,
     val quickEffects: List<ActiveQuickEffect> = emptyList(),
@@ -107,7 +111,9 @@ internal object EditorRenderer {
                     operation = request.operation,
                     assignedDocumentEngine = request.assignedDocumentEngine,
                     debugOverride = request.debugOverride,
+                    storedRequestedRoute = request.storedRequestedRoute,
                     exactRoute = request.exactRoute,
+                    storedDecision = request.storedDecision,
                     fallbackPolicy = request.fallbackPolicy,
                 )
             )
@@ -214,8 +220,9 @@ internal object EditorRenderer {
             decision = decision,
             usedDebugOverride = usedDebugOverride,
             algorithmVersion =
-                if (actualRoute == NativeRenderRoute.V2) "native-v2" else "native-v1",
-            participation = RenderParticipation(),
+                request.storedAlgorithmVersion
+                    ?: if (actualRoute == NativeRenderRoute.V2) "native-v2" else "native-v1",
+            participation = request.storedParticipation ?: RenderParticipation(),
             durationMillis = (System.nanoTime() - startedNanos) / 1_000_000L,
             knownTransientBytes = null,
         )

@@ -1,0 +1,52 @@
+{
+  "formatVersion": 3,
+  "generationId": "v3-fallback-generation",
+  "savedAtMillis": 1700000002000,
+  "draftOperationEpoch": 9,
+  "editorRevision": 14,
+  "originalSourceIdentity": "original-v3",
+  "sourceIdentity": "v3-source",
+  "baseContentToken": "v3-base",
+  "baseBitmapDirty": true,
+  "sourceFileName": "source.img",
+  "sourceWidth": 4000,
+  "sourceHeight": 3000,
+  "thumbnailFileName": "thumbnail.jpg",
+  "thumbnailWidth": 256,
+  "thumbnailHeight": 192,
+  "params": {
+    "exposure": 0.0, "contrast": 0.0, "shadows": 0.0, "highlights": 0.0,
+    "whites": 0.0, "blacks": 0.0, "temperature": 0.0, "tint": 0.0,
+    "saturation": 0.0, "vibrance": 0.0, "clarity": 0.0, "dehaze": 0.0,
+    "sharpness": 0.0, "noiseReduction": 0.0, "luminanceNoiseReduction": 0.0,
+    "colorNoiseReduction": 0.0, "noiseDetailProtection": 0.5
+  },
+  "correctionEngine": "Engine2",
+  "previewEngine": "Engine1",
+  "previewRoute": "V1",
+  "requestedRoute": "V2",
+  "previewResultClass": "V2FallbackToV1",
+  "fallbackReason": "V2RenderFailed",
+  "renderDecision": "RuntimeFallbackToV1",
+  "algorithmVersion": "native-v1",
+  "renderParticipation": {"model": false, "rule": true, "manual": false},
+  "noiseEngine": "FastEdgeAware",
+  "detailEngine": "MaskedUnsharp",
+  "toneEngine": "HistogramAuto",
+  "hazeEngine": "FastContrast",
+  "presetLook": null,
+  "activeQuickEffects": [],
+  "exportFormat": "Jpeg",
+  "exportResolution": "Full",
+  "cropState": {
+    "aspectRatio": "Original", "cropLeft": 0.0, "cropTop": 0.0,
+    "cropRight": 1.0, "cropBottom": 1.0, "rotationDegrees": 0,
+    "straightenDegrees": 0.0, "flipHorizontal": false
+  },
+  "selectionLayers": [],
+  "activeSelectionLayerId": null,
+  "selectionPaintSettings": {
+    "mode": "Add", "sizePx": 120.0, "feather": 0.55, "strength": 0.7
+  },
+  "showSelectionOverlay": true
+}

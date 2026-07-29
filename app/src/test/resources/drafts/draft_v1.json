@@ -1,0 +1,39 @@
+{
+  "formatVersion": 1,
+  "generationId": "legacy-v1-generation",
+  "savedAtMillis": 1700000000000,
+  "originalSourcePath": "C:\\legacy\\photo.jpg",
+  "sourceIdentity": "legacy-v1-source",
+  "baseContentToken": "legacy-v1-base",
+  "baseBitmapDirty": false,
+  "sourceFileName": "source.img",
+  "sourceWidth": 1920,
+  "sourceHeight": 1080,
+  "thumbnailFileName": "thumbnail.jpg",
+  "params": {
+    "exposure": 0.1, "contrast": 0.0, "shadows": 0.0, "highlights": 0.0,
+    "whites": 0.0, "blacks": 0.0, "temperature": 0.0, "tint": 0.0,
+    "saturation": 0.0, "vibrance": 0.0, "clarity": 0.0, "dehaze": 0.0,
+    "sharpness": 0.0, "noiseReduction": 0.0, "luminanceNoiseReduction": 0.0,
+    "colorNoiseReduction": 0.0, "noiseDetailProtection": 0.5
+  },
+  "noiseEngine": "FastEdgeAware",
+  "detailEngine": "MaskedUnsharp",
+  "toneEngine": "HistogramAuto",
+  "hazeEngine": "FastContrast",
+  "presetLook": null,
+  "activeQuickEffects": [],
+  "exportFormat": "Jpeg",
+  "exportResolution": "Full",
+  "cropState": {
+    "aspectRatio": "Original", "cropLeft": 0.0, "cropTop": 0.0,
+    "cropRight": 1.0, "cropBottom": 1.0, "rotationDegrees": 0,
+    "straightenDegrees": 0.0, "flipHorizontal": false
+  },
+  "selectionLayers": [],
+  "activeSelectionLayerId": null,
+  "selectionPaintSettings": {
+    "mode": "Add", "sizePx": 120.0, "feather": 0.55, "strength": 0.7
+  },
+  "showSelectionOverlay": true
+}

@@ -838,7 +838,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         look: PresetColorLook? = state.presetLook,
         quickEffects: List<ActiveQuickEffect> = state.activeQuickEffects,
         selectionLayers: List<SelectionLayer> = state.selectionLayers,
+        storedRequestedRoute: NativeRenderRoute? = null,
         exactRoute: NativeRenderRoute? = null,
+        storedDecision: RenderRouteDecision? = null,
+        storedAlgorithmVersion: String? = null,
+        storedParticipation: RenderParticipation? = null,
         fallbackPolicy: FallbackPolicy = state.correctionEngineState.fallbackPolicy,
         diagnostics: MemoryTrackerScope? = null,
     ): RenderRequest {
@@ -860,7 +864,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             debugOverride =
                 ExperimentalLabController.debugOverrides().nativeRender
                     .takeIf { exactRoute == null },
+            storedRequestedRoute = storedRequestedRoute,
             exactRoute = exactRoute,
+            storedDecision = storedDecision,
+            storedAlgorithmVersion = storedAlgorithmVersion,
+            storedParticipation = storedParticipation,
             fallbackPolicy = fallbackPolicy,
             look = look,
             quickEffects = quickEffects,
@@ -2729,14 +2737,40 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val exportEngines = state.engineSelection()
         val exportLook = state.presetLook
         val exportQuickEffects = state.activeQuickEffects.toList()
-        val exportRouting = state.renderRoutingForExport()
+        val exportVisible =
+            state.correctionEngineState.visiblePreview as? VisiblePreviewState.Rendered
+        val exportActualRoute = exportVisible?.actualRoute
+        val exportRequestedRoute = exportVisible?.requestedRoute
+        val exportDecision = exportVisible?.decision
+        val exportAlgorithmVersion = exportVisible?.algorithmVersion
+        val exportParticipation = exportVisible?.participation
+        val exportDocumentEngine = state.correctionEngineState.documentEngine
+        val exportDocumentGeneration = currentDocumentGeneration()
         val exportRevision = state.revision
         val exportBaseToken = state.baseContentToken
         val exportDirty = state.baseBitmapDirty
         val exportRetention = state.exportHistoryRetention
         var ownedDirtyBase: Bitmap? = null
-        var exportPrepareTracker: MemoryTrackerScope? = null
+        var ownedExportLayers: List<SelectionLayer> = emptyList()
+        var exportPrepareTracker: MemoryTrackerScope? =
+            beginMemoryTracking("exportPreview:prepare", snapshotState = "copying")
         var dirtyBaseEdge = 0L
+        try {
+            ownedExportLayers = state.selectionLayers.copyBitmapsOwned()
+            ownedExportLayers.forEach {
+                exportPrepareTracker?.track(it.bitmap, "exportPreview:selection:${it.id}")
+            }
+        } catch (failure: Throwable) {
+            ownedExportLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
+            exportPrepareTracker?.end()
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "선택 마스크를 내보내기용으로 준비하지 못했습니다.")
+            }
+            if (failure is BitmapAllocationRejectedException) {
+                requestAllocationRecovery(MemoryRetryAction.ExportPreview, failure.requiredBytes)
+            }
+            return
+        }
         if (exportDirty) {
             val liveBase = state.originalPreviewBitmap ?: state.previewBitmap
             val dirtyPeakBytes =
@@ -2752,18 +2786,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 } ?: Long.MAX_VALUE
             if (liveBase == null || !BitmapMemoryBudget.canAllocate(dirtyPeakBytes)) {
+                ownedExportLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
+                ownedExportLayers = emptyList()
+                exportPrepareTracker?.end()
+                exportPrepareTracker = null
                 updateUiStateAndRecycleReplaced {
                     it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.")
                 }
                 requestAllocationRecovery(MemoryRetryAction.ExportPreview, dirtyPeakBytes)
                 return
             }
-            exportPrepareTracker =
-                beginMemoryTracking("exportPreview:prepare", snapshotState = "copying")
             ownedDirtyBase =
                 runCatching { liveBase.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
                     .getOrElse { failure ->
+                        ownedExportLayers.forEach {
+                            it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle()
+                        }
+                        ownedExportLayers = emptyList()
                         exportPrepareTracker?.end()
+                        exportPrepareTracker = null
                         updateUiStateAndRecycleReplaced {
                             it.copy(message = "메모리가 부족하여 내보내기를 준비하지 못했습니다.")
                         }
@@ -2778,6 +2819,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 exportPrepareTracker?.track(checkNotNull(ownedDirtyBase), "exportPreview:dirtyBase")
                     ?: 0L
         } else if (!canPreflightCleanExport(sourcePath, exportResolution)) {
+            ownedExportLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
+            ownedExportLayers = emptyList()
+            exportPrepareTracker?.end()
+            exportPrepareTracker = null
             updateUiStateAndRecycleReplaced {
                 it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.")
             }
@@ -2797,6 +2842,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 {
                     ownedDirtyBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedDirtyBase = null
+                },
+                {
+                    ownedExportLayers.forEach {
+                        it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle()
+                    }
+                    ownedExportLayers = emptyList()
                 },
                 { exportPrepareTracker?.release(dirtyBaseEdge) },
                 {
@@ -2830,6 +2881,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         exportTracker?.track(it, "exportPreview:dirtyBase")
                         exportPrepareTracker?.release(dirtyBaseEdge)
                     }
+                    var ownedLayersForExport = ownedExportLayers
+                    ownedExportLayers = emptyList()
+                    ownedLayersForExport.forEach {
+                        exportTracker?.track(it.bitmap, "exportPreview:selection:${it.id}")
+                    }
                     exportPrepareTracker?.end()
                     exportPrepareTracker = null
                     val exportCoroutine = currentCoroutineContext()[Job] ?: return@launch
@@ -2854,26 +2910,86 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                                 checkNotNull(ownedDirtyBase).also {
                                                     ownedDirtyBase = null
                                                 },
-                                            params = exportParams,
                                             resolution = exportResolution,
-                                            engines = exportEngines,
-                                            revision = exportRevision + 1,
-                                            look = exportLook,
-                                            quickEffects = exportQuickEffects,
-                                            routingSelection = exportRouting,
+                                            selectionLayers =
+                                                ownedLayersForExport.also {
+                                                    ownedLayersForExport = emptyList()
+                                                },
                                             diagnostics = exportTracker,
+                                            requestFactory = { base, layers ->
+                                                exportActualRoute?.let { actualRoute ->
+                                                    RenderRequest(
+                                                        operation = RenderOperation.ExportDirty,
+                                                        basePreview = base,
+                                                        params = exportParams,
+                                                        engines = exportEngines,
+                                                        assignedDocumentEngine =
+                                                            exportDocumentEngine,
+                                                        identity =
+                                                            RenderIdentity(
+                                                                exportDocumentGeneration,
+                                                                exportBaseToken,
+                                                                exportRevision + 1,
+                                                                "export:$token:$exportRevision",
+                                                            ),
+                                                        storedRequestedRoute =
+                                                            exportRequestedRoute ?: actualRoute,
+                                                        exactRoute = actualRoute,
+                                                        storedDecision = exportDecision,
+                                                        storedAlgorithmVersion =
+                                                            exportAlgorithmVersion,
+                                                        storedParticipation =
+                                                            exportParticipation,
+                                                        fallbackPolicy = FallbackPolicy.NoFallback,
+                                                        look = exportLook,
+                                                        quickEffects = exportQuickEffects,
+                                                        selectionLayers = layers,
+                                                        diagnostics = exportTracker,
+                                                    )
+                                                }
+                                            },
                                         )
                                     } else {
                                         renderEditedExport(
                                             sourcePath = sourcePath,
-                                            params = exportParams,
                                             resolution = exportResolution,
-                                            engines = exportEngines,
-                                            revision = exportRevision + 1,
-                                            look = exportLook,
-                                            quickEffects = exportQuickEffects,
-                                            routingSelection = exportRouting,
+                                            selectionLayers =
+                                                ownedLayersForExport.also {
+                                                    ownedLayersForExport = emptyList()
+                                                },
                                             diagnostics = exportTracker,
+                                            requestFactory = { base, layers ->
+                                                exportActualRoute?.let { actualRoute ->
+                                                    RenderRequest(
+                                                        operation = RenderOperation.ExportClean,
+                                                        basePreview = base,
+                                                        params = exportParams,
+                                                        engines = exportEngines,
+                                                        assignedDocumentEngine =
+                                                            exportDocumentEngine,
+                                                        identity =
+                                                            RenderIdentity(
+                                                                exportDocumentGeneration,
+                                                                exportBaseToken,
+                                                                exportRevision + 1,
+                                                                "export:$token:$exportRevision",
+                                                            ),
+                                                        storedRequestedRoute =
+                                                            exportRequestedRoute ?: actualRoute,
+                                                        exactRoute = actualRoute,
+                                                        storedDecision = exportDecision,
+                                                        storedAlgorithmVersion =
+                                                            exportAlgorithmVersion,
+                                                        storedParticipation =
+                                                            exportParticipation,
+                                                        fallbackPolicy = FallbackPolicy.NoFallback,
+                                                        look = exportLook,
+                                                        quickEffects = exportQuickEffects,
+                                                        selectionLayers = layers,
+                                                        diagnostics = exportTracker,
+                                                    )
+                                                }
+                                            },
                                         )
                                     }
                                 ownedExportResult = rendered
@@ -3054,8 +3170,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         val owned = identityBitmapSet()
                         ownedExportResult?.let(owned::add)
                         ownedDirtyBase?.let(owned::add)
+                        ownedLayersForExport.forEach { owned.add(it.bitmap) }
                         owned.forEach { if (!it.isRecycled) it.recycle() }
                         ownedDirtyBase = null
+                        ownedLayersForExport = emptyList()
                         if (exportJob === currentCoroutineContext()[Job]) exportJob = null
                         exportTracker?.end()
                     }
@@ -3872,12 +3990,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val appContext = context.applicationContext
         val documentGeneration = historyCoordinator.currentGeneration()
         val flareOverride = ExperimentalLabController.debugOverrides().flareGuard
-        val flareResolution = RouteResolver.resolveFlareRoute(
-            current.correctionEngineState.previewEngine ?: current.correctionEngineState.documentEngine,
-            flareOverride,
-            modelAvailable = false,
-        )
-        val flareAlgorithm = flareResolution.actualRoute
         updateUiStateAndRecycleReplaced {
             it.copy(
                 isBusy = true,
@@ -3925,6 +4037,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 },
                                 isCancelled = { inferenceJob?.isActive == false },
                             )
+                        val preloadedModel =
+                            if (flareOverride == FlareGuardRoute.V2ModelAssisted) {
+                                FlareGuardModelRunner.create(appContext)
+                            } else {
+                                null
+                            }
+                        val flareResolution =
+                            RouteResolver.resolveFlareRoute(
+                                current.correctionEngineState.documentEngine,
+                                flareOverride,
+                                modelAvailable = preloadedModel is ModelLoadResult.Ready,
+                            )
+                        val flareAlgorithm = flareResolution.actualRoute
                         val r =
                             if (flareAlgorithm == FlareGuardRoute.V1 ||
                                 flareAlgorithm == FlareGuardRoute.ForcedV1Fallback
@@ -3950,6 +4075,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                         },
                                     diagnostics = flareTracker,
                                     operation = modelOperation,
+                                    preloadedModel = preloadedModel,
                                 )
                             }
                         flareGuardResult = r
@@ -3973,7 +4099,28 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     quickEffects = quickEffects,
                                     diagnostics = flareTracker,
                                 )
-                            ).successOrThrow()
+                            ).successOrThrow().let { success ->
+                                val status = checkNotNull(flareGuardResult).status
+                                success.copy(
+                                    participation =
+                                        RenderParticipation(
+                                            model =
+                                                status ==
+                                                    FlareGuardRuntimeStatus.ExperimentalV2Model ||
+                                                    status ==
+                                                        FlareGuardRuntimeStatus.ModelInferenceSuccess,
+                                            rule =
+                                                status ==
+                                                    FlareGuardRuntimeStatus.ExperimentalV2Rule ||
+                                                    status ==
+                                                        FlareGuardRuntimeStatus.ModelUnavailableRuleFallback ||
+                                                    status ==
+                                                        FlareGuardRuntimeStatus.ModelFailedRuleFallback,
+                                        ),
+                                    algorithmVersion =
+                                        "${success.algorithmVersion}+flare-${checkNotNull(flareGuardResult).algorithmDecision?.name ?: "v1"}",
+                                )
+                            }
                         checkNotNull(renderSuccess).output.also { renderedPreview = it }
                     }
                 flareTracker?.track(renderedPreview!!, "applyFlareGuard:renderedPreview")
@@ -4182,6 +4329,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         ?.let { runCatching { NativeRenderRoute.valueOf(it) }.getOrNull() }
                         ?.takeUnless { it == NativeRenderRoute.Compare }
                         ?: NativeRenderRoute.V1
+                val storedRequestedRoute =
+                    manifest.requestedRoute
+                        ?.let { runCatching { NativeRenderRoute.valueOf(it) }.getOrNull() }
+                        ?.takeUnless { it == NativeRenderRoute.Compare }
+                        ?: storedRoute
+                val storedDecision =
+                    manifest.renderDecision
+                        ?.let { runCatching { RenderRouteDecision.valueOf(it) }.getOrNull() }
+                        ?: when (manifest.previewResultClass) {
+                            PreviewResultClass.V2FallbackToV1.name ->
+                                RenderRouteDecision.RuntimeFallbackToV1
+                            PreviewResultClass.DebugForcedV1.name ->
+                                RenderRouteDecision.DebugForcedV1
+                            PreviewResultClass.DebugForcedV2.name ->
+                                RenderRouteDecision.DebugForcedV2
+                            else -> RenderRouteDecision.FollowDocument
+                        }
                 restoreRenderSuccess =
                     EditorRenderer.render(
                         createRenderRequest(
@@ -4195,7 +4359,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             look = manifest.presetLook,
                             quickEffects = manifest.activeQuickEffects,
                             selectionLayers = layers,
+                            storedRequestedRoute = storedRequestedRoute,
                             exactRoute = storedRoute,
+                            storedDecision = storedDecision,
+                            storedAlgorithmVersion = manifest.algorithmVersion,
+                            storedParticipation = manifest.renderParticipation,
                             diagnostics = restoreTracker,
                         )
                     ).successOrThrow()
@@ -4904,7 +5072,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             look = snapshot.presetLook,
                             quickEffects = snapshot.activeQuickEffects,
                             selectionLayers = emptyList(),
+                            storedRequestedRoute = snapshot.requestedRoute,
                             exactRoute = storedRoute,
+                            storedDecision = snapshot.renderDecision,
+                            storedAlgorithmVersion = snapshot.algorithmVersion,
+                            storedParticipation = snapshot.renderParticipation,
+                            fallbackPolicy = FallbackPolicy.NoFallback,
                             diagnostics = diagnostics,
                         )
                     ).successOrThrow()
@@ -5362,6 +5535,25 @@ private fun buildHistoryAppliedMessage(
     val changedParams = historyParamSummaries(current.params, target.params)
     if (changedParams.isNotEmpty()) {
         return "$prefix: ${changedParams.take(3).joinToString(", ")}"
+    }
+    if (current.correctionEngineState.documentEngine != target.correctionEngine) {
+        return "$prefix: ${target.correctionEngine.displayName} 문서 상태"
+    }
+    if (
+        current.correctionEngineState.previewRoute != target.previewRoute ||
+            current.correctionEngineState.previewResultClass != target.previewResultClass
+    ) {
+        val routeLabel =
+            when (target.previewResultClass) {
+                PreviewResultClass.Original -> "원본"
+                PreviewResultClass.V2FallbackToV1 -> "엔진 1 폴백"
+                PreviewResultClass.DebugForcedV1 -> "개발자 지정 엔진 1"
+                PreviewResultClass.DebugForcedV2 -> "개발자 지정 엔진 2"
+                PreviewResultClass.V2 -> "엔진 2"
+                PreviewResultClass.V1 -> "엔진 1"
+                else -> "미리보기"
+            }
+        return "$prefix: $routeLabel"
     }
     val changedImageState =
         current.presetLook != target.presetLook ||
@@ -6105,91 +6297,75 @@ private fun estimateCleanExportPeakBytes(sourcePath: String, resolution: ExportR
 
 private suspend fun renderEditedExport(
     sourcePath: String,
-    params: EditParams,
     resolution: ExportResolution,
-    engines: EngineSelection,
-    revision: Int,
-    look: PresetColorLook? = null,
-    quickEffects: List<ActiveQuickEffect> = emptyList(),
+    selectionLayers: List<SelectionLayer>,
     diagnostics: MemoryTrackerScope? = null,
-    routingSelection: ExperimentalLabSelection,
+    requestFactory: (Bitmap, List<SelectionLayer>) -> RenderRequest?,
 ): Bitmap {
     var decoded: Bitmap? = null
-    var working: Bitmap? = null
-    var scaled: Bitmap? = null
     try {
         decoded =
             decodeSampledMutableBitmapWithExif(sourcePath, maxSide = EXPORT_MAX_SIDE, diagnostics)
-        working = decoded
-        val plan = RenderPipelinePlanner.create(routingSelection, params, quickEffects)
-        renderBitmapInNative(checkNotNull(working), plan.v1Params, engines, revision, look, diagnostics)
-        applyActiveQuickEffectsToBitmap(checkNotNull(working), plan.v1QuickEffects, revision, diagnostics)
-        val corrected =
-            applyExperimentalNativeCorrections(
-                checkNotNull(working),
-                plan,
-                diagnostics,
+        val result =
+            renderEditedExportFromBitmap(
+                ownedBaseBitmap = checkNotNull(decoded).also { decoded = null },
+                resolution = resolution,
+                selectionLayers = selectionLayers,
+                diagnostics = diagnostics,
+                requestFactory = requestFactory,
             )
-        if (corrected !== working) {
-            working?.takeUnless(Bitmap::isRecycled)?.recycle()
-            if (decoded === working) decoded = null
-            working = corrected
-        }
-        applySelectedToneEngine(checkNotNull(working), engines.toneEngine)
-        scaled = scaleBitmapForExport(checkNotNull(working), resolution, diagnostics)
-        if (scaled !== working) working?.takeUnless(Bitmap::isRecycled)?.recycle()
-        val result = checkNotNull(scaled)
         decoded = null
-        working = null
-        scaled = null
         return result
     } catch (t: Throwable) {
-        scaled?.takeIf { it !== working && !it.isRecycled }?.recycle()
-        working?.takeUnless(Bitmap::isRecycled)?.recycle()
-        decoded?.takeIf { it !== working && !it.isRecycled }?.recycle()
+        decoded?.takeUnless(Bitmap::isRecycled)?.recycle()
+        selectionLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
         throw t
     }
 }
 
 private suspend fun renderEditedExportFromBitmap(
     ownedBaseBitmap: Bitmap,
-    params: EditParams,
     resolution: ExportResolution,
-    engines: EngineSelection,
-    revision: Int,
-    look: PresetColorLook? = null,
-    quickEffects: List<ActiveQuickEffect> = emptyList(),
+    selectionLayers: List<SelectionLayer>,
     diagnostics: MemoryTrackerScope? = null,
-    routingSelection: ExperimentalLabSelection,
+    requestFactory: (Bitmap, List<SelectionLayer>) -> RenderRequest?,
 ): Bitmap {
-    var working: Bitmap? = ownedBaseBitmap
+    var baseOwner: Bitmap? = ownedBaseBitmap
+    var working: Bitmap? = null
     var scaled: Bitmap? = null
+    val preparedLayers = ArrayList<SelectionLayer>(selectionLayers.size)
     try {
-        val renderTarget = checkNotNull(working)
-        val plan = RenderPipelinePlanner.create(routingSelection, params, quickEffects)
-        renderBitmapInNative(renderTarget, plan.v1Params, engines, revision, look, diagnostics)
-        applyActiveQuickEffectsToBitmap(renderTarget, plan.v1QuickEffects, revision, diagnostics)
-        val corrected =
-            applyExperimentalNativeCorrections(
-                renderTarget,
-                plan,
-                diagnostics,
-            )
-        if (corrected !== renderTarget) {
-            renderTarget.takeUnless(Bitmap::isRecycled)?.recycle()
-            working = corrected
+        val base = checkNotNull(baseOwner)
+        selectionLayers.forEach { layer ->
+            val mask =
+                if (layer.bitmap.width == base.width && layer.bitmap.height == base.height) {
+                    layer.bitmap
+                } else {
+                    createScaledBitmapOrThrow(layer.bitmap, base.width, base.height, true)
+                }
+            preparedLayers += layer.copy(bitmap = mask)
         }
-        applySelectedToneEngine(checkNotNull(working), engines.toneEngine)
+        val request = requestFactory(base, preparedLayers)
+        if (request == null) {
+            working = base
+            baseOwner = null
+        } else {
+            working = EditorRenderer.render(request).successOrThrow().output
+        }
         scaled = scaleBitmapForExport(checkNotNull(working), resolution, diagnostics)
         if (scaled !== working) working?.takeUnless(Bitmap::isRecycled)?.recycle()
         val result = checkNotNull(scaled)
         working = null
         scaled = null
         return result
-    } catch (t: Throwable) {
-        if (scaled != null && scaled !== working && !scaled.isRecycled) scaled.recycle()
-        if (working != null && !working.isRecycled) working.recycle()
-        throw t
+    } finally {
+        val owned = identityBitmapSet()
+        baseOwner?.let(owned::add)
+        working?.let(owned::add)
+        scaled?.let(owned::add)
+        selectionLayers.forEach { owned.add(it.bitmap) }
+        preparedLayers.forEach { owned.add(it.bitmap) }
+        owned.forEach { it.takeUnless(Bitmap::isRecycled)?.recycle() }
     }
 }
 
@@ -6925,8 +7101,13 @@ private fun persistDraftGenerationInternal(
                 correctionEngine = payload.correctionEngine.name,
                 previewEngine = payload.correctionEngineState?.previewEngine?.name,
                 previewRoute = payload.correctionEngineState?.previewRoute?.name,
+                requestedRoute = payload.correctionEngineState?.requestedRoute?.name,
                 previewResultClass = payload.correctionEngineState?.previewResultClass?.name,
                 fallbackReason = payload.correctionEngineState?.fallbackReason?.name,
+                renderDecision =
+                    (payload.correctionEngineState?.visiblePreview as? VisiblePreviewState.Rendered)
+                        ?.decision
+                        ?.name,
                 noiseEngine = payload.noiseEngine.name,
                 detailEngine = payload.detailEngine.name,
                 toneEngine = payload.toneEngine.name,
@@ -6941,6 +7122,7 @@ private fun persistDraftGenerationInternal(
                 selectionPaintSettings = payload.selectionPaintSettings,
                 showSelectionOverlay = payload.showSelectionOverlay,
                 algorithmVersion = payload.correctionEngineState?.algorithmVersion,
+                renderParticipation = payload.correctionEngineState?.participation,
             )
         if (
             !writeDraftGeneration(
