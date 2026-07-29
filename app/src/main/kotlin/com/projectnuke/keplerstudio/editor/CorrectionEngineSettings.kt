@@ -95,8 +95,31 @@ data class CorrectionEngineState(
 
 /**
  * Helper: apply a successful native-render result to the state.
+ *
+ * The result class is derived from the actual rendered route, not from the
+ * requested engine. This eliminates the defect where success was labeled from
+ * the requested engine instead of what was actually executed.
+ *
  * A successful V2 render clears any old fallback indicator.
- * A successful V1 render clears any old V2-fallback if the document engine is Engine 1.
+ * A successful V1 render on an E2 document is classified as V2FallbackToV1.
+ */
+internal fun CorrectionEngineState.withSuccessfulRender(
+    documentEngine: CorrectionEngine,
+    result: RenderResult,
+): CorrectionEngineState = copy(
+    documentEngine = documentEngine,
+    previewEngine = result.toPreviewEngine(documentEngine),
+    previewRoute = result.actualRoute,
+    previewResultClass = result.toPreviewResultClass(documentEngine),
+    fallbackReason = result.fallbackReason?.toRenderFallbackReason(),
+    lastRenderFailure = null,
+    debugOverrideActive = result.usedDebugOverride,
+    algorithmVersion = result.algorithmVersion,
+)
+
+/**
+ * Helper: apply a successful native-render result to the state (legacy route-based variant).
+ * Kept for backward compatibility during incremental migration.
  */
 internal fun CorrectionEngineState.withSuccessfulRender(
     documentEngine: CorrectionEngine,
@@ -184,4 +207,15 @@ internal data class CorrectionEngineOperationIdentity(
             documentGeneration == currentDocumentGeneration &&
             baseContentToken == currentBaseContentToken &&
             revision == currentRevision
+}
+
+/**
+ * Map the route-resolver [FallbackReason] to the state-field [RenderFallbackReason].
+ */
+internal fun FallbackReason.toRenderFallbackReason(): RenderFallbackReason = when (this) {
+    FallbackReason.ModelUnavailable -> RenderFallbackReason.ModelUnavailable
+    FallbackReason.V2RenderFailed -> RenderFallbackReason.V2RenderFailed
+    FallbackReason.DebugForcedV1 -> RenderFallbackReason.DebugForcedV1
+    FallbackReason.DebugForcedV2 -> RenderFallbackReason.DebugForcedV1
+    FallbackReason.FeatureUnavailable -> RenderFallbackReason.V2RenderFailed
 }
