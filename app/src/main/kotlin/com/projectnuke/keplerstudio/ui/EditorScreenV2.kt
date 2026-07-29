@@ -273,6 +273,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         hazeEngine = state.hazeEngine,
                         correctionEngineState = state.correctionEngineState,
                         maintenanceBusy = state.maintenanceBusy,
+                        comparisonBusy = state.comparisonBusy,
                         onRetentionSelected = viewModel::setExportHistoryRetention,
                         onNoiseEngineSelected = viewModel::setNoiseEngine,
                         onDetailEngineSelected = viewModel::setDetailEngine,
@@ -281,6 +282,8 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         onDefaultCorrectionEngineSelected = viewModel::setDefaultCorrectionEngine,
                         onApplyCorrectionEngine = viewModel::applyCorrectionEngineToCurrentDocument,
                         onExperimentalLabChanged = viewModel::updateExperimentalLab,
+                        onGenerateComparison = viewModel::generateDebugComparison,
+                        onCancelComparison = viewModel::cancelDebugComparison,
                         onClearDraft = viewModel::clearDraft,
                         onDismissRecoveryDebugCard = viewModel::dismissRecoveryDebugCard,
                         onCleanupOldTemporarySources = viewModel::cleanupOldTemporarySources,
@@ -958,6 +961,7 @@ internal fun V2SettingsScreen(
     hazeEngine: DehazeEngine,
     correctionEngineState: CorrectionEngineState,
     maintenanceBusy: Boolean,
+    comparisonBusy: Boolean,
     onRetentionSelected: (ExportHistoryRetention) -> Unit,
     onNoiseEngineSelected: (NoiseEngine) -> Unit,
     onDetailEngineSelected: (DetailEngine) -> Unit,
@@ -966,6 +970,8 @@ internal fun V2SettingsScreen(
     onDefaultCorrectionEngineSelected: (CorrectionEngine) -> Unit,
     onApplyCorrectionEngine: (CorrectionEngine) -> Unit,
     onExperimentalLabChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
+    onGenerateComparison: () -> Unit,
+    onCancelComparison: () -> Unit,
     onClearDraft: () -> Unit,
     onDismissRecoveryDebugCard: () -> Unit,
     onCleanupOldTemporarySources: () -> Unit,
@@ -1081,7 +1087,10 @@ internal fun V2SettingsScreen(
                 assignedEngine = correctionEngineState.documentEngine,
                 overrides = overrides,
                 comparison = comparison,
+                comparisonBusy = comparisonBusy,
                 onOverridesChanged = onExperimentalLabChanged,
+                onGenerateComparison = onGenerateComparison,
+                onCancelComparison = onCancelComparison,
             )
         }
         if (showRecoveryDebugCard && recoveryDebugInfo != null) {
@@ -1168,7 +1177,10 @@ private fun ExperimentalLabSettingsCard(
     assignedEngine: CorrectionEngine,
     overrides: DebugFeatureOverrides,
     comparison: com.projectnuke.keplerstudio.editor.DebugComparisonArtifact?,
+    comparisonBusy: Boolean,
     onOverridesChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
+    onGenerateComparison: () -> Unit,
+    onCancelComparison: () -> Unit,
 ) {
     val effective = ExperimentalLabController.resolvedSelection(assignedEngine)
     V2SettingsCard("실험실") {
@@ -1232,6 +1244,19 @@ private fun ExperimentalLabSettingsCard(
             selectedValue = overrides.subjectSelection,
         ) { value ->
             onOverridesChanged { it.copy(subjectSelection = value) }
+        }
+        Text(
+            "비교는 긴 변 720px 이하의 미리보기만 메모리에 유지합니다. 사용자 사진을 파일로 내보내지 않습니다.",
+            color = V2TextMuted,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        if (comparisonBusy) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(modifier = Modifier.width(20.dp))
+                TextButton(onClick = onCancelComparison) { Text("비교 생성 취소") }
+            }
+        } else {
+            Button(onClick = onGenerateComparison) { Text("V1·V2 비교 생성") }
         }
         comparison?.let { artifact ->
             val comparisonBitmaps =

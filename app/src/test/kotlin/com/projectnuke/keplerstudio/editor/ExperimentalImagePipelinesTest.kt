@@ -31,9 +31,9 @@ class ExperimentalImagePipelinesTest {
         assertTrue(first.argb.indices.any { first.argb[it] != source[it] })
         assertTrue(maximumChannelDelta(source, first.argb) <= 32)
         assertEquals(
-            2929945719209832014L,
+            8357199531398524606L,
             exactHash(first.argb),
-            "record frozen experimental fixture hash",
+            "record texture-protected V2 fixture hash",
         )
     }
 
@@ -69,6 +69,36 @@ class ExperimentalImagePipelinesTest {
                 ++checks > 1
             }
         }
+    }
+
+    @Test
+    fun flareV2SuppressesHighlightTextureFalsePositives() {
+        val width = 32
+        val height = 24
+        val source =
+            IntArray(width * height) { index ->
+                val x = index % width
+                val y = index / width
+                if ((x + y) % 2 == 0) {
+                    argb(255, 250, 238, 218)
+                } else {
+                    argb(255, 132, 121, 108)
+                }
+            }
+
+        val result =
+            FlareGuardV2.process(
+                source,
+                width,
+                height,
+                FlareGuardMode.DaySun,
+                strength = 1f,
+            )
+        val changedRatio =
+            result.argb.indices.count { result.argb[it] != source[it] }.toFloat() /
+                source.size
+
+        assertTrue(changedRatio <= 0.05f, "textured highlights must not become a broad flare mask")
     }
 
     @Test
@@ -139,9 +169,9 @@ class ExperimentalImagePipelinesTest {
         assertEquals(41L, result.operationToken)
         assertEquals("doc-a", result.documentGeneration)
         assertEquals(
-            -3136016801182880011L,
+            -8522811236559730425L,
             exactHash(result.mask),
-            "record frozen experimental fixture hash",
+            "record thin-structure-preserving V2 fixture hash",
         )
     }
 
@@ -181,6 +211,38 @@ class ExperimentalImagePipelinesTest {
                 operation(5L, "doc", cancelled = true),
             )
         }
+    }
+
+    @Test
+    fun subjectSelectionV2KeepsSupportedThinStructuresAndManualPoints() {
+        val width = 7
+        val height = 7
+        val raw = FloatArray(width * height)
+        for (y in 0 until height) raw[y * width + 3] = 0.9f
+        raw[width + 1] = 0.98f
+
+        val refined =
+            SubjectSelectionV2.refine(
+                raw,
+                width,
+                height,
+                operation(17L, "thin"),
+            )
+
+        assertTrue((0 until height).all { refined.mask[it * width + 3] >= 0.72f })
+        assertTrue(refined.mask[width + 1] < 0.35f)
+
+        val manual = FloatArray(width * height).also { it[width * 5 + 5] = 1f }
+        val manualResult =
+            SubjectSelectionV2.refine(
+                FloatArray(width * height),
+                width,
+                height,
+                operation(18L, "manual-point"),
+                manualMask = manual,
+                manualMode = ManualMaskEditMode.Add,
+            )
+        assertTrue(manualResult.mask[width * 5 + 5] >= 0.9f)
     }
 
     @Test

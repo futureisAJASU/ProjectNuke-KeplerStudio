@@ -149,11 +149,19 @@ object FlareGuardV2 {
                     smoothstep(22f, 90f, chroma) *
                         smoothstep(70f, 210f, value) *
                         (1f - smoothstep(238f, 255f, peak))
+                val textureSupport =
+                    1f -
+                        smoothstep(
+                            18f,
+                            72f,
+                            localLumaGradient(luma, width, height, x, y),
+                        ) * 0.72f
                 rule[index] =
                     max(
                         highlight * bloomSupport * (0.52f + 0.38f * contamination),
                         coloredGhost * (0.45f + 0.35f * contamination),
                     )
+                        .times(textureSupport)
                         .coerceIn(0f, 1f)
             }
             if ((y and 31) == 0) checkCancelled(isCancelled)
@@ -566,6 +574,34 @@ object SubjectSelectionV2 {
                 ),
                 operation.isCancelled,
             )
+        // Closing removes isolated noise well, but it can also weaken legitimate one-pixel
+        // structures. Restore only high-confidence pixels with adjacent support; manual Add
+        // strokes are authoritative even when they begin as a single disconnected point.
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val index = y * width + x
+                val confidence = combined[index]
+                if (confidence < 0.72f) continue
+                var hasNeighborSupport = false
+                for (yy in max(0, y - 1)..min(height - 1, y + 1)) {
+                    for (xx in max(0, x - 1)..min(width - 1, x + 1)) {
+                        if (xx == x && yy == y) continue
+                        if (combined[yy * width + xx] >= 0.55f) {
+                            hasNeighborSupport = true
+                            break
+                        }
+                    }
+                    if (hasNeighborSupport) break
+                }
+                val manualAdd =
+                    manualMode == ManualMaskEditMode.Add &&
+                        (manualMask?.get(index) ?: 0f) >= 0.35f
+                if (hasNeighborSupport || manualAdd) {
+                    refined[index] = max(refined[index], confidence * 0.92f)
+                }
+            }
+            if ((y and 31) == 0) checkCancelled(operation.isCancelled)
+        }
         operation.validateOrThrow()
         val quality =
             MaskQualityValidator.evaluate(

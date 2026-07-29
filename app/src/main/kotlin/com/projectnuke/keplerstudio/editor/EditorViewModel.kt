@@ -50,6 +50,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -78,6 +79,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var correctionEngineEpoch: Long = 0L
     private var exportJob: Job? = null
     private var exportToken: Long = 0L
+    private var comparisonJob: Job? = null
+    private var comparisonEpoch: Long = 0L
     internal var selectionLivePreviewJob: Job? = null
     internal var cropJob: Job? = null
     private var draftSaveJob: Job? = null
@@ -391,12 +394,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         protectedEntryId: String? = null,
     ): MemoryCleanupResult {
         var reclaimedResources = false
+        if (strong && BuildConfig.DEBUG) {
+            val hadComparison =
+                comparisonJob != null || ExperimentalComparisonStore.latest.value != null
+            invalidateComparison()
+            if (hadComparison) reclaimedResources = true
+        }
         fun clearCompleted(job: Job?): Job? {
             if (job != null && !job.isActive) reclaimedResources = true
             return job?.takeIf { it.isActive }
         }
         renderJob = clearCompleted(renderJob)
         exportJob = clearCompleted(exportJob)
+        comparisonJob = clearCompleted(comparisonJob)
         selectionLivePreviewJob = clearCompleted(selectionLivePreviewJob)
         cropJob = clearCompleted(cropJob)
         managedEdits.clearCompleted()
@@ -576,10 +586,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun launchManagedEdit(block: suspend (Long) -> Unit): Job =
         launchManagedEditWithPreparedResources(block)
 
+    private fun invalidateComparison() {
+        if (!BuildConfig.DEBUG) return
+        val hadComparison =
+            comparisonJob != null ||
+                _uiState.value.comparisonBusy ||
+                ExperimentalComparisonStore.latest.value != null
+        if (!hadComparison) return
+        comparisonEpoch += 1L
+        comparisonJob?.cancel()
+        comparisonJob = null
+        ExperimentalComparisonStore.clear()
+        if (!shuttingDown) {
+            updateUiStateAndRecycleReplaced {
+                if (it.comparisonBusy) it.copy(comparisonBusy = false) else it
+            }
+        }
+    }
+
     internal fun launchManagedEditWithPreparedResources(
         block: suspend (Long) -> Unit,
         handoff: PreparedResourceHandoff? = null,
-    ): Job = managedEdits.launch(handoff, block)
+    ): Job {
+        invalidateComparison()
+        return managedEdits.launch(handoff, block)
+    }
 
     private fun launchManagedRenderWithPreparedResources(
         block: suspend (Long) -> Unit,
@@ -615,7 +646,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob = null
         activeParamRenderRevision = null
         invalidateExport()
-        if (BuildConfig.DEBUG) ExperimentalComparisonStore.clear()
 
         val before = _uiState.value
         var engineUndoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.MetadataOnly)
@@ -832,6 +862,207 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (beforeNative != afterNative && _uiState.value.previewBitmap != null) {
             applyCorrectionEngineToCurrentDocument(engine)
         }
+    }
+
+    fun generateDebugComparison() {
+        if (!BuildConfig.DEBUG || shuttingDown) return
+        val state = _uiState.value
+        val source = state.originalPreviewBitmap ?: state.previewBitmap ?: return
+        if (state.isBusy || state.maintenanceBusy) {
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "현재 작업이 끝난 뒤 비교를 생성해 주세요.")
+            }
+            return
+        }
+
+        invalidateComparison()
+        val longest = max(source.width, source.height).coerceAtLeast(1)
+        val scale = (DEBUG_COMPARISON_MAX_SIDE.toFloat() / longest).coerceAtMost(1f)
+        val width = (source.width * scale).roundToInt().coerceAtLeast(1)
+        val height = (source.height * scale).roundToInt().coerceAtLeast(1)
+        val sourceLayers = state.selectionLayers.filter(SelectionLayer::enabled)
+        val enabledLayerCount = sourceLayers.size
+        val bitmapBytes = BitmapMemoryBudget.bytes(width, height)
+        val requiredBytes =
+            BitmapMemoryBudget.saturatingMultiply(
+                bitmapBytes,
+                (12L + enabledLayerCount * 2L),
+            )
+        if (!BitmapMemoryBudget.canAllocate(requiredBytes)) {
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "비교 미리보기에 필요한 메모리를 확보할 수 없습니다.")
+            }
+            return
+        }
+        val comparisonTracker =
+            beginMemoryTracking(
+                "debugComparison",
+                snapshotState = "rendering",
+                transientReserveBytes = requiredBytes,
+            )
+
+        var ownedBase: Bitmap? = null
+        val ownedLayers = ArrayList<SelectionLayer>(sourceLayers.size)
+        try {
+            ownedBase =
+                if (source.width == width && source.height == height) {
+                    source.copyOrThrow()
+                } else {
+                    createScaledBitmapOrThrow(source, width, height, true)
+                }
+            sourceLayers.forEach { layer ->
+                val copiedMask =
+                    if (layer.bitmap.width == width && layer.bitmap.height == height) {
+                        layer.bitmap.copyOrThrow()
+                    } else {
+                        createScaledBitmapOrThrow(layer.bitmap, width, height, true)
+                    }
+                ownedLayers += layer.copy(bitmap = copiedMask)
+            }
+        } catch (t: Throwable) {
+            ownedBase?.takeUnless(Bitmap::isRecycled)?.recycle()
+            ownedLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
+            comparisonTracker?.end()
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "비교 입력을 준비하지 못했습니다: ${t.message ?: "메모리 부족"}")
+            }
+            return
+        }
+
+        val epoch = ++comparisonEpoch
+        val base = checkNotNull(ownedBase)
+        val v1Request =
+            createRenderRequest(
+                state = state,
+                operation = RenderOperation.DebugComparison,
+                basePreview = base,
+                revision = state.revision,
+                selectionLayers = ownedLayers,
+                storedRequestedRoute = NativeRenderRoute.V1,
+                exactRoute = NativeRenderRoute.V1,
+                storedDecision = RenderRouteDecision.StoredVisibleTruth,
+                fallbackPolicy = FallbackPolicy.NoFallback,
+                diagnostics = comparisonTracker,
+            )
+        val v2Request =
+            createRenderRequest(
+                state = state,
+                operation = RenderOperation.DebugComparison,
+                basePreview = base,
+                revision = state.revision,
+                selectionLayers = ownedLayers,
+                storedRequestedRoute = NativeRenderRoute.V2,
+                exactRoute = NativeRenderRoute.V2,
+                storedDecision = RenderRouteDecision.StoredVisibleTruth,
+                fallbackPolicy = FallbackPolicy.NoFallback,
+                diagnostics = comparisonTracker,
+            )
+        val comparisonIdentity =
+            DebugComparisonIdentity(
+                epoch = epoch,
+                documentGeneration = v1Request.identity.documentGeneration,
+                baseContentToken = v1Request.identity.baseContentToken,
+                revision = v1Request.identity.revision,
+            )
+        updateUiStateAndRecycleReplaced {
+            it.copy(comparisonBusy = true, message = "V1·V2 비교 미리보기를 생성하는 중입니다.")
+        }
+
+        val launched =
+            viewModelScope.launch {
+                var v1Output: Bitmap? = null
+                var v2Output: Bitmap? = null
+                try {
+                    val pair =
+                        withContext(Dispatchers.Default) {
+                            currentCoroutineContext().ensureActive()
+                            val v1 = EditorRenderer.render(v1Request).successOrThrow()
+                            v1Output = v1.output
+                            currentCoroutineContext().ensureActive()
+                            val v2 = EditorRenderer.render(v2Request).successOrThrow()
+                            v2Output = v2.output
+                            v1 to v2
+                        }
+                    if (!isDebugComparisonCurrent(comparisonIdentity)) return@launch
+                    val v1Pixels = IntArray(width * height)
+                    val v2Pixels = IntArray(width * height)
+                    checkNotNull(v1Output).getPixels(v1Pixels, 0, width, 0, 0, width, height)
+                    checkNotNull(v2Output).getPixels(v2Pixels, 0, width, 0, 0, width, height)
+                    val maskPixels = comparisonMaskArgb(ownedLayers, width, height)
+                    val artifact =
+                        QualityRegressionMetricsV2
+                            .debugArtifact(
+                                fixtureVersion = "document-${state.baseContentToken}",
+                                baseline = v1Pixels,
+                                experimental = v2Pixels,
+                                width = width,
+                                height = height,
+                                maskArgb = maskPixels,
+                            )
+                            .copy(
+                                algorithmDecision = "동일 문서 V1·V2",
+                                knownTransientBytes = requiredBytes,
+                                durationMillis = pair.first.durationMillis + pair.second.durationMillis,
+                            )
+                    if (!isDebugComparisonCurrent(comparisonIdentity)) return@launch
+                    ExperimentalComparisonStore.publishDebug(artifact)
+                    updateUiStateAndRecycleReplaced {
+                        if (isDebugComparisonCurrent(comparisonIdentity)) {
+                            it.copy(
+                                comparisonBusy = false,
+                                message = "V1·V2 비교 미리보기를 생성했습니다.",
+                            )
+                        } else {
+                            it
+                        }
+                    }
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    if (isDebugComparisonCurrent(comparisonIdentity)) {
+                        updateUiStateAndRecycleReplaced {
+                            it.copy(
+                                comparisonBusy = false,
+                                message = "비교 미리보기 생성에 실패했습니다: ${t.message ?: "알 수 없는 오류"}",
+                            )
+                        }
+                    }
+                } finally {
+                    v1Output?.takeUnless(Bitmap::isRecycled)?.recycle()
+                    v2Output?.takeUnless(Bitmap::isRecycled)?.recycle()
+                    base.takeUnless(Bitmap::isRecycled)?.recycle()
+                    ownedLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
+                    comparisonTracker?.end()
+                    if (comparisonEpoch == epoch) {
+                        updateUiStateAndRecycleReplaced {
+                            if (it.comparisonBusy) it.copy(comparisonBusy = false) else it
+                        }
+                    }
+                }
+            }
+        comparisonJob = launched
+        launched.invokeOnCompletion { if (comparisonJob === launched) comparisonJob = null }
+        if (launched.isCompleted && comparisonJob === launched) comparisonJob = null
+    }
+
+    fun cancelDebugComparison() {
+        if (!BuildConfig.DEBUG || !(_uiState.value.comparisonBusy)) return
+        invalidateComparison()
+        updateUiStateAndRecycleReplaced {
+            it.copy(message = "V1·V2 비교 생성을 취소했습니다.")
+        }
+    }
+
+    private fun isDebugComparisonCurrent(identity: DebugComparisonIdentity): Boolean {
+        val state = _uiState.value
+        return BuildConfig.DEBUG &&
+            !shuttingDown &&
+            identity.matches(
+                epoch = comparisonEpoch,
+                documentGeneration = historyCoordinator.currentGeneration(),
+                baseContentToken = state.baseContentToken,
+                revision = state.revision,
+            )
     }
 
     internal fun isManagedEditTokenCurrent(token: Long): Boolean =
@@ -1381,6 +1612,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun invalidateManagedEdits() {
+        invalidateComparison()
         managedEdits.invalidate()
     }
 
@@ -1449,6 +1681,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun applySynchronousEditWithHistory(
         transform: (EditorUiState) -> EditorUiState
     ): Boolean {
+        invalidateComparison()
         var snapshot = captureCurrentHistorySnapshot()
         return try {
             updateUiState(transform)
@@ -1811,7 +2044,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             it.copy(isBusy = true, revision = invalidateRevision, message = openingMessage)
         }
-        ExperimentalComparisonStore.clear()
         viewModelScope.launch {
             var preview: Bitmap? = null
             var createdSession = 0L
@@ -5272,6 +5504,50 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
     }
 }
+
+internal data class DebugComparisonIdentity(
+    val epoch: Long,
+    val documentGeneration: String,
+    val baseContentToken: String,
+    val revision: Int,
+) {
+    fun matches(
+        epoch: Long,
+        documentGeneration: String,
+        baseContentToken: String,
+        revision: Int,
+    ): Boolean =
+        this.epoch == epoch &&
+            this.documentGeneration == documentGeneration &&
+            this.baseContentToken == baseContentToken &&
+            this.revision == revision
+}
+
+private fun comparisonMaskArgb(
+    layers: List<SelectionLayer>,
+    width: Int,
+    height: Int,
+): IntArray? {
+    val enabled = layers.filter(SelectionLayer::enabled)
+    if (enabled.isEmpty()) return null
+    val combined = IntArray(width * height)
+    val scratch = IntArray(width * height)
+    enabled.forEach { layer ->
+        layer.bitmap.getPixels(scratch, 0, width, 0, 0, width, height)
+        for (index in scratch.indices) {
+            var value = (scratch[index] ushr 16) and 0xff
+            if (layer.inverted) value = 255 - value
+            value = (value * layer.opacity.coerceIn(0f, 1f)).roundToInt()
+            if (value > combined[index]) combined[index] = value
+        }
+    }
+    return IntArray(combined.size) { index ->
+        val value = combined[index]
+        -0x1000000 or (value shl 16) or (value shl 8) or value
+    }
+}
+
+private const val DEBUG_COMPARISON_MAX_SIDE = 720
 
 internal enum class MemoryRetryAction {
     CreateBrushSelection,

@@ -35,6 +35,7 @@ enum class RenderOperation {
     Remaster,
     SubjectSelection,
     SubjectSelectionBake,
+    DebugComparison,
 }
 
 enum class FallbackPolicy {

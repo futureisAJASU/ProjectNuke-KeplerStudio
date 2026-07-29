@@ -81,4 +81,21 @@ class CorrectionEngineSettingsTest {
         assertEquals(null, second.nativeRender)
         assertEquals(null, second.remaster)
     }
+
+    @Test
+    fun debugComparisonRejectsEveryStaleIdentityDimension() {
+        val identity =
+            DebugComparisonIdentity(
+                epoch = 4,
+                documentGeneration = "generation-a",
+                baseContentToken = "base-a",
+                revision = 9,
+            )
+
+        assertTrue(identity.matches(4, "generation-a", "base-a", 9))
+        assertFalse(identity.matches(5, "generation-a", "base-a", 9))
+        assertFalse(identity.matches(4, "generation-b", "base-a", 9))
+        assertFalse(identity.matches(4, "generation-a", "base-b", 9))
+        assertFalse(identity.matches(4, "generation-a", "base-a", 10))
+    }
 }
