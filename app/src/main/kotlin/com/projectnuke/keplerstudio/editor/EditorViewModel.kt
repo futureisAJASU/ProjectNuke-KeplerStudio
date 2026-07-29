@@ -854,7 +854,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (shuttingDown || !BuildConfig.DEBUG) return
         val engine = _uiState.value.correctionEngineState.documentEngine
         val before = ExperimentalLabController.resolvedSelection(engine)
-        ExperimentalLabController.updateDebug(transform)
+        ExperimentalLabController.updateDebugOverrides { currentOverrides ->
+            val currentSelection = RouteResolver.toLegacySelection(engine, currentOverrides, RouteModelAvailability())
+            val updatedSelection = transform(currentSelection)
+            updatedSelection.toDebugOverrides(engine)
+        }
         val after = ExperimentalLabController.resolvedSelection(engine)
         if (before == after) return
         if (before.nativeRender != after.nativeRender) {

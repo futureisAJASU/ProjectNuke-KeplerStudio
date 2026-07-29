@@ -3,20 +3,20 @@ package com.projectnuke.keplerstudio.editor
 /**
  * Authoritative route resolver for the editor.
  *
- * This single resolver derives the effective route for every production render operation from:
- * - the current document engine ([CorrectionEngine])
- * - the operation type ([RenderOperation])
- * - an optional per-feature debug override (nullable — null means "follow document engine")
- * - model availability where relevant
- * - a deterministic fallback policy
+ * Each production render path goes through [RouteResolver] to determine the
+ * requested route and possible fallback. The resolver never uses the old
+ * visible-preview engine to decide the requested route — the requested route
+ * is always derived from the **target/assigned document engine**.
  *
- * Debug overrides are represented as nullable values, not as complete selections whose V1
- * defaults accidentally override Engine 2. An override of `null` means "no override" and
- * therefore "use the document engine route". An explicit `V1` override deliberately forces
- * V1 for that feature only, without touching unrelated features.
- *
- * Release builds ignore debug overrides entirely — [DebugFeatureOverrides] is always empty
- * (all null) because [ExperimentalLabController.updateDebug] is guarded by `BuildConfig.DEBUG`.
+ * `previewEngine` describes the bitmap already visible; it is never an input
+ * to route resolution.
+ */
+
+// ─── Debug overrides ──────────────────────────────────────────────────────────
+
+/**
+ * Nullable per-feature debug overrides. `null` means "Follow Document Engine".
+ * In release builds this is always [DebugFeatureOverrides.None].
  */
 data class DebugFeatureOverrides(
     val nativeRender: NativeRenderRoute? = null,
@@ -29,9 +29,11 @@ data class DebugFeatureOverrides(
     }
 }
 
+// ─── Operations ───────────────────────────────────────────────────────────────
+
 /**
- * The kind of operation being routed. Different operations may share or differ in route
- * policy even when the document engine is the same.
+ * The kind of operation being routed. Different operations may have different
+ * fallback behavior even when the document engine is the same.
  */
 enum class RenderOperation {
     NativePreview,
@@ -53,18 +55,7 @@ enum class RenderOperation {
     SubjectSelectionBake,
 }
 
-/**
- * The effective, resolved route for the document-based native render pipeline.
- *
- * [requestedRoute] is what the document engine + operation dictates before fallback.
- * [actualRoute] is what was or will be used after any fallback decision.
- */
-data class EffectiveNativeRoute(
-    val requestedRoute: NativeRenderRoute,
-    val actualRoute: NativeRenderRoute,
-    val fallbackReason: FallbackReason?,
-    val usedDebugOverride: Boolean,
-)
+// ─── Fallback ──────────────────────────────────────────────────────────────────
 
 /** Why the actual route differs from the requested route, if it does. */
 enum class FallbackReason {
@@ -75,20 +66,12 @@ enum class FallbackReason {
     DebugForcedV2,
 }
 
-/**
- * The effective route for a specific V2 feature operation (Flare/Remaster/Subject).
- */
-data class EffectiveFeatureRoute<T : Enum<T>>(
-    val requestedRoute: T,
-    val actualRoute: T,
-    val fallbackReason: FallbackReason?,
-    val usedDebugOverride: Boolean,
-)
+// ─── Model availability ─────────────────────────────────────────────────────────
 
 /**
- * Model availability flags relevant to route resolution. When a model-required route
- * cannot run because the model is unavailable, the resolver reports [FallbackReason.ModelUnavailable]
- * and the actual route is downgraded to a rule/manual/V1 path.
+ * Model availability flags relevant to route resolution. When a model-required
+ * route cannot run because the model is unavailable, the resolver reports
+ * [FallbackReason.ModelUnavailable] and the actual route is downgraded.
  */
 data class RouteModelAvailability(
     val flareGuardModelAvailable: Boolean = false,
@@ -96,28 +79,70 @@ data class RouteModelAvailability(
     val subjectSelectionModelAvailable: Boolean = false,
 )
 
+// ─── Structured route request ──────────────────────────────────────────────────
+
+/**
+ * The structured request for a native render route. This is the unambiguous input
+ * to the resolver — every production caller constructs a [RouteRequest] instead
+ * of inferring routing from the old visible-preview engine.
+ *
+ * @param operation The kind of operation (preview, engine switch, export, etc.)
+ * @param effectiveDocumentEngine The engine interpretation assigned to the document.
+ *   For an engine switch, this is the **target** engine, not the old preview engine.
+ * @param debugOverride Nullable per-feature override; null means "follow engine".
+ * @param availability Actual runtime model availability for feature routes.
+ * @param identity Document/operation identity for stale/supersession checks.
+ */
+data class RouteRequest(
+    val operation: RenderOperation,
+    val effectiveDocumentEngine: CorrectionEngine,
+    val debugOverride: DebugFeatureOverrides,
+    val availability: RouteModelAvailability = RouteModelAvailability(),
+)
+
+// ─── Structured route result ───────────────────────────────────────────────────
+
+/**
+ * The resolved route for native rendering. Both what was requested and what
+ * will actually be used after any fallback decision.
+ */
+data class ResolvedNativeRoute(
+    val requestedRoute: NativeRenderRoute,
+    val actualRoute: NativeRenderRoute,
+    val fallbackReason: FallbackReason?,
+    val usedDebugOverride: Boolean,
+)
+
+/**
+ * The resolved route for a specific V2 feature operation (Flare/Remaster/Subject).
+ */
+data class ResolvedFeatureRoute<T : Enum<T>>(
+    val requestedRoute: T,
+    val actualRoute: T,
+    val fallbackReason: FallbackReason?,
+    val usedDebugOverride: Boolean,
+)
+
+// ─── Resolver ─────────────────────────────────────────────────────────────────
+
 /**
  * The single source of truth for route resolution.
  *
- * Every production render path (preview, export, selection, Flare, Remaster, Subject,
- * Draft restore, history materialization, engine switch) goes through this resolver.
- * Direct reads of `ExperimentalLabController.snapshot()` are no longer used by production.
+ * Every production render path (preview, export, selection, Flare, Remaster,
+ * Subject, Draft restore, history materialization, engine switch) goes through
+ * this resolver. The resolver never derives the requested route from the old
+ * visible-preview engine.
  */
 object RouteResolver {
-    /**
-     * Resolve the document-engine default route for native render.
-     * Engine 1 → V1, Engine 2 → V2.
-     */
+
+    // ─── Default routes ────────────────────────────────────────────────────────
+
     fun defaultNativeRoute(engine: CorrectionEngine): NativeRenderRoute =
         when (engine) {
             CorrectionEngine.Engine1 -> NativeRenderRoute.V1
             CorrectionEngine.Engine2 -> NativeRenderRoute.V2
         }
 
-    /**
-     * Resolve the document-engine default route for each V2 feature.
-     * Engine 1 → V1-class routes. Engine 2 → V2-rule/manual paths (model-assisted only if model present).
-     */
     fun defaultFlareRoute(engine: CorrectionEngine): FlareGuardRoute =
         when (engine) {
             CorrectionEngine.Engine1 -> FlareGuardRoute.V1
@@ -136,23 +161,23 @@ object RouteResolver {
             CorrectionEngine.Engine2 -> SubjectSelectionRoute.V2ManualOrSynthetic
         }
 
+    // ─── Native route resolution ───────────────────────────────────────────────
+
     /**
-     * Resolve the effective native render route for [operation].
+     * Resolve the effective native render route.
      *
-     * Debug override takes precedence when non-null. Otherwise the document engine decides.
-     * If a debug override forces V2 but the document engine is V1, the override wins.
-     * If a debug override forces V1 but the document engine is V2, the override wins
-     * (this is the "explicitly force V1" case).
+     * Debug override takes precedence when non-null. Otherwise the document
+     * engine decides. `Compare` is mapped back to V2 (debug-only display value).
      *
-     * `Compare` is not a valid production route; it is mapped back to V2 for native render.
+     * For [RenderOperation.EngineSwitch], the requested route is derived from the
+     * target engine — never from the old visible-preview engine.
      */
     fun resolveNativeRoute(
         engine: CorrectionEngine,
-        operation: RenderOperation,
         debugOverride: NativeRenderRoute?,
-    ): EffectiveNativeRoute {
+    ): ResolvedNativeRoute {
         val requested = debugOverride ?: defaultNativeRoute(engine)
-        val normalizedRequest = if (requested == NativeRenderRoute.Compare) NativeRenderRoute.V2 else requested
+        val normalized = if (requested == NativeRenderRoute.Compare) NativeRenderRoute.V2 else requested
 
         val actual: NativeRenderRoute
         val fallback: FallbackReason?
@@ -164,23 +189,25 @@ object RouteResolver {
             actual = NativeRenderRoute.V2
             fallback = FallbackReason.DebugForcedV2
         } else {
-            actual = normalizedRequest
+            actual = normalized
             fallback = null
         }
 
-        return EffectiveNativeRoute(
-            requestedRoute = normalizedRequest,
+        return ResolvedNativeRoute(
+            requestedRoute = normalized,
             actualRoute = actual,
             fallbackReason = fallback,
             usedDebugOverride = debugOverride != null,
         )
     }
 
+    // ─── Feature route resolution ──────────────────────────────────────────────
+
     fun resolveFlareRoute(
         engine: CorrectionEngine,
         debugOverride: FlareGuardRoute?,
         modelAvailable: Boolean,
-    ): EffectiveFeatureRoute<FlareGuardRoute> = resolveFeatureRoute(
+    ): ResolvedFeatureRoute<FlareGuardRoute> = resolveFeatureRoute(
         engine = engine,
         debugOverride = debugOverride,
         modelAvailable = modelAvailable,
@@ -196,7 +223,7 @@ object RouteResolver {
         engine: CorrectionEngine,
         debugOverride: RemasterRoute?,
         modelAvailable: Boolean,
-    ): EffectiveFeatureRoute<RemasterRoute> = resolveFeatureRoute(
+    ): ResolvedFeatureRoute<RemasterRoute> = resolveFeatureRoute(
         engine = engine,
         debugOverride = debugOverride,
         modelAvailable = modelAvailable,
@@ -212,7 +239,7 @@ object RouteResolver {
         engine: CorrectionEngine,
         debugOverride: SubjectSelectionRoute?,
         modelAvailable: Boolean,
-    ): EffectiveFeatureRoute<SubjectSelectionRoute> = resolveFeatureRoute(
+    ): ResolvedFeatureRoute<SubjectSelectionRoute> = resolveFeatureRoute(
         engine = engine,
         debugOverride = debugOverride,
         modelAvailable = modelAvailable,
@@ -224,14 +251,6 @@ object RouteResolver {
         compareRoute = SubjectSelectionRoute.Compare,
     )
 
-    /**
-     * Generic feature-route resolver shared by Flare/Remaster/Subject.
-     *
-     * - No override → use the document engine default.
-     * - Explicit V1 or ForcedV1Fallback override → force V1 for this feature.
-     * - Compare override → mapped to the V2-rule/manual path (Compare is debug-only display).
-     * - Model-assisted override when model unavailable → downgrade to fallback route.
-     */
     private inline fun <T : Enum<T>> resolveFeatureRoute(
         engine: CorrectionEngine,
         debugOverride: T?,
@@ -242,7 +261,7 @@ object RouteResolver {
         fallbackRoute: T,
         forcedV1FallbackRoute: T,
         compareRoute: T,
-    ): EffectiveFeatureRoute<T> {
+    ): ResolvedFeatureRoute<T> {
         val requested = debugOverride ?: defaultRoute(engine)
         val normalized = if (requested == compareRoute) fallbackRoute else requested
 
@@ -258,7 +277,7 @@ object RouteResolver {
             fallback = FallbackReason.ModelUnavailable
         }
 
-        return EffectiveFeatureRoute(
+        return ResolvedFeatureRoute(
             requestedRoute = if (normalized == forcedV1FallbackRoute) v1Route else normalized,
             actualRoute = actual,
             fallbackReason = fallback,
@@ -266,22 +285,22 @@ object RouteResolver {
         )
     }
 
-    /**
-     * Build the [ExperimentalLabSelection] that the legacy [RenderPipelinePlanner] expects,
-     * derived from the effective native route. This bridges the resolver to the existing
-     * planner without requiring a planner rewrite.
-     */
-    fun toLegacySelection(nativeRoute: NativeRenderRoute): ExperimentalLabSelection =
-        ExperimentalLabSelection().copy(nativeRender = nativeRoute)
+    // ─── Legacy selection bridge ────────────────────────────────────────────────
 
+    /**
+     * Bridge to the legacy [RenderPipelinePlanner]. Produces the
+     * [ExperimentalLabSelection] from the current document engine and overrides,
+     * using actual model availability for feature routes.
+     */
     fun toLegacySelection(
         engine: CorrectionEngine,
         overrides: DebugFeatureOverrides,
+        availability: RouteModelAvailability,
     ): ExperimentalLabSelection {
-        val native = resolveNativeRoute(engine, RenderOperation.NativePreview, overrides.nativeRender)
-        val flare = resolveFlareRoute(engine, overrides.flareGuard, modelAvailable = false)
-        val remaster = resolveRemasterRoute(engine, overrides.remaster, modelAvailable = false)
-        val subject = resolveSubjectRoute(engine, overrides.subjectSelection, modelAvailable = false)
+        val native = resolveNativeRoute(engine, overrides.nativeRender)
+        val flare = resolveFlareRoute(engine, overrides.flareGuard, availability.flareGuardModelAvailable)
+        val remaster = resolveRemasterRoute(engine, overrides.remaster, availability.remasterModelAvailable)
+        val subject = resolveSubjectRoute(engine, overrides.subjectSelection, availability.subjectSelectionModelAvailable)
         return ExperimentalLabSelection(
             nativeRender = native.actualRoute,
             flareGuard = flare.actualRoute,
@@ -289,7 +308,34 @@ object RouteResolver {
             subjectSelection = subject.actualRoute,
         )
     }
+
+    /**
+     * Resolve the native route only, returning a selection suitable for
+     * [RenderPipelinePlanner] without overriding feature routes.
+     *
+     * Use this when only the native pipeline matters (preview, export) and
+     * feature-specific rendering (Flare/Remaster/Subject) handles its own routing.
+     */
+    fun toNativeSelection(
+        engine: CorrectionEngine,
+        debugOverride: NativeRenderRoute?,
+    ): ExperimentalLabSelection {
+        val resolved = resolveNativeRoute(engine, debugOverride)
+        return routingForCorrectionEngine(engine).copy(nativeRender = resolved.actualRoute)
+    }
+
+    /**
+     * Determine whether the native route for the given engine and override
+     * differs from the other engine/document route.
+     */
+    fun nativeRouteChanged(
+        engine: CorrectionEngine,
+        debugOverride: NativeRenderRoute?,
+        otherRoute: NativeRenderRoute,
+    ): Boolean = resolveNativeRoute(engine, debugOverride).actualRoute != otherRoute
 }
+
+// ─── Convenience extension ─────────────────────────────────────────────────────
 
 /**
  * Convenience: read debug overrides from the controller.

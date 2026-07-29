@@ -7,64 +7,48 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Route matrix test: every document engine × operation × override combination.
+ * Route matrix test: every document engine × override combination.
  * Verifies that [RouteResolver] is the single source of truth and that debug
  * overrides are represented unambiguously (null = no override, explicit V1 = force V1).
  */
 class RouteResolverMatrixTest {
 
     @Test
-    fun engine1NoOverrideAlwaysV1ForAllOperations() {
-        for (op in RenderOperation.entries) {
-            val result = RouteResolver.resolveNativeRoute(
-                CorrectionEngine.Engine1, op, null
-            )
-            assertEquals(NativeRenderRoute.V1, result.actualRoute, "Engine1 op=$op")
-            assertFalse(result.usedDebugOverride, "Engine1 op=$op")
-            assertNull(result.fallbackReason, "Engine1 op=$op")
-        }
+    fun engine1NoOverrideAlwaysV1() {
+        val result = RouteResolver.resolveNativeRoute(CorrectionEngine.Engine1, null)
+        assertEquals(NativeRenderRoute.V1, result.actualRoute)
+        assertFalse(result.usedDebugOverride)
+        assertNull(result.fallbackReason)
     }
 
     @Test
-    fun engine2NoOverrideAlwaysV2ForAllOperations() {
-        for (op in RenderOperation.entries) {
-            val result = RouteResolver.resolveNativeRoute(
-                CorrectionEngine.Engine2, op, null
-            )
-            assertEquals(NativeRenderRoute.V2, result.actualRoute, "Engine2 op=$op")
-            assertFalse(result.usedDebugOverride, "Engine2 op=$op")
-            assertNull(result.fallbackReason, "Engine2 op=$op")
-        }
+    fun engine2NoOverrideAlwaysV2() {
+        val result = RouteResolver.resolveNativeRoute(CorrectionEngine.Engine2, null)
+        assertEquals(NativeRenderRoute.V2, result.actualRoute)
+        assertFalse(result.usedDebugOverride)
+        assertNull(result.fallbackReason)
     }
 
     @Test
-    fun engine2WithV1OverrideForcesV1RegardlessOfOperation() {
-        for (op in RenderOperation.entries) {
-            val result = RouteResolver.resolveNativeRoute(
-                CorrectionEngine.Engine2, op, NativeRenderRoute.V1
-            )
-            assertEquals(NativeRenderRoute.V1, result.actualRoute, "E2+V1 op=$op")
-            assertTrue(result.usedDebugOverride, "E2+V1 op=$op")
-            assertEquals(FallbackReason.DebugForcedV1, result.fallbackReason, "E2+V1 op=$op")
-        }
+    fun engine2WithV1OverrideForcesV1() {
+        val result = RouteResolver.resolveNativeRoute(CorrectionEngine.Engine2, NativeRenderRoute.V1)
+        assertEquals(NativeRenderRoute.V1, result.actualRoute)
+        assertTrue(result.usedDebugOverride)
+        assertEquals(FallbackReason.DebugForcedV1, result.fallbackReason)
     }
 
     @Test
-    fun engine1WithV2OverrideForcesV2RegardlessOfOperation() {
-        for (op in RenderOperation.entries) {
-            val result = RouteResolver.resolveNativeRoute(
-                CorrectionEngine.Engine1, op, NativeRenderRoute.V2
-            )
-            assertEquals(NativeRenderRoute.V2, result.actualRoute, "E1+V2 op=$op")
-            assertTrue(result.usedDebugOverride, "E1+V2 op=$op")
-            assertEquals(FallbackReason.DebugForcedV2, result.fallbackReason, "E1+V2 op=$op")
-        }
+    fun engine1WithV2OverrideForcesV2() {
+        val result = RouteResolver.resolveNativeRoute(CorrectionEngine.Engine1, NativeRenderRoute.V2)
+        assertEquals(NativeRenderRoute.V2, result.actualRoute)
+        assertTrue(result.usedDebugOverride)
+        assertEquals(FallbackReason.DebugForcedV2, result.fallbackReason)
     }
 
     @Test
     fun engine1WithV1OverrideIsNoOp() {
         val result = RouteResolver.resolveNativeRoute(
-            CorrectionEngine.Engine1, RenderOperation.NativePreview, NativeRenderRoute.V1
+            CorrectionEngine.Engine1, NativeRenderRoute.V1
         )
         assertEquals(NativeRenderRoute.V1, result.actualRoute)
         assertTrue(result.usedDebugOverride)
@@ -74,7 +58,7 @@ class RouteResolverMatrixTest {
     @Test
     fun engine2WithV2OverrideIsNoOp() {
         val result = RouteResolver.resolveNativeRoute(
-            CorrectionEngine.Engine2, RenderOperation.NativePreview, NativeRenderRoute.V2
+            CorrectionEngine.Engine2, NativeRenderRoute.V2
         )
         assertEquals(NativeRenderRoute.V2, result.actualRoute)
         assertTrue(result.usedDebugOverride)
@@ -85,7 +69,7 @@ class RouteResolverMatrixTest {
     fun compareOverrideIsNormalizedToV2() {
         for (engine in CorrectionEngine.entries) {
             val result = RouteResolver.resolveNativeRoute(
-                engine, RenderOperation.NativePreview, NativeRenderRoute.Compare
+                engine, NativeRenderRoute.Compare
             )
             assertEquals(NativeRenderRoute.V2, result.actualRoute, "Compare engine=$engine")
             assertEquals(NativeRenderRoute.V2, result.requestedRoute)
@@ -202,7 +186,7 @@ class RouteResolverMatrixTest {
         for (engine in CorrectionEngine.entries) {
             assertEquals(
                 RouteResolver.defaultNativeRoute(engine),
-                RouteResolver.resolveNativeRoute(engine, RenderOperation.NativePreview, null).actualRoute
+                RouteResolver.resolveNativeRoute(engine, null).actualRoute
             )
             assertEquals(
                 RouteResolver.defaultFlareRoute(engine),
@@ -222,7 +206,7 @@ class RouteResolverMatrixTest {
     @Test
     fun legacySelectionFromResolverMatchesRoutingForCorrectionEngine() {
         for (engine in CorrectionEngine.entries) {
-            val legacy = RouteResolver.toLegacySelection(engine, DebugFeatureOverrides.None)
+            val legacy = RouteResolver.toLegacySelection(engine, DebugFeatureOverrides.None, RouteModelAvailability())
             val direct = routingForCorrectionEngine(engine)
             assertEquals(direct, legacy, "engine=$engine")
         }

@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import com.projectnuke.keplerstudio.BuildConfig
 import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,6 +32,20 @@ data class ExperimentalLabSelection(
 )
 
 /**
+ * Convert a resolved [ExperimentalLabSelection] back to nullable [DebugFeatureOverrides]
+ * for the given document engine. A field matching the engine's default becomes null
+ * (Follow Document Engine); a field that differs becomes an explicit override.
+ */
+internal fun ExperimentalLabSelection.toDebugOverrides(
+    engine: CorrectionEngine,
+): DebugFeatureOverrides = DebugFeatureOverrides(
+    nativeRender = nativeRender.takeIf { it != RouteResolver.defaultNativeRoute(engine) },
+    flareGuard = flareGuard.takeIf { it != RouteResolver.defaultFlareRoute(engine) },
+    remaster = remaster.takeIf { it != RouteResolver.defaultRemasterRoute(engine) },
+    subjectSelection = subjectSelection.takeIf { it != RouteResolver.defaultSubjectRoute(engine) },
+)
+
+/**
  * Derive the resolved [ExperimentalLabSelection] purely from a document engine.
  * This is the document engine default — no debug overrides.
  */
@@ -50,34 +65,43 @@ internal fun routingForCorrectionEngine(engine: CorrectionEngine): ExperimentalL
  * Authoritative route resolver entry point for production native preview renders.
  *
  * Derives the effective [ExperimentalLabSelection] from:
- * - the effective preview engine ([CorrectionEngineState.previewEngine], falling back to
- *   [CorrectionEngineState.documentEngine] when no preview has been rendered yet)
+ * - the **assigned document engine** ([CorrectionEngineState.documentEngine])
  * - optional debug-only per-feature overrides from [ExperimentalLabController]
  * - the deterministic fallback policy in [RouteResolver]
  *
- * Using the effective preview engine ensures that when a V2 document falls back to V1,
- * subsequent param adjustments render with V1 matching what the user sees, rather than
- * retrying V2 (which would fail and fall back again, causing flicker).
+ * The requested route is always derived from the assigned document engine, never
+ * from the old visible-preview engine. This means:
+ * - A switch to Engine 2 requests V2 (regardless of what the old preview was).
+ * - A switch to Engine 1 requests V1.
+ * - After a V2→V1 fallback, subsequent param adjustments still **retry Engine 2**
+ *   (matching the fallback policy in Phase 5) unless the policy is sticky.
  *
- * No override means the effective engine route is used. An explicit debug V1 override
- * deliberately forces V1 for that feature. One feature override does not modify
- * unrelated features. Release builds ignore debug overrides.
+ * No override means the document engine route is used. An explicit debug V1
+ * override deliberately forces V1 for that feature only. Release builds ignore
+ * debug overrides.
  */
 internal fun EditorUiState.renderRouting(): ExperimentalLabSelection {
     val overrides = ExperimentalLabController.debugOverridesCompat()
-    val effectiveEngine = correctionEngineState.previewEngine ?: correctionEngineState.documentEngine
-    return RouteResolver.toLegacySelection(effectiveEngine, overrides)
+    val availability = RouteModelAvailability()
+    return RouteResolver.toLegacySelection(correctionEngineState.documentEngine, overrides, availability)
 }
 
 /**
  * Export routing must match the visible preview, not just the document engine.
- * When the preview is a V2-fallback-to-V1, export uses V1 to match what the user sees.
- * When a debug override produced the visible preview, export uses the same override.
+ *
+ * When the preview is a V2-fallback-to-V1, the visible bitmap was rendered by V1.
+ * Export uses the **effective preview engine** (previewEngine ?: documentEngine)
+ * so the exported image matches what the user sees, not what the document is
+ * *assigned* to.
+ *
+ * If export intentionally retries the assigned document engine (e.g. a "retry E2"
+ * flow), the caller constructs its own route request; it does NOT call this function.
  */
 internal fun EditorUiState.renderRoutingForExport(): ExperimentalLabSelection {
     val overrides = ExperimentalLabController.debugOverridesCompat()
     val effectiveEngine = correctionEngineState.previewEngine ?: correctionEngineState.documentEngine
-    return RouteResolver.toLegacySelection(effectiveEngine, overrides)
+    val availability = RouteModelAvailability()
+    return RouteResolver.toLegacySelection(effectiveEngine, overrides, availability)
 }
 
 /**
@@ -85,13 +109,13 @@ internal fun EditorUiState.renderRoutingForExport(): ExperimentalLabSelection {
  * values (null = follow document engine). In release builds, all mutations are refused
  * and the controller always returns [DebugFeatureOverrides.None].
  *
- * The state exposed as [ExperimentalLabSelection] is resolved at read time using the
- * document engine from the current [EditorUiState]. This ensures the UI always shows
- * the effective route, not raw debug state.
+ * The state exposed as [overrides] is a flow of raw [DebugFeatureOverrides] objects —
+ * not a global resolved selection mutated by whichever engine last queried it. The UI
+ * resolves display state from the current engine + raw overrides + model availability.
  */
 object ExperimentalLabController {
     private val overrides = AtomicReference(DebugFeatureOverrides.None)
-    private val mutableState = MutableStateFlow(routingForCorrectionEngine(CorrectionEngine.Engine1))
+    private val overridesFlow = MutableStateFlow(DebugFeatureOverrides.None)
 
     /**
      * Current debug overrides. In release builds this is always [DebugFeatureOverrides.None].
@@ -100,26 +124,35 @@ object ExperimentalLabController {
         if (BuildConfig.DEBUG) overrides.get() else DebugFeatureOverrides.None
 
     /**
+     * State flow of raw [DebugFeatureOverrides]. Stable — does not change with the
+     * document engine. UI and renderer subscribe to this and resolve display state
+     * from the current engine + overrides.
+     */
+    val overridesState: StateFlow<DebugFeatureOverrides> get() = overridesFlow.asStateFlow()
+
+    /**
      * Resolved selection for the given document engine. Used by the UI to display
      * the current effective state and by tests that need to verify route resolution.
      */
     fun resolvedSelection(engine: CorrectionEngine): ExperimentalLabSelection {
         val o = debugOverrides()
-        return RouteResolver.toLegacySelection(engine, o)
+        return RouteResolver.toLegacySelection(engine, o, RouteModelAvailability())
     }
 
     /**
-     * State flow of the resolved selection for the given engine. Updates when
-     * debug overrides change.
+     * Legacy state flow: resolved selection for the raw overrides, using Engine 1.
+     * This is a simple derivation from the raw overrides flow. The value is recomputed
+     * each time the overrides change.
      */
-    fun stateFor(engine: CorrectionEngine): StateFlow<ExperimentalLabSelection> {
-        val sel = resolvedSelection(engine)
-        if (mutableState.value != sel) mutableState.value = sel
-        return mutableState.asStateFlow()
-    }
+    val state: StateFlow<ExperimentalLabSelection> get() = ResolvedStateFlow(CorrectionEngine.Engine1)
 
-    /** Legacy state flow; resolves for whatever engine is set at first read. */
-    val state: StateFlow<ExperimentalLabSelection> get() = mutableState.asStateFlow()
+    /**
+     * Returns a [StateFlow] that maps the raw overrides flow into a resolved
+     * [ExperimentalLabSelection] for the given engine. Each call creates a lightweight
+     * wrapper; collect() delegates to the source flow.
+     */
+    fun stateFor(engine: CorrectionEngine): StateFlow<ExperimentalLabSelection> =
+        ResolvedStateFlow(engine)
 
     /**
      * Update debug overrides. Only callable in debug builds. The transform receives
@@ -129,42 +162,58 @@ object ExperimentalLabController {
         check(BuildConfig.DEBUG) { "Experimental Lab is unavailable in release builds" }
         val updated = transform(overrides.get())
         overrides.set(updated)
-        mutableState.value = routingForCorrectionEngine(
-            if (updated.nativeRender == NativeRenderRoute.V1 &&
-                updated.flareGuard == FlareGuardRoute.V1 &&
-                updated.remaster == RemasterRoute.V1 &&
-                updated.subjectSelection == SubjectSelectionRoute.V1
-            ) CorrectionEngine.Engine1 else CorrectionEngine.Engine2
-        )
+        overridesFlow.value = updated
     }
 
     /**
-     * Legacy: update debug selection via [ExperimentalLabSelection] transform.
-     * Converts to/from [DebugFeatureOverrides] internally.
+     * Set a single per-feature override. `null` means "Follow Document Engine".
      */
-    fun updateDebug(transform: (ExperimentalLabSelection) -> ExperimentalLabSelection) {
-        check(BuildConfig.DEBUG) { "Experimental Lab is unavailable in release builds" }
-        val current = mutableState.value
-        val updated = transform(current)
-        val o = DebugFeatureOverrides(
-            nativeRender = updated.nativeRender.takeIf { it != RouteResolver.defaultNativeRoute(currentEngineFromSelection(updated)) },
-            flareGuard = updated.flareGuard.takeIf { it != RouteResolver.defaultFlareRoute(currentEngineFromSelection(updated)) },
-            remaster = updated.remaster.takeIf { it != RouteResolver.defaultRemasterRoute(currentEngineFromSelection(updated)) },
-            subjectSelection = updated.subjectSelection.takeIf { it != RouteResolver.defaultSubjectRoute(currentEngineFromSelection(updated)) },
-        )
-        overrides.set(o)
-        mutableState.value = updated
+    fun setNativeOverride(route: NativeRenderRoute?) {
+        updateDebugOverrides { it.copy(nativeRender = route) }
+    }
+
+    fun setFlareGuardOverride(route: FlareGuardRoute?) {
+        updateDebugOverrides { it.copy(flareGuard = route) }
+    }
+
+    fun setRemasterOverride(route: RemasterRoute?) {
+        updateDebugOverrides { it.copy(remaster = route) }
+    }
+
+    fun setSubjectSelectionOverride(route: SubjectSelectionRoute?) {
+        updateDebugOverrides { it.copy(subjectSelection = route) }
     }
 
     internal fun resetForTest() {
         overrides.set(DebugFeatureOverrides.None)
-        mutableState.value = routingForCorrectionEngine(CorrectionEngine.Engine1)
+        overridesFlow.value = DebugFeatureOverrides.None
+    }
+
+    /**
+     * Lightweight [StateFlow] that resolves raw overrides to an
+     * [ExperimentalLabSelection] for a fixed engine.
+     */
+    class ResolvedStateFlow(
+        private val engine: CorrectionEngine,
+    ) : StateFlow<ExperimentalLabSelection> {
+        override val value: ExperimentalLabSelection
+            get() = ExperimentalLabController.resolvedSelection(engine)
+
+        @Suppress("RedundantSuspendModifier")
+        override suspend fun collect(
+            collector: FlowCollector<ExperimentalLabSelection>,
+        ): Nothing {
+            collector.emit(value)
+            overridesFlow.collect { overrides ->
+                collector.emit(
+                    RouteResolver.toLegacySelection(engine, overrides, RouteModelAvailability()),
+                )
+            }
+        }
+
+        override val replayCache: List<ExperimentalLabSelection> get() = listOf(value)
     }
 }
-
-private fun currentEngineFromSelection(sel: ExperimentalLabSelection): CorrectionEngine =
-    if (sel.nativeRender == NativeRenderRoute.V1) CorrectionEngine.Engine1
-    else CorrectionEngine.Engine2
 
 object ExperimentalComparisonStore {
     private val mutable = MutableStateFlow<DebugComparisonArtifact?>(null)

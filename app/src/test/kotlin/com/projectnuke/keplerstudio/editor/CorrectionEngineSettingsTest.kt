@@ -89,14 +89,14 @@ class CorrectionEngineSettingsTest {
     @Test
     fun routeResolverNoOverrideFollowsDocumentEngine() {
         val e1 = RouteResolver.resolveNativeRoute(
-            CorrectionEngine.Engine1, RenderOperation.NativePreview, null
+            CorrectionEngine.Engine1, null
         )
         assertEquals(NativeRenderRoute.V1, e1.actualRoute)
         assertFalse(e1.usedDebugOverride)
         assertNull(e1.fallbackReason)
 
         val e2 = RouteResolver.resolveNativeRoute(
-            CorrectionEngine.Engine2, RenderOperation.NativePreview, null
+            CorrectionEngine.Engine2, null
         )
         assertEquals(NativeRenderRoute.V2, e2.actualRoute)
         assertFalse(e2.usedDebugOverride)
@@ -106,7 +106,7 @@ class CorrectionEngineSettingsTest {
     @Test
     fun routeResolverExplicitV1OverrideForcesV1OnEngine2() {
         val result = RouteResolver.resolveNativeRoute(
-            CorrectionEngine.Engine2, RenderOperation.NativePreview, NativeRenderRoute.V1
+            CorrectionEngine.Engine2, NativeRenderRoute.V1
         )
         assertEquals(NativeRenderRoute.V1, result.actualRoute)
         assertTrue(result.usedDebugOverride)
@@ -116,7 +116,7 @@ class CorrectionEngineSettingsTest {
     @Test
     fun routeResolverExplicitV2OverrideForcesV2OnEngine1() {
         val result = RouteResolver.resolveNativeRoute(
-            CorrectionEngine.Engine1, RenderOperation.NativePreview, NativeRenderRoute.V2
+            CorrectionEngine.Engine1, NativeRenderRoute.V2
         )
         assertEquals(NativeRenderRoute.V2, result.actualRoute)
         assertTrue(result.usedDebugOverride)
@@ -126,7 +126,7 @@ class CorrectionEngineSettingsTest {
     @Test
     fun routeResolverCompareIsNotAProductionRoute() {
         val result = RouteResolver.resolveNativeRoute(
-            CorrectionEngine.Engine2, RenderOperation.NativePreview, NativeRenderRoute.Compare
+            CorrectionEngine.Engine2, NativeRenderRoute.Compare
         )
         assertEquals(NativeRenderRoute.V2, result.actualRoute)
     }
