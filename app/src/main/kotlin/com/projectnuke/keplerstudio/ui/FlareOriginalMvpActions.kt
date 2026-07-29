@@ -3,15 +3,21 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
-import com.projectnuke.keplerstudio.editor.applyActiveQuickEffectsToBitmap
+import com.projectnuke.keplerstudio.editor.RenderFailedException
+import com.projectnuke.keplerstudio.editor.RenderOperation
+import com.projectnuke.keplerstudio.editor.RenderParticipation
+import com.projectnuke.keplerstudio.editor.RenderResult
 import com.projectnuke.keplerstudio.editor.copyOrThrow
-import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
+import com.projectnuke.keplerstudio.editor.successOrThrow
+import com.projectnuke.keplerstudio.editor.withFailedRender
+import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -58,9 +64,6 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
     val sourcePath = current.sourcePath
     val baseToken = current.baseContentToken
     val params = current.params
-    val engines = current.engineSelection()
-    val presetLook = current.presetLook
-    val quickEffects = current.activeQuickEffects
     val nextRevision = current.revision + 1
 
     updateUiState {
@@ -80,6 +83,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
             ownedBase = null
             var adoptedFlare = ownedBaseOwned
             var ownedPreview: Bitmap? = null
+            var previewSuccess: RenderResult.Success? = null
             try {
                 withContext(Dispatchers.Default) {
                     val result =
@@ -93,44 +97,24 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                         error("nativeApplyFlareGuardInPlace failed: $result")
                     }
                 }
-                withContext(Dispatchers.Default) {
-                    val copy =
-                        checkNotNull(ownedBaseOwned).copyOrThrow(Bitmap.Config.ARGB_8888, true)
-                    ownedPreview = copy
-                    val result =
-                        NativePhotoCore.nativeRenderPreviewInPlace(
-                            copy,
-                            params.exposure,
-                            params.contrast,
-                            params.shadows,
-                            params.highlights,
-                            params.whites,
-                            params.blacks,
-                            params.temperature,
-                            params.tint,
-                            params.saturation,
-                            params.vibrance,
-                            params.clarity,
-                            params.dehaze,
-                            params.sharpness,
-                            params.noiseReduction,
-                            params.luminanceNoiseReduction,
-                            params.colorNoiseReduction,
-                            params.noiseDetailProtection,
-                            engines.noiseEngine.nativeId,
-                            engines.detailEngine.nativeId,
-                            engines.toneEngine.nativeId,
-                            engines.hazeEngine.nativeId,
-                            nextRevision,
-                            presetLook,
-                        )
-                    if (result < 0) {
-                        throw IllegalStateException(
-                            "native flare preview render failed: code=$result"
-                        )
+                previewSuccess =
+                    withContext(Dispatchers.Default) {
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = current,
+                                operation = RenderOperation.FlareGuard,
+                                basePreview = checkNotNull(ownedBaseOwned),
+                                revision = nextRevision,
+                                params = params,
+                            )
+                        ).successOrThrow().let { success ->
+                            success.copy(
+                                algorithmVersion = "${success.algorithmVersion}+flare-native-rule",
+                                participation = RenderParticipation(rule = true),
+                            )
+                        }
                     }
-                    applyActiveQuickEffectsToBitmap(copy, quickEffects, nextRevision)
-                }
+                ownedPreview = checkNotNull(previewSuccess).output
                 adoptedFlare = checkNotNull(ownedBaseOwned)
                 val adoptedPreview = checkNotNull(ownedPreview)
                 if (
@@ -146,6 +130,11 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                             baseBitmapDirty = true,
                             baseContentToken = newBaseContentToken(),
                             isBusy = false,
+                            correctionEngineState =
+                                it.correctionEngineState.withSuccessfulRender(
+                                    current.correctionEngineState.documentEngine,
+                                    checkNotNull(previewSuccess),
+                                ),
                             message = "규칙 기반 보정으로 번짐을 완화했습니다.",
                             flareGuardRuntimeStatus = "규칙 기반 보정으로 번짐을 완화했습니다.",
                         )
@@ -168,6 +157,13 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                     updateUiState {
                         it.copy(
                             isBusy = false,
+                            correctionEngineState =
+                                (t as? RenderFailedException)?.failure?.let { failure ->
+                                    it.correctionEngineState.withFailedRender(
+                                        current.correctionEngineState.documentEngine,
+                                        failure,
+                                    )
+                                } ?: it.correctionEngineState,
                             message = "번짐 완화에 실패했습니다.",
                             flareGuardRuntimeStatus = "번짐 완화에 실패했습니다.",
                         )
