@@ -615,6 +615,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         renderJob = null
         activeParamRenderRevision = null
         invalidateExport()
+        if (BuildConfig.DEBUG) ExperimentalComparisonStore.clear()
 
         val before = _uiState.value
         var engineUndoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot(HistorySnapshotStorage.MetadataOnly)
