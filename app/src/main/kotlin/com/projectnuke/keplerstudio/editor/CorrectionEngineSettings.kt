@@ -37,6 +37,23 @@ enum class RenderFallbackReason {
 }
 
 /**
+ * The per-operation fallback policy for Engine 2 native render failures.
+ *
+ * - [RetryV2OnNext]: the current operation fell back to V1, but the document is still
+ *   assigned to Engine 2. The next ordinary parameter/preset/auto render will
+ *   attempt V2 again. Fallback is one-operation, not sticky.
+ * - [StickyV1]: after a V2 fallback, all subsequent renders use V1 until the user
+ *   explicitly retries V2. This is a "sticky fallback" mode for stability.
+ * - [RetryV1ForDocument]: Engine 1 is the assigned engine; fallback to V2 is not
+ *   applicable.
+ */
+enum class FallbackPolicy {
+    RetryV2OnFailure,
+    StickyV1AfterFallback,
+    Engine1Only,
+}
+
+/**
  * Structured last render failure. A failed render that keeps the old preview MUST set
  * this and MUST NOT relabel the old preview as a new result class.
  */
@@ -71,9 +88,11 @@ data class CorrectionEngineState(
     val previewRoute: NativeRenderRoute? = null,
     val previewResultClass: PreviewResultClass = PreviewResultClass.NoDocument,
     val fallbackReason: RenderFallbackReason? = null,
+    val fallbackPolicy: FallbackPolicy = FallbackPolicy.RetryV2OnFailure,
     val lastRenderFailure: RenderFailureState? = null,
     val debugOverrideActive: Boolean = false,
     val algorithmVersion: String? = null,
+    val previewIsOriginal: Boolean = true,
 ) {
     val isSwitching: Boolean get() = pendingEngine != null
 
