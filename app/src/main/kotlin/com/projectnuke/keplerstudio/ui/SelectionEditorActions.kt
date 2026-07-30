@@ -2,6 +2,9 @@ package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.AlgorithmContracts
+import com.projectnuke.keplerstudio.editor.BakedFeatureProvenance
+import com.projectnuke.keplerstudio.editor.BakedFeatureType
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
@@ -12,6 +15,9 @@ import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.FeatureExecutionOutcome
+import com.projectnuke.keplerstudio.editor.ModelFeature
+import com.projectnuke.keplerstudio.editor.RenderParticipation
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelRunResult
@@ -51,12 +57,12 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val sourceRevision = state.revision
     val documentEngine = state.correctionEngineState.documentEngine
     val subjectOverride = ExperimentalLabController.debugOverrides().subjectSelection
-    val modelLoaded =
-        RemasterModelSession.activeModel?.id == "edge_masker" &&
-            RemasterModelSession.isModelLoaded
-    ModelAvailabilityRegistry.reportEdgeSession(modelLoaded)
+    val modelCapability =
+        ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]
     val subjectResolution = RouteResolver.resolveSubjectRoute(
-        documentEngine, subjectOverride, modelAvailable = modelLoaded,
+        documentEngine,
+        subjectOverride,
+        modelAvailable = modelCapability?.executable == true,
     )
     val subjectAlgorithm = subjectResolution.actualRoute
     val useModel =
@@ -86,7 +92,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         }
         return
     }
-    if (useModel && !modelLoaded) {
+    if (useModel && modelCapability?.executable != true) {
         updateUiState {
             it.copy(
                 message =
@@ -172,6 +178,15 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                     withContext(Dispatchers.Default) {
                         val rawTracked =
                             if (useModel) {
+                                val loaded = RemasterModelSession.ensureEdgeLoaded(appContext())
+                                if (
+                                    loaded !is
+                                        com.projectnuke.keplerstudio.editor.ModelLoadResult.Ready
+                                ) {
+                                    error(
+                                        "Edge Masker load failed: ${loaded::class.java.simpleName}"
+                                    )
+                                }
                                 val maskResult =
                                     RemasterModelSession.createForegroundMaskResult(
                                         checkNotNull(ownedBaseOwned),
@@ -271,6 +286,52 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                             isBusy = false,
                             selectionLayers = current.selectionLayers + layer,
                             activeSelectionLayerId = layer.id,
+                            algorithmContracts =
+                                current.algorithmContracts.copy(
+                                    subjectSelectionContract =
+                                        if (
+                                            subjectAlgorithm == SubjectSelectionRoute.V1 ||
+                                                subjectAlgorithm ==
+                                                    SubjectSelectionRoute.ForcedV1Fallback
+                                        ) {
+                                            AlgorithmContracts.SUBJECT_V1
+                                        } else {
+                                            AlgorithmContracts.SUBJECT_V2
+                                        },
+                                ),
+                            baseProvenance =
+                                current.baseProvenance.append(
+                                    BakedFeatureProvenance(
+                                        feature = BakedFeatureType.SubjectSelection,
+                                        operationId = operationToken.toString(),
+                                        sequence =
+                                            (current.baseProvenance.operations.lastOrNull()
+                                                ?.sequence ?: 0L) + 1L,
+                                        requestedRoute = subjectResolution.requestedRoute.name,
+                                        actualRoute = subjectAlgorithm.name,
+                                        participation =
+                                            RenderParticipation(
+                                                model = useModel,
+                                                manual = !useModel,
+                                            ),
+                                        capabilityPhase =
+                                            ModelAvailabilityRegistry.state.value[
+                                                    ModelFeature.SubjectSelection]
+                                                ?.phase,
+                                        outcome = FeatureExecutionOutcome.Applied,
+                                        stageContract =
+                                            if (
+                                                subjectAlgorithm == SubjectSelectionRoute.V1 ||
+                                                    subjectAlgorithm ==
+                                                        SubjectSelectionRoute.ForcedV1Fallback
+                                            ) {
+                                                AlgorithmContracts.SUBJECT_V1
+                                            } else {
+                                                AlgorithmContracts.SUBJECT_V2
+                                            },
+                                        timestampMillis = System.currentTimeMillis(),
+                                    )
+                                ),
                             message =
                                 "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C\uB97C \uCD94\uAC00\uD588\uC2B5\uB2C8\uB2E4.",
                         )

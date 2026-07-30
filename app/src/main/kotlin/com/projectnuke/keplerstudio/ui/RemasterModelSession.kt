@@ -20,7 +20,10 @@ import com.projectnuke.keplerstudio.editor.ModelColorSpace
 import com.projectnuke.keplerstudio.editor.ModelConfidence
 import com.projectnuke.keplerstudio.editor.ModelFailure
 import com.projectnuke.keplerstudio.editor.ModelFailureReason
+import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
+import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.ModelInputContract
+import com.projectnuke.keplerstudio.editor.ModelLoadResult
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelOutputContract
 import com.projectnuke.keplerstudio.editor.ModelOutputSemantic
@@ -59,6 +62,7 @@ object RemasterModelSession : ModelRunnerContract {
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
     private val commandGeneration = AtomicLong()
+    private var registrySessionGeneration: Long = 0L
     var isModelLoading by mutableStateOf(false)
         private set
 
@@ -119,6 +123,7 @@ object RemasterModelSession : ModelRunnerContract {
 
     fun load(context: Context, candidate: RemasterModelCandidate) {
         val generation = commandGeneration.incrementAndGet()
+        val registryLoadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
         isModelLoading = true
         isModelLoaded = false
         lifecycle = ModelRunnerLifecycle.Loading
@@ -126,6 +131,7 @@ object RemasterModelSession : ModelRunnerContract {
         modelScope.launch {
             modelMutex.withLock {
                 if (generation != commandGeneration.get()) return@withLock
+                publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 activeModel = candidate
@@ -134,11 +140,19 @@ object RemasterModelSession : ModelRunnerContract {
                     lifecycle = ModelRunnerLifecycle.Failed
                     GlobalModelDiagnostics.publish("RemasterModelSession", "failed")
                     statusText = "${candidate.title}: unsupported model contract"
+                    ModelAvailabilityRegistry.reportEdgeLoad(
+                        ModelLoadResult.UnsupportedContract("unsupported Edge Masker contract"),
+                        registryLoadGeneration,
+                    )
                     return@withLock
                 }
                 if (!hasModelAsset(context, candidate.assetPath)) {
                     isModelLoading = false
                     lifecycle = ModelRunnerLifecycle.Failed
+                    ModelAvailabilityRegistry.reportEdgeLoad(
+                        ModelLoadResult.AssetMissing(candidate.assetPath),
+                        registryLoadGeneration,
+                    )
                     GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                     statusText = "${candidate.title}: 모델 파일 없음"
                     return@withLock
@@ -157,6 +171,24 @@ object RemasterModelSession : ModelRunnerContract {
                     }
                     .onSuccess {
                         isModelLoaded = closeableModel != null
+                        if (isModelLoaded) {
+                            ModelAvailabilityRegistry.reportEdgeLoad(
+                                ModelLoadResult.Ready(Unit),
+                                registryLoadGeneration,
+                            )
+                            registrySessionGeneration =
+                                ModelAvailabilityRegistry.reportSessionReady(
+                                    listOf(
+                                        ModelFeature.Remaster,
+                                        ModelFeature.SubjectSelection,
+                                    )
+                                )
+                        } else {
+                            ModelAvailabilityRegistry.reportEdgeLoad(
+                                ModelLoadResult.LoadFailed("runner creation returned null"),
+                                registryLoadGeneration,
+                            )
+                        }
                         isModelLoading = false
                         lifecycle =
                             if (closeableModel != null) ModelRunnerLifecycle.Loaded
@@ -172,6 +204,12 @@ object RemasterModelSession : ModelRunnerContract {
                     .onFailure {
                         closeableModel = null
                         isModelLoaded = false
+                        ModelAvailabilityRegistry.reportEdgeLoad(
+                            ModelLoadResult.LoadFailed(
+                                it.message ?: "Edge Masker load failed"
+                            ),
+                            registryLoadGeneration,
+                        )
                         isModelLoading = false
                         lifecycle = ModelRunnerLifecycle.Failed
                         GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
@@ -180,6 +218,63 @@ object RemasterModelSession : ModelRunnerContract {
             }
         }
     }
+
+    internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> =
+        modelMutex.withLock {
+            if (activeModel?.id == "edge_masker" && isModelLoaded && closeableModel != null) {
+                return@withLock ModelLoadResult.Ready(Unit)
+            }
+            val candidate =
+                OnDeviceRemasterModels.firstOrNull { it.id == "edge_masker" }
+                    ?: return@withLock ModelLoadResult.AssetMissing(
+                        "edge_masker catalog entry missing"
+                    )
+            val loadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
+            activeModel = candidate
+            isModelLoading = true
+            lifecycle = ModelRunnerLifecycle.Loading
+            if (!isSupportedModelContract(candidate)) {
+                isModelLoading = false
+                lifecycle = ModelRunnerLifecycle.Failed
+                return@withLock ModelLoadResult.UnsupportedContract(
+                    "unsupported Edge Masker contract"
+                ).also {
+                    ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
+                }
+            }
+            if (!hasModelAsset(context, candidate.assetPath)) {
+                isModelLoading = false
+                lifecycle = ModelRunnerLifecycle.Failed
+                return@withLock ModelLoadResult.AssetMissing(candidate.assetPath).also {
+                    ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
+                }
+            }
+            return@withLock try {
+                publishSessionClosed()
+                runCatching { closeableModel?.close() }
+                closeableModel = createImageSegmenter(context, candidate.assetPath)
+                isModelLoaded = true
+                isModelLoading = false
+                lifecycle = ModelRunnerLifecycle.Loaded
+                ModelLoadResult.Ready(Unit).also {
+                    ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
+                    registrySessionGeneration =
+                        ModelAvailabilityRegistry.reportSessionReady(
+                            listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection)
+                        )
+                }
+            } catch (failure: Throwable) {
+                closeableModel = null
+                isModelLoaded = false
+                isModelLoading = false
+                lifecycle = ModelRunnerLifecycle.Failed
+                ModelLoadResult.LoadFailed(
+                    failure.message ?: "Edge Masker load failed"
+                ).also {
+                    ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
+                }
+            }
+        }
 
     internal suspend fun createForegroundMask(
         bitmap: Bitmap,
@@ -269,12 +364,14 @@ object RemasterModelSession : ModelRunnerContract {
         modelScope.launch {
             modelMutex.withLock {
                 if (generation != commandGeneration.get()) return@withLock
+                publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 activeModel = null
                 isModelLoaded = false
                 isModelLoading = false
                 lifecycle = ModelRunnerLifecycle.Unloaded
+                ModelAvailabilityRegistry.reportEdgeUnloaded()
                 GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                 statusText = "로드된 모델이 없습니다."
             }
@@ -287,12 +384,14 @@ object RemasterModelSession : ModelRunnerContract {
             commandGeneration.incrementAndGet()
             GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
             lifecycle = ModelRunnerLifecycle.Closing
+            publishSessionClosed()
             runCatching { closeableModel?.close() }
             closeableModel = null
             activeModel = null
             isModelLoaded = false
             isModelLoading = false
             lifecycle = ModelRunnerLifecycle.Unloaded
+            ModelAvailabilityRegistry.reportEdgeUnloaded()
             GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
             statusText = "로드된 모델이 없습니다."
             true
@@ -323,6 +422,15 @@ object RemasterModelSession : ModelRunnerContract {
                     isModelLoaded &&
                     manifest.inferenceAdapterImplemented,
         )
+    }
+
+    private fun publishSessionClosed() {
+        if (registrySessionGeneration == 0L) return
+        ModelAvailabilityRegistry.reportSessionClosed(
+            listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection),
+            registrySessionGeneration,
+        )
+        registrySessionGeneration = 0L
     }
 
     private fun isSupportedModelContract(candidate: RemasterModelCandidate): Boolean {

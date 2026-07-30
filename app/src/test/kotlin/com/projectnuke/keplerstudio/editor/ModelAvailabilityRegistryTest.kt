@@ -40,12 +40,12 @@ class ModelAvailabilityRegistryTest {
 
     @Test
     fun missingEdgeSessionDoesNotDisableManualRoutes() {
-        ModelAvailabilityRegistry.reportEdgeSession(false, "asset missing")
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.AssetMissing("asset missing"))
 
         val availability = ModelAvailabilityRegistry.routeAvailability()
         val edge = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
-        assertEquals(ModelCapabilityPhase.Failed, edge.phase)
-        assertEquals(null, edge.assetPresent)
+        assertEquals(ModelCapabilityPhase.AssetMissing, edge.phase)
+        assertEquals(false, edge.assetPresent)
         assertFalse(availability.remasterModelAvailable)
         assertFalse(availability.subjectSelectionModelAvailable)
         assertTrue(
@@ -99,5 +99,91 @@ class ModelAvailabilityRegistryTest {
         assertTrue(availability.flareGuardModelAvailable)
         assertTrue(availability.remasterModelAvailable)
         assertTrue(availability.subjectSelectionModelAvailable)
+    }
+
+    @Test
+    fun staleProbeCannotDowngradeReadySession() {
+        val ready =
+            reduceModelCapability(
+                ModelCapabilityState(
+                    phase = ModelCapabilityPhase.Loadable,
+                    assetPresent = true,
+                    assetValid = true,
+                    runtimeAvailable = true,
+                    contractSupported = true,
+                    runnerImplemented = true,
+                ),
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Session,
+                    generation = 7L,
+                    phase = ModelCapabilityPhase.Ready,
+                ),
+                sequence = 1L,
+            )
+
+        val afterProbe =
+            reduceModelCapability(
+                ready,
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Probe,
+                    generation = 1L,
+                    phase = ModelCapabilityPhase.Loadable,
+                ),
+                sequence = 2L,
+            )
+
+        assertEquals(ModelCapabilityPhase.Ready, afterProbe.phase)
+        assertEquals(7L, afterProbe.sessionGeneration)
+    }
+
+    @Test
+    fun currentSessionClosePreservesFactsAndOlderCloseIsIgnored() {
+        val ready =
+            ModelCapabilityState(
+                phase = ModelCapabilityPhase.Ready,
+                assetPresent = true,
+                assetValid = true,
+                runtimeAvailable = true,
+                contractSupported = true,
+                runnerImplemented = true,
+                sessionGeneration = 9L,
+            )
+        val staleClose =
+            reduceModelCapability(
+                ready,
+                ModelCapabilityObservation(
+                    ModelCapabilityPublisher.Session,
+                    8L,
+                    ModelCapabilityPhase.Unloaded,
+                ),
+                sequence = 2L,
+            )
+        assertEquals(ready, staleClose)
+
+        val closed =
+            reduceModelCapability(
+                ready,
+                ModelCapabilityObservation(
+                    ModelCapabilityPublisher.Session,
+                    9L,
+                    ModelCapabilityPhase.Unloaded,
+                ),
+                sequence = 3L,
+            )
+        assertEquals(ModelCapabilityPhase.Loadable, closed.phase)
+        assertTrue(closed.factsLoadable)
+    }
+
+    @Test
+    fun loadFailurePreservesKnownAssetAndRuntimeFacts() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("creation failed"))
+
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertEquals(ModelCapabilityPhase.Failed, state.phase)
+        assertTrue(state.assetPresent == true)
+        assertTrue(state.assetValid == true)
+        assertTrue(state.runtimeAvailable == true)
+        assertTrue(state.contractSupported == true)
     }
 }

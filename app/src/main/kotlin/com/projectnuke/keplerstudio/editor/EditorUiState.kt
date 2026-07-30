@@ -40,6 +40,8 @@ data class EditorUiState(
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val flareGuardRuntimeStatus: String? = null,
+    val algorithmContracts: AlgorithmContractSet = AlgorithmContractSet(),
+    val baseProvenance: BaseProvenanceChain = BaseProvenanceChain(),
     val memoryRecoveryRequest: MemoryRecoveryRequest? = null,
     val revision: Int = 0,
     val nativeVersion: String = "",

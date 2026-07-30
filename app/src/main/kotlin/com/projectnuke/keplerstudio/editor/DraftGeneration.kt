@@ -53,6 +53,9 @@ internal data class DraftGenerationManifest(
     val showSelectionOverlay: Boolean,
     val algorithmVersion: String?,
     val renderParticipation: RenderParticipation?,
+    val algorithmContracts: AlgorithmContractSet =
+        AlgorithmContractSet.fromLegacy(algorithmVersion),
+    val baseProvenance: BaseProvenanceChain = BaseProvenanceChain(),
 )
 
 internal data class DraftSelectionLayerEntry(
@@ -97,6 +100,8 @@ internal fun DraftGenerationManifest.toJson(): JSONObject = JSONObject().apply {
     put("fallbackReason", fallbackReason ?: JSONObject.NULL)
     put("renderDecision", renderDecision ?: JSONObject.NULL)
     put("algorithmVersion", algorithmVersion ?: JSONObject.NULL)
+    put("algorithmContracts", algorithmContracts.toJson())
+    put("baseProvenance", baseProvenance.toJson())
     put(
         "renderParticipation",
         renderParticipation?.let { participation ->
@@ -203,6 +208,9 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
     val parsedPreset = presetObject?.let { presetColorLookFromJson(it) }
     if (presetObject != null && parsedPreset == null) return null
     val activeLayerId = json.optionalString("activeSelectionLayerId")
+    val parsedAlgorithmVersion =
+        json.optionalString("algorithmVersion")
+            ?: if (legacyV1) "native-v1" else null
     DraftGenerationManifest(
         formatVersion = formatVersion,
         generationId = json.requiredString("generationId"),
@@ -267,9 +275,7 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         activeSelectionLayerId = activeLayerId,
         selectionPaintSettings = paintSettings,
         showSelectionOverlay = json.requiredBoolean("showSelectionOverlay"),
-        algorithmVersion =
-            json.optionalString("algorithmVersion")
-                ?: if (legacyV1) "native-v1" else null,
+        algorithmVersion = parsedAlgorithmVersion,
         renderParticipation =
             json.optJSONObject("renderParticipation")?.let {
                 RenderParticipation(
@@ -278,6 +284,12 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
                     manual = it.optBoolean("manual", false),
                 )
             },
+        algorithmContracts =
+            parseAlgorithmContractSet(
+                json.optJSONObject("algorithmContracts"),
+                parsedAlgorithmVersion,
+            ),
+        baseProvenance = parseBaseProvenance(json.optJSONArray("baseProvenance")),
     )
 }.getOrNull()
 

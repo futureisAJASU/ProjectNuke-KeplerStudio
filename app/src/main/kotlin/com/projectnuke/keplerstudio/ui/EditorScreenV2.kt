@@ -71,7 +71,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -97,6 +99,7 @@ import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.ExperimentalComparisonStore
+import com.projectnuke.keplerstudio.editor.OwnedDebugComparisonArtifact
 import com.projectnuke.keplerstudio.editor.FlareGuardRoute
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DEHAZE_ENGINES
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DETAIL_ENGINES
@@ -1186,7 +1189,7 @@ internal fun V2SettingsScreen(
 private fun ExperimentalLabSettingsCard(
     assignedEngine: CorrectionEngine,
     overrides: DebugFeatureOverrides,
-    comparison: com.projectnuke.keplerstudio.editor.DebugComparisonArtifact?,
+    comparison: OwnedDebugComparisonArtifact?,
     comparisonBusy: Boolean,
     onOverridesChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
     onGenerateComparison: () -> Unit,
@@ -1308,35 +1311,16 @@ private fun ExperimentalLabSettingsCard(
             }
         }
         comparison?.let { artifact ->
+            DisposableEffect(artifact) {
+                val lease = artifact.retain()
+                onDispose { lease.close() }
+            }
             val comparisonBitmaps =
                 remember(artifact) {
-                    (
-                        listOf(
-                            "V1" to artifact.baselineArgb,
-                            "V2" to artifact.experimentalArgb,
-                            "차이" to artifact.differenceHeatmapArgb,
-                        ) +
-                            listOfNotNull(artifact.maskArgb?.let { "마스크" to it })
-                    ).map { (label, pixels) ->
-                        LabeledComparisonBitmap(
-                            label = label,
-                            bitmap =
-                                Bitmap.createBitmap(
-                                    pixels,
-                                    artifact.width,
-                                    artifact.height,
-                                    Bitmap.Config.ARGB_8888,
-                                ),
-                        )
+                    artifact.labeledBitmaps().map { (label, bitmap) ->
+                        LabeledComparisonBitmap(label = label, bitmap = bitmap)
                     }
                 }
-            DisposableEffect(comparisonBitmaps) {
-                onDispose {
-                    comparisonBitmaps.forEach { item ->
-                        if (!item.bitmap.isRecycled) item.bitmap.recycle()
-                    }
-                }
-            }
             Text(
                 "${artifact.resolutionLevel.label} ${artifact.evaluatedWidth}×${artifact.evaluatedHeight} · " +
                     "${artifact.algorithmDecision ?: "비교"} · 변경 ${(artifact.metrics.changedPixelRatio * 100f).toInt()}% · " +
@@ -1390,7 +1374,7 @@ private fun ExperimentalLabSettingsCard(
 
 @Composable
 private fun DebugComparisonViewerDialog(
-    artifact: com.projectnuke.keplerstudio.editor.DebugComparisonArtifact,
+    artifact: OwnedDebugComparisonArtifact,
     images: List<LabeledComparisonBitmap>,
     onDismiss: () -> Unit,
     onClear: () -> Unit,
@@ -1398,6 +1382,7 @@ private fun DebugComparisonViewerDialog(
     var selectedLabel by remember(artifact) { mutableStateOf("V1") }
     var scale by remember(artifact) { mutableFloatStateOf(1f) }
     var offset by remember(artifact) { mutableStateOf(Offset.Zero) }
+    var splitPosition by remember(artifact) { mutableFloatStateOf(0.5f) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -1413,17 +1398,23 @@ private fun DebugComparisonViewerDialog(
                 ) {
                     images.forEach { item ->
                         TextButton(
-                            onClick = {
-                                selectedLabel = item.label
-                                scale = 1f
-                                offset = Offset.Zero
-                            }
+                            onClick = { selectedLabel = item.label }
                         ) {
                             Text(item.label)
                         }
                     }
+                    TextButton(onClick = { selectedLabel = "분할" }) { Text("분할") }
+                    TextButton(
+                        onClick = {
+                            scale = 1f
+                            offset = Offset.Zero
+                        }
+                    ) {
+                        Text("보기 초기화")
+                    }
                 }
-                images.firstOrNull { it.label == selectedLabel }?.let { selected ->
+                val selected = images.firstOrNull { it.label == selectedLabel }
+                if (selected != null || selectedLabel == "분할") {
                     Box(
                         modifier =
                             Modifier
@@ -1431,7 +1422,7 @@ private fun DebugComparisonViewerDialog(
                                 .heightIn(min = 280.dp, max = 480.dp)
                                 .clipToBounds()
                                 .background(Color.Black)
-                                .pointerInput(selected.bitmap) {
+                                .pointerInput(artifact.artifactId) {
                                     detectTransformGestures { _, pan, zoom, _ ->
                                         scale = (scale * zoom).coerceIn(1f, 8f)
                                         offset =
@@ -1439,20 +1430,65 @@ private fun DebugComparisonViewerDialog(
                                             else offset + pan
                                     }
                                 }
+                                .pointerInput(artifact.artifactId) {
+                                    detectTapGestures(
+                                        onDoubleTap = {
+                                            if (scale > 1f) {
+                                                scale = 1f
+                                                offset = Offset.Zero
+                                            } else {
+                                                scale = 2f
+                                            }
+                                        },
+                                    )
+                                }
                     ) {
-                        Image(
-                            bitmap = selected.bitmap.asImageBitmap(),
-                            contentDescription = "${selected.label} 확대 비교",
-                            modifier =
-                                Modifier
-                                    .fillMaxSize()
-                                    .graphicsLayer {
-                                        scaleX = scale
-                                        scaleY = scale
-                                        translationX = offset.x
-                                        translationY = offset.y
+                        val transformed =
+                            Modifier.fillMaxSize().graphicsLayer {
+                                scaleX = scale
+                                scaleY = scale
+                                translationX = offset.x
+                                translationY = offset.y
+                            }
+                        if (selectedLabel == "분할") {
+                            Image(
+                                bitmap = artifact.experimental.asImageBitmap(),
+                                contentDescription = "V2 분할 비교",
+                                modifier = transformed,
+                                contentScale = ContentScale.Fit,
+                            )
+                            Image(
+                                bitmap = artifact.baseline.asImageBitmap(),
+                                contentDescription = "V1 분할 비교",
+                                modifier =
+                                    transformed.drawWithContent {
+                                        clipRect(right = size.width * splitPosition) {
+                                            this@drawWithContent.drawContent()
+                                        }
                                     },
-                            contentScale = ContentScale.Fit,
+                                contentScale = ContentScale.Fit,
+                            )
+                        } else if (selected != null) {
+                            Image(
+                                bitmap = selected.bitmap.asImageBitmap(),
+                                contentDescription = "${selected.label} 확대 비교",
+                                modifier = transformed,
+                                contentScale = ContentScale.Fit,
+                            )
+                        }
+                    }
+                    if (selectedLabel == "분할") {
+                        Slider(
+                            value = splitPosition,
+                            onValueChange = {
+                                splitPosition = it.coerceIn(0.05f, 0.95f)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text(
+                            "분할 위치 ${(splitPosition * 100).toInt()}%",
+                            color = V2TextMuted,
+                            style = MaterialTheme.typography.labelSmall,
                         )
                     }
                 }
@@ -1461,6 +1497,20 @@ private fun DebugComparisonViewerDialog(
                     color = V2TextMuted,
                     style = MaterialTheme.typography.labelSmall,
                 )
+                Text(
+                    "V1 ${artifact.baselineContracts.nativeRenderContract ?: "계약 정보 없음"} · " +
+                        "V2 ${artifact.experimentalContracts.nativeRenderContract ?: "계약 정보 없음"}",
+                    color = V2TextMuted,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                artifact.baseProvenance.operations.lastOrNull()?.let { provenance ->
+                    Text(
+                        "기반 작업 ${provenance.feature.name} · ${provenance.stageContract} · " +
+                            "${provenance.requestedRoute} → ${provenance.actualRoute}",
+                        color = V2TextMuted,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("닫기") } },

@@ -1276,6 +1276,8 @@ internal class EditorHistoryStorage(
             put("fallbackReason", snapshot.fallbackReason?.name ?: JSONObject.NULL)
             put("renderDecision", snapshot.renderDecision?.name ?: JSONObject.NULL)
             put("algorithmVersion", snapshot.algorithmVersion ?: JSONObject.NULL)
+            put("algorithmContracts", snapshot.algorithmContracts.toJson())
+            put("baseProvenance", snapshot.baseProvenance.toJson())
             put(
                 "renderParticipation",
                 JSONObject().apply {
@@ -1412,6 +1414,12 @@ internal class EditorHistoryStorage(
                     )
                 } ?: RenderParticipation(),
             algorithmVersion = nullableString("algorithmVersion"),
+            algorithmContracts =
+                parseAlgorithmContractSet(
+                    json.optJSONObject("algorithmContracts"),
+                    nullableString("algorithmVersion"),
+                ),
+            baseProvenance = parseBaseProvenance(json.optJSONArray("baseProvenance")),
             noiseEngine = enumValueStrict(json.getString("noiseEngine")),
             detailEngine = enumValueStrict(json.getString("detailEngine")),
             toneEngine = enumValueStrict(json.getString("toneEngine")),

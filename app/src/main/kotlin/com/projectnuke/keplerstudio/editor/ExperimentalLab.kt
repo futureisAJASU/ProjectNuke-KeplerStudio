@@ -1,6 +1,10 @@
 package com.projectnuke.keplerstudio.editor
 
+import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.BuildConfig
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -119,18 +123,172 @@ object ExperimentalLabController {
     }
 }
 
-object ExperimentalComparisonStore {
-    private val mutable = MutableStateFlow<DebugComparisonArtifact?>(null)
-    val latest: StateFlow<DebugComparisonArtifact?> = mutable.asStateFlow()
+class OwnedDebugComparisonArtifact private constructor(
+    val artifactId: Long,
+    val fixtureVersion: String,
+    val width: Int,
+    val height: Int,
+    val resolutionLevel: DebugComparisonResolution,
+    val evaluatedWidth: Int,
+    val evaluatedHeight: Int,
+    val baseline: Bitmap,
+    val experimental: Bitmap,
+    val mask: Bitmap?,
+    val differenceHeatmap: Bitmap,
+    val metrics: ImageQualityMetricsV2,
+    val baselineContracts: AlgorithmContractSet,
+    val experimentalContracts: AlgorithmContractSet,
+    val baseProvenance: BaseProvenanceChain,
+    val algorithmDecision: String?,
+    val knownTransientBytes: Long?,
+    val durationMillis: Long?,
+) : AutoCloseable {
+    private val closeRequested = AtomicBoolean(false)
+    private val references = AtomicInteger(1)
+    private val recycled = AtomicBoolean(false)
+    private val reservation =
+        RetainedMemoryLedger.reserve("comparison-artifact-$artifactId").also { retained ->
+            retained.replace(
+                RetainedMemoryCategory.NativeBitmap,
+                listOfNotNull(baseline, experimental, mask, differenceHeatmap)
+                    .fold(0L) { total, bitmap ->
+                        BitmapMemoryBudget.saturatingAdd(total, BitmapMemoryBudget.bytes(bitmap))
+                    },
+            )
+        }
 
-    fun publishDebug(artifact: DebugComparisonArtifact) {
+    val isClosed: Boolean
+        get() = recycled.get()
+
+    val canPublish: Boolean
+        get() = !closeRequested.get() && !isClosed
+
+    val retainedBitmapBytes: Long
+        get() =
+            listOfNotNull(baseline, experimental, mask, differenceHeatmap)
+                .filterNot(Bitmap::isRecycled)
+                .fold(0L) { total, bitmap ->
+                    BitmapMemoryBudget.saturatingAdd(total, BitmapMemoryBudget.bytes(bitmap))
+                }
+
+    fun labeledBitmaps(): List<Pair<String, Bitmap>> {
+        check(canPublish) { "comparison artifact is closing or closed" }
+        return listOf(
+            "V1" to baseline,
+            "V2" to experimental,
+            "차이" to differenceHeatmap,
+        ) + listOfNotNull(mask?.let { "마스크" to it })
+    }
+
+    fun compactMetricJson(): String =
+        buildString {
+            append('{')
+            append("\"fixtureVersion\":\"").append(fixtureVersion).append("\",")
+            append("\"changedPixelRatio\":").append(metrics.changedPixelRatio).append(',')
+            append("\"maximumChannelDelta\":").append(metrics.maximumChannelDelta).append(',')
+            append("\"p95ChannelDelta\":").append(metrics.p95ChannelDelta).append(',')
+            append("\"lumaMae\":").append(metrics.lumaMeanAbsoluteError).append(',')
+            append("\"chromaMae\":").append(metrics.chromaMeanAbsoluteError)
+            append('}')
+        }
+
+    override fun close() {
+        if (!closeRequested.compareAndSet(false, true)) return
+        releaseReference()
+    }
+
+    fun retain(): AutoCloseable {
+        while (true) {
+            check(!closeRequested.get()) { "comparison artifact is closing" }
+            val current = references.get()
+            check(current > 0) { "comparison artifact is closed" }
+            if (references.compareAndSet(current, current + 1)) {
+                if (closeRequested.get()) {
+                    releaseReference()
+                    error("comparison artifact began closing")
+                }
+                break
+            }
+        }
+        val leaseClosed = AtomicBoolean(false)
+        return AutoCloseable {
+            if (leaseClosed.compareAndSet(false, true)) releaseReference()
+        }
+    }
+
+    private fun releaseReference() {
+        val remaining = references.decrementAndGet()
+        check(remaining >= 0) { "comparison artifact reference underflow" }
+        if (remaining != 0 || !closeRequested.get()) return
+        if (!recycled.compareAndSet(false, true)) return
+        listOfNotNull(baseline, experimental, mask, differenceHeatmap).forEach { bitmap ->
+            bitmap.takeUnless(Bitmap::isRecycled)?.recycle()
+        }
+        reservation.close()
+    }
+
+    companion object {
+        private val ids = AtomicLong()
+
+        fun create(source: DebugComparisonArtifact): OwnedDebugComparisonArtifact {
+            val owned = ArrayList<Bitmap>(4)
+            fun create(pixels: IntArray): Bitmap =
+                Bitmap.createBitmap(
+                    pixels,
+                    source.width,
+                    source.height,
+                    Bitmap.Config.ARGB_8888,
+                ).also(owned::add)
+            return try {
+                OwnedDebugComparisonArtifact(
+                    artifactId = ids.incrementAndGet(),
+                    fixtureVersion = source.fixtureVersion,
+                    width = source.width,
+                    height = source.height,
+                    resolutionLevel = source.resolutionLevel,
+                    evaluatedWidth = source.evaluatedWidth,
+                    evaluatedHeight = source.evaluatedHeight,
+                    baseline = create(source.baselineArgb),
+                    experimental = create(source.experimentalArgb),
+                    mask = source.maskArgb?.let(::create),
+                    differenceHeatmap = create(source.differenceHeatmapArgb),
+                    metrics = source.metrics,
+                    baselineContracts = source.baselineContracts,
+                    experimentalContracts = source.experimentalContracts,
+                    baseProvenance = source.baseProvenance,
+                    algorithmDecision = source.algorithmDecision,
+                    knownTransientBytes = source.knownTransientBytes,
+                    durationMillis = source.durationMillis,
+                )
+            } catch (failure: Throwable) {
+                owned.forEach { it.takeUnless(Bitmap::isRecycled)?.recycle() }
+                throw failure
+            }
+        }
+    }
+}
+
+object ExperimentalComparisonStore {
+    private val lock = Any()
+    private val mutable = MutableStateFlow<OwnedDebugComparisonArtifact?>(null)
+    val latest: StateFlow<OwnedDebugComparisonArtifact?> = mutable.asStateFlow()
+
+    /** Takes ownership of [artifact]. */
+    fun publishDebug(artifact: OwnedDebugComparisonArtifact) {
         check(BuildConfig.DEBUG)
-        BitmapMemoryBudget.setExternalRetainedBytes(artifact.retainedBytes)
-        mutable.value = artifact
+        check(artifact.canPublish)
+        synchronized(lock) {
+            val previous = mutable.value
+            previous?.takeUnless { it === artifact }?.close()
+            mutable.value = artifact
+        }
     }
 
     fun clear() {
-        mutable.value = null
-        BitmapMemoryBudget.setExternalRetainedBytes(0L)
+        synchronized(lock) {
+            val previous = mutable.value
+            mutable.value = null
+            previous?.close()
+        }
     }
 }

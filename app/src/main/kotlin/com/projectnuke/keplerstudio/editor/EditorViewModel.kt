@@ -138,14 +138,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         ThumbnailBitmapCache.setByteBudget(BitmapMemoryBudget.thumbnailBudgetBytes())
         tracker.activateDocument(historyCoordinator.currentGeneration())
         if (BuildConfig.DEBUG) {
+            val probeGeneration = ModelAvailabilityRegistry.beginProbe()
             viewModelScope.launch(Dispatchers.IO) {
-                ModelFeature.entries.forEach { feature ->
-                    ModelAvailabilityRegistry.reportPhase(
-                        feature,
-                        ModelCapabilityState(phase = ModelCapabilityPhase.Probing),
-                    )
-                }
-                ModelAvailabilityRegistry.probePackagedCapabilities(app.applicationContext)
+                ModelAvailabilityRegistry.probePackagedCapabilities(
+                    app.applicationContext,
+                    probeGeneration,
+                )
             }
         }
     }
@@ -536,7 +534,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         var nextState: EditorUiState? = null
         _uiState.update { current ->
             previousState = current
-            transform(current).also { nextState = it }
+            transform(current)
+                .withVisibleNativeContractIfChangedFrom(current)
+                .also { nextState = it }
         }
         val prev = previousState ?: return
         val next = nextState ?: return
@@ -552,7 +552,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         replaceDocument: Boolean = false,
         adoptedNativeSession: Long = 0L,
     ): Boolean {
-        if (!_uiState.compareAndSet(expected, next)) return false
+        val settled = next.withVisibleNativeContractIfChangedFrom(expected)
+        if (!_uiState.compareAndSet(expected, settled)) return false
         val generation =
             if (replaceDocument) {
                 val oldGeneration = historyCoordinator.currentGeneration()
@@ -564,11 +565,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 historyCoordinator.currentGeneration()
             }
-        uiStateOwnership?.reconcile(expected, next, generation)
+        uiStateOwnership?.reconcile(expected, settled, generation)
         if (adoptedNativeSession != 0L)
             tracker.rebindNativeSessionGeneration(adoptedNativeSession, generation)
-        releaseOrphanedBitmaps(expected, next)
+        releaseOrphanedBitmaps(expected, settled)
         return true
+    }
+
+    private fun EditorUiState.withVisibleNativeContractIfChangedFrom(
+        previous: EditorUiState,
+    ): EditorUiState {
+        val rendered = correctionEngineState.visiblePreview as? VisiblePreviewState.Rendered
+            ?: return this
+        if (
+            previewBitmap === previous.previewBitmap &&
+                correctionEngineState.visiblePreview == previous.correctionEngineState.visiblePreview
+        ) {
+            return this
+        }
+        return copy(
+            algorithmContracts =
+                algorithmContracts.copy(
+                    nativeRenderContract = rendered.algorithmVersion,
+                    migratedFromLegacy = rendered.migratedFromAlgorithmVersion,
+                )
+        )
     }
 
     private fun releaseOrphanedBitmaps(previous: EditorUiState, next: EditorUiState) {
@@ -1106,12 +1127,30 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     },
                                 evaluatedWidth = width,
                                 evaluatedHeight = height,
+                                baselineContracts =
+                                    state.algorithmContracts.copy(
+                                        nativeRenderContract = AlgorithmContracts.NATIVE_V1,
+                                    ),
+                                experimentalContracts =
+                                    state.algorithmContracts.copy(
+                                        nativeRenderContract = AlgorithmContracts.NATIVE_V2,
+                                    ),
+                                baseProvenance = state.baseProvenance,
                                 algorithmDecision = "동일 문서 V1·V2",
                                 knownTransientBytes = requiredBytes,
                                 durationMillis = pair.first.durationMillis + pair.second.durationMillis,
                             )
-                    if (!isDebugComparisonCurrent(comparisonIdentity)) return@launch
-                    ExperimentalComparisonStore.publishDebug(artifact)
+                    val ownedArtifact = OwnedDebugComparisonArtifact.create(artifact)
+                    if (!isDebugComparisonCurrent(comparisonIdentity)) {
+                        ownedArtifact.close()
+                        return@launch
+                    }
+                    try {
+                        ExperimentalComparisonStore.publishDebug(ownedArtifact)
+                    } catch (failure: Throwable) {
+                        ownedArtifact.close()
+                        throw failure
+                    }
                     updateUiStateAndRecycleReplaced {
                         if (isDebugComparisonCurrent(comparisonIdentity)) {
                             it.copy(
@@ -1720,6 +1759,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     else snapshot.showSelectionOverlay,
                 activeQuickEffects = snapshot.activeQuickEffects,
                 flareGuardRuntimeStatus = snapshot.flareGuardRuntimeStatus,
+                algorithmContracts = snapshot.algorithmContracts,
+                baseProvenance = snapshot.baseProvenance,
                 isBusy = false,
                 revision = current.revision + 1,
             )
@@ -4426,6 +4467,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var flareGuardBitmap: Bitmap? = null
             var renderedPreview: Bitmap? = null
             var renderSuccess: RenderResult.Success? = null
+            var resolvedFlareRoute: ResolvedFeatureRoute<FlareGuardRoute>? = null
             var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
             undoSnapshot = null
             var ownedBaseOwned: Bitmap? = null
@@ -4471,6 +4513,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 flareOverride,
                                 modelAvailable = preloadedModel is ModelLoadResult.Ready,
                             )
+                        resolvedFlareRoute = flareResolution
                         val flareAlgorithm = flareResolution.actualRoute
                         val r =
                             if (flareAlgorithm == FlareGuardRoute.V1 ||
@@ -4539,8 +4582,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                                     status ==
                                                         FlareGuardRuntimeStatus.ModelFailedRuleFallback,
                                         ),
-                                    algorithmVersion =
-                                        "${success.algorithmVersion}+flare-${checkNotNull(flareGuardResult).algorithmDecision?.name ?: "v1"}",
                                 )
                             }
                         checkNotNull(renderSuccess).output.also { renderedPreview = it }
@@ -4571,6 +4612,66 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 ),
                             message = flareGuardResult!!.status.uiText,
                             flareGuardRuntimeStatus = flareGuardResult!!.status.uiText,
+                        ).withBakedFeatureProvenance(
+                            provenance =
+                                BakedFeatureProvenance(
+                                    feature = BakedFeatureType.FlareGuard,
+                                    operationId = operationToken.toString(),
+                                    sequence =
+                                        (it.baseProvenance.operations.lastOrNull()?.sequence ?: 0L) +
+                                            1L,
+                                    requestedRoute =
+                                        checkNotNull(resolvedFlareRoute).requestedRoute.name,
+                                    actualRoute =
+                                        checkNotNull(resolvedFlareRoute).actualRoute.name,
+                                    participation =
+                                        when (flareGuardResult!!.algorithmDecision) {
+                                            FlareGuardV2Decision.ModelRuleFused ->
+                                                RenderParticipation(model = true, rule = true)
+                                            FlareGuardV2Decision.ModelAccepted ->
+                                                RenderParticipation(model = true)
+                                            else ->
+                                                when (flareGuardResult!!.status) {
+                                                    FlareGuardRuntimeStatus.ExperimentalV2Model,
+                                                    FlareGuardRuntimeStatus.ModelInferenceSuccess ->
+                                                        RenderParticipation(model = true)
+                                                    FlareGuardRuntimeStatus.ExperimentalV2Rule,
+                                                    FlareGuardRuntimeStatus.ModelUnavailableRuleFallback,
+                                                    FlareGuardRuntimeStatus.ModelFailedRuleFallback ->
+                                                        RenderParticipation(rule = true)
+                                                    else -> RenderParticipation()
+                                                }
+                                        },
+                                    capabilityPhase =
+                                        ModelAvailabilityRegistry.state.value[
+                                                ModelFeature.FlareGuard]
+                                            ?.phase,
+                                    outcome =
+                                        when {
+                                            flareGuardResult!!.fallbackReason != null ->
+                                                FeatureExecutionOutcome.Fallback
+                                            flareGuardResult!!.algorithmDecision in
+                                                setOf(
+                                                    FlareGuardV2Decision.MaskInsignificant,
+                                                    FlareGuardV2Decision.NoOpZeroStrength,
+                                                    FlareGuardV2Decision.NoOpSafetyFallback,
+                                                ) -> FeatureExecutionOutcome.NoOp
+                                            flareGuardResult!!.algorithmDecision ==
+                                                FlareGuardV2Decision.ModelRejectedByQuality ->
+                                                FeatureExecutionOutcome.QualityRejected
+                                            else -> FeatureExecutionOutcome.Applied
+                                        },
+                                    fallbackReason =
+                                        flareGuardResult!!.fallbackReason?.toString(),
+                                    stageContract =
+                                        if (flareGuardResult!!.algorithmDecision != null) {
+                                            AlgorithmContracts.FLARE_V2
+                                        } else {
+                                            AlgorithmContracts.FLARE_V1
+                                        },
+                                    timestampMillis = System.currentTimeMillis(),
+                                ),
+                            nativeRenderContract = checkNotNull(renderSuccess).algorithmVersion,
                         )
                     }
                     flareGuardBitmap = null
@@ -4784,7 +4885,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             storedRequestedRoute = storedRequestedRoute,
                             exactRoute = storedRoute,
                             storedDecision = storedDecision,
-                            storedAlgorithmVersion = manifest.algorithmVersion,
+                            storedAlgorithmVersion =
+                                manifest.algorithmContracts.nativeVersionForMetadataRestore(
+                                    manifest.algorithmVersion
+                                ),
                             storedParticipation = manifest.renderParticipation,
                             diagnostics = restoreTracker,
                         )
@@ -4856,6 +4960,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     selectionPaintSettings = manifest.selectionPaintSettings,
                     showSelectionOverlay = manifest.showSelectionOverlay,
                     activeQuickEffects = manifest.activeQuickEffects,
+                    algorithmContracts =
+                        manifest.algorithmContracts.copy(
+                            nativeRenderContract =
+                                checkNotNull(restoreRenderSuccess).algorithmVersion,
+                            migratedFromLegacy =
+                                checkNotNull(restoreRenderSuccess)
+                                    .migratedFromAlgorithmVersion,
+                        ),
+                    baseProvenance = manifest.baseProvenance,
                     viewport = ViewportState(),
                     flareGuardRuntimeStatus = null,
                     revision = nextRevision,
@@ -5395,6 +5508,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         else snapshot.showSelectionOverlay,
                     activeQuickEffects = snapshot.activeQuickEffects,
                     flareGuardRuntimeStatus = snapshot.flareGuardRuntimeStatus,
+                    algorithmContracts = snapshot.algorithmContracts,
+                    baseProvenance = snapshot.baseProvenance,
                     isBusy = false,
                     revision = it.revision + 1,
                     message = message,
@@ -5502,7 +5617,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             storedRequestedRoute = snapshot.requestedRoute,
                             exactRoute = storedRoute,
                             storedDecision = snapshot.renderDecision,
-                            storedAlgorithmVersion = snapshot.algorithmVersion,
+                            storedAlgorithmVersion =
+                                snapshot.algorithmContracts.nativeVersionForMetadataRestore(
+                                    snapshot.algorithmVersion
+                                ),
                             storedParticipation = snapshot.renderParticipation,
                             fallbackPolicy = FallbackPolicy.NoFallback,
                             diagnostics = diagnostics,
@@ -5541,6 +5659,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 renderDecision = success.decision,
                 renderParticipation = success.participation,
                 algorithmVersion = success.algorithmVersion,
+                algorithmContracts =
+                    snapshot.algorithmContracts.copy(
+                        nativeRenderContract = success.algorithmVersion,
+                        migratedFromLegacy = success.migratedFromAlgorithmVersion,
+                    ),
                 previewBitmap = rendered,
                 resourcesReleased = false,
             ).also {
@@ -5755,6 +5878,9 @@ internal data class EditorHistorySnapshot(
     val activeQuickEffects: List<ActiveQuickEffect>,
     val flareGuardRuntimeStatus: String?,
     val storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
+    val algorithmContracts: AlgorithmContractSet =
+        AlgorithmContractSet.fromLegacy(algorithmVersion),
+    val baseProvenance: BaseProvenanceChain = BaseProvenanceChain(),
     var resourcesReleased: Boolean = false,
     var coordinatorGeneration: String? = null,
     private var localDiagnostics: HistorySnapshotDiagnostics? = null,
@@ -5900,6 +6026,8 @@ private fun EditorUiState.toHistorySnapshot(
             activeQuickEffects = activeQuickEffects,
             flareGuardRuntimeStatus = flareGuardRuntimeStatus,
             storage = storage,
+            algorithmContracts = algorithmContracts,
+            baseProvenance = baseProvenance,
         )
     }
     var previewCopy: Bitmap? = null
@@ -5950,6 +6078,8 @@ private fun EditorUiState.toHistorySnapshot(
             activeQuickEffects = activeQuickEffects,
             flareGuardRuntimeStatus = flareGuardRuntimeStatus,
             storage = storage,
+            algorithmContracts = algorithmContracts,
+            baseProvenance = baseProvenance,
         )
     } catch (t: Throwable) {
         previewCopy?.takeIf { it !== originalCopy && !it.isRecycled }?.recycle()
@@ -7191,6 +7321,8 @@ private data class DraftSaveResult(
     val compatibilitySourceChanged: Boolean = false,
     val previousDraftPath: String? = null,
     val originalSourcePath: String? = null,
+    val algorithmContracts: AlgorithmContractSet = AlgorithmContractSet(),
+    val baseProvenance: BaseProvenanceChain = BaseProvenanceChain(),
 )
 
 private class DraftPreferencesSnapshot(private val values: Map<String, *>) {
@@ -7282,6 +7414,8 @@ private data class DraftSavePayload(
     val toneEngine: ToneEngine = ToneEngine.HistogramAuto,
     val hazeEngine: DehazeEngine = DehazeEngine.FastContrast,
     val originalSourcePath: String? = null,
+    val algorithmContracts: AlgorithmContractSet = AlgorithmContractSet(),
+    val baseProvenance: BaseProvenanceChain = BaseProvenanceChain(),
 )
 
 private data class DraftSourceResult(val file: File, val changed: Boolean)
@@ -7349,6 +7483,8 @@ private fun createDraftSavePayload(
             toneEngine = state.toneEngine,
             hazeEngine = state.hazeEngine,
             originalSourcePath = state.sourcePath,
+            algorithmContracts = state.algorithmContracts,
+            baseProvenance = state.baseProvenance,
         )
     } catch (t: Throwable) {
         owned.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
@@ -7594,6 +7730,8 @@ private fun persistDraftGenerationInternal(
                 showSelectionOverlay = payload.showSelectionOverlay,
                 algorithmVersion = payload.correctionEngineState?.algorithmVersion,
                 renderParticipation = payload.correctionEngineState?.participation,
+                algorithmContracts = payload.algorithmContracts,
+                baseProvenance = payload.baseProvenance,
             )
         if (
             !writeDraftGeneration(
@@ -8133,7 +8271,7 @@ internal const val DRAFT_MANIFEST_FILE_NAME = "manifest.json"
 internal const val DRAFT_GENERATION_DIR_PREFIX = "gen_"
 internal const val DRAFT_GENERATION_STAGING_PREFIX = ".staging_"
 internal const val PREF_NAME_DRAFT = "kepler_studio_editor"
-internal const val DRAFT_FORMAT_VERSION = 3
+internal const val DRAFT_FORMAT_VERSION = 4
 internal val IMPLEMENTED_NOISE_ENGINES =
     listOf(NoiseEngine.FastEdgeAware, NoiseEngine.GuidedFilter, NoiseEngine.NonLocalMeansLite)
 internal val IMPLEMENTED_DETAIL_ENGINES = listOf(DetailEngine.MaskedUnsharp)

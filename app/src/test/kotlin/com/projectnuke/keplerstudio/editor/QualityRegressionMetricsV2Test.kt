@@ -6,21 +6,20 @@ import kotlin.test.assertTrue
 
 class QualityRegressionMetricsV2Test {
     @Test
-    fun comparisonStoreAccountsAndReleasesBoundedRetainedBytes() {
-        val artifact =
-            QualityRegressionMetricsV2.debugArtifact(
-                fixtureVersion = "retained-memory",
-                baseline = IntArray(16),
-                experimental = IntArray(16) { it },
-                width = 4,
-                height = 4,
-            )
+    fun retainedMemoryLedgerIsAdditiveAndDoesNotDoubleCountJavaHeap() {
+        RetainedMemoryLedger.resetForTest()
+        val comparison = RetainedMemoryLedger.reserve("comparison-test")
+        val history = RetainedMemoryLedger.reserve("history-test")
+        comparison.replace(RetainedMemoryCategory.JavaHeapObservable, 4_096L)
+        comparison.replace(RetainedMemoryCategory.NativeBitmap, 8_192L)
+        history.replace(RetainedMemoryCategory.NativeOrOpaqueRuntime, 16_384L)
 
-        ExperimentalComparisonStore.publishDebug(artifact)
-        assertEquals(artifact.retainedBytes, BitmapMemoryBudget.externalRetainedBytes())
+        assertEquals(24_576L, BitmapMemoryBudget.retainedMemorySnapshot().admissionBytes)
 
-        ExperimentalComparisonStore.clear()
-        assertEquals(0L, BitmapMemoryBudget.externalRetainedBytes())
+        comparison.close()
+        assertEquals(16_384L, BitmapMemoryBudget.retainedMemorySnapshot().admissionBytes)
+        history.close()
+        assertEquals(0L, BitmapMemoryBudget.retainedMemorySnapshot().admissionBytes)
     }
 
     @Test

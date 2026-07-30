@@ -6,9 +6,83 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import kotlin.math.max
 import kotlin.math.min
-import java.util.concurrent.atomic.AtomicLong
 
-private val externallyRetainedBytes = AtomicLong(0L)
+internal enum class RetainedMemoryCategory(val subtractFromRuntimeHeap: Boolean) {
+    /** Runtime.freeMemory already reflects these objects. */
+    JavaHeapObservable(false),
+    /** Bitmap pixels and other allocations not reliably represented by Runtime heap. */
+    NativeBitmap(true),
+    NativeOrOpaqueRuntime(true),
+    FileBacked(false),
+}
+
+internal data class RetainedMemorySnapshot(
+    val byOwner: Map<String, Map<RetainedMemoryCategory, Long>>,
+) {
+    val admissionBytes: Long
+        get() =
+            byOwner.values.sumOf { categories ->
+                categories.entries
+                    .filter { it.key.subtractFromRuntimeHeap }
+                    .sumOf(Map.Entry<RetainedMemoryCategory, Long>::value)
+            }
+}
+
+internal class RetainedMemoryReservation internal constructor(
+    private val owner: String,
+) : AutoCloseable {
+    @Volatile
+    private var closed = false
+
+    fun replace(category: RetainedMemoryCategory, bytes: Long) {
+        check(!closed) { "retained-memory reservation is closed" }
+        RetainedMemoryLedger.replace(owner, category, bytes)
+    }
+
+    override fun close() {
+        if (closed) return
+        closed = true
+        RetainedMemoryLedger.release(owner)
+    }
+}
+
+internal object RetainedMemoryLedger {
+    private val lock = Any()
+    private val retained = LinkedHashMap<String, MutableMap<RetainedMemoryCategory, Long>>()
+
+    fun reserve(owner: String): RetainedMemoryReservation {
+        require(owner.isNotBlank())
+        synchronized(lock) {
+            check(owner !in retained) { "retained-memory owner already exists: $owner" }
+            retained[owner] = linkedMapOf()
+        }
+        return RetainedMemoryReservation(owner)
+    }
+
+    internal fun replace(owner: String, category: RetainedMemoryCategory, bytes: Long) {
+        synchronized(lock) {
+            val categories = checkNotNull(retained[owner]) {
+                "unknown retained-memory owner: $owner"
+            }
+            if (bytes <= 0L) categories.remove(category) else categories[category] = bytes
+        }
+    }
+
+    internal fun release(owner: String) {
+        synchronized(lock) { retained.remove(owner) }
+    }
+
+    fun snapshot(): RetainedMemorySnapshot =
+        synchronized(lock) {
+            RetainedMemorySnapshot(
+                retained.mapValues { (_, categories) -> categories.toMap() }
+            )
+        }
+
+    internal fun resetForTest() {
+        synchronized(lock) { retained.clear() }
+    }
+}
 
 /** Conservative JVM Bitmap allocation guard; native stages remain whole-image by design. */
 internal object BitmapMemoryBudget {
@@ -66,17 +140,14 @@ internal object BitmapMemoryBudget {
     fun canAllocate(requiredBytes: Long): Boolean {
         if (requiredBytes <= 0L) return true
         val availableAfterRetained =
-            (availableBytes() - externallyRetainedBytes.get()).coerceAtLeast(0L)
+            (availableBytes() - RetainedMemoryLedger.snapshot().admissionBytes)
+                .coerceAtLeast(0L)
         return requiredBytes <=
             saturatingMultiply(availableAfterRetained, HEADROOM_NUMERATOR) /
                 HEADROOM_DENOMINATOR
     }
 
-    fun setExternalRetainedBytes(bytes: Long) {
-        externallyRetainedBytes.set(bytes.coerceAtLeast(0L))
-    }
-
-    fun externalRetainedBytes(): Long = externallyRetainedBytes.get()
+    fun retainedMemorySnapshot(): RetainedMemorySnapshot = RetainedMemoryLedger.snapshot()
 
     fun operationReserveBytes(): Long = min(profile.maxHeapBytes / 2L, max(96L * MIB, profile.maxHeapBytes / 3L))
 

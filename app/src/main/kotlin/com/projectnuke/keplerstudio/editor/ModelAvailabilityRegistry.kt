@@ -1,16 +1,13 @@
 package com.projectnuke.keplerstudio.editor
 
 import android.content.Context
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
-enum class ModelFeature {
-    FlareGuard,
-    Remaster,
-    SubjectSelection,
-}
+enum class ModelFeature { FlareGuard, Remaster, SubjectSelection }
 
 enum class ModelCapabilityPhase {
     Unknown,
@@ -27,6 +24,8 @@ enum class ModelCapabilityPhase {
     Unloaded,
 }
 
+enum class ModelCapabilityPublisher { Probe, Loader, Session, Inference, Test }
+
 data class ModelCapabilityFailure(
     val phase: ModelCapabilityPhase,
     val detail: String?,
@@ -40,9 +39,22 @@ data class ModelCapabilityState(
     val contractSupported: Boolean? = null,
     val runnerImplemented: Boolean? = null,
     val lastFailure: ModelCapabilityFailure? = null,
+    val probeGeneration: Long = 0L,
+    val loadGeneration: Long = 0L,
+    val sessionGeneration: Long = 0L,
+    val observationSequence: Long = 0L,
+    val publisher: ModelCapabilityPublisher? = null,
 ) {
+    val factsLoadable: Boolean
+        get() =
+            assetPresent == true && assetValid == true && runtimeAvailable == true &&
+                contractSupported == true && runnerImplemented == true
+
     val executable: Boolean
-        get() = phase == ModelCapabilityPhase.Loadable || phase == ModelCapabilityPhase.Ready
+        get() =
+            phase == ModelCapabilityPhase.Loadable ||
+                phase == ModelCapabilityPhase.Ready ||
+                (phase == ModelCapabilityPhase.Unloaded && factsLoadable)
 
     val statusLabel: String
         get() =
@@ -74,11 +86,122 @@ data class ModelCapabilitySnapshot(
         )
 }
 
-/**
- * One concurrency-safe capability source for production routing and debug UI.
- * Edge Masker observations update both dependent features in one atomic transition.
- */
+internal data class ModelCapabilityObservation(
+    val publisher: ModelCapabilityPublisher,
+    val generation: Long,
+    val phase: ModelCapabilityPhase,
+    val assetPresent: Boolean? = null,
+    val assetValid: Boolean? = null,
+    val runtimeAvailable: Boolean? = null,
+    val contractSupported: Boolean? = null,
+    val runnerImplemented: Boolean? = null,
+    val failure: ModelCapabilityFailure? = null,
+)
+
+internal fun reduceModelCapability(
+    current: ModelCapabilityState,
+    observation: ModelCapabilityObservation,
+    sequence: Long,
+): ModelCapabilityState {
+    val generationIsStale =
+        when (observation.publisher) {
+            ModelCapabilityPublisher.Probe ->
+                observation.generation < current.probeGeneration
+            ModelCapabilityPublisher.Loader ->
+                observation.generation < current.loadGeneration
+            ModelCapabilityPublisher.Session,
+            ModelCapabilityPublisher.Inference ->
+                observation.generation < current.sessionGeneration
+            ModelCapabilityPublisher.Test -> false
+        }
+    if (generationIsStale) return current
+
+    fun Boolean?.merge(old: Boolean?): Boolean? = this ?: old
+    val merged =
+        current.copy(
+            assetPresent = observation.assetPresent.merge(current.assetPresent),
+            assetValid = observation.assetValid.merge(current.assetValid),
+            runtimeAvailable = observation.runtimeAvailable.merge(current.runtimeAvailable),
+            contractSupported =
+                observation.contractSupported.merge(current.contractSupported),
+            runnerImplemented =
+                observation.runnerImplemented.merge(current.runnerImplemented),
+            lastFailure = observation.failure ?: current.lastFailure,
+            probeGeneration =
+                if (observation.publisher == ModelCapabilityPublisher.Probe) {
+                    observation.generation
+                } else {
+                    current.probeGeneration
+                },
+            loadGeneration =
+                if (observation.publisher == ModelCapabilityPublisher.Loader) {
+                    observation.generation
+                } else {
+                    current.loadGeneration
+                },
+            sessionGeneration =
+                if (
+                    observation.publisher == ModelCapabilityPublisher.Session ||
+                        observation.publisher == ModelCapabilityPublisher.Inference
+                ) {
+                    observation.generation
+                } else {
+                    current.sessionGeneration
+                },
+            observationSequence = sequence,
+            publisher = observation.publisher,
+        )
+
+    val protectedActiveSession =
+        observation.publisher == ModelCapabilityPublisher.Probe &&
+            (current.phase == ModelCapabilityPhase.Ready ||
+                current.phase == ModelCapabilityPhase.Loading) &&
+            current.sessionGeneration > 0L
+    if (protectedActiveSession) return merged.copy(phase = current.phase)
+
+    val settledPhase =
+        when {
+            observation.publisher == ModelCapabilityPublisher.Session &&
+                observation.phase == ModelCapabilityPhase.Unloaded ->
+                if (merged.factsLoadable) ModelCapabilityPhase.Loadable
+                else if (
+                    current.phase in
+                        setOf(
+                            ModelCapabilityPhase.AssetMissing,
+                            ModelCapabilityPhase.AssetInvalid,
+                            ModelCapabilityPhase.RuntimeUnavailable,
+                            ModelCapabilityPhase.ContractUnsupported,
+                            ModelCapabilityPhase.RunnerUnavailable,
+                        )
+                ) {
+                    current.phase
+                } else {
+                    ModelCapabilityPhase.Unloaded
+                }
+            observation.phase == ModelCapabilityPhase.Failed &&
+                merged.factsLoadable -> ModelCapabilityPhase.Failed
+            else -> observation.phase
+        }
+    return merged.copy(
+        phase = settledPhase,
+        lastFailure =
+            if (
+                settledPhase == ModelCapabilityPhase.Ready ||
+                    settledPhase == ModelCapabilityPhase.Loadable
+            ) {
+                null
+            } else {
+                merged.lastFailure
+            },
+    )
+}
+
 object ModelAvailabilityRegistry {
+    private val sequence = AtomicLong()
+    private val probeGeneration = AtomicLong()
+    private val loadGeneration = AtomicLong()
+    private val sessionGeneration = AtomicLong()
+
     private fun emptyState() =
         ModelFeature.entries.associateWith { ModelCapabilityState() }
 
@@ -86,222 +209,332 @@ object ModelAvailabilityRegistry {
     val state: StateFlow<Map<ModelFeature, ModelCapabilityState>> = mutable.asStateFlow()
 
     fun snapshot(): ModelCapabilitySnapshot = ModelCapabilitySnapshot(mutable.value)
-
-    fun reportPhase(feature: ModelFeature, state: ModelCapabilityState) {
-        mutable.update { current -> current + (feature to state) }
-    }
-
-    fun reportLoad(feature: ModelFeature, result: ModelLoadResult<*>) {
-        reportPhase(feature, capabilityFrom(result))
-    }
-
-    fun reportEdgeLoad(result: ModelLoadResult<*>) {
-        val capability = capabilityFrom(result)
-        mutable.update { current ->
-            current +
-                mapOf(
-                    ModelFeature.Remaster to capability,
-                    ModelFeature.SubjectSelection to capability,
-                )
-        }
-    }
-
-    /**
-     * Compatibility for current session publishers. `false` is a failed/unloaded
-     * observation, never evidence that the asset itself is absent.
-     */
-    fun reportEdgeSession(ready: Boolean, failure: String? = null) {
-        val capability =
-            if (ready) {
-                ModelCapabilityState(
-                    phase = ModelCapabilityPhase.Ready,
-                    assetPresent = true,
-                    assetValid = true,
-                    runtimeAvailable = true,
-                    contractSupported = true,
-                    runnerImplemented = true,
-                )
-            } else {
-                ModelCapabilityState(
-                    phase =
-                        if (failure == null) ModelCapabilityPhase.Unloaded
-                        else ModelCapabilityPhase.Failed,
-                    lastFailure =
-                        failure?.let {
-                            ModelCapabilityFailure(ModelCapabilityPhase.Failed, it)
-                        },
-                )
-            }
-        mutable.update { current ->
-            current +
-                mapOf(
-                    ModelFeature.Remaster to capability,
-                    ModelFeature.SubjectSelection to capability,
-                )
-        }
-    }
-
     fun routeAvailability(): RouteModelAvailability = snapshot().routeAvailability()
 
-    /**
-     * Validates packaged assets and lightweight runtime contracts without creating
-     * or retaining an inference session.
-     */
-    fun probePackagedCapabilities(context: Context) {
-        reportPhase(
+    fun beginProbe(): Long = probeGeneration.incrementAndGet().also { generation ->
+        applyToFeatures(
+            ModelFeature.entries,
+            ModelCapabilityObservation(
+                ModelCapabilityPublisher.Probe,
+                generation,
+                ModelCapabilityPhase.Probing,
+            ),
+        )
+    }
+
+    fun probePackagedCapabilities(context: Context, generation: Long = beginProbe()) {
+        apply(
             ModelFeature.FlareGuard,
             probeAsset(
-                context = context,
-                manifestId = "flare_masker",
-                runtimeClass = "org.tensorflow.lite.InterpreterApi",
+                context,
+                generation,
+                "flare_masker",
+                "org.tensorflow.lite.InterpreterApi",
             ),
         )
         val edge =
             probeAsset(
-                context = context,
-                manifestId = "edge_masker",
-                runtimeClass =
-                    "com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter",
+                context,
+                generation,
+                "edge_masker",
+                "com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter",
             )
-        mutable.update { current ->
-            current +
-                mapOf(
-                    ModelFeature.Remaster to edge,
-                    ModelFeature.SubjectSelection to edge,
-                )
+        applyToFeatures(listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection), edge)
+    }
+
+    fun reportLoading(feature: ModelFeature): Long =
+        loadGeneration.incrementAndGet().also { generation ->
+            apply(
+                feature,
+                ModelCapabilityObservation(
+                    ModelCapabilityPublisher.Loader,
+                    generation,
+                    ModelCapabilityPhase.Loading,
+                ),
+            )
         }
+
+    fun reportEdgeLoading(): Long =
+        loadGeneration.incrementAndGet().also { generation ->
+            applyToFeatures(
+                listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection),
+                ModelCapabilityObservation(
+                    ModelCapabilityPublisher.Loader,
+                    generation,
+                    ModelCapabilityPhase.Loading,
+                ),
+            )
+        }
+
+    fun reportLoad(
+        feature: ModelFeature,
+        result: ModelLoadResult<*>,
+        generation: Long = loadGeneration.incrementAndGet(),
+    ) {
+        apply(feature, observationFromLoad(result, generation))
     }
 
-    internal fun resetForTest() {
-        mutable.value = emptyState()
+    fun reportEdgeLoad(
+        result: ModelLoadResult<*>,
+        generation: Long = loadGeneration.incrementAndGet(),
+    ) {
+        applyToFeatures(
+            listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection),
+            observationFromLoad(result, generation),
+        )
     }
 
-    private fun capabilityFrom(result: ModelLoadResult<*>): ModelCapabilityState =
-        when (result) {
-            is ModelLoadResult.Ready ->
-                ModelCapabilityState(
-                    phase = ModelCapabilityPhase.Ready,
+    fun reportSessionReady(features: Collection<ModelFeature>): Long =
+        sessionGeneration.incrementAndGet().also { generation ->
+            applyToFeatures(
+                features,
+                ModelCapabilityObservation(
+                    ModelCapabilityPublisher.Session,
+                    generation,
+                    ModelCapabilityPhase.Ready,
                     assetPresent = true,
                     assetValid = true,
                     runtimeAvailable = true,
                     contractSupported = true,
                     runnerImplemented = true,
+                ),
+            )
+        }
+
+    fun reportSessionClosed(features: Collection<ModelFeature>, generation: Long) {
+        applyToFeatures(
+            features,
+            ModelCapabilityObservation(
+                ModelCapabilityPublisher.Session,
+                generation,
+                ModelCapabilityPhase.Unloaded,
+            ),
+        )
+    }
+
+    fun reportEdgeUnloaded() {
+        val generation = sessionGeneration.incrementAndGet()
+        applyToFeatures(
+            listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection),
+            ModelCapabilityObservation(
+                ModelCapabilityPublisher.Session,
+                generation,
+                ModelCapabilityPhase.Unloaded,
+            ),
+        )
+    }
+
+    internal fun applyForTest(feature: ModelFeature, observation: ModelCapabilityObservation) {
+        apply(feature, observation)
+    }
+
+    internal fun resetForTest() {
+        sequence.set(0L)
+        probeGeneration.set(0L)
+        loadGeneration.set(0L)
+        sessionGeneration.set(0L)
+        mutable.value = emptyState()
+    }
+
+    private fun apply(feature: ModelFeature, observation: ModelCapabilityObservation) {
+        val nextSequence = sequence.incrementAndGet()
+        mutable.update { current ->
+            current +
+                (feature to
+                    reduceModelCapability(
+                        current.getValue(feature),
+                        observation,
+                        nextSequence,
+                    ))
+        }
+    }
+
+    private fun applyToFeatures(
+        features: Collection<ModelFeature>,
+        observation: ModelCapabilityObservation,
+    ) {
+        val nextSequence = sequence.incrementAndGet()
+        mutable.update { current ->
+            current.mapValues { (feature, state) ->
+                if (feature in features) {
+                    reduceModelCapability(state, observation, nextSequence)
+                } else {
+                    state
+                }
+            }
+        }
+    }
+
+    private fun observationFromLoad(
+        result: ModelLoadResult<*>,
+        generation: Long,
+    ): ModelCapabilityObservation =
+        when (result) {
+            is ModelLoadResult.Ready ->
+                ModelCapabilityObservation(
+                    ModelCapabilityPublisher.Loader,
+                    generation,
+                    ModelCapabilityPhase.Loadable,
+                    true,
+                    true,
+                    true,
+                    true,
+                    true,
                 )
             is ModelLoadResult.AssetMissing ->
-                failedCapability(ModelCapabilityPhase.AssetMissing, result.detail)
+                failedObservation(
+                    generation,
+                    ModelCapabilityPhase.AssetMissing,
+                    result.detail,
+                    assetPresent = false,
+                )
             is ModelLoadResult.AssetInvalid ->
-                failedCapability(
+                failedObservation(
+                    generation,
                     ModelCapabilityPhase.AssetInvalid,
                     result.detail,
                     assetPresent = true,
+                    assetValid = false,
                 )
             is ModelLoadResult.UnsupportedContract ->
-                failedCapability(
+                failedObservation(
+                    generation,
                     ModelCapabilityPhase.ContractUnsupported,
                     result.detail,
-                    assetPresent = true,
-                    assetValid = true,
-                    runtimeAvailable = true,
+                    true,
+                    true,
+                    true,
                     runnerImplemented = true,
                 )
             is ModelLoadResult.RuntimeUnavailable ->
-                failedCapability(
+                failedObservation(
+                    generation,
                     ModelCapabilityPhase.RuntimeUnavailable,
                     result.detail,
-                    assetPresent = true,
-                    assetValid = true,
+                    true,
+                    true,
                     contractSupported = true,
                     runnerImplemented = true,
                 )
             is ModelLoadResult.LoadFailed ->
-                failedCapability(
+                failedObservation(
+                    generation,
                     ModelCapabilityPhase.Failed,
                     result.detail,
-                    assetPresent = true,
-                    assetValid = true,
-                    runtimeAvailable = true,
-                    contractSupported = true,
                     runnerImplemented = true,
                 )
         }
 
+    private fun failedObservation(
+        generation: Long,
+        phase: ModelCapabilityPhase,
+        detail: String?,
+        assetPresent: Boolean? = null,
+        assetValid: Boolean? = null,
+        runtimeAvailable: Boolean? = null,
+        contractSupported: Boolean? = null,
+        runnerImplemented: Boolean? = null,
+    ) = ModelCapabilityObservation(
+        ModelCapabilityPublisher.Loader,
+        generation,
+        phase,
+        assetPresent,
+        assetValid,
+        runtimeAvailable,
+        contractSupported,
+        runnerImplemented,
+        ModelCapabilityFailure(phase, detail),
+    )
+
     private fun probeAsset(
         context: Context,
+        generation: Long,
         manifestId: String,
         runtimeClass: String,
-    ): ModelCapabilityState {
+    ): ModelCapabilityObservation {
         val manifest =
             ModelAssetManifest.byId(manifestId)
-                ?: return failedCapability(
+                ?: return probeFailure(
+                    generation,
                     ModelCapabilityPhase.AssetMissing,
                     "manifest entry missing",
+                    assetPresent = false,
+                    runnerImplemented = false,
                 )
         if (manifest.asset.requiredContractSchemaVersion !=
             ModelAssetManifest.CONTRACT_SCHEMA_VERSION
         ) {
-            return failedCapability(
+            return probeFailure(
+                generation,
                 ModelCapabilityPhase.ContractUnsupported,
                 "contract schema is unsupported",
-                assetPresent = null,
-                assetValid = null,
+                contractSupported = false,
             )
         }
-        val validation =
-            ModelAssetValidator.validate(manifest) { path ->
-                runCatching { context.assets.open(path) }.getOrNull()
-            }
-        when (validation) {
+        when (
+            val validation =
+                ModelAssetValidator.validate(manifest) { path ->
+                    runCatching { context.assets.open(path) }.getOrNull()
+                }
+        ) {
             ModelAssetValidation.Missing ->
-                return failedCapability(
+                return probeFailure(
+                    generation,
                     ModelCapabilityPhase.AssetMissing,
                     "packaged asset missing",
+                    assetPresent = false,
                 )
             is ModelAssetValidation.Invalid ->
-                return failedCapability(
+                return probeFailure(
+                    generation,
                     ModelCapabilityPhase.AssetInvalid,
                     validation.detail,
                     assetPresent = true,
+                    assetValid = false,
                 )
             is ModelAssetValidation.Valid -> Unit
         }
-        val runtimeAvailable =
-            runCatching { Class.forName(runtimeClass, false, context.classLoader) }.isSuccess
-        if (!runtimeAvailable) {
-            return failedCapability(
+        if (runCatching { Class.forName(runtimeClass, false, context.classLoader) }.isFailure) {
+            return probeFailure(
+                generation,
                 ModelCapabilityPhase.RuntimeUnavailable,
                 "required runtime is unavailable",
-                assetPresent = true,
-                assetValid = true,
+                true,
+                true,
                 contractSupported = true,
                 runnerImplemented = true,
             )
         }
-        return ModelCapabilityState(
-            phase = ModelCapabilityPhase.Loadable,
-            assetPresent = true,
-            assetValid = true,
-            runtimeAvailable = true,
-            contractSupported = true,
-            runnerImplemented = true,
+        return ModelCapabilityObservation(
+            ModelCapabilityPublisher.Probe,
+            generation,
+            ModelCapabilityPhase.Loadable,
+            true,
+            true,
+            true,
+            true,
+            true,
         )
-
     }
 
-    private fun failedCapability(
+    private fun probeFailure(
+        generation: Long,
         phase: ModelCapabilityPhase,
-        detail: String?,
-        assetPresent: Boolean? = false,
-        assetValid: Boolean? = false,
-        runtimeAvailable: Boolean? = false,
-        contractSupported: Boolean? = false,
+        detail: String,
+        assetPresent: Boolean? = null,
+        assetValid: Boolean? = null,
+        runtimeAvailable: Boolean? = null,
+        contractSupported: Boolean? = null,
         runnerImplemented: Boolean? = true,
-    ) = ModelCapabilityState(
-        phase = phase,
-        assetPresent = assetPresent,
-        assetValid = assetValid,
-        runtimeAvailable = runtimeAvailable,
-        contractSupported = contractSupported,
-        runnerImplemented = runnerImplemented,
-        lastFailure = ModelCapabilityFailure(phase, detail),
+    ) = ModelCapabilityObservation(
+        ModelCapabilityPublisher.Probe,
+        generation,
+        phase,
+        assetPresent,
+        assetValid,
+        runtimeAvailable,
+        contractSupported,
+        runnerImplemented,
+        ModelCapabilityFailure(phase, detail),
     )
 }

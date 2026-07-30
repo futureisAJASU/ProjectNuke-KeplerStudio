@@ -3,6 +3,9 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.AlgorithmContracts
+import com.projectnuke.keplerstudio.editor.BakedFeatureProvenance
+import com.projectnuke.keplerstudio.editor.BakedFeatureType
 import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
@@ -13,11 +16,13 @@ import com.projectnuke.keplerstudio.editor.RenderFailedException
 import com.projectnuke.keplerstudio.editor.RenderOperation
 import com.projectnuke.keplerstudio.editor.RenderParticipation
 import com.projectnuke.keplerstudio.editor.RenderResult
+import com.projectnuke.keplerstudio.editor.FeatureExecutionOutcome
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.successOrThrow
 import com.projectnuke.keplerstudio.editor.withFailedRender
 import com.projectnuke.keplerstudio.editor.withSuccessfulRender
+import com.projectnuke.keplerstudio.editor.withBakedFeatureProvenance
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -108,10 +113,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                                 params = params,
                             )
                         ).successOrThrow().let { success ->
-                            success.copy(
-                                algorithmVersion = "${success.algorithmVersion}+flare-native-rule",
-                                participation = RenderParticipation(rule = true),
-                            )
+                            success.copy(participation = RenderParticipation(rule = true))
                         }
                     }
                 ownedPreview = checkNotNull(previewSuccess).output
@@ -137,6 +139,23 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                                 ),
                             message = "규칙 기반 보정으로 번짐을 완화했습니다.",
                             flareGuardRuntimeStatus = "규칙 기반 보정으로 번짐을 완화했습니다.",
+                        ).withBakedFeatureProvenance(
+                            provenance =
+                                BakedFeatureProvenance(
+                                    feature = BakedFeatureType.FlareGuard,
+                                    operationId = operationToken.toString(),
+                                    sequence =
+                                        (it.baseProvenance.operations.lastOrNull()?.sequence ?: 0L) +
+                                            1L,
+                                    requestedRoute = "V1Rule",
+                                    actualRoute = "V1Rule",
+                                    participation = RenderParticipation(rule = true),
+                                    capabilityPhase = null,
+                                    outcome = FeatureExecutionOutcome.Applied,
+                                    stageContract = AlgorithmContracts.FLARE_V1,
+                                    timestampMillis = System.currentTimeMillis(),
+                                ),
+                            nativeRenderContract = checkNotNull(previewSuccess).algorithmVersion,
                         )
                     }
                     settleAdoptedEditHistory(undoSnapshotOwned)

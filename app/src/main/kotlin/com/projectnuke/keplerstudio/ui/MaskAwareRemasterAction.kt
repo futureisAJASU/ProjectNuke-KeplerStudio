@@ -3,6 +3,9 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.AlgorithmContracts
+import com.projectnuke.keplerstudio.editor.BakedFeatureProvenance
+import com.projectnuke.keplerstudio.editor.BakedFeatureType
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
@@ -12,6 +15,8 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.FeatureExecutionOutcome
+import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelRunResult
@@ -31,6 +36,7 @@ import com.projectnuke.keplerstudio.editor.renderExperimentalRemasterV2
 import com.projectnuke.keplerstudio.editor.successOrThrow
 import com.projectnuke.keplerstudio.editor.withFailedRender
 import com.projectnuke.keplerstudio.editor.withSuccessfulRender
+import com.projectnuke.keplerstudio.editor.withBakedFeatureProvenance
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -46,12 +52,12 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     val stateAtEntry = uiState.value
     val documentEngine = stateAtEntry.correctionEngineState.documentEngine
     val remasterOverride = ExperimentalLabController.debugOverrides().remaster
-    val modelLoaded =
-        RemasterModelSession.activeModel?.id == "edge_masker" &&
-            RemasterModelSession.isModelLoaded
-    ModelAvailabilityRegistry.reportEdgeSession(modelLoaded)
+    val modelCapability =
+        ModelAvailabilityRegistry.state.value[ModelFeature.Remaster]
     val remasterResolution = RouteResolver.resolveRemasterRoute(
-        documentEngine, remasterOverride, modelAvailable = modelLoaded,
+        documentEngine,
+        remasterOverride,
+        modelAvailable = modelCapability?.executable == true,
     )
     val remasterAlgorithm = remasterResolution.actualRoute
     val useModel =
@@ -70,7 +76,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         } else {
             null
         }
-    if (useModel && !modelLoaded) {
+    if (useModel && modelCapability?.executable != true) {
         updateUiState { it.copy(message = "모델 보조 V2를 사용할 수 없습니다. 모델과 런타임 상태를 확인해 주세요.") }
         return
     }
@@ -165,6 +171,13 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     val createdBase = checkNotNull(ownedBaseOwned)
                     val maskResult =
                         if (useModel) {
+                            val loaded = RemasterModelSession.ensureEdgeLoaded(appContext())
+                            if (
+                                loaded !is
+                                    com.projectnuke.keplerstudio.editor.ModelLoadResult.Ready
+                            ) {
+                                error("Edge Masker load failed: ${loaded::class.java.simpleName}")
+                            }
                             RemasterModelSession.createForegroundMaskResult(
                                 createdBase,
                                 remasterTracker,
@@ -235,8 +248,6 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                             )
                         ).successOrThrow().let { success ->
                             success.copy(
-                                algorithmVersion =
-                                    "${success.algorithmVersion}+remaster-${remasterAlgorithm.name}",
                                 participation =
                                     RenderParticipation(
                                         model = useModel,
@@ -278,6 +289,39 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                                         checkNotNull(previewSuccess),
                                     ),
                                 message = "Edge Masker 기반 마스크 보정을 적용했습니다.",
+                            ).withBakedFeatureProvenance(
+                                provenance =
+                                    BakedFeatureProvenance(
+                                        feature = BakedFeatureType.Remaster,
+                                        operationId = operationToken.toString(),
+                                        sequence =
+                                            (it.baseProvenance.operations.lastOrNull()?.sequence
+                                                ?: 0L) + 1L,
+                                        requestedRoute = remasterResolution.requestedRoute.name,
+                                        actualRoute = remasterAlgorithm.name,
+                                        participation =
+                                            RenderParticipation(
+                                                model = useModel,
+                                                manual = !useModel,
+                                            ),
+                                        capabilityPhase =
+                                            ModelAvailabilityRegistry.state.value[
+                                                    ModelFeature.Remaster]
+                                                ?.phase,
+                                        outcome = FeatureExecutionOutcome.Applied,
+                                        stageContract =
+                                            if (
+                                                remasterAlgorithm == RemasterRoute.V1 ||
+                                                    remasterAlgorithm ==
+                                                        RemasterRoute.ForcedV1Fallback
+                                            ) {
+                                                AlgorithmContracts.REMASTER_V1
+                                            } else {
+                                                AlgorithmContracts.REMASTER_V2
+                                            },
+                                        timestampMillis = System.currentTimeMillis(),
+                                    ),
+                                nativeRenderContract = checkNotNull(previewSuccess).algorithmVersion,
                             )
                         }
                     } catch (t: Throwable) {

@@ -22,18 +22,14 @@ internal data class AlgorithmVersionResolution(
 )
 
 internal object PixelContractVersion {
-    const val V1 = "native-v1-contract-1"
-    const val V2 = "native-v2-contract-2"
+    const val V1 = AlgorithmContracts.NATIVE_V1
+    const val V2 = AlgorithmContracts.NATIVE_V2
 
     fun current(route: NativeRenderRoute): String =
         if (route == NativeRenderRoute.V2) V2 else V1
 
     fun normalizeHistorical(version: String?): String? =
-        when (version?.trim()?.takeIf(String::isNotEmpty)) {
-            "native-v1" -> V1
-            "native-v2" -> V2
-            else -> version?.trim()?.takeIf(String::isNotEmpty)
-        }
+        AlgorithmContractSet.fromLegacy(version).nativeRenderContract
 }
 
 internal fun resolveExecutedAlgorithmVersion(
@@ -41,10 +37,17 @@ internal fun resolveExecutedAlgorithmVersion(
     storedVersion: String?,
 ): AlgorithmVersionResolution {
     val current = PixelContractVersion.current(actualRoute)
-    val stored = PixelContractVersion.normalizeHistorical(storedVersion)
+    val storedSet = AlgorithmContractSet.fromLegacy(storedVersion)
+    val stored = storedSet.nativeRenderContract
     return AlgorithmVersionResolution(
         executedVersion = current,
-        migratedFromVersion = stored?.takeUnless { it == current },
+        migratedFromVersion =
+            storedVersion
+                ?.trim()
+                ?.takeIf(String::isNotEmpty)
+                ?.takeUnless {
+                    stored == current && storedSet.migratedFromLegacy == null
+                },
     )
 }
 

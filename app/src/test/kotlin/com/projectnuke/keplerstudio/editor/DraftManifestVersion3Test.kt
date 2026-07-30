@@ -22,6 +22,10 @@ class DraftManifestVersion3Test {
         assertEquals(PreviewResultClass.V1.name, parsed.previewResultClass)
         assertEquals(RenderRouteDecision.FollowDocument.name, parsed.renderDecision)
         assertEquals("native-v1", parsed.algorithmVersion)
+        assertEquals(
+            AlgorithmContracts.LEGACY_NATIVE_V1,
+            parsed.algorithmContracts.nativeRenderContract,
+        )
         assertEquals(0L, parsed.draftOperationEpoch)
         assertEquals(0, parsed.editorRevision)
     }
@@ -36,6 +40,7 @@ class DraftManifestVersion3Test {
         assertNull(parsed.previewRoute)
         assertNull(parsed.previewResultClass)
         assertNull(parsed.fallbackReason)
+        assertNull(parsed.algorithmContracts.nativeRenderContract)
     }
 
     @Test
@@ -50,10 +55,28 @@ class DraftManifestVersion3Test {
         assertEquals(RenderFallbackReason.V2RenderFailed.name, parsed.fallbackReason)
         assertEquals(RenderRouteDecision.RuntimeFallbackToV1.name, parsed.renderDecision)
         assertEquals(RenderParticipation(rule = true), parsed.renderParticipation)
+        assertEquals(
+            AlgorithmContracts.LEGACY_NATIVE_V1,
+            parsed.algorithmContracts.nativeRenderContract,
+        )
     }
 
     @Test
     fun currentManifestRoundTripsCompleteVisibleTruth() {
+        val provenance =
+            BakedFeatureProvenance(
+                feature = BakedFeatureType.FlareGuard,
+                operationId = "flare-1",
+                sequence = 1L,
+                requestedRoute = FlareGuardRoute.V2ModelAssisted.name,
+                actualRoute = FlareGuardRoute.V2Rule.name,
+                participation = RenderParticipation(rule = true),
+                capabilityPhase = ModelCapabilityPhase.AssetMissing,
+                outcome = FeatureExecutionOutcome.Fallback,
+                fallbackReason = "asset missing",
+                stageContract = AlgorithmContracts.FLARE_V2,
+                timestampMillis = 1700000000000L,
+            )
         val original =
             baselineManifest(
                 correctionEngine = CorrectionEngine.Engine2.name,
@@ -65,9 +88,19 @@ class DraftManifestVersion3Test {
                 renderDecision = RenderRouteDecision.RuntimeFallbackToV1.name,
                 algorithmVersion = "native-v1",
                 renderParticipation = RenderParticipation(rule = true),
+            ).copy(
+                algorithmContracts =
+                    AlgorithmContractSet(
+                        nativeRenderContract = AlgorithmContracts.NATIVE_V1,
+                        flareGuardContract = AlgorithmContracts.FLARE_V2,
+                    ),
+                baseProvenance = BaseProvenanceChain(listOf(provenance)),
             )
 
-        assertEquals(original, parseDraftGenerationManifest(original.toJson()))
+        val restored = checkNotNull(parseDraftGenerationManifest(original.toJson()))
+        assertEquals(original.toJson().toString(), restored.toJson().toString())
+        assertEquals(original.algorithmContracts, restored.algorithmContracts)
+        assertEquals(original.baseProvenance, restored.baseProvenance)
     }
 
     @Test
@@ -100,6 +133,27 @@ class DraftManifestVersion3Test {
 
         assertNull(parseDraftGenerationManifest(malformed))
         assertNull(parseDraftGenerationManifest(future))
+    }
+
+    @Test
+    fun futureStructuredContractSchemaCannotMasqueradeAsCurrent() {
+        val json =
+            JSONObject()
+                .put("schemaVersion", AlgorithmContractSet.SCHEMA_VERSION + 1)
+                .put("nativeRenderContract", AlgorithmContracts.NATIVE_V2)
+        val parsed = parseAlgorithmContractSet(json, legacyVersion = null)
+        val result =
+            resolveExecutedAlgorithmVersion(
+                NativeRenderRoute.V2,
+                parsed.nativeRenderContract,
+            )
+
+        assertEquals(
+            "unsupported-contract-schema-2:${AlgorithmContracts.NATIVE_V2}",
+            parsed.nativeRenderContract,
+        )
+        assertEquals(AlgorithmContracts.NATIVE_V2, result.executedVersion)
+        assertEquals(parsed.nativeRenderContract, result.migratedFromVersion)
     }
 
     @Test
