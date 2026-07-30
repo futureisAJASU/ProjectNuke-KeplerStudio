@@ -186,4 +186,97 @@ class ModelAvailabilityRegistryTest {
         assertTrue(state.runtimeAvailable == true)
         assertTrue(state.contractSupported == true)
     }
+    @Test
+    fun lateLoaderCannotDowngradeOrFailAnActiveReadySession() {
+        val ready =
+            reduceModelCapability(
+                ModelCapabilityState(
+                    phase = ModelCapabilityPhase.Loadable,
+                    assetPresent = true,
+                    assetValid = true,
+                    runtimeAvailable = true,
+                    contractSupported = true,
+                    runnerImplemented = true,
+                    loadGeneration = 12L,
+                ),
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Session,
+                    generation = 21L,
+                    phase = ModelCapabilityPhase.Ready,
+                ),
+                sequence = 1L,
+            )
+
+        val afterLateLoadable =
+            reduceModelCapability(
+                ready,
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Loader,
+                    generation = 13L,
+                    phase = ModelCapabilityPhase.Loadable,
+                    assetPresent = true,
+                    assetValid = true,
+                    runtimeAvailable = true,
+                    contractSupported = true,
+                    runnerImplemented = true,
+                ),
+                sequence = 2L,
+            )
+        val afterLateFailure =
+            reduceModelCapability(
+                afterLateLoadable,
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Loader,
+                    generation = 14L,
+                    phase = ModelCapabilityPhase.Failed,
+                    failure =
+                        ModelCapabilityFailure(
+                            ModelCapabilityPhase.Failed,
+                            "late loader result",
+                        ),
+                ),
+                sequence = 3L,
+            )
+
+        assertEquals(ModelCapabilityPhase.Ready, afterLateFailure.phase)
+        assertTrue(afterLateFailure.sessionActive)
+        assertEquals(null, afterLateFailure.lastFailure)
+        assertEquals(14L, afterLateFailure.loadGeneration)
+    }
+
+    @Test
+    fun currentSessionCloseEndsProtectionButPreservesLoadFacts() {
+        val ready =
+            reduceModelCapability(
+                ModelCapabilityState(
+                    phase = ModelCapabilityPhase.Loadable,
+                    assetPresent = true,
+                    assetValid = true,
+                    runtimeAvailable = true,
+                    contractSupported = true,
+                    runnerImplemented = true,
+                ),
+                ModelCapabilityObservation(
+                    ModelCapabilityPublisher.Session,
+                    5L,
+                    ModelCapabilityPhase.Ready,
+                ),
+                sequence = 1L,
+            )
+        val closed =
+            reduceModelCapability(
+                ready,
+                ModelCapabilityObservation(
+                    ModelCapabilityPublisher.Session,
+                    5L,
+                    ModelCapabilityPhase.Unloaded,
+                ),
+                sequence = 2L,
+            )
+
+        assertFalse(closed.sessionActive)
+        assertEquals(ModelCapabilityPhase.Loadable, closed.phase)
+        assertTrue(closed.factsLoadable)
+    }
+
 }

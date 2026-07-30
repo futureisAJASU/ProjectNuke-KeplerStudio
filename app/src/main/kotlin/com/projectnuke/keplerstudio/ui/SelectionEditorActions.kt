@@ -16,6 +16,7 @@ import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.FeatureExecutionOutcome
+import com.projectnuke.keplerstudio.editor.FeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.RenderParticipation
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
@@ -37,6 +38,7 @@ import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.refineTrackedSubjectSelectionV2
 import com.projectnuke.keplerstudio.editor.successOrThrow
+import com.projectnuke.keplerstudio.editor.toFeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.withFailedRender
 import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import java.util.UUID
@@ -157,6 +159,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             var ownedManualMaskOwned = ownedManualMask
             ownedManualMask = null
             var pendingLayerBitmap: Bitmap? = null
+            var featureMaskSummary: FeatureMaskSummary? = null
             try {
                 val inferenceJob = currentCoroutineContext()[Job]
                 val modelOperation =
@@ -229,6 +232,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                                     modelOperation,
                                 )
                             }
+                        featureMaskSummary = finalTracked.toFeatureMaskSummary()
                         // Subject-selection adoption: copy the validated mask into an
                         // own bitmap, then release the model mask's diagnostic edge
                         // exactly once (and recycle the source bitmap) via TrackedMask.
@@ -319,6 +323,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                                                     ModelFeature.SubjectSelection]
                                                 ?.phase,
                                         outcome = FeatureExecutionOutcome.Applied,
+                                        mask = featureMaskSummary,
                                         stageContract =
                                             if (
                                                 subjectAlgorithm == SubjectSelectionRoute.V1 ||

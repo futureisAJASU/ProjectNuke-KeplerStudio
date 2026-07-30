@@ -14,6 +14,7 @@ class FlareGuardApplyResult internal constructor(
     val status: FlareGuardRuntimeStatus,
     val fallbackReason: FlareGuardFallbackReason? = null,
     val algorithmDecision: FlareGuardV2Decision? = null,
+    val maskSummary: FeatureMaskSummary? = null,
 ) {
     val bitmap: Bitmap get() = ownedBitmap.bitmap
 
@@ -87,10 +88,19 @@ internal suspend fun applyFlareGuardModelOrRuleResultV0(
     diagnostics: MemoryTrackerScope? = null,
     operation: ModelOperationContext,
 ): FlareGuardApplyResult {
+    val registryLoadGeneration =
+        ModelAvailabilityRegistry.reportLoading(ModelFeature.FlareGuard)
     val loadResult = FlareGuardModelRunner.create(context)
+    ModelAvailabilityRegistry.reportLoad(
+        ModelFeature.FlareGuard,
+        loadResult,
+        registryLoadGeneration,
+    )
     val runner = (loadResult as? ModelLoadResult.Ready)?.runner
     val loadReason = loadResult.fallbackReason()
     if (runner != null) {
+        val registrySessionGeneration =
+            ModelAvailabilityRegistry.reportSessionReady(listOf(ModelFeature.FlareGuard))
         try {
             Log.i(
                 FLARE_GUARD_BRIDGE_TAG,
@@ -116,6 +126,7 @@ internal suspend fun applyFlareGuardModelOrRuleResultV0(
                         ownedBitmap = blended,
                         status = FlareGuardRuntimeStatus.ModelInferenceSuccess,
                         fallbackReason = null,
+                        maskSummary = result.ownedMask.toFeatureMaskSummary(),
                     )
                 } finally {
                     result.ownedMask.recycleAndRelease()
@@ -176,6 +187,10 @@ internal suspend fun applyFlareGuardModelOrRuleResultV0(
             )
         } finally {
             runner.close()
+            ModelAvailabilityRegistry.reportSessionClosed(
+                listOf(ModelFeature.FlareGuard),
+                registrySessionGeneration,
+            )
         }
     } else {
         Log.i(FLARE_GUARD_BRIDGE_TAG, "FlareGuard model unavailable: reason=$loadReason")

@@ -4500,13 +4500,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             )
                         val preloadedModel =
                             if (flareOverride == FlareGuardRoute.V2ModelAssisted) {
-                                FlareGuardModelRunner.create(appContext)
+                                val loadGeneration =
+                                    ModelAvailabilityRegistry.reportLoading(
+                                        ModelFeature.FlareGuard
+                                    )
+                                FlareGuardModelRunner.create(appContext).also { loaded ->
+                                    ModelAvailabilityRegistry.reportLoad(
+                                        ModelFeature.FlareGuard,
+                                        loaded,
+                                        loadGeneration,
+                                    )
+                                }
                             } else {
                                 null
                             }
-                        preloadedModel?.let {
-                            ModelAvailabilityRegistry.reportLoad(ModelFeature.FlareGuard, it)
-                        }
                         val flareResolution =
                             RouteResolver.resolveFlareRoute(
                                 current.correctionEngineState.documentEngine,
@@ -4663,6 +4670,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                         },
                                     fallbackReason =
                                         flareGuardResult!!.fallbackReason?.toString(),
+                                    mask = flareGuardResult!!.maskSummary,
                                     stageContract =
                                         if (flareGuardResult!!.algorithmDecision != null) {
                                             AlgorithmContracts.FLARE_V2

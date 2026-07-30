@@ -16,6 +16,7 @@ import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.FeatureExecutionOutcome
+import com.projectnuke.keplerstudio.editor.FeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
@@ -34,6 +35,7 @@ import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.renderExperimentalRemasterV2
 import com.projectnuke.keplerstudio.editor.successOrThrow
+import com.projectnuke.keplerstudio.editor.toFeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.withFailedRender
 import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import com.projectnuke.keplerstudio.editor.withBakedFeatureProvenance
@@ -136,6 +138,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             var remasteredOriginal: Bitmap? = null
             var renderedPreview: Bitmap? = null
             var previewSuccess: RenderResult.Success? = null
+            var featureMaskSummary: FeatureMaskSummary? = null
             var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
             var ownedBaseOwned: Bitmap? = ownedBase
             var ownedManualMaskOwned: Bitmap? = ownedManualMask
@@ -207,6 +210,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     val mask =
                         (maskResult as? ModelRunResult.Success)?.value
                             ?: error("Edge Masker 마스크를 생성하지 못했습니다.")
+                    featureMaskSummary = mask.toFeatureMaskSummary()
                     val created =
                         try {
                             if (remasterAlgorithm == RemasterRoute.V1 ||
@@ -309,6 +313,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                                                     ModelFeature.Remaster]
                                                 ?.phase,
                                         outcome = FeatureExecutionOutcome.Applied,
+                                        mask = featureMaskSummary,
                                         stageContract =
                                             if (
                                                 remasterAlgorithm == RemasterRoute.V1 ||

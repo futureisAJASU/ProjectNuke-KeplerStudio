@@ -1013,12 +1013,29 @@ internal fun applyExperimentalFlareGuardV2(
     var modelMaskTransient = 0L
     var fallbackReason: FlareGuardFallbackReason? = null
     var runner: FlareGuardModelRunner? = null
+    var registrySessionGeneration = 0L
     try {
         source.getPixels(sourcePixels, 0, source.width, 0, 0, source.width, source.height)
         if (algorithmMode == FlareGuardRoute.V2ModelAssisted) {
-            when (val loaded = preloadedModel ?: FlareGuardModelRunner.create(context)) {
+            val loaded =
+                preloadedModel ?: run {
+                    val loadGeneration =
+                        ModelAvailabilityRegistry.reportLoading(ModelFeature.FlareGuard)
+                    FlareGuardModelRunner.create(context).also { result ->
+                        ModelAvailabilityRegistry.reportLoad(
+                            ModelFeature.FlareGuard,
+                            result,
+                            loadGeneration,
+                        )
+                    }
+                }
+            when (loaded) {
                 is ModelLoadResult.Ready -> {
                     runner = loaded.runner
+                    registrySessionGeneration =
+                        ModelAvailabilityRegistry.reportSessionReady(
+                            listOf(ModelFeature.FlareGuard)
+                        )
                     when (val inference = loaded.runner.predictMask(source, diagnostics, operation)) {
                         is ModelRunResult.Success -> {
                             var ownedMask: Bitmap? = null
@@ -1113,16 +1130,25 @@ internal fun applyExperimentalFlareGuardV2(
             )
             operation.validateOrThrow()
             return FlareGuardApplyResult(
-                tracked,
-                if (processed.decision == FlareGuardV2Decision.ModelRuleFused ||
-                    processed.decision == FlareGuardV2Decision.ModelAccepted
-                ) {
-                    FlareGuardRuntimeStatus.ExperimentalV2Model
-                } else {
-                    FlareGuardRuntimeStatus.ExperimentalV2Rule
-                },
-                fallbackReason,
-                processed.decision,
+                ownedBitmap = tracked,
+                status =
+                    if (processed.decision == FlareGuardV2Decision.ModelRuleFused ||
+                        processed.decision == FlareGuardV2Decision.ModelAccepted
+                    ) {
+                        FlareGuardRuntimeStatus.ExperimentalV2Model
+                    } else {
+                        FlareGuardRuntimeStatus.ExperimentalV2Rule
+                    },
+                fallbackReason = fallbackReason,
+                algorithmDecision = processed.decision,
+                maskSummary =
+                    processed.maskMetrics?.let { metrics ->
+                        FeatureMaskSummary(
+                            affectedAreaRatio = metrics.affectedAreaRatio,
+                            componentCount = metrics.connectedComponentCount,
+                            confidence = metrics.activeRegionMeanConfidence,
+                        )
+                    },
             )
         } catch (failure: Throwable) {
             tracked.recycleAndRelease()
@@ -1130,6 +1156,12 @@ internal fun applyExperimentalFlareGuardV2(
         }
     } finally {
         runner?.close()
+        if (registrySessionGeneration != 0L) {
+            ModelAvailabilityRegistry.reportSessionClosed(
+                listOf(ModelFeature.FlareGuard),
+                registrySessionGeneration,
+            )
+        }
         diagnostics?.releaseTransient(modelMaskTransient)
         diagnostics?.releaseTransient(sourceTransient)
     }

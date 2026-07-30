@@ -364,14 +364,14 @@ object RemasterModelSession : ModelRunnerContract {
         modelScope.launch {
             modelMutex.withLock {
                 if (generation != commandGeneration.get()) return@withLock
-                publishSessionClosed()
+                val sessionClosePublished = publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 activeModel = null
                 isModelLoaded = false
                 isModelLoading = false
                 lifecycle = ModelRunnerLifecycle.Unloaded
-                ModelAvailabilityRegistry.reportEdgeUnloaded()
+                if (!sessionClosePublished) ModelAvailabilityRegistry.reportEdgeUnloaded()
                 GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                 statusText = "로드된 모델이 없습니다."
             }
@@ -384,14 +384,14 @@ object RemasterModelSession : ModelRunnerContract {
             commandGeneration.incrementAndGet()
             GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
             lifecycle = ModelRunnerLifecycle.Closing
-            publishSessionClosed()
+            val sessionClosePublished = publishSessionClosed()
             runCatching { closeableModel?.close() }
             closeableModel = null
             activeModel = null
             isModelLoaded = false
             isModelLoading = false
             lifecycle = ModelRunnerLifecycle.Unloaded
-            ModelAvailabilityRegistry.reportEdgeUnloaded()
+            if (!sessionClosePublished) ModelAvailabilityRegistry.reportEdgeUnloaded()
             GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
             statusText = "로드된 모델이 없습니다."
             true
@@ -424,13 +424,14 @@ object RemasterModelSession : ModelRunnerContract {
         )
     }
 
-    private fun publishSessionClosed() {
-        if (registrySessionGeneration == 0L) return
+    private fun publishSessionClosed(): Boolean {
+        if (registrySessionGeneration == 0L) return false
         ModelAvailabilityRegistry.reportSessionClosed(
             listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection),
             registrySessionGeneration,
         )
         registrySessionGeneration = 0L
+        return true
     }
 
     private fun isSupportedModelContract(candidate: RemasterModelCandidate): Boolean {

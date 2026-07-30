@@ -20,6 +20,26 @@ data class FeatureMaskSummary(
     val confidence: Float?,
 )
 
+internal fun TrackedMask.toFeatureMaskSummary(): FeatureMaskSummary {
+    val qualityMetrics =
+        when (val quality = maskQuality) {
+            is MaskQualityResult.Valid -> quality.metrics
+            is MaskQualityResult.LowConfidence -> quality.metrics
+            is MaskQualityResult.Invalid, null -> null
+        }
+    val confidenceMetrics = this.confidenceMetrics
+    return FeatureMaskSummary(
+        affectedAreaRatio =
+            (qualityMetrics?.affectedAreaRatio ?: confidenceMetrics.affectedAreaRatio)
+                .coerceIn(0f, 1f),
+        componentCount = qualityMetrics?.connectedComponentCount?.coerceAtLeast(0) ?: 0,
+        confidence =
+            (qualityMetrics?.activeRegionMeanConfidence ?: confidenceMetrics.finalPolicy)
+                .takeIf(Float::isFinite)
+                ?.coerceIn(0f, 1f),
+    )
+}
+
 data class BakedFeatureProvenance(
     val feature: BakedFeatureType,
     val operationId: String,

@@ -42,6 +42,8 @@ data class ModelCapabilityState(
     val probeGeneration: Long = 0L,
     val loadGeneration: Long = 0L,
     val sessionGeneration: Long = 0L,
+    /** True only while a concrete runner/session for this feature is alive. */
+    val sessionActive: Boolean = false,
     val observationSequence: Long = 0L,
     val publisher: ModelCapabilityPublisher? = null,
 ) {
@@ -117,6 +119,19 @@ internal fun reduceModelCapability(
     if (generationIsStale) return current
 
     fun Boolean?.merge(old: Boolean?): Boolean? = this ?: old
+    val nonSessionObservationWhileActive =
+        current.sessionActive &&
+            observation.publisher in
+                setOf(ModelCapabilityPublisher.Probe, ModelCapabilityPublisher.Loader)
+    val nextSessionActive =
+        when {
+            observation.publisher == ModelCapabilityPublisher.Session &&
+                observation.phase == ModelCapabilityPhase.Ready -> true
+            observation.publisher == ModelCapabilityPublisher.Session &&
+                observation.phase in
+                    setOf(ModelCapabilityPhase.Unloaded, ModelCapabilityPhase.Failed) -> false
+            else -> current.sessionActive
+        }
     val merged =
         current.copy(
             assetPresent = observation.assetPresent.merge(current.assetPresent),
@@ -126,7 +141,11 @@ internal fun reduceModelCapability(
                 observation.contractSupported.merge(current.contractSupported),
             runnerImplemented =
                 observation.runnerImplemented.merge(current.runnerImplemented),
-            lastFailure = observation.failure ?: current.lastFailure,
+            // A late probe/load result may refine durable facts, but it must not attach a
+            // stale failure to a runner that is already alive and executing successfully.
+            lastFailure =
+                if (nonSessionObservationWhileActive) current.lastFailure
+                else observation.failure ?: current.lastFailure,
             probeGeneration =
                 if (observation.publisher == ModelCapabilityPublisher.Probe) {
                     observation.generation
@@ -148,16 +167,19 @@ internal fun reduceModelCapability(
                 } else {
                     current.sessionGeneration
                 },
+            sessionActive = nextSessionActive,
             observationSequence = sequence,
             publisher = observation.publisher,
         )
 
-    val protectedActiveSession =
-        observation.publisher == ModelCapabilityPublisher.Probe &&
-            (current.phase == ModelCapabilityPhase.Ready ||
-                current.phase == ModelCapabilityPhase.Loading) &&
-            current.sessionGeneration > 0L
-    if (protectedActiveSession) return merged.copy(phase = current.phase)
+    // Probe and loader generations live in independent domains. A load/probe that
+    // started before Session Ready can therefore finish later with a numerically
+    // larger generation. Session ownership, not cross-domain generation ordering,
+    // is the authoritative guard: only the current Session publisher may close or
+    // fail a live runner.
+    if (nonSessionObservationWhileActive) {
+        return merged.copy(phase = current.phase)
+    }
 
     val settledPhase =
         when {
