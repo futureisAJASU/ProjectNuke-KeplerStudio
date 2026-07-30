@@ -13,6 +13,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -21,10 +22,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -68,6 +72,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -77,9 +82,17 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.BuildConfig
@@ -1383,6 +1396,8 @@ private fun DebugComparisonViewerDialog(
     var scale by remember(artifact) { mutableFloatStateOf(1f) }
     var offset by remember(artifact) { mutableStateOf(Offset.Zero) }
     var splitPosition by remember(artifact) { mutableFloatStateOf(0.5f) }
+    var viewportSize by remember(artifact) { mutableStateOf(IntSize.Zero) }
+    val dividerTouchWidthPx = with(LocalDensity.current) { 36.dp.roundToPx() }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -1408,6 +1423,7 @@ private fun DebugComparisonViewerDialog(
                         onClick = {
                             scale = 1f
                             offset = Offset.Zero
+                            splitPosition = 0.5f
                         }
                     ) {
                         Text("보기 초기화")
@@ -1420,14 +1436,19 @@ private fun DebugComparisonViewerDialog(
                             Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = 280.dp, max = 480.dp)
+                                .onSizeChanged { viewportSize = it }
                                 .clipToBounds()
                                 .background(Color.Black)
                                 .pointerInput(artifact.artifactId) {
                                     detectTransformGestures { _, pan, zoom, _ ->
-                                        scale = (scale * zoom).coerceIn(1f, 8f)
+                                        val nextScale = (scale * zoom).coerceIn(1f, 8f)
+                                        scale = nextScale
                                         offset =
-                                            if (scale == 1f) Offset.Zero
-                                            else offset + pan
+                                            clampComparisonOffset(
+                                                offset + pan,
+                                                viewportSize,
+                                                nextScale,
+                                            )
                                     }
                                 }
                                 .pointerInput(artifact.artifactId) {
@@ -1468,6 +1489,68 @@ private fun DebugComparisonViewerDialog(
                                     },
                                 contentScale = ContentScale.Fit,
                             )
+                            if (viewportSize.width > 0) {
+                                val dividerX =
+                                    (viewportSize.width * splitPosition).toInt()
+                                Box(
+                                    modifier =
+                                        Modifier
+                                            .offset {
+                                                IntOffset(
+                                                    x = dividerX - dividerTouchWidthPx / 2,
+                                                    y = 0,
+                                                )
+                                            }
+                                            .width(36.dp)
+                                            .fillMaxHeight()
+                                            .pointerInput(artifact.artifactId, viewportSize.width) {
+                                                detectHorizontalDragGestures { change, dragAmount ->
+                                                    change.consume()
+                                                    splitPosition =
+                                                        moveComparisonSplit(
+                                                            splitPosition,
+                                                            dragAmount,
+                                                            viewportSize.width,
+                                                        )
+                                                }
+                                            }
+                                            .semantics {
+                                                role = Role.Adjustable
+                                                contentDescription = "V1과 V2 비교 분할선"
+                                                stateDescription =
+                                                    "V1 ${(splitPosition * 100).toInt()}퍼센트"
+                                                progressBarRangeInfo =
+                                                    ProgressBarRangeInfo(
+                                                        splitPosition,
+                                                        0.05f..0.95f,
+                                                    )
+                                                setProgress { requested ->
+                                                    splitPosition =
+                                                        requested.coerceIn(0.05f, 0.95f)
+                                                    true
+                                                }
+                                            },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Box(
+                                        modifier =
+                                            Modifier
+                                                .width(2.dp)
+                                                .fillMaxHeight()
+                                                .background(Color.White.copy(alpha = 0.9f))
+                                    )
+                                    Box(
+                                        modifier =
+                                            Modifier
+                                                .width(24.dp)
+                                                .height(40.dp)
+                                                .background(V2BadgeBackground),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Text("↔", color = Color.White)
+                                    }
+                                }
+                            }
                         } else if (selected != null) {
                             Image(
                                 bitmap = selected.bitmap.asImageBitmap(),
@@ -1478,15 +1561,8 @@ private fun DebugComparisonViewerDialog(
                         }
                     }
                     if (selectedLabel == "분할") {
-                        Slider(
-                            value = splitPosition,
-                            onValueChange = {
-                                splitPosition = it.coerceIn(0.05f, 0.95f)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
                         Text(
-                            "분할 위치 ${(splitPosition * 100).toInt()}%",
+                            "이미지 위 분할선을 드래그 · V1 ${(splitPosition * 100).toInt()}%",
                             color = V2TextMuted,
                             style = MaterialTheme.typography.labelSmall,
                         )
