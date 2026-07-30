@@ -41,6 +41,7 @@ import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -286,6 +287,8 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         onApplyCorrectionEngine = viewModel::applyCorrectionEngineToCurrentDocument,
                         onExperimentalLabChanged = viewModel::updateExperimentalLab,
                         onGenerateComparison = viewModel::generateDebugComparison,
+                        onGenerateFullResolutionComparison =
+                            viewModel::generateFullResolutionDebugComparison,
                         onCancelComparison = viewModel::cancelDebugComparison,
                         onClearDraft = viewModel::clearDraft,
                         onDismissRecoveryDebugCard = viewModel::dismissRecoveryDebugCard,
@@ -974,6 +977,7 @@ internal fun V2SettingsScreen(
     onApplyCorrectionEngine: (CorrectionEngine) -> Unit,
     onExperimentalLabChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
     onGenerateComparison: () -> Unit,
+    onGenerateFullResolutionComparison: () -> Unit,
     onCancelComparison: () -> Unit,
     onClearDraft: () -> Unit,
     onDismissRecoveryDebugCard: () -> Unit,
@@ -1093,6 +1097,7 @@ internal fun V2SettingsScreen(
                 comparisonBusy = comparisonBusy,
                 onOverridesChanged = onExperimentalLabChanged,
                 onGenerateComparison = onGenerateComparison,
+                onGenerateFullResolutionComparison = onGenerateFullResolutionComparison,
                 onCancelComparison = onCancelComparison,
             )
         }
@@ -1185,6 +1190,7 @@ private fun ExperimentalLabSettingsCard(
     comparisonBusy: Boolean,
     onOverridesChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
     onGenerateComparison: () -> Unit,
+    onGenerateFullResolutionComparison: () -> Unit,
     onCancelComparison: () -> Unit,
 ) {
     val modelAvailability by ModelAvailabilityRegistry.state.collectAsState()
@@ -1279,6 +1285,14 @@ private fun ExperimentalLabSettingsCard(
             }
         } else {
             Button(onClick = onGenerateComparison) { Text("V1·V2 비교 생성") }
+            Text(
+                "전체 해상도 비교는 메모리를 많이 사용하며 명시적으로 실행할 때만 생성됩니다.",
+                color = V2TextMuted,
+                style = MaterialTheme.typography.labelSmall,
+            )
+            OutlinedButton(onClick = onGenerateFullResolutionComparison) {
+                Text("전체 해상도 비교 실행")
+            }
         }
         comparison?.let { artifact ->
             val comparisonBitmaps =

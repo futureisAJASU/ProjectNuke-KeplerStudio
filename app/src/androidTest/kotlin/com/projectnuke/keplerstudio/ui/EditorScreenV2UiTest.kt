@@ -202,6 +202,7 @@ class EditorScreenV2UiTest {
                 onApplyCorrectionEngine = onApplyCorrectionEngine,
                 onExperimentalLabChanged = {},
                 onGenerateComparison = {},
+                onGenerateFullResolutionComparison = {},
                 onCancelComparison = {},
                 onClearDraft = {},
                 onDismissRecoveryDebugCard = {},

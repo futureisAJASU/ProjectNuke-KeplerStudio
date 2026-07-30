@@ -863,7 +863,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun generateDebugComparison() {
+    fun generateDebugComparison() = generateDebugComparison(fullResolution = false)
+
+    fun generateFullResolutionDebugComparison() = generateDebugComparison(fullResolution = true)
+
+    private fun generateDebugComparison(fullResolution: Boolean) {
         if (!BuildConfig.DEBUG || shuttingDown) return
         val state = _uiState.value
         val source = state.originalPreviewBitmap ?: state.previewBitmap ?: return
@@ -876,7 +880,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         invalidateComparison()
         val longest = max(source.width, source.height).coerceAtLeast(1)
-        val scale = (DEBUG_COMPARISON_MAX_SIDE.toFloat() / longest).coerceAtMost(1f)
+        val scale =
+            if (fullResolution) 1f
+            else (DEBUG_COMPARISON_MAX_SIDE.toFloat() / longest).coerceAtMost(1f)
         val width = (source.width * scale).roundToInt().coerceAtLeast(1)
         val height = (source.height * scale).roundToInt().coerceAtLeast(1)
         val sourceLayers = state.selectionLayers.filter(SelectionLayer::enabled)
@@ -889,13 +895,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         if (!BitmapMemoryBudget.canAllocate(requiredBytes)) {
             updateUiStateAndRecycleReplaced {
-                it.copy(message = "비교 미리보기에 필요한 메모리를 확보할 수 없습니다.")
+                it.copy(
+                    message =
+                        if (fullResolution) {
+                            "전체 해상도 비교에 필요한 메모리를 확보할 수 없습니다."
+                        } else {
+                            "비교 미리보기에 필요한 메모리를 확보할 수 없습니다."
+                        }
+                )
             }
             return
         }
         val comparisonTracker =
             beginMemoryTracking(
-                "debugComparison",
+                if (fullResolution) "debugComparisonFullResolution" else "debugComparison",
                 snapshotState = "rendering",
                 transientReserveBytes = requiredBytes,
             )
@@ -964,7 +977,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 revision = v1Request.identity.revision,
             )
         updateUiStateAndRecycleReplaced {
-            it.copy(comparisonBusy = true, message = "V1·V2 비교 미리보기를 생성하는 중입니다.")
+            it.copy(
+                comparisonBusy = true,
+                message =
+                    if (fullResolution) "전체 해상도 비교 준비 중 · V1 단계"
+                    else "V1·V2 비교 미리보기를 생성하는 중입니다.",
+            )
         }
 
         val launched =
@@ -978,6 +996,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             val v1 = EditorRenderer.render(v1Request).successOrThrow()
                             v1Output = v1.output
                             currentCoroutineContext().ensureActive()
+                            withContext(Dispatchers.Main) {
+                                if (isDebugComparisonCurrent(comparisonIdentity)) {
+                                    updateUiStateAndRecycleReplaced {
+                                        it.copy(message = "전체 해상도 비교 처리 중 · V2 단계")
+                                    }
+                                }
+                            }
                             val v2 = EditorRenderer.render(v2Request).successOrThrow()
                             v2Output = v2.output
                             v1 to v2
@@ -1009,7 +1034,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         if (isDebugComparisonCurrent(comparisonIdentity)) {
                             it.copy(
                                 comparisonBusy = false,
-                                message = "V1·V2 비교 미리보기를 생성했습니다.",
+                                message =
+                                    if (fullResolution) "전체 해상도 V1·V2 비교를 생성했습니다."
+                                    else "V1·V2 비교 미리보기를 생성했습니다.",
                             )
                         } else {
                             it
