@@ -23,7 +23,7 @@ internal data class AlgorithmVersionResolution(
 
 internal object PixelContractVersion {
     const val V1 = "native-v1-contract-1"
-    const val V2 = "native-v2-contract-1"
+    const val V2 = "native-v2-contract-2"
 
     fun current(route: NativeRenderRoute): String =
         if (route == NativeRenderRoute.V2) V2 else V1

@@ -31,9 +31,9 @@ class ExperimentalImagePipelinesTest {
         assertTrue(first.argb.indices.any { first.argb[it] != source[it] })
         assertTrue(maximumChannelDelta(source, first.argb) <= 32)
         assertEquals(
-            8357199531398524606L,
+            -5621778256173100593L,
             exactHash(first.argb),
-            "record texture-protected V2 fixture hash",
+            "record contract-2 point-light/veiling protected V2 fixture hash",
         )
     }
 
@@ -102,6 +102,54 @@ class ExperimentalImagePipelinesTest {
     }
 
     @Test
+    fun flareV2ProtectsPointLightCoreButCorrectsBroadWarmVeil() {
+        val width = 31
+        val height = 21
+        val pointLight =
+            IntArray(width * height) { argb(255, 24, 26, 30) }.also {
+                it[(height / 2) * width + width / 2] = argb(255, 255, 250, 232)
+            }
+        val protected =
+            FlareGuardV2.process(
+                pointLight,
+                width,
+                height,
+                FlareGuardMode.NightLight,
+                1f,
+            )
+        assertTrue(
+            protected.argb.indices.count { protected.argb[it] != pointLight[it] } <= 2,
+            "a compact point-light core must not seed a broad correction",
+        )
+
+        val warmVeil =
+            IntArray(width * height) { index ->
+                val x = index % width
+                val y = index / width
+                val dx = (x - width / 2f) / width
+                val dy = (y - height / 2f) / height
+                if (dx * dx + dy * dy < 0.11f) {
+                    argb(255, 212, 166, 104)
+                } else {
+                    argb(255, 104, 108, 112)
+                }
+            }
+        val corrected =
+            FlareGuardV2.process(
+                warmVeil,
+                width,
+                height,
+                FlareGuardMode.DaySun,
+                0.8f,
+            )
+        assertTrue(
+            corrected.argb.indices.count { corrected.argb[it] != warmVeil[it] } >
+                warmVeil.size / 10,
+            "a smooth warm veil should remain reachable",
+        )
+    }
+
+    @Test
     fun remasterV2PreservesAlphaMultipleSubjectsAndHasExactFixture() {
         val width = 9
         val height = 7
@@ -125,9 +173,9 @@ class ExperimentalImagePipelinesTest {
         assertTrue(result.argb.indices.all { alpha(result.argb[it]) == alpha(source[it]) })
         assertTrue(maximumChannelDelta(source, result.argb) <= 24)
         assertEquals(
-            3419337200305523604L,
+            1521270168617583706L,
             exactHash(result.argb),
-            "record frozen experimental fixture hash",
+            "record contract-2 alpha/boundary protected fixture hash",
         )
     }
 

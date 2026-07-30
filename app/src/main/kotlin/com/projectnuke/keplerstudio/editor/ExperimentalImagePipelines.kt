@@ -149,19 +149,41 @@ object FlareGuardV2 {
                     smoothstep(22f, 90f, chroma) *
                         smoothstep(70f, 210f, value) *
                         (1f - smoothstep(238f, 255f, peak))
+                val localGradient = localLumaGradient(luma, width, height, x, y)
+                val pointLightCore =
+                    smoothstep(24f, 82f, value - surrounding) *
+                        smoothstep(232f, 255f, peak)
+                val borderDistance =
+                    min(min(x, width - 1 - x), min(y, height - 1 - y))
+                val borderGhostSupport =
+                    (1f - smoothstep(0f, min(width, height).coerceAtLeast(2) * 0.12f, borderDistance.toFloat()))
+                        .coerceIn(0f, 1f)
+                val broadVeil =
+                    smoothstep(
+                        if (mode == FlareGuardMode.NightLight) 82f else 158f,
+                        if (mode == FlareGuardMode.NightLight) 178f else 226f,
+                        surrounding,
+                    ) *
+                        smoothstep(0.12f, 0.6f, contamination) *
+                        (1f - smoothstep(10f, 46f, localGradient))
                 val textureSupport =
                     1f -
                         smoothstep(
                             18f,
                             72f,
-                            localLumaGradient(luma, width, height, x, y),
+                            localGradient,
                         ) * 0.72f
                 rule[index] =
                     max(
-                        highlight * bloomSupport * (0.52f + 0.38f * contamination),
-                        coloredGhost * (0.45f + 0.35f * contamination),
+                        max(
+                            highlight * bloomSupport * (0.52f + 0.38f * contamination),
+                            coloredGhost *
+                                (0.45f + 0.35f * contamination + 0.12f * borderGhostSupport),
+                        ),
+                        broadVeil * 0.64f,
                     )
                         .times(textureSupport)
+                        .times(1f - pointLightCore * 0.9f)
                         .coerceIn(0f, 1f)
             }
             if ((y and 31) == 0) checkCancelled(isCancelled)
@@ -458,14 +480,29 @@ object RemasterV2 {
                 val mask = refined[index]
                 val detail = luma[index] - localMean[index]
                 val localNoise = localAbsoluteDeviation(luma, localMean[index], width, height, x, y)
+                var maskLow = mask
+                var maskHigh = mask
+                for (yy in max(0, y - 1)..min(height - 1, y + 1)) {
+                    for (xx in max(0, x - 1)..min(width - 1, x + 1)) {
+                        val sample = refined[yy * width + xx]
+                        maskLow = min(maskLow, sample)
+                        maskHigh = max(maskHigh, sample)
+                    }
+                }
+                val boundaryProtection =
+                    1f - smoothstep(0.08f, 0.65f, maskHigh - maskLow) * 0.58f
+                val alphaProtection =
+                    smoothstep(24f, 208f, alpha(color).toFloat())
                 val highlightProtection = 1f - smoothstep(210f, 252f, luma[index])
                 val shadowProtection = smoothstep(8f, 55f, luma[index])
                 val noiseProtection = 1f - smoothstep(5f, 24f, localNoise) * 0.72f
                 val foregroundGain =
-                    foregroundStrength * mask * highlightProtection * shadowProtection * noiseProtection
+                    foregroundStrength * mask * highlightProtection * shadowProtection *
+                        noiseProtection * boundaryProtection * alphaProtection
                 val centered = luma[index] - 127.5f
                 val backgroundGain =
-                    backgroundStrength * (1f - mask) * highlightProtection * shadowProtection
+                    backgroundStrength * (1f - mask) * highlightProtection * shadowProtection *
+                        boundaryProtection * alphaProtection
                 val lumaDelta =
                     detail * 0.58f * foregroundGain +
                         centered * 0.045f * backgroundGain

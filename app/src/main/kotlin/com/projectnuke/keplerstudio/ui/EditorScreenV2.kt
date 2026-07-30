@@ -287,8 +287,8 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         onApplyCorrectionEngine = viewModel::applyCorrectionEngineToCurrentDocument,
                         onExperimentalLabChanged = viewModel::updateExperimentalLab,
                         onGenerateComparison = viewModel::generateDebugComparison,
-                        onGenerateFullResolutionComparison =
-                            viewModel::generateFullResolutionDebugComparison,
+                        onGenerateEditorResolutionComparison =
+                            viewModel::generateEditorResolutionDebugComparison,
                         onCancelComparison = viewModel::cancelDebugComparison,
                         onClearDraft = viewModel::clearDraft,
                         onDismissRecoveryDebugCard = viewModel::dismissRecoveryDebugCard,
@@ -977,7 +977,7 @@ internal fun V2SettingsScreen(
     onApplyCorrectionEngine: (CorrectionEngine) -> Unit,
     onExperimentalLabChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
     onGenerateComparison: () -> Unit,
-    onGenerateFullResolutionComparison: () -> Unit,
+    onGenerateEditorResolutionComparison: () -> Unit,
     onCancelComparison: () -> Unit,
     onClearDraft: () -> Unit,
     onDismissRecoveryDebugCard: () -> Unit,
@@ -1097,7 +1097,7 @@ internal fun V2SettingsScreen(
                 comparisonBusy = comparisonBusy,
                 onOverridesChanged = onExperimentalLabChanged,
                 onGenerateComparison = onGenerateComparison,
-                onGenerateFullResolutionComparison = onGenerateFullResolutionComparison,
+                onGenerateEditorResolutionComparison = onGenerateEditorResolutionComparison,
                 onCancelComparison = onCancelComparison,
             )
         }
@@ -1190,7 +1190,7 @@ private fun ExperimentalLabSettingsCard(
     comparisonBusy: Boolean,
     onOverridesChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
     onGenerateComparison: () -> Unit,
-    onGenerateFullResolutionComparison: () -> Unit,
+    onGenerateEditorResolutionComparison: () -> Unit,
     onCancelComparison: () -> Unit,
 ) {
     val modelAvailability by ModelAvailabilityRegistry.state.collectAsState()
@@ -1303,7 +1303,7 @@ private fun ExperimentalLabSettingsCard(
                 color = V2TextMuted,
                 style = MaterialTheme.typography.labelSmall,
             )
-            OutlinedButton(onClick = onGenerateFullResolutionComparison) {
+            OutlinedButton(onClick = onGenerateEditorResolutionComparison) {
                 Text("편집 해상도 비교 실행")
             }
         }
@@ -1358,9 +1358,11 @@ private fun ExperimentalLabSettingsCard(
                 }
             }
             var toggledVersion by remember(artifact) { mutableStateOf("V1") }
+            var viewerOpen by remember(artifact) { mutableStateOf(false) }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 TextButton(onClick = { toggledVersion = "V1" }) { Text("V1 보기") }
                 TextButton(onClick = { toggledVersion = "V2" }) { Text("V2 보기") }
+                TextButton(onClick = { viewerOpen = true }) { Text("비교 뷰어 열기") }
                 TextButton(onClick = ExperimentalComparisonStore::clear) { Text("비교 지우기") }
             }
             comparisonBitmaps.firstOrNull { it.label == toggledVersion }?.let { item ->
@@ -1371,8 +1373,99 @@ private fun ExperimentalLabSettingsCard(
                     contentScale = ContentScale.Fit,
                 )
             }
+            if (viewerOpen) {
+                DebugComparisonViewerDialog(
+                    artifact = artifact,
+                    images = comparisonBitmaps,
+                    onDismiss = { viewerOpen = false },
+                    onClear = {
+                        viewerOpen = false
+                        ExperimentalComparisonStore.clear()
+                    },
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun DebugComparisonViewerDialog(
+    artifact: com.projectnuke.keplerstudio.editor.DebugComparisonArtifact,
+    images: List<LabeledComparisonBitmap>,
+    onDismiss: () -> Unit,
+    onClear: () -> Unit,
+) {
+    var selectedLabel by remember(artifact) { mutableStateOf("V1") }
+    var scale by remember(artifact) { mutableFloatStateOf(1f) }
+    var offset by remember(artifact) { mutableStateOf(Offset.Zero) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "${artifact.resolutionLevel.label} · ${artifact.evaluatedWidth}×${artifact.evaluatedHeight}"
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    images.forEach { item ->
+                        TextButton(
+                            onClick = {
+                                selectedLabel = item.label
+                                scale = 1f
+                                offset = Offset.Zero
+                            }
+                        ) {
+                            Text(item.label)
+                        }
+                    }
+                }
+                images.firstOrNull { it.label == selectedLabel }?.let { selected ->
+                    Box(
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 280.dp, max = 480.dp)
+                                .clipToBounds()
+                                .background(Color.Black)
+                                .pointerInput(selected.bitmap) {
+                                    detectTransformGestures { _, pan, zoom, _ ->
+                                        scale = (scale * zoom).coerceIn(1f, 8f)
+                                        offset =
+                                            if (scale == 1f) Offset.Zero
+                                            else offset + pan
+                                    }
+                                }
+                    ) {
+                        Image(
+                            bitmap = selected.bitmap.asImageBitmap(),
+                            contentDescription = "${selected.label} 확대 비교",
+                            modifier =
+                                Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer {
+                                        scaleX = scale
+                                        scaleY = scale
+                                        translationX = offset.x
+                                        translationY = offset.y
+                                    },
+                            contentScale = ContentScale.Fit,
+                        )
+                    }
+                }
+                Text(
+                    artifact.compactMetricJson(),
+                    color = V2TextMuted,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("닫기") } },
+        dismissButton = { TextButton(onClick = onClear) { Text("비교 해제") } },
+    )
 }
 
 private data class LabRouteOption<T>(

@@ -6,6 +6,24 @@ import kotlin.test.assertTrue
 
 class QualityRegressionMetricsV2Test {
     @Test
+    fun comparisonStoreAccountsAndReleasesBoundedRetainedBytes() {
+        val artifact =
+            QualityRegressionMetricsV2.debugArtifact(
+                fixtureVersion = "retained-memory",
+                baseline = IntArray(16),
+                experimental = IntArray(16) { it },
+                width = 4,
+                height = 4,
+            )
+
+        ExperimentalComparisonStore.publishDebug(artifact)
+        assertEquals(artifact.retainedBytes, BitmapMemoryBudget.externalRetainedBytes())
+
+        ExperimentalComparisonStore.clear()
+        assertEquals(0L, BitmapMemoryBudget.externalRetainedBytes())
+    }
+
+    @Test
     fun identicalFixtureHasZeroImageRegressionMetrics() {
         val fixture =
             intArrayOf(

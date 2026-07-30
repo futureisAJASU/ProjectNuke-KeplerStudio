@@ -876,7 +876,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun generateDebugComparison() = generateDebugComparison(editorResolution = false)
 
-    fun generateFullResolutionDebugComparison() = generateDebugComparison(editorResolution = true)
+    fun generateEditorResolutionDebugComparison() = generateDebugComparison(editorResolution = true)
 
     private fun generateDebugComparison(editorResolution: Boolean) {
         if (!BuildConfig.DEBUG || shuttingDown) return

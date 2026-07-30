@@ -4,6 +4,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.test.assertEquals
 import org.junit.Before
+import java.util.concurrent.CountDownLatch
 import org.junit.Test
 
 class ModelAvailabilityRegistryTest {
@@ -67,5 +68,36 @@ class ModelAvailabilityRegistryTest {
         )
         assertTrue(snapshot.routeAvailability().remasterModelAvailable)
         assertTrue(snapshot.routeAvailability().subjectSelectionModelAvailable)
+    }
+
+    @Test
+    fun concurrentFlareAndEdgeReportsDoNotLoseUnrelatedCapability() {
+        val start = CountDownLatch(1)
+        val done = CountDownLatch(2)
+        Thread {
+            start.await()
+            repeat(100) {
+                ModelAvailabilityRegistry.reportLoad(
+                    ModelFeature.FlareGuard,
+                    ModelLoadResult.Ready(Unit),
+                )
+            }
+            done.countDown()
+        }.start()
+        Thread {
+            start.await()
+            repeat(100) {
+                ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+            }
+            done.countDown()
+        }.start()
+
+        start.countDown()
+        done.await()
+
+        val availability = ModelAvailabilityRegistry.snapshot().routeAvailability()
+        assertTrue(availability.flareGuardModelAvailable)
+        assertTrue(availability.remasterModelAvailable)
+        assertTrue(availability.subjectSelectionModelAvailable)
     }
 }
