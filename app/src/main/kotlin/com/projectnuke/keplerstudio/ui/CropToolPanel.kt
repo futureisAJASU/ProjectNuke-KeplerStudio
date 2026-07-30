@@ -194,6 +194,7 @@ fun CropOverlayPreview(
     imageWidth: Int,
     imageHeight: Int,
     modifier: Modifier = Modifier,
+    showGrid: Boolean = true,
     enabled: Boolean = true,
     onCropRectChanged: (Float, Float, Float, Float) -> Unit
 ) {
@@ -235,14 +236,16 @@ fun CropOverlayPreview(
             drawRect(CropOverlay, topLeft = Offset(rect.right, rect.top), size = Size(imageRect.right - rect.right, rect.height))
             drawRect(CropGuide, topLeft = rect.topLeft, size = rect.size, style = Stroke(width = 3f))
 
-            val x1 = rect.left + rect.width / 3f
-            val x2 = rect.left + rect.width * 2f / 3f
-            val y1 = rect.top + rect.height / 3f
-            val y2 = rect.top + rect.height * 2f / 3f
-            drawLine(CropGuideSoft, Offset(x1, rect.top), Offset(x1, rect.bottom), strokeWidth = 1.5f)
-            drawLine(CropGuideSoft, Offset(x2, rect.top), Offset(x2, rect.bottom), strokeWidth = 1.5f)
-            drawLine(CropGuideSoft, Offset(rect.left, y1), Offset(rect.right, y1), strokeWidth = 1.5f)
-            drawLine(CropGuideSoft, Offset(rect.left, y2), Offset(rect.right, y2), strokeWidth = 1.5f)
+            if (showGrid) {
+                val x1 = rect.left + rect.width / 3f
+                val x2 = rect.left + rect.width * 2f / 3f
+                val y1 = rect.top + rect.height / 3f
+                val y2 = rect.top + rect.height * 2f / 3f
+                drawLine(CropGuideSoft, Offset(x1, rect.top), Offset(x1, rect.bottom), strokeWidth = 1.5f)
+                drawLine(CropGuideSoft, Offset(x2, rect.top), Offset(x2, rect.bottom), strokeWidth = 1.5f)
+                drawLine(CropGuideSoft, Offset(rect.left, y1), Offset(rect.right, y1), strokeWidth = 1.5f)
+                drawLine(CropGuideSoft, Offset(rect.left, y2), Offset(rect.right, y2), strokeWidth = 1.5f)
+            }
 
             drawCorner(rect.topLeft)
             drawCorner(Offset(rect.right, rect.top))

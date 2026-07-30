@@ -196,6 +196,14 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     var showResetDialog by remember { mutableStateOf(false) }
     var panelCollapsed by remember { mutableStateOf(false) }
     var chromeHidden by remember { mutableStateOf(false) }
+    var histogramVisible by rememberSaveable { mutableStateOf(false) }
+    var histogramModeName by rememberSaveable {
+        mutableStateOf(PreviewHistogramMode.Luminance.name)
+    }
+    var gridVisible by rememberSaveable { mutableStateOf(false) }
+    val histogramMode =
+        PreviewHistogramMode.entries.firstOrNull { it.name == histogramModeName }
+            ?: PreviewHistogramMode.Luminance
     val hideChromeForPreview = selectedTab == EditorDestination.Editor && chromeHidden
     val chromeTween = tween<Int>(durationMillis = ChromeAnimationMillis, easing = FastOutSlowInEasing)
     val alphaTween = tween<Float>(durationMillis = 220, easing = FastOutSlowInEasing)
@@ -248,6 +256,19 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                             isBusy = state.isBusy,
                             message = state.message,
                             chromeHidden = chromeHidden,
+                            histogramVisible = histogramVisible,
+                            histogramMode = histogramMode,
+                            gridVisible = gridVisible,
+                            onToggleHistogram = { histogramVisible = !histogramVisible },
+                            onToggleHistogramMode = {
+                                histogramModeName =
+                                    if (histogramMode == PreviewHistogramMode.Luminance) {
+                                        PreviewHistogramMode.RGB.name
+                                    } else {
+                                        PreviewHistogramMode.Luminance.name
+                                    }
+                            },
+                            onToggleGrid = { gridVisible = !gridVisible },
                             onCropRectChanged = viewModel::updateCropRect,
                             onToggleChrome = {
                                 if (state.previewBitmap != null) chromeHidden = !chromeHidden
@@ -504,6 +525,12 @@ private fun V2PreviewArea(
     isBusy: Boolean,
     message: String?,
     chromeHidden: Boolean,
+    histogramVisible: Boolean,
+    histogramMode: PreviewHistogramMode,
+    gridVisible: Boolean,
+    onToggleHistogram: () -> Unit,
+    onToggleHistogramMode: () -> Unit,
+    onToggleGrid: () -> Unit,
     onCropRectChanged: (Float, Float, Float, Float) -> Unit,
     onToggleChrome: () -> Unit,
     modifier: Modifier = Modifier
@@ -530,11 +557,47 @@ private fun V2PreviewArea(
                 V2CropPreview(
                     bitmap = bitmap,
                     cropState = cropState,
+                    showGrid = gridVisible,
                     enabled = !isBusy,
                     onCropRectChanged = onCropRectChanged
                 )
             } else {
-                V2ZoomablePreview(bitmap = bitmap, originalBitmap = originalBitmap, onToggleChrome = onToggleChrome)
+                V2ZoomablePreview(
+                    bitmap = bitmap,
+                    originalBitmap = originalBitmap,
+                    showGrid = gridVisible,
+                    onToggleChrome = onToggleChrome,
+                )
+            }
+        }
+        if (bitmap != null && histogramVisible) {
+            PreviewHistogramOverlay(
+                bitmap = bitmap,
+                mode = histogramMode,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 52.dp),
+            )
+        }
+        if (bitmap != null && !chromeHidden) {
+            Row(
+                modifier =
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 8.dp)
+                        .background(V2BadgeBackground)
+                        .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                TextButton(onClick = onToggleHistogram) {
+                    Text(if (histogramVisible) "히스토그램 끄기" else "히스토그램")
+                }
+                if (histogramVisible) {
+                    TextButton(onClick = onToggleHistogramMode) {
+                        Text(histogramMode.label)
+                    }
+                }
+                TextButton(onClick = onToggleGrid) {
+                    Text(if (gridVisible) "격자 끄기" else "격자")
+                }
             }
         }
         if (isBusy) {
@@ -571,6 +634,7 @@ private fun isImportantPreviewMessage(message: String): Boolean {
 private fun V2CropPreview(
     bitmap: Bitmap,
     cropState: CropState,
+    showGrid: Boolean,
     enabled: Boolean,
     onCropRectChanged: (Float, Float, Float, Float) -> Unit
 ) {
@@ -592,6 +656,7 @@ private fun V2CropPreview(
             cropState = cropState,
             imageWidth = bitmap.width,
             imageHeight = bitmap.height,
+            showGrid = showGrid,
             enabled = enabled,
             modifier = Modifier
                 .fillMaxSize()
@@ -615,6 +680,7 @@ private fun V2CropPreview(
 private fun V2ZoomablePreview(
     bitmap: Bitmap,
     originalBitmap: Bitmap?,
+    showGrid: Boolean,
     onToggleChrome: () -> Unit
 ) {
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
@@ -680,6 +746,22 @@ private fun V2ZoomablePreview(
                     translationY = offset.y
                 }
         )
+        if (showGrid) {
+            PreviewGridOverlay(
+                imageWidth = displayedBitmap.width,
+                imageHeight = displayedBitmap.height,
+                modifier =
+                    Modifier
+                        .fillMaxSize()
+                        .padding(8.dp)
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = offset.x
+                            translationY = offset.y
+                        },
+            )
+        }
 
         Text(
             text = if (showOriginal && originalBitmap != null) "원본" else "미리보기",
