@@ -75,9 +75,12 @@ object ExperimentalLabController {
      * Resolved selection for the given document engine. Used by the UI to display
      * the current effective state and by tests that need to verify route resolution.
      */
-    fun resolvedSelection(engine: CorrectionEngine): ExperimentalLabSelection {
+    fun resolvedSelection(
+        engine: CorrectionEngine,
+        availability: RouteModelAvailability = ModelAvailabilityRegistry.routeAvailability(),
+    ): ExperimentalLabSelection {
         val o = debugOverrides()
-        return RouteResolver.toLegacySelection(engine, o, RouteModelAvailability())
+        return RouteResolver.toLegacySelection(engine, o, availability)
     }
 
     /**

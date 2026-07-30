@@ -12,6 +12,7 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
@@ -48,6 +49,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
             RemasterModelSession.isModelLoaded
+    ModelAvailabilityRegistry.reportEdgeSession(modelLoaded)
     val remasterResolution = RouteResolver.resolveRemasterRoute(
         documentEngine, remasterOverride, modelAvailable = modelLoaded,
     )

@@ -93,6 +93,8 @@ import com.projectnuke.keplerstudio.editor.ExportFormat
 import com.projectnuke.keplerstudio.editor.ExportHistoryRetention
 import com.projectnuke.keplerstudio.editor.ExportResolution
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
+import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
+import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.ExperimentalComparisonStore
 import com.projectnuke.keplerstudio.editor.FlareGuardRoute
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DEHAZE_ENGINES
@@ -104,6 +106,7 @@ import com.projectnuke.keplerstudio.editor.NativeRenderRoute
 import com.projectnuke.keplerstudio.editor.PresetColorLook
 import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
 import com.projectnuke.keplerstudio.editor.RemasterRoute
+import com.projectnuke.keplerstudio.editor.RouteResolver
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
@@ -1184,7 +1187,15 @@ private fun ExperimentalLabSettingsCard(
     onGenerateComparison: () -> Unit,
     onCancelComparison: () -> Unit,
 ) {
-    val effective = ExperimentalLabController.resolvedSelection(assignedEngine)
+    val modelAvailability by ModelAvailabilityRegistry.state.collectAsState()
+    val effective =
+        RouteResolver.toLegacySelection(
+            assignedEngine,
+            overrides,
+            ModelAvailabilityRegistry.routeAvailability(),
+        )
+    val flareModelReady = modelAvailability[ModelFeature.FlareGuard]?.executable == true
+    val edgeModelReady = modelAvailability[ModelFeature.Remaster]?.executable == true
     V2SettingsCard("실험실") {
         Text(
             "개발 빌드의 현재 세션에서만 적용됩니다. ‘사진 엔진 따르기’는 현재 사진에 지정된 엔진을 사용합니다.",
@@ -1213,9 +1224,12 @@ private fun ExperimentalLabSettingsCard(
             values =
                 listOf(
                     LabRouteOption(null, "사진 엔진 따르기"),
-                    LabRouteOption(FlareGuardRoute.V1, "V1 강제"),
+                    LabRouteOption(FlareGuardRoute.V1, "레거시 V1 강제 · 모델 우선, 규칙 대체"),
                     LabRouteOption(FlareGuardRoute.V2Rule, "규칙 기반 V2"),
-                    LabRouteOption(FlareGuardRoute.V2ModelAssisted, "모델 보조 V2 · 실행 시 검증"),
+                    LabRouteOption(
+                        FlareGuardRoute.V2ModelAssisted,
+                        if (flareModelReady) "모델 보조 V2" else "모델 보조 V2 · 현재 사용 불가",
+                    ),
                 ),
             selectedValue = overrides.flareGuard,
         ) { value ->
@@ -1228,7 +1242,10 @@ private fun ExperimentalLabSettingsCard(
                     LabRouteOption(null, "사진 엔진 따르기"),
                     LabRouteOption(RemasterRoute.V1, "V1 강제"),
                     LabRouteOption(RemasterRoute.V2MaskAware, "수동 마스크 V2"),
-                    LabRouteOption(RemasterRoute.V2ModelAssisted, "모델 보조 V2 · 모델 필요"),
+                    LabRouteOption(
+                        RemasterRoute.V2ModelAssisted,
+                        if (edgeModelReady) "모델 보조 V2" else "모델 보조 V2 · Edge Masker 없음",
+                    ),
                 ),
             selectedValue = overrides.remaster,
         ) { value ->
@@ -1241,7 +1258,10 @@ private fun ExperimentalLabSettingsCard(
                     LabRouteOption(null, "사진 엔진 따르기"),
                     LabRouteOption(SubjectSelectionRoute.V1, "V1 강제"),
                     LabRouteOption(SubjectSelectionRoute.V2ManualOrSynthetic, "수동·합성 V2"),
-                    LabRouteOption(SubjectSelectionRoute.V2ModelAssisted, "모델 보조 V2 · 모델 필요"),
+                    LabRouteOption(
+                        SubjectSelectionRoute.V2ModelAssisted,
+                        if (edgeModelReady) "모델 보조 V2" else "모델 보조 V2 · Edge Masker 없음",
+                    ),
                 ),
             selectedValue = overrides.subjectSelection,
         ) { value ->

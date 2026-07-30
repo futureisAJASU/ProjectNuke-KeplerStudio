@@ -4351,6 +4351,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             } else {
                                 null
                             }
+                        preloadedModel?.let {
+                            ModelAvailabilityRegistry.reportLoad(ModelFeature.FlareGuard, it)
+                        }
                         val flareResolution =
                             RouteResolver.resolveFlareRoute(
                                 current.correctionEngineState.documentEngine,

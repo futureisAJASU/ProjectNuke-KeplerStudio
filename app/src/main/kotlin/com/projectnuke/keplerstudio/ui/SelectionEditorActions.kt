@@ -13,6 +13,7 @@ import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
+import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.RenderFailedException
@@ -53,6 +54,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val modelLoaded =
         RemasterModelSession.activeModel?.id == "edge_masker" &&
             RemasterModelSession.isModelLoaded
+    ModelAvailabilityRegistry.reportEdgeSession(modelLoaded)
     val subjectResolution = RouteResolver.resolveSubjectRoute(
         documentEngine, subjectOverride, modelAvailable = modelLoaded,
     )
