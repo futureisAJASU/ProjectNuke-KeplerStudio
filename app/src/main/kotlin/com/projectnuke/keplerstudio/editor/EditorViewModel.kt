@@ -999,7 +999,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             withContext(Dispatchers.Main) {
                                 if (isDebugComparisonCurrent(comparisonIdentity)) {
                                     updateUiStateAndRecycleReplaced {
-                                        it.copy(message = "전체 해상도 비교 처리 중 · V2 단계")
+                                        it.copy(
+                                            message =
+                                                if (fullResolution) {
+                                                    "전체 해상도 비교 처리 중 · V2 단계"
+                                                } else {
+                                                    "V1·V2 비교 미리보기 처리 중 · V2 단계"
+                                                }
+                                        )
                                     }
                                 }
                             }
