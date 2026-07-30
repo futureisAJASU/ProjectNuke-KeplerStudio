@@ -12,6 +12,7 @@ add_library(
     native_selection_blend.cpp
     native_cancellation.cpp
     native_corrections_v2.cpp
+    native_processing_algorithms.cpp
 )
 
 find_library(log-lib log)

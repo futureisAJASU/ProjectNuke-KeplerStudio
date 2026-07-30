@@ -50,6 +50,26 @@ class ExperimentalComparisonStoreTest {
         assertEquals(0L, BitmapMemoryBudget.retainedMemorySnapshot().admissionBytes)
     }
 
+    @Test
+    fun customComparisonLabelsSurviveOwnershipConversion() {
+        val owned =
+            OwnedDebugComparisonArtifact.create(
+                QualityRegressionMetricsV2
+                    .debugArtifact(
+                        fixtureVersion = "algorithm-labels",
+                        baseline = IntArray(4) { 0xff101010.toInt() },
+                        experimental = IntArray(4) { 0xff202020.toInt() },
+                        width = 2,
+                        height = 2,
+                    )
+                    .copy(baselineLabel = "기본 처리", experimentalLabel = "선택 처리")
+            )
+
+        assertEquals(listOf("기본 처리", "선택 처리", "차이"), owned.labeledBitmaps().map { it.first })
+        owned.close()
+        assertTrue(owned.isClosed)
+    }
+
     private fun ownedArtifact(name: String, color: Int): OwnedDebugComparisonArtifact =
         OwnedDebugComparisonArtifact.create(
             QualityRegressionMetricsV2.debugArtifact(

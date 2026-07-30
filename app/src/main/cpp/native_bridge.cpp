@@ -12,6 +12,7 @@
 #include <vector>
 #include "native_common.h"
 #include "native_cancellation.h"
+#include "native_processing_algorithms.h"
 #ifdef KEPLER_HOST_TEST
 #include "native_v1_host_test.h"
 #endif
@@ -805,69 +806,56 @@ bool kepler_host::renderMain(
             params.saturation,
             params.vibrance,
             params.clarity,
-            params.dehaze,
+            params.hazeEngine == 0 ? params.dehaze : 0.0f,
             params.colorNoiseReduction,
             cancellation)) {
         return false;
     }
+    if (params.hazeEngine == 1 || params.hazeEngine == 2) {
+        if (!kepler_processing::applyDarkChannelDehaze(
+                rgba, width, height, stride, params.dehaze, params.hazeEngine == 2, cancellation)) {
+            return false;
+        }
+    }
+    if (params.toneEngine == 2 &&
+        !kepler_processing::applyFilmicTone(rgba, width, height, stride, cancellation)) {
+        return false;
+    }
+    if (params.toneEngine == 3 &&
+        !kepler_processing::applySigmoidTone(rgba, width, height, stride, cancellation)) {
+        return false;
+    }
     if (params.noiseEngine == 1) {
         if (!apply_guided_noise_reduction_rgba8888(
-                rgba,
-                width,
-                height,
-                stride,
-                params.luminanceNoiseReduction,
-                params.colorNoiseReduction,
-                params.noiseDetailProtection,
-                cancellation)) {
+                rgba, width, height, stride, params.luminanceNoiseReduction,
+                params.colorNoiseReduction, params.noiseDetailProtection, cancellation)) {
             return false;
         }
     } else if (params.noiseEngine == 2) {
-        if (!apply_edge_aware_noise_reduction_rgba8888(
-                rgba,
-                width,
-                height,
-                stride,
-                params.luminanceNoiseReduction * 0.70f,
-                params.colorNoiseReduction * 0.80f,
-                params.noiseDetailProtection,
-                cancellation) ||
-            !apply_guided_noise_reduction_rgba8888(
-                rgba,
-                width,
-                height,
-                stride,
-                params.luminanceNoiseReduction * 0.75f,
-                params.colorNoiseReduction * 0.90f,
-                params.noiseDetailProtection,
-                cancellation)) {
+        if (!kepler_processing::applyNonLocalMeansLite(
+                rgba, width, height, stride, params.luminanceNoiseReduction,
+                params.colorNoiseReduction, params.noiseDetailProtection, cancellation)) {
             return false;
         }
     } else if (!apply_edge_aware_noise_reduction_rgba8888(
-                   rgba,
-                   width,
-                   height,
-                   stride,
-                   params.luminanceNoiseReduction,
-                   params.colorNoiseReduction,
-                   params.noiseDetailProtection,
-                   cancellation)) {
+                   rgba, width, height, stride, params.luminanceNoiseReduction,
+                   params.colorNoiseReduction, params.noiseDetailProtection, cancellation)) {
         return false;
     }
+    if (params.detailEngine == 2) {
+        return kepler_processing::applyMultiscaleLaplacianDetail(
+            rgba, width, height, stride, params.sharpness,
+            params.luminanceNoiseReduction, cancellation);
+    }
     return apply_sharpness_rgba8888(
-        rgba,
-        width,
-        height,
-        stride,
-        params.sharpness,
-        params.luminanceNoiseReduction,
-        cancellation);
+        rgba, width, height, stride, params.sharpness,
+        params.luminanceNoiseReduction, cancellation);
 }
 #endif
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeVersion(JNIEnv* env, jobject /*thiz*/) {
-    return env->NewStringUTF("PhotoCore C++ v0.4");
+    return env->NewStringUTF("PhotoCore C++ v0.5");
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -928,9 +916,6 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
     return runNativeGuarded("nativeRenderPreviewInPlace", [&]() -> jint {
         kepler_native::CancellationLease cancellation(operationToken);
         if (cancellation.cancelled()) return kepler_native::kCancelledBeforeStart;
-        (void)detailEngine;
-        (void)toneEngine;
-        (void)hazeEngine;
         (void)noiseReduction;
 
         AndroidBitmapInfo info{};
@@ -987,10 +972,28 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
             saturation,
             vibrance,
             clarity,
-            dehaze,
+            hazeEngine == 0 ? dehaze : 0.0f,
             colorNoiseReduction,
             cancellation
         )) return kepler_native::kCancelledMidPass;
+        if ((hazeEngine == 1 || hazeEngine == 2) &&
+            !kepler_processing::applyDarkChannelDehaze(
+                bytes,
+                width,
+                height,
+                stride,
+                dehaze,
+                hazeEngine == 2,
+                cancellation
+            )) return kepler_native::kCancelledMidPass;
+        if (toneEngine == 2 &&
+            !kepler_processing::applyFilmicTone(
+                bytes, width, height, stride, cancellation
+            )) return kepler_native::kCancelledMidPass;
+        if (toneEngine == 3 &&
+            !kepler_processing::applySigmoidTone(
+                bytes, width, height, stride, cancellation
+            )) return kepler_native::kCancelledMidPass;
         const auto toneEnd = std::chrono::steady_clock::now();
         if (cancellation.cancelled()) return kepler_native::kCancelledMidPass;
 
@@ -1007,25 +1010,13 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
                 cancellation
             )) return kepler_native::kCancelledMidPass;
         } else if (noiseEngine == 2) {
-            // Kotlin-side NonLocalMeansLite maps to a lightweight approximation here:
-            // edge-aware/guided refinement plus 5x5 speckle and chroma cleanup, not a full NLM search.
-            if (!apply_edge_aware_noise_reduction_rgba8888(
+            if (!kepler_processing::applyNonLocalMeansLite(
                 bytes,
                 width,
                 height,
                 stride,
-                luminanceNoiseReduction * 0.70f,
-                colorNoiseReduction * 0.80f,
-                noiseDetailProtection,
-                cancellation
-            )) return kepler_native::kCancelledMidPass;
-            if (!apply_guided_noise_reduction_rgba8888(
-                bytes,
-                width,
-                height,
-                stride,
-                luminanceNoiseReduction * 0.75f,
-                colorNoiseReduction * 0.90f,
+                luminanceNoiseReduction,
+                colorNoiseReduction,
                 noiseDetailProtection,
                 cancellation
             )) return kepler_native::kCancelledMidPass;
@@ -1045,24 +1036,39 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPl
         if (cancellation.cancelled()) return kepler_native::kCancelledMidPass;
 
         const auto sharpenStart = std::chrono::steady_clock::now();
-        if (!apply_sharpness_rgba8888(
-            bytes,
-            width,
-            height,
-            stride,
-            sharpness,
-            luminanceNoiseReduction,
-            cancellation
-        )) return kepler_native::kCancelledMidPass;
+        const bool detailApplied =
+            detailEngine == 2
+                ? kepler_processing::applyMultiscaleLaplacianDetail(
+                      bytes,
+                      width,
+                      height,
+                      stride,
+                      sharpness,
+                      luminanceNoiseReduction,
+                      cancellation
+                  )
+                : apply_sharpness_rgba8888(
+                      bytes,
+                      width,
+                      height,
+                      stride,
+                      sharpness,
+                      luminanceNoiseReduction,
+                      cancellation
+                  );
+        if (!detailApplied) return kepler_native::kCancelledMidPass;
         const auto sharpenEnd = std::chrono::steady_clock::now();
         if (cancellation.cancelled()) return kepler_native::kCancelledBeforeCommit;
         const auto totalEnd = std::chrono::steady_clock::now();
 
         LOGD(
-            "render %dx%d engine=%d denoise=%.2fms tone=%.2fms sharpen=%.2fms total=%.2fms",
+            "render %dx%d noise=%d detail=%d tone=%d haze=%d denoise=%.2fms toneMs=%.2fms detailMs=%.2fms total=%.2fms",
             width,
             height,
             noiseEngine,
+            detailEngine,
+            toneEngine,
+            hazeEngine,
             std::chrono::duration<double, std::milli>(denoiseEnd - denoiseStart).count(),
             std::chrono::duration<double, std::milli>(toneEnd - toneStart).count(),
             std::chrono::duration<double, std::milli>(sharpenEnd - sharpenStart).count(),

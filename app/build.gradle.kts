@@ -130,6 +130,7 @@ tasks.register<Exec>("compileHostNativeV1Goldens") {
         listOf(
             "src/test/native/native_v1_exact_golden.cpp",
             "src/main/cpp/native_bridge.cpp",
+            "src/main/cpp/native_processing_algorithms.cpp",
             "src/main/cpp/native_special_effects.cpp",
             "src/main/cpp/native_flare_guard.cpp",
             "src/main/cpp/native_flare_mask.cpp",

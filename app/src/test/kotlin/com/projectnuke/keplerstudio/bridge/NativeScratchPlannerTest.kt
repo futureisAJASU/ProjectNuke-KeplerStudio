@@ -120,6 +120,41 @@ class NativeScratchPlannerTest {
         tracker.close()
     }
 
+    @Test
+    fun advancedProcessingEnginesReserveTheirFullFrameScratch() {
+        val nlm =
+            NativeScratchPlanner.mainRender(
+                rowBytes = 4000,
+                needsFiveRows = true,
+                needsThreeRows = true,
+                width = 1000,
+                height = 500,
+                noiseEngine = 2,
+            )
+        val dcp =
+            NativeScratchPlanner.mainRender(
+                rowBytes = 4000,
+                needsFiveRows = false,
+                needsThreeRows = false,
+                width = 1000,
+                height = 500,
+                hazeEngine = 1,
+            )
+        val multiscaleDcp =
+            NativeScratchPlanner.mainRender(
+                rowBytes = 4000,
+                needsFiveRows = false,
+                needsThreeRows = false,
+                width = 1000,
+                height = 500,
+                hazeEngine = 2,
+            )
+
+        assertEquals(2_000_000L, nlm.knownBytes)
+        assertEquals(3_500_000L, dcp.knownBytes)
+        assertEquals(4_000_000L, multiscaleDcp.knownBytes)
+    }
+
     private fun scope(
         tracker: TrackerSession,
         transientReserveBytes: Long = 0L,

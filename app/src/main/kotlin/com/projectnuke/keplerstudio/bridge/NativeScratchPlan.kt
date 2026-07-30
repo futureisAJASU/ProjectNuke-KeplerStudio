@@ -31,16 +31,39 @@ internal data class NativeScratchPlan(
 }
 
 internal object NativeScratchPlanner {
-    fun mainRender(rowBytes: Int, needsFiveRows: Boolean, needsThreeRows: Boolean): NativeScratchPlan {
+    fun mainRender(
+        rowBytes: Int,
+        needsFiveRows: Boolean,
+        needsThreeRows: Boolean,
+        width: Int = 0,
+        height: Int = 0,
+        noiseEngine: Int = 0,
+        detailEngine: Int = 0,
+        hazeEngine: Int = 0,
+    ): NativeScratchPlan {
         val rowCount = when {
             needsFiveRows -> 5L
             needsThreeRows -> 3L
             else -> 0L
         }
-        return NativeScratchPlan(
-            NativeScratchKind.MainRender,
-            checkedMultiply(positive(rowBytes), rowCount),
-        )
+        val rowPeak = checkedMultiply(positive(rowBytes), rowCount)
+        val advancedPeak =
+            if (width > 0 && height > 0) {
+                val frame = bitmapBytes(rowBytes, height)
+                val pixels = checkedMultiply(positive(width), positive(height))
+                maxOf(
+                    if (noiseEngine == 2) frame else 0L,
+                    if (detailEngine == 2) frame else 0L,
+                    when (hazeEngine) {
+                        1 -> checkedAdd(frame, checkedMultiply(pixels, 3L))
+                        2 -> checkedAdd(frame, checkedMultiply(pixels, 4L))
+                        else -> 0L
+                    },
+                )
+            } else {
+                0L
+            }
+        return NativeScratchPlan(NativeScratchKind.MainRender, maxOf(rowPeak, advancedPeak))
     }
 
     fun specialEffect(rowBytes: Int, height: Int, effect: Int): NativeScratchPlan =

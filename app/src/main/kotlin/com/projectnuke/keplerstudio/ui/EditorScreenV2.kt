@@ -324,6 +324,8 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         onApplyCorrectionEngine = viewModel::applyCorrectionEngineToCurrentDocument,
                         onExperimentalLabChanged = viewModel::updateExperimentalLab,
                         onGenerateComparison = viewModel::generateDebugComparison,
+                        onGenerateProcessingEngineComparison =
+                            viewModel::generateProcessingEngineComparison,
                         onGenerateEditorResolutionComparison =
                             viewModel::generateEditorResolutionDebugComparison,
                         onCancelComparison = viewModel::cancelDebugComparison,
@@ -1075,6 +1077,7 @@ internal fun V2SettingsScreen(
     onApplyCorrectionEngine: (CorrectionEngine) -> Unit,
     onExperimentalLabChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
     onGenerateComparison: () -> Unit,
+    onGenerateProcessingEngineComparison: () -> Unit,
     onGenerateEditorResolutionComparison: () -> Unit,
     onCancelComparison: () -> Unit,
     onClearDraft: () -> Unit,
@@ -1195,6 +1198,7 @@ internal fun V2SettingsScreen(
                 comparisonBusy = comparisonBusy,
                 onOverridesChanged = onExperimentalLabChanged,
                 onGenerateComparison = onGenerateComparison,
+                onGenerateProcessingEngineComparison = onGenerateProcessingEngineComparison,
                 onGenerateEditorResolutionComparison = onGenerateEditorResolutionComparison,
                 onCancelComparison = onCancelComparison,
             )
@@ -1288,6 +1292,7 @@ private fun ExperimentalLabSettingsCard(
     comparisonBusy: Boolean,
     onOverridesChanged: ((DebugFeatureOverrides) -> DebugFeatureOverrides) -> Unit,
     onGenerateComparison: () -> Unit,
+    onGenerateProcessingEngineComparison: () -> Unit,
     onGenerateEditorResolutionComparison: () -> Unit,
     onCancelComparison: () -> Unit,
 ) {
@@ -1396,6 +1401,9 @@ private fun ExperimentalLabSettingsCard(
             }
         } else {
             Button(onClick = onGenerateComparison) { Text("V1·V2 비교 생성") }
+            OutlinedButton(onClick = onGenerateProcessingEngineComparison) {
+                Text("기본·선택 알고리즘 비교")
+            }
             Text(
                 "편집 해상도 비교는 현재 편집용 비트맵(보통 최대 2048px)을 사용합니다. 원본/내보내기 해상도가 아닙니다.",
                 color = V2TextMuted,
@@ -1436,11 +1444,15 @@ private fun ExperimentalLabSettingsCard(
                     }
                 }
             }
-            var toggledVersion by remember(artifact) { mutableStateOf("V1") }
+            var toggledVersion by remember(artifact) { mutableStateOf(artifact.baselineLabel) }
             var viewerOpen by remember(artifact) { mutableStateOf(false) }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TextButton(onClick = { toggledVersion = "V1" }) { Text("V1 보기") }
-                TextButton(onClick = { toggledVersion = "V2" }) { Text("V2 보기") }
+                TextButton(onClick = { toggledVersion = artifact.baselineLabel }) {
+                    Text("${artifact.baselineLabel} 보기")
+                }
+                TextButton(onClick = { toggledVersion = artifact.experimentalLabel }) {
+                    Text("${artifact.experimentalLabel} 보기")
+                }
                 TextButton(onClick = { viewerOpen = true }) { Text("비교 뷰어 열기") }
                 TextButton(onClick = ExperimentalComparisonStore::clear) { Text("비교 지우기") }
             }
@@ -1474,7 +1486,7 @@ private fun DebugComparisonViewerDialog(
     onDismiss: () -> Unit,
     onClear: () -> Unit,
 ) {
-    var selectedLabel by remember(artifact) { mutableStateOf("V1") }
+    var selectedLabel by remember(artifact) { mutableStateOf(artifact.baselineLabel) }
     var scale by remember(artifact) { mutableFloatStateOf(1f) }
     var offset by remember(artifact) { mutableStateOf(Offset.Zero) }
     var splitPosition by remember(artifact) { mutableFloatStateOf(0.5f) }
@@ -1556,13 +1568,13 @@ private fun DebugComparisonViewerDialog(
                         if (selectedLabel == "분할") {
                             Image(
                                 bitmap = artifact.experimental.asImageBitmap(),
-                                contentDescription = "V2 분할 비교",
+                                contentDescription = "${artifact.experimentalLabel} 분할 비교",
                                 modifier = transformed,
                                 contentScale = ContentScale.Fit,
                             )
                             Image(
                                 bitmap = artifact.baseline.asImageBitmap(),
-                                contentDescription = "V1 분할 비교",
+                                contentDescription = "${artifact.baselineLabel} 분할 비교",
                                 modifier =
                                     transformed.drawWithContent {
                                         clipRect(right = size.width * splitPosition) {
@@ -1598,9 +1610,10 @@ private fun DebugComparisonViewerDialog(
                                             }
                                             .semantics {
                                                 role = Role.Adjustable
-                                                contentDescription = "V1과 V2 비교 분할선"
+                                                contentDescription =
+                                                    "${artifact.baselineLabel}과 ${artifact.experimentalLabel} 비교 분할선"
                                                 stateDescription =
-                                                    "V1 ${(splitPosition * 100).toInt()}퍼센트"
+                                                    "${artifact.baselineLabel} ${(splitPosition * 100).toInt()}퍼센트"
                                                 progressBarRangeInfo =
                                                     ProgressBarRangeInfo(
                                                         splitPosition,
@@ -1644,7 +1657,7 @@ private fun DebugComparisonViewerDialog(
                     }
                     if (selectedLabel == "분할") {
                         Text(
-                            "이미지 위 분할선을 드래그 · V1 ${(splitPosition * 100).toInt()}%",
+                            "이미지 위 분할선을 드래그 · ${artifact.baselineLabel} ${(splitPosition * 100).toInt()}%",
                             color = V2TextMuted,
                             style = MaterialTheme.typography.labelSmall,
                         )
@@ -1656,8 +1669,8 @@ private fun DebugComparisonViewerDialog(
                     style = MaterialTheme.typography.labelSmall,
                 )
                 Text(
-                    "V1 ${artifact.baselineContracts.nativeRenderContract ?: "계약 정보 없음"} · " +
-                        "V2 ${artifact.experimentalContracts.nativeRenderContract ?: "계약 정보 없음"}",
+                    "${artifact.baselineLabel} ${artifact.baselineContracts.nativeRenderContract ?: "계약 정보 없음"} · " +
+                        "${artifact.experimentalLabel} ${artifact.experimentalContracts.nativeRenderContract ?: "계약 정보 없음"}",
                     color = V2TextMuted,
                     style = MaterialTheme.typography.labelSmall,
                 )

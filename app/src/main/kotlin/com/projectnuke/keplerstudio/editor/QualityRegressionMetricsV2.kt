@@ -47,6 +47,8 @@ data class DebugComparisonArtifact(
     val algorithmDecision: String? = null,
     val knownTransientBytes: Long? = null,
     val durationMillis: Long? = null,
+    val baselineLabel: String = "V1",
+    val experimentalLabel: String = "V2",
 ) {
     val retainedBytes: Long
         get() =

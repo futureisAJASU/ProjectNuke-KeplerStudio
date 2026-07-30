@@ -23,6 +23,9 @@ struct MainRenderParams {
     float colorNoiseReduction;
     float noiseDetailProtection;
     int noiseEngine;
+    int detailEngine;
+    int toneEngine;
+    int hazeEngine;
 };
 
 bool renderMain(

@@ -142,6 +142,8 @@ class OwnedDebugComparisonArtifact private constructor(
     val algorithmDecision: String?,
     val knownTransientBytes: Long?,
     val durationMillis: Long?,
+    val baselineLabel: String,
+    val experimentalLabel: String,
 ) : AutoCloseable {
     private val closeRequested = AtomicBoolean(false)
     private val references = AtomicInteger(1)
@@ -174,8 +176,8 @@ class OwnedDebugComparisonArtifact private constructor(
     fun labeledBitmaps(): List<Pair<String, Bitmap>> {
         check(canPublish) { "comparison artifact is closing or closed" }
         return listOf(
-            "V1" to baseline,
-            "V2" to experimental,
+            baselineLabel to baseline,
+            experimentalLabel to experimental,
             "차이" to differenceHeatmap,
         ) + listOfNotNull(mask?.let { "마스크" to it })
     }
@@ -259,6 +261,8 @@ class OwnedDebugComparisonArtifact private constructor(
                     algorithmDecision = source.algorithmDecision,
                     knownTransientBytes = source.knownTransientBytes,
                     durationMillis = source.durationMillis,
+                    baselineLabel = source.baselineLabel,
+                    experimentalLabel = source.experimentalLabel,
                 )
             } catch (failure: Throwable) {
                 owned.forEach { it.takeUnless(Bitmap::isRecycled)?.recycle() }

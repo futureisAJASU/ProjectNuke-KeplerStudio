@@ -62,6 +62,11 @@ object NativePhotoCore {
                 needsFiveRows =
                     luminanceNoiseReduction > 0.001f || colorNoiseReduction > 0.001f,
                 needsThreeRows = sharpness > 0.001f,
+                width = bitmap.width,
+                height = bitmap.height,
+                noiseEngine = noiseEngine,
+                detailEngine = detailEngine,
+                hazeEngine = hazeEngine,
             )
         // Kotlin keeps highlights signed opposite the native kernel, so pass the negated value here.
         val result =

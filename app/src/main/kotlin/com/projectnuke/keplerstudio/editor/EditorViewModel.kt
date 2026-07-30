@@ -895,14 +895,47 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun generateDebugComparison() = generateDebugComparison(editorResolution = false)
+    fun generateDebugComparison() =
+        generateDebugComparison(editorResolution = false, mode = DebugComparisonMode.NativeRoutes)
 
-    fun generateEditorResolutionDebugComparison() = generateDebugComparison(editorResolution = true)
+    fun generateEditorResolutionDebugComparison() =
+        generateDebugComparison(editorResolution = true, mode = DebugComparisonMode.NativeRoutes)
 
-    private fun generateDebugComparison(editorResolution: Boolean) {
+    fun generateProcessingEngineComparison() =
+        generateDebugComparison(editorResolution = false, mode = DebugComparisonMode.ProcessingEngines)
+
+    private fun generateDebugComparison(
+        editorResolution: Boolean,
+        mode: DebugComparisonMode,
+    ) {
         if (!BuildConfig.DEBUG || shuttingDown) return
         val state = _uiState.value
         val source = state.originalPreviewBitmap ?: state.previewBitmap ?: return
+        val referenceEngines =
+            EngineSelection(
+                noiseEngine = NoiseEngine.FastEdgeAware,
+                detailEngine = DetailEngine.MaskedUnsharp,
+                toneEngine = ToneEngine.HistogramAuto,
+                hazeEngine = DehazeEngine.FastContrast,
+            )
+        val selectedEngines = state.engineSelection()
+        if (mode == DebugComparisonMode.ProcessingEngines && selectedEngines == referenceEngines) {
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "세부 보정 방식에서 비교할 대체 알고리즘을 먼저 선택해 주세요.")
+            }
+            return
+        }
+        val comparisonRoute =
+            if (mode == DebugComparisonMode.ProcessingEngines) {
+                state.correctionEngineState.previewRoute
+                    ?: if (state.correctionEngineState.documentEngine == CorrectionEngine.Engine2) {
+                        NativeRenderRoute.V2
+                    } else {
+                        NativeRenderRoute.V1
+                    }
+            } else {
+                null
+            }
         if (state.isBusy || state.maintenanceBusy) {
             updateUiStateAndRecycleReplaced {
                 it.copy(message = "현재 작업이 끝난 뒤 비교를 생성해 주세요.")
@@ -940,7 +973,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val comparisonTracker =
             beginMemoryTracking(
-                if (editorResolution) "debugComparisonEditorResolution" else "debugComparison",
+                when {
+                    mode == DebugComparisonMode.ProcessingEngines -> "processingEngineComparison"
+                    editorResolution -> "debugComparisonEditorResolution"
+                    else -> "debugComparison"
+                },
                 snapshotState = "rendering",
                 transientReserveBytes = requiredBytes,
             )
@@ -975,15 +1012,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         val epoch = ++comparisonEpoch
         val base = checkNotNull(ownedBase)
+        val baselineRoute = comparisonRoute ?: NativeRenderRoute.V1
+        val experimentalRoute = comparisonRoute ?: NativeRenderRoute.V2
         val v1Request =
             createRenderRequest(
                 state = state,
                 operation = RenderOperation.DebugComparison,
                 basePreview = base,
                 revision = state.revision,
+                engines =
+                    if (mode == DebugComparisonMode.ProcessingEngines) referenceEngines
+                    else selectedEngines,
                 selectionLayers = ownedLayers,
-                storedRequestedRoute = NativeRenderRoute.V1,
-                exactRoute = NativeRenderRoute.V1,
+                storedRequestedRoute = baselineRoute,
+                exactRoute = baselineRoute,
                 storedDecision = RenderRouteDecision.StoredVisibleTruth,
                 fallbackPolicy = FallbackPolicy.NoFallback,
                 diagnostics = comparisonTracker,
@@ -994,9 +1036,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 operation = RenderOperation.DebugComparison,
                 basePreview = base,
                 revision = state.revision,
+                engines = selectedEngines,
                 selectionLayers = ownedLayers,
-                storedRequestedRoute = NativeRenderRoute.V2,
-                exactRoute = NativeRenderRoute.V2,
+                storedRequestedRoute = experimentalRoute,
+                exactRoute = experimentalRoute,
                 storedDecision = RenderRouteDecision.StoredVisibleTruth,
                 fallbackPolicy = FallbackPolicy.NoFallback,
                 diagnostics = comparisonTracker,
@@ -1012,8 +1055,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 comparisonBusy = true,
                 message =
-                    if (editorResolution) "편집 해상도 비교 준비 중 · V1 단계"
-                    else "V1·V2 비교 미리보기를 생성하는 중입니다.",
+                    when {
+                        mode == DebugComparisonMode.ProcessingEngines ->
+                            "기본·선택 알고리즘 비교 미리보기를 생성하는 중입니다."
+                        editorResolution -> "편집 해상도 비교 준비 중 · V1 단계"
+                        else -> "V1·V2 비교 미리보기를 생성하는 중입니다."
+                    },
             )
         }
 
@@ -1035,10 +1082,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     updateUiStateAndRecycleReplaced {
                                         it.copy(
                                             message =
-                                                if (editorResolution) {
-                                                    "편집 해상도 비교 처리 중 · V2 단계"
-                                                } else {
-                                                    "V1·V2 비교 미리보기 처리 중 · V2 단계"
+                                                when {
+                                                    mode == DebugComparisonMode.ProcessingEngines ->
+                                                        "기본·선택 알고리즘 비교 처리 중 · 선택 단계"
+                                                    editorResolution ->
+                                                        "편집 해상도 비교 처리 중 · V2 단계"
+                                                    else ->
+                                                        "V1·V2 비교 미리보기 처리 중 · V2 단계"
                                                 }
                                         )
                                     }
@@ -1129,14 +1179,33 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 evaluatedHeight = height,
                                 baselineContracts =
                                     state.algorithmContracts.copy(
-                                        nativeRenderContract = AlgorithmContracts.NATIVE_V1,
+                                        nativeRenderContract =
+                                            if (baselineRoute == NativeRenderRoute.V2) {
+                                                AlgorithmContracts.NATIVE_V2
+                                            } else {
+                                                AlgorithmContracts.NATIVE_V1
+                                            },
                                     ),
                                 experimentalContracts =
                                     state.algorithmContracts.copy(
-                                        nativeRenderContract = AlgorithmContracts.NATIVE_V2,
+                                        nativeRenderContract =
+                                            if (experimentalRoute == NativeRenderRoute.V2) {
+                                                AlgorithmContracts.NATIVE_V2
+                                            } else {
+                                                AlgorithmContracts.NATIVE_V1
+                                            },
                                     ),
                                 baseProvenance = state.baseProvenance,
-                                algorithmDecision = "동일 문서 V1·V2",
+                                algorithmDecision =
+                                    if (mode == DebugComparisonMode.ProcessingEngines) {
+                                        "기본 처리 → ${selectedEngines.compactLabel()}"
+                                    } else {
+                                        "동일 문서 V1·V2"
+                                    },
+                                baselineLabel =
+                                    if (mode == DebugComparisonMode.ProcessingEngines) "기본 처리" else "V1",
+                                experimentalLabel =
+                                    if (mode == DebugComparisonMode.ProcessingEngines) "선택 처리" else "V2",
                                 knownTransientBytes = requiredBytes,
                                 durationMillis = pair.first.durationMillis + pair.second.durationMillis,
                             )
@@ -1156,8 +1225,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             it.copy(
                                 comparisonBusy = false,
                                 message =
-                                    if (editorResolution) "편집 해상도 V1·V2 비교를 생성했습니다."
-                                    else "V1·V2 비교 미리보기를 생성했습니다.",
+                                    when {
+                                        mode == DebugComparisonMode.ProcessingEngines ->
+                                            "기본·선택 알고리즘 비교 미리보기를 생성했습니다."
+                                        editorResolution -> "편집 해상도 V1·V2 비교를 생성했습니다."
+                                        else -> "V1·V2 비교 미리보기를 생성했습니다."
+                                    },
                             )
                         } else {
                             it
@@ -6313,12 +6386,21 @@ internal fun EditorHistorySnapshot.releaseBitmapOwnership() {
     selectionLayers = emptyList()
 }
 
+private enum class DebugComparisonMode {
+    NativeRoutes,
+    ProcessingEngines,
+}
+
 internal data class EngineSelection(
     val noiseEngine: NoiseEngine,
     val detailEngine: DetailEngine,
     val toneEngine: ToneEngine,
     val hazeEngine: DehazeEngine,
-)
+) {
+    fun compactLabel(): String =
+        listOf(noiseEngine.label, detailEngine.label, toneEngine.label, hazeEngine.label)
+            .joinToString(" / ")
+}
 
 internal fun EditorUiState.engineSelection(): EngineSelection =
     EngineSelection(
@@ -8282,6 +8364,13 @@ internal const val PREF_NAME_DRAFT = "kepler_studio_editor"
 internal const val DRAFT_FORMAT_VERSION = 4
 internal val IMPLEMENTED_NOISE_ENGINES =
     listOf(NoiseEngine.FastEdgeAware, NoiseEngine.GuidedFilter, NoiseEngine.NonLocalMeansLite)
-internal val IMPLEMENTED_DETAIL_ENGINES = listOf(DetailEngine.MaskedUnsharp)
-internal val IMPLEMENTED_TONE_ENGINES = listOf(ToneEngine.HistogramAuto, ToneEngine.Clahe)
-internal val IMPLEMENTED_DEHAZE_ENGINES = listOf(DehazeEngine.FastContrast)
+internal val IMPLEMENTED_DETAIL_ENGINES =
+    listOf(DetailEngine.MaskedUnsharp, DetailEngine.MultiLayerLaplacian)
+internal val IMPLEMENTED_TONE_ENGINES =
+    listOf(ToneEngine.HistogramAuto, ToneEngine.Clahe, ToneEngine.Filmic, ToneEngine.Sigmoid)
+internal val IMPLEMENTED_DEHAZE_ENGINES =
+    listOf(
+        DehazeEngine.FastContrast,
+        DehazeEngine.DarkChannelPrior,
+        DehazeEngine.PyramidFusionDcp,
+    )

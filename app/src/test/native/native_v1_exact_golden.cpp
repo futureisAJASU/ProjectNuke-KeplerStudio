@@ -1,4 +1,6 @@
 #include "native_v1_host_test.h"
+#include "native_processing_algorithms.h"
+#include "native_cancellation.h"
 
 #include <array>
 #include <cstdint>
@@ -84,6 +86,9 @@ int main() {
         0.02f,
         0.01f,
         0.50f,
+        0,
+        0,
+        0,
         0,
     };
     if (!kepler_host::renderMain(mainRender.data(), kWidth, kHeight, kWidth * 4, params)) {
@@ -208,6 +213,60 @@ int main() {
         }
     }
 
-    std::cout << "native V1 host exact goldens passed\n";
+    // Alternative processing engines are opt-in and must preserve alpha and zero-strength identity.
+    kepler_native::CancellationLease noCancellation(0);
+    auto nlmIdentity = fixtureRgba();
+    const auto nlmIdentityHash = exactHash(nlmIdentity.data(), kWidth, kHeight, kWidth * 4);
+    if (!kepler_processing::applyNonLocalMeansLite(
+            nlmIdentity.data(), kWidth, kHeight, kWidth * 4, 0.0f, 0.0f, 0.5f, noCancellation) ||
+        exactHash(nlmIdentity.data(), kWidth, kHeight, kWidth * 4) != nlmIdentityHash) {
+        return 27;
+    }
+
+    std::vector<std::uint8_t> noisy(7U * 7U * 4U, 128U);
+    for (std::size_t index = 3; index < noisy.size(); index += 4) noisy[index] = 211U;
+    noisy[(3U * 7U + 3U) * 4U] = 250U;
+    noisy[(3U * 7U + 3U) * 4U + 1U] = 20U;
+    noisy[(3U * 7U + 3U) * 4U + 2U] = 20U;
+    const auto noisyBefore = noisy;
+    if (!kepler_processing::applyNonLocalMeansLite(
+            noisy.data(), 7, 7, 28, 1.0f, 1.0f, 0.2f, noCancellation) ||
+        noisy == noisyBefore || noisy[(3U * 7U + 3U) * 4U + 3U] != 211U) {
+        return 28;
+    }
+
+    auto filmic = fixtureRgba();
+    const auto filmicBefore = filmic;
+    if (!kepler_processing::applyFilmicTone(
+            filmic.data(), kWidth, kHeight, kWidth * 4, noCancellation) ||
+        filmic == filmicBefore) {
+        return 29;
+    }
+    for (std::size_t index = 3; index < filmic.size(); index += 4) {
+        if (filmic[index] != filmicBefore[index]) return 30;
+    }
+
+    std::vector<std::uint8_t> hazy(9U * 5U * 4U, 255U);
+    for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < 9; ++x) {
+            auto* pixel = hazy.data() + (static_cast<std::size_t>(y) * 9U + x) * 4U;
+            const auto value = static_cast<std::uint8_t>(145 + x * 9);
+            pixel[0] = value;
+            pixel[1] = static_cast<std::uint8_t>(value + 3);
+            pixel[2] = static_cast<std::uint8_t>(value + 6);
+            pixel[3] = 173U;
+        }
+    }
+    const auto hazyBefore = hazy;
+    if (!kepler_processing::applyDarkChannelDehaze(
+            hazy.data(), 9, 5, 36, 0.8f, true, noCancellation) ||
+        hazy == hazyBefore) {
+        return 31;
+    }
+    for (std::size_t index = 3; index < hazy.size(); index += 4) {
+        if (hazy[index] != 173U) return 32;
+    }
+
+    std::cout << "native V1 host exact goldens and alternative engines passed\n";
     return 0;
 }

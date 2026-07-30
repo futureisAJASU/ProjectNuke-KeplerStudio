@@ -65,8 +65,9 @@ internal fun PreviewHistogramOverlay(
     mode: PreviewHistogramMode,
     modifier: Modifier = Modifier,
 ) {
+    val bitmapGeneration = bitmap.generationId
     val histogram by
-        produceState<PreviewHistogram?>(initialValue = null, bitmap) {
+        produceState<PreviewHistogram?>(initialValue = null, bitmap, bitmapGeneration) {
             value = createBoundedHistogram(bitmap)
         }
     val data = histogram ?: return
