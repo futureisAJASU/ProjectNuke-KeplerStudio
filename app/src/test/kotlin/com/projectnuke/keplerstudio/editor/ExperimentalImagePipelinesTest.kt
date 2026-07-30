@@ -175,8 +175,44 @@ class ExperimentalImagePipelinesTest {
         assertEquals(
             1521270168617583706L,
             exactHash(result.argb),
-            "record contract-2 alpha/boundary protected fixture hash",
+            "record contract-3 alpha/boundary protected fixture hash",
         )
+    }
+
+    @Test
+    fun remasterV2TranslucentEdgesRemainStableOverMultipleBackgrounds() {
+        val width = 7
+        val height = 5
+        val alphas = intArrayOf(16, 48, 96, 160, 224, 255, 96)
+        val source =
+            IntArray(width * height) { index ->
+                argb(alphas[index % width], 188, 132, 104)
+            }
+        val result =
+            RemasterV2.process(
+                source,
+                FloatArray(source.size) { 1f },
+                width,
+                height,
+                foregroundStrength = 0.9f,
+                backgroundStrength = 0.4f,
+            )
+        val backgrounds =
+            intArrayOf(
+                argb(255, 0, 0, 0),
+                argb(255, 255, 255, 255),
+                argb(255, 32, 96, 180),
+            )
+
+        result.argb.indices.forEach { index ->
+            assertEquals(alpha(source[index]), alpha(result.argb[index]))
+            backgrounds.forEach { background ->
+                val before = compositeOpaque(source[index], background)
+                val after = compositeOpaque(result.argb[index], background)
+                val maximumAllowed = if (alpha(source[index]) <= 48) 1 else 10
+                assertTrue(maxChannelDelta(before, after) <= maximumAllowed)
+            }
+        }
     }
 
     @Test
@@ -294,6 +330,46 @@ class ExperimentalImagePipelinesTest {
     }
 
     @Test
+    fun subjectSelectionV2KeepsLowConfidenceBridgeAndHonorsSubtractAfterFeather() {
+        val width = 9
+        val height = 5
+        val raw = FloatArray(width * height)
+        for (y in 1..3) {
+            raw[y * width + 2] = 0.9f
+            raw[y * width + 6] = 0.9f
+        }
+        raw[2 * width + 3] = 0.38f
+        raw[2 * width + 4] = 0.38f
+        raw[2 * width + 5] = 0.38f
+        val connected =
+            SubjectSelectionV2.refine(
+                raw,
+                width,
+                height,
+                operation(19L, "low-confidence-bridge"),
+            )
+        assertTrue(connected.mask[2 * width + 4] >= 0.35f)
+        assertEquals(1, connected.metrics.connectedComponentCount)
+
+        val subtract = FloatArray(width * height)
+        subtract[2 * width + 4] = 1f
+        subtract[2 * width + 3] = 0.7f
+        subtract[2 * width + 5] = 0.7f
+        val removed =
+            SubjectSelectionV2.refine(
+                raw,
+                width,
+                height,
+                operation(20L, "subtract-authority"),
+                manualMask = subtract,
+                manualMode = ManualMaskEditMode.Subtract,
+            )
+        assertEquals(0f, removed.mask[2 * width + 4])
+        assertTrue(removed.mask[2 * width + 3] < connected.mask[2 * width + 3])
+        assertTrue(removed.mask[2 * width + 5] < connected.mask[2 * width + 5])
+    }
+
+    @Test
     fun experimentalPlannersRejectOverflowBeforeAllocation() {
         assertFailsWith<IllegalArgumentException> {
             FlareGuardV2.plan(Int.MAX_VALUE, Int.MAX_VALUE)
@@ -360,4 +436,21 @@ class ExperimentalImagePipelinesTest {
     private fun blue(argb: Int) = argb and 0xff
     private fun argb(a: Int, r: Int, g: Int, b: Int) =
         (a shl 24) or (r shl 16) or (g shl 8) or b
+
+    private fun compositeOpaque(foreground: Int, background: Int): Int {
+        val alpha = alpha(foreground)
+        fun channel(shift: Int): Int {
+            val front = (foreground ushr shift) and 0xff
+            val back = (background ushr shift) and 0xff
+            return (front * alpha + back * (255 - alpha) + 127) / 255
+        }
+        return argb(255, channel(16), channel(8), channel(0))
+    }
+
+    private fun maxChannelDelta(left: Int, right: Int): Int =
+        maxOf(
+            abs(red(left) - red(right)),
+            abs(green(left) - green(right)),
+            abs(blue(left) - blue(right)),
+        )
 }

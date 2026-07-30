@@ -43,7 +43,8 @@ class AlgorithmVersionPolicyTest {
         val result =
             resolveExecutedAlgorithmVersion(NativeRenderRoute.V2, "native-v2-contract-2")
 
-        assertEquals(AlgorithmContracts.NATIVE_V2, parsed.nativeRenderContract)
+        assertEquals(AlgorithmContracts.NATIVE_V2_PREVIOUS, parsed.nativeRenderContract)
+        assertEquals(AlgorithmContracts.NATIVE_V2, result.executedVersion)
         assertEquals("native-v2-contract-2", result.migratedFromVersion)
     }
 
@@ -54,7 +55,7 @@ class AlgorithmVersionPolicyTest {
                 "native-v2-contract-2+remaster-V2MaskAware+flare-RuleSelected"
             )
 
-        assertEquals(AlgorithmContracts.NATIVE_V2, parsed.nativeRenderContract)
+        assertEquals(AlgorithmContracts.NATIVE_V2_PREVIOUS, parsed.nativeRenderContract)
         assertEquals(
             AlgorithmContracts.LEGACY_REMASTER_COMPOSITE,
             parsed.remasterContract,

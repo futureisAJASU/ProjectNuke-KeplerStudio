@@ -282,6 +282,8 @@ bool cleanSmallSpots(
         for (int x = 0; x < width; ++x) {
             const auto* center = inputRow + static_cast<std::size_t>(x) * 4U;
             float mean[3] = {0.0F, 0.0F, 0.0F};
+            float minimumNeighborLuma = 255.0F;
+            float maximumNeighborLuma = 0.0F;
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     if (dx == 0 && dy == 0) continue;
@@ -289,13 +291,33 @@ bool cleanSmallSpots(
                     mean[0] += sample[0];
                     mean[1] += sample[1];
                     mean[2] += sample[2];
+                    const float sampleLuma = luma(sample);
+                    minimumNeighborLuma = std::min(minimumNeighborLuma, sampleLuma);
+                    maximumNeighborLuma = std::max(maximumNeighborLuma, sampleLuma);
                 }
             }
             for (float& channel : mean) channel /= 8.0F;
             const float centerY = luma(center);
             const float meanY = 0.2126F * mean[0] + 0.7152F * mean[1] + 0.0722F * mean[2];
-            const float isolated = smoothstep(18.0F, 52.0F, std::fabs(centerY - meanY));
-            const float mix = isolated * bounded * 0.65F;
+            const float lumaOutlier = std::fabs(centerY - meanY);
+            const float chromaOutlier =
+                std::max(
+                    std::fabs((center[0] - center[1]) - (mean[0] - mean[1])),
+                    std::fabs((center[2] - center[1]) - (mean[2] - mean[1])));
+            const float neighborRange = maximumNeighborLuma - minimumNeighborLuma;
+            const float neighborhoodCoherence =
+                1.0F - smoothstep(10.0F, 34.0F, neighborRange);
+            const float isolated =
+                std::max(
+                    smoothstep(20.0F, 56.0F, lumaOutlier),
+                    smoothstep(24.0F, 72.0F, chromaOutlier));
+            const float legitimateHighlightGuard =
+                (centerY > 210.0F && centerY > meanY && chromaOutlier < 18.0F)
+                    ? 0.04F
+                    : 1.0F;
+            const float mix =
+                isolated * bounded * neighborhoodCoherence *
+                legitimateHighlightGuard * 0.62F;
             auto* out = outputRow + static_cast<std::size_t>(x) * 4U;
             out[0] = toByte(center[0] + (mean[0] - center[0]) * mix);
             out[1] = toByte(center[1] + (mean[1] - center[1]) * mix);

@@ -55,7 +55,7 @@ data class AlgorithmContractSet(
                     // This label-only bump shipped no ordinary native pixel change.
                     "native-v2-contract-2" ->
                         AlgorithmContractSet(
-                            nativeRenderContract = AlgorithmContracts.NATIVE_V2,
+                            nativeRenderContract = AlgorithmContracts.NATIVE_V2_PREVIOUS,
                             migratedFromLegacy = raw,
                         )
                     else ->
@@ -150,14 +150,15 @@ internal object AlgorithmContracts {
     const val LEGACY_NATIVE_V1 = "native-v1-legacy"
     const val LEGACY_NATIVE_V2 = "native-v2-legacy-pre-contract"
     const val NATIVE_V1 = "native-v1-contract-1"
-    const val NATIVE_V2 = "native-v2-contract-1"
+    const val NATIVE_V2_PREVIOUS = "native-v2-contract-1"
+    const val NATIVE_V2 = "native-v2-contract-3"
 
     const val FLARE_V1 = "flare-v1-contract-1"
     const val FLARE_V2 = "flare-v2-contract-2"
     const val REMASTER_V1 = "remaster-v1-contract-1"
-    const val REMASTER_V2 = "remaster-v2-contract-2"
+    const val REMASTER_V2 = "remaster-v2-contract-3"
     const val SUBJECT_V1 = "subject-v1-contract-1"
-    const val SUBJECT_V2 = "subject-v2-contract-1"
+    const val SUBJECT_V2 = "subject-v2-contract-2"
     const val SELECTION_BLEND = "selection-blend-contract-1"
 
     const val LEGACY_FLARE_COMPOSITE = "flare-legacy-composite"

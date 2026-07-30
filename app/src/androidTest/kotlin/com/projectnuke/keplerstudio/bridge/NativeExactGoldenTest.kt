@@ -277,7 +277,7 @@ class NativeExactGoldenTest {
             )
 
         assertEquals(0, NativePhotoCore.nativeApplyCorrectionsV2(source, destination, params))
-        assertEquals(4995100279895001413L, exactRgbaHash(pixels(destination)))
+        assertEquals(-7938035531949190446L, exactRgbaHash(pixels(destination)))
         assertArrayEquals(sourceBefore, pixels(source))
 
         val identity =

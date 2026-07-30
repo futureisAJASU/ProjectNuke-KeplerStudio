@@ -492,7 +492,7 @@ object RemasterV2 {
                 val boundaryProtection =
                     1f - smoothstep(0.08f, 0.65f, maskHigh - maskLow) * 0.58f
                 val alphaProtection =
-                    smoothstep(24f, 208f, alpha(color).toFloat())
+                    smoothstep(72f, 224f, alpha(color).toFloat())
                 val highlightProtection = 1f - smoothstep(210f, 252f, luma[index])
                 val shadowProtection = smoothstep(8f, 55f, luma[index])
                 val noiseProtection = 1f - smoothstep(5f, 24f, localNoise) * 0.72f
@@ -559,7 +559,7 @@ object SubjectSelectionV2 {
                 activationThreshold = 0.45f,
             )
         val refinement = MaskRefinement.plan(width, height, options).knownPeakTransientBytes
-        val inputs = plane * if (includesManualMask) 3L else 1L
+        val inputs = plane * if (includesManualMask) 3L else 2L
         return ExperimentalPipelinePlan(
             count,
             Math.addExact(inputs, refinement),
@@ -595,9 +595,60 @@ object SubjectSelectionV2 {
                     }
                 }
             }
+        val prepared = combined.copyOf()
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val index = y * width + x
+                val value = combined[index]
+                if (value !in 0.24f..<0.45f) continue
+                if (
+                    manualMode == ManualMaskEditMode.Subtract &&
+                        (manualMask?.get(index) ?: 0f) >= 0.15f
+                ) {
+                    prepared[index] = 0f
+                    continue
+                }
+                var strongestNeighbor = 0f
+                var supportedDirections = 0
+                for (yy in max(0, y - 1)..min(height - 1, y + 1)) {
+                    for (xx in max(0, x - 1)..min(width - 1, x + 1)) {
+                        if (xx == x && yy == y) continue
+                        val neighbor = combined[yy * width + xx]
+                        strongestNeighbor = max(strongestNeighbor, neighbor)
+                        if (neighbor >= 0.52f) supportedDirections++
+                    }
+                }
+                fun directionalMaximum(dx: Int, dy: Int): Float {
+                    var maximum = 0f
+                    for (distance in 1..3) {
+                        val xx = x + dx * distance
+                        val yy = y + dy * distance
+                        if (xx !in 0 until width || yy !in 0 until height) break
+                        maximum = max(maximum, combined[yy * width + xx])
+                    }
+                    return maximum
+                }
+                val left = directionalMaximum(-1, 0)
+                val right = directionalMaximum(1, 0)
+                val up = directionalMaximum(0, -1)
+                val down = directionalMaximum(0, 1)
+                strongestNeighbor =
+                    max(strongestNeighbor, max(max(left, right), max(up, down)))
+                val bridgesStrongSeeds =
+                    min(left, right) >= 0.62f || min(up, down) >= 0.62f
+                if (
+                    strongestNeighbor >= 0.62f &&
+                        (supportedDirections >= 2 || bridgesStrongSeeds)
+                ) {
+                    prepared[index] =
+                        max(value, min(0.58f, strongestNeighbor * 0.76f))
+                }
+            }
+            if ((y and 31) == 0) checkCancelled(operation.isCancelled)
+        }
         val refined =
             MaskRefinement.refine(
-                combined,
+                prepared,
                 width,
                 height,
                 MaskRefinementOptions(
@@ -617,13 +668,14 @@ object SubjectSelectionV2 {
         for (y in 0 until height) {
             for (x in 0 until width) {
                 val index = y * width + x
-                val confidence = combined[index]
-                if (confidence < 0.72f) continue
+                val confidence = prepared[index]
+                val hysteresisBridge = prepared[index] > combined[index] + 0.01f
+                if (confidence < 0.72f && !hysteresisBridge) continue
                 var hasNeighborSupport = false
                 for (yy in max(0, y - 1)..min(height - 1, y + 1)) {
                     for (xx in max(0, x - 1)..min(width - 1, x + 1)) {
                         if (xx == x && yy == y) continue
-                        if (combined[yy * width + xx] >= 0.55f) {
+                        if (prepared[yy * width + xx] >= 0.55f) {
                             hasNeighborSupport = true
                             break
                         }
@@ -633,11 +685,22 @@ object SubjectSelectionV2 {
                 val manualAdd =
                     manualMode == ManualMaskEditMode.Add &&
                         (manualMask?.get(index) ?: 0f) >= 0.35f
-                if (hasNeighborSupport || manualAdd) {
-                    refined[index] = max(refined[index], confidence * 0.92f)
+                if (hasNeighborSupport || manualAdd || hysteresisBridge) {
+                    refined[index] =
+                        max(
+                            refined[index],
+                            confidence * if (hysteresisBridge) 0.9f else 0.92f,
+                        )
                 }
             }
             if ((y and 31) == 0) checkCancelled(operation.isCancelled)
+        }
+        if (manualMode == ManualMaskEditMode.Subtract && manualMask != null) {
+            for (index in refined.indices) {
+                refined[index] =
+                    (refined[index] * (1f - manualMask[index])).coerceIn(0f, 1f)
+                if ((index and 0x3fff) == 0) checkCancelled(operation.isCancelled)
+            }
         }
         operation.validateOrThrow()
         val quality =
