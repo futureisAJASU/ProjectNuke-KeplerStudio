@@ -897,7 +897,7 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeReleaseSession(
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPlace(
+Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeRenderPreviewInPlaceNative(
     JNIEnv* env,
     jobject /*thiz*/,
     jobject bitmap,

@@ -5,7 +5,6 @@ add_library(
     kepler_photocore
     SHARED
     native_bridge.cpp
-    native_bridge_alias.cpp
     native_special_effects.cpp
     native_crop_transform.cpp
     native_flare_guard.cpp
