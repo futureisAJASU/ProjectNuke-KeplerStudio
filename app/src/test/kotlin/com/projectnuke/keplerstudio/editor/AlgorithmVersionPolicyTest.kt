@@ -9,7 +9,8 @@ class AlgorithmVersionPolicyTest {
     fun sameVersionRestoreKeepsCurrentVersionWithoutMigration() {
         val result = resolveExecutedAlgorithmVersion(NativeRenderRoute.V2, "native-v2")
 
-        assertEquals("native-v2", result.executedVersion)
+        assertEquals(PixelContractVersion.V2, result.executedVersion)
+        assertEquals(null, result.migratedFromVersion)
         assertNull(result.migratedFromVersion)
     }
 
@@ -17,7 +18,7 @@ class AlgorithmVersionPolicyTest {
     fun olderV2MetadataMigratesToCurrentVersionTruthfully() {
         val result = resolveExecutedAlgorithmVersion(NativeRenderRoute.V2, "native-v2-preview-0")
 
-        assertEquals("native-v2", result.executedVersion)
+        assertEquals(PixelContractVersion.V2, result.executedVersion)
         assertEquals("native-v2-preview-0", result.migratedFromVersion)
     }
 
@@ -25,7 +26,7 @@ class AlgorithmVersionPolicyTest {
     fun futureMetadataCannotRelabelCurrentExecution() {
         val result = resolveExecutedAlgorithmVersion(NativeRenderRoute.V1, "native-v9")
 
-        assertEquals("native-v1", result.executedVersion)
+        assertEquals(PixelContractVersion.V1, result.executedVersion)
         assertEquals("native-v9", result.migratedFromVersion)
     }
 }

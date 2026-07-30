@@ -137,6 +137,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         BitmapMemoryBudget.initialize(app.applicationContext)
         ThumbnailBitmapCache.setByteBudget(BitmapMemoryBudget.thumbnailBudgetBytes())
         tracker.activateDocument(historyCoordinator.currentGeneration())
+        if (BuildConfig.DEBUG) {
+            viewModelScope.launch(Dispatchers.IO) {
+                ModelFeature.entries.forEach { feature ->
+                    ModelAvailabilityRegistry.reportPhase(
+                        feature,
+                        ModelCapabilityState(phase = ModelCapabilityPhase.Probing),
+                    )
+                }
+                ModelAvailabilityRegistry.probePackagedCapabilities(app.applicationContext)
+            }
+        }
     }
 
     internal fun createBrushSelectionInternal(allowRecovery: Boolean = true) {
@@ -863,11 +874,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun generateDebugComparison() = generateDebugComparison(fullResolution = false)
+    fun generateDebugComparison() = generateDebugComparison(editorResolution = false)
 
-    fun generateFullResolutionDebugComparison() = generateDebugComparison(fullResolution = true)
+    fun generateFullResolutionDebugComparison() = generateDebugComparison(editorResolution = true)
 
-    private fun generateDebugComparison(fullResolution: Boolean) {
+    private fun generateDebugComparison(editorResolution: Boolean) {
         if (!BuildConfig.DEBUG || shuttingDown) return
         val state = _uiState.value
         val source = state.originalPreviewBitmap ?: state.previewBitmap ?: return
@@ -881,7 +892,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         invalidateComparison()
         val longest = max(source.width, source.height).coerceAtLeast(1)
         val scale =
-            if (fullResolution) 1f
+            if (editorResolution) 1f
             else (DEBUG_COMPARISON_MAX_SIDE.toFloat() / longest).coerceAtMost(1f)
         val width = (source.width * scale).roundToInt().coerceAtLeast(1)
         val height = (source.height * scale).roundToInt().coerceAtLeast(1)
@@ -897,8 +908,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             updateUiStateAndRecycleReplaced {
                 it.copy(
                     message =
-                        if (fullResolution) {
-                            "전체 해상도 비교에 필요한 메모리를 확보할 수 없습니다."
+                        if (editorResolution) {
+                            "편집 해상도 비교에 필요한 메모리를 확보할 수 없습니다."
                         } else {
                             "비교 미리보기에 필요한 메모리를 확보할 수 없습니다."
                         }
@@ -908,7 +919,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val comparisonTracker =
             beginMemoryTracking(
-                if (fullResolution) "debugComparisonFullResolution" else "debugComparison",
+                if (editorResolution) "debugComparisonEditorResolution" else "debugComparison",
                 snapshotState = "rendering",
                 transientReserveBytes = requiredBytes,
             )
@@ -980,7 +991,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 comparisonBusy = true,
                 message =
-                    if (fullResolution) "전체 해상도 비교 준비 중 · V1 단계"
+                    if (editorResolution) "편집 해상도 비교 준비 중 · V1 단계"
                     else "V1·V2 비교 미리보기를 생성하는 중입니다.",
             )
         }
@@ -989,6 +1000,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             viewModelScope.launch {
                 var v1Output: Bitmap? = null
                 var v2Output: Bitmap? = null
+                var v1Display: Bitmap? = null
+                var v2Display: Bitmap? = null
                 try {
                     val pair =
                         withContext(Dispatchers.Default) {
@@ -1001,8 +1014,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     updateUiStateAndRecycleReplaced {
                                         it.copy(
                                             message =
-                                                if (fullResolution) {
-                                                    "전체 해상도 비교 처리 중 · V2 단계"
+                                                if (editorResolution) {
+                                                    "편집 해상도 비교 처리 중 · V2 단계"
                                                 } else {
                                                     "V1·V2 비교 미리보기 처리 중 · V2 단계"
                                                 }
@@ -1015,22 +1028,84 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             v1 to v2
                         }
                     if (!isDebugComparisonCurrent(comparisonIdentity)) return@launch
-                    val v1Pixels = IntArray(width * height)
-                    val v2Pixels = IntArray(width * height)
-                    checkNotNull(v1Output).getPixels(v1Pixels, 0, width, 0, 0, width, height)
-                    checkNotNull(v2Output).getPixels(v2Pixels, 0, width, 0, 0, width, height)
-                    val maskPixels = comparisonMaskArgb(ownedLayers, width, height)
+                    val displayScale =
+                        (DEBUG_COMPARISON_MAX_SIDE.toFloat() / max(width, height))
+                            .coerceAtMost(1f)
+                    val displayWidth = (width * displayScale).roundToInt().coerceAtLeast(1)
+                    val displayHeight = (height * displayScale).roundToInt().coerceAtLeast(1)
+                    v1Display =
+                        if (displayWidth == width && displayHeight == height) {
+                            checkNotNull(v1Output).copyOrThrow()
+                        } else {
+                            createScaledBitmapOrThrow(
+                                checkNotNull(v1Output),
+                                displayWidth,
+                                displayHeight,
+                                true,
+                            )
+                        }
+                    v2Display =
+                        if (displayWidth == width && displayHeight == height) {
+                            checkNotNull(v2Output).copyOrThrow()
+                        } else {
+                            createScaledBitmapOrThrow(
+                                checkNotNull(v2Output),
+                                displayWidth,
+                                displayHeight,
+                                true,
+                            )
+                        }
+                    val v1Pixels = IntArray(displayWidth * displayHeight)
+                    val v2Pixels = IntArray(displayWidth * displayHeight)
+                    checkNotNull(v1Display)
+                        .getPixels(v1Pixels, 0, displayWidth, 0, 0, displayWidth, displayHeight)
+                    checkNotNull(v2Display)
+                        .getPixels(v2Pixels, 0, displayWidth, 0, 0, displayWidth, displayHeight)
+                    val displayLayers =
+                        if (displayWidth == width && displayHeight == height) {
+                            ownedLayers
+                        } else {
+                            ownedLayers.map { layer ->
+                                layer.copy(
+                                    bitmap =
+                                        createScaledBitmapOrThrow(
+                                            layer.bitmap,
+                                            displayWidth,
+                                            displayHeight,
+                                            true,
+                                        )
+                                )
+                            }
+                        }
+                    val maskPixels =
+                        try {
+                            comparisonMaskArgb(displayLayers, displayWidth, displayHeight)
+                        } finally {
+                            if (displayLayers !== ownedLayers) {
+                                displayLayers.forEach {
+                                    it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle()
+                                }
+                            }
+                        }
                     val artifact =
                         QualityRegressionMetricsV2
                             .debugArtifact(
                                 fixtureVersion = "document-${state.baseContentToken}",
                                 baseline = v1Pixels,
                                 experimental = v2Pixels,
-                                width = width,
-                                height = height,
+                                width = displayWidth,
+                                height = displayHeight,
                                 maskArgb = maskPixels,
                             )
                             .copy(
+                                resolutionLevel =
+                                    if (editorResolution) {
+                                        DebugComparisonResolution.EditorWorking
+                                    } else {
+                                        DebugComparisonResolution.BoundedPreview
+                                    },
+                                evaluatedWidth = width,
+                                evaluatedHeight = height,
                                 algorithmDecision = "동일 문서 V1·V2",
                                 knownTransientBytes = requiredBytes,
                                 durationMillis = pair.first.durationMillis + pair.second.durationMillis,
@@ -1042,7 +1117,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             it.copy(
                                 comparisonBusy = false,
                                 message =
-                                    if (fullResolution) "전체 해상도 V1·V2 비교를 생성했습니다."
+                                    if (editorResolution) "편집 해상도 V1·V2 비교를 생성했습니다."
                                     else "V1·V2 비교 미리보기를 생성했습니다.",
                             )
                         } else {
@@ -1063,6 +1138,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 } finally {
                     v1Output?.takeUnless(Bitmap::isRecycled)?.recycle()
                     v2Output?.takeUnless(Bitmap::isRecycled)?.recycle()
+                    v1Display?.takeUnless(Bitmap::isRecycled)?.recycle()
+                    v2Display?.takeUnless(Bitmap::isRecycled)?.recycle()
                     base.takeUnless(Bitmap::isRecycled)?.recycle()
                     ownedLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
                     comparisonTracker?.end()
@@ -5915,7 +5992,7 @@ private fun EditorHistorySnapshot.toVisiblePreviewState(): VisiblePreviewState =
                 decision = decision,
                 algorithmVersion =
                     algorithmVersion
-                        ?: if (actual == NativeRenderRoute.V2) "native-v2" else "native-v1",
+                        ?: PixelContractVersion.current(actual),
                 participation = renderParticipation,
             )
         }

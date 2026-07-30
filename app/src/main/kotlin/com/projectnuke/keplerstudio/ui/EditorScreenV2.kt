@@ -1194,11 +1194,15 @@ private fun ExperimentalLabSettingsCard(
     onCancelComparison: () -> Unit,
 ) {
     val modelAvailability by ModelAvailabilityRegistry.state.collectAsState()
+    val capabilitySnapshot =
+        remember(modelAvailability) {
+            com.projectnuke.keplerstudio.editor.ModelCapabilitySnapshot(modelAvailability)
+        }
     val effective =
         RouteResolver.toLegacySelection(
             assignedEngine,
             overrides,
-            ModelAvailabilityRegistry.routeAvailability(),
+            capabilitySnapshot.routeAvailability(),
         )
     val flareModelReady = modelAvailability[ModelFeature.FlareGuard]?.executable == true
     val edgeModelReady = modelAvailability[ModelFeature.Remaster]?.executable == true
@@ -1234,7 +1238,10 @@ private fun ExperimentalLabSettingsCard(
                     LabRouteOption(FlareGuardRoute.V2Rule, "규칙 기반 V2"),
                     LabRouteOption(
                         FlareGuardRoute.V2ModelAssisted,
-                        if (flareModelReady) "모델 보조 V2" else "모델 보조 V2 · 현재 사용 불가",
+                        "모델 보조 V2",
+                        enabled = flareModelReady,
+                        unavailableReason =
+                            modelAvailability[ModelFeature.FlareGuard]?.statusLabel,
                     ),
                 ),
             selectedValue = overrides.flareGuard,
@@ -1250,7 +1257,10 @@ private fun ExperimentalLabSettingsCard(
                     LabRouteOption(RemasterRoute.V2MaskAware, "수동 마스크 V2"),
                     LabRouteOption(
                         RemasterRoute.V2ModelAssisted,
-                        if (edgeModelReady) "모델 보조 V2" else "모델 보조 V2 · Edge Masker 없음",
+                        "모델 보조 V2",
+                        enabled = edgeModelReady,
+                        unavailableReason =
+                            modelAvailability[ModelFeature.Remaster]?.statusLabel,
                     ),
                 ),
             selectedValue = overrides.remaster,
@@ -1266,7 +1276,10 @@ private fun ExperimentalLabSettingsCard(
                     LabRouteOption(SubjectSelectionRoute.V2ManualOrSynthetic, "수동·합성 V2"),
                     LabRouteOption(
                         SubjectSelectionRoute.V2ModelAssisted,
-                        if (edgeModelReady) "모델 보조 V2" else "모델 보조 V2 · Edge Masker 없음",
+                        "모델 보조 V2",
+                        enabled = edgeModelReady,
+                        unavailableReason =
+                            modelAvailability[ModelFeature.SubjectSelection]?.statusLabel,
                     ),
                 ),
             selectedValue = overrides.subjectSelection,
@@ -1286,12 +1299,12 @@ private fun ExperimentalLabSettingsCard(
         } else {
             Button(onClick = onGenerateComparison) { Text("V1·V2 비교 생성") }
             Text(
-                "전체 해상도 비교는 메모리를 많이 사용하며 명시적으로 실행할 때만 생성됩니다.",
+                "편집 해상도 비교는 현재 편집용 비트맵(보통 최대 2048px)을 사용합니다. 원본/내보내기 해상도가 아닙니다.",
                 color = V2TextMuted,
                 style = MaterialTheme.typography.labelSmall,
             )
             OutlinedButton(onClick = onGenerateFullResolutionComparison) {
-                Text("전체 해상도 비교 실행")
+                Text("편집 해상도 비교 실행")
             }
         }
         comparison?.let { artifact ->
@@ -1325,7 +1338,9 @@ private fun ExperimentalLabSettingsCard(
                 }
             }
             Text(
-                "${artifact.algorithmDecision ?: "비교"} · 변경 ${(artifact.metrics.changedPixelRatio * 100f).toInt()}% · ${artifact.durationMillis ?: 0L} ms",
+                "${artifact.resolutionLevel.label} ${artifact.evaluatedWidth}×${artifact.evaluatedHeight} · " +
+                    "${artifact.algorithmDecision ?: "비교"} · 변경 ${(artifact.metrics.changedPixelRatio * 100f).toInt()}% · " +
+                    "${artifact.durationMillis ?: 0L} ms",
                 color = V2TextSecondary,
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -1363,6 +1378,8 @@ private fun ExperimentalLabSettingsCard(
 private data class LabRouteOption<T>(
     val value: T?,
     val label: String,
+    val enabled: Boolean = true,
+    val unavailableReason: String? = null,
 )
 
 private data class LabeledComparisonBitmap(
@@ -1400,13 +1417,52 @@ private fun <T> LabRouteRow(
     onSelected: (T?) -> Unit,
 ) {
     val selected = values.first { it.value == selectedValue }
-    V2OptionRow(
-        title = title,
-        values = values,
-        selected = selected,
-        label = LabRouteOption<T>::label,
-        onSelected = { onSelected(it.value) },
-    )
+    Column {
+        Text(title, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+        values.forEach { option ->
+            val isSelected = option == selected
+            Surface(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = isSelected,
+                            enabled = option.enabled,
+                            role = Role.RadioButton,
+                            onClick = { onSelected(option.value) },
+                        ),
+                color = if (isSelected) V2SelectedMenuBackground else Color.Transparent,
+                shape = MaterialTheme.shapes.small,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(
+                        selected = isSelected,
+                        onClick = null,
+                        enabled = option.enabled,
+                    )
+                    Column {
+                        Text(
+                            option.label,
+                            color =
+                                if (!option.enabled) V2TextMuted
+                                else if (isSelected) V2Accent
+                                else V2TextSecondary,
+                        )
+                        if (!option.enabled && option.unavailableReason != null) {
+                            Text(
+                                option.unavailableReason,
+                                color = V2TextMuted,
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

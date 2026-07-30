@@ -125,10 +125,12 @@ object ExperimentalComparisonStore {
 
     fun publishDebug(artifact: DebugComparisonArtifact) {
         check(BuildConfig.DEBUG)
+        BitmapMemoryBudget.setExternalRetainedBytes(artifact.retainedBytes)
         mutable.value = artifact
     }
 
     fun clear() {
         mutable.value = null
+        BitmapMemoryBudget.setExternalRetainedBytes(0L)
     }
 }

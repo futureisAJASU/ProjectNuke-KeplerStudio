@@ -6,6 +6,9 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import kotlin.math.max
 import kotlin.math.min
+import java.util.concurrent.atomic.AtomicLong
+
+private val externallyRetainedBytes = AtomicLong(0L)
 
 /** Conservative JVM Bitmap allocation guard; native stages remain whole-image by design. */
 internal object BitmapMemoryBudget {
@@ -62,8 +65,18 @@ internal object BitmapMemoryBudget {
 
     fun canAllocate(requiredBytes: Long): Boolean {
         if (requiredBytes <= 0L) return true
-        return requiredBytes <= saturatingMultiply(availableBytes(), HEADROOM_NUMERATOR) / HEADROOM_DENOMINATOR
+        val availableAfterRetained =
+            (availableBytes() - externallyRetainedBytes.get()).coerceAtLeast(0L)
+        return requiredBytes <=
+            saturatingMultiply(availableAfterRetained, HEADROOM_NUMERATOR) /
+                HEADROOM_DENOMINATOR
     }
+
+    fun setExternalRetainedBytes(bytes: Long) {
+        externallyRetainedBytes.set(bytes.coerceAtLeast(0L))
+    }
+
+    fun externalRetainedBytes(): Long = externallyRetainedBytes.get()
 
     fun operationReserveBytes(): Long = min(profile.maxHeapBytes / 2L, max(96L * MIB, profile.maxHeapBytes / 3L))
 

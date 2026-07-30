@@ -33,6 +33,9 @@ data class DebugComparisonArtifact(
     val fixtureVersion: String,
     val width: Int,
     val height: Int,
+    val resolutionLevel: DebugComparisonResolution = DebugComparisonResolution.BoundedPreview,
+    val evaluatedWidth: Int = width,
+    val evaluatedHeight: Int = height,
     val baselineArgb: IntArray,
     val experimentalArgb: IntArray,
     val maskArgb: IntArray?,
@@ -42,6 +45,13 @@ data class DebugComparisonArtifact(
     val knownTransientBytes: Long? = null,
     val durationMillis: Long? = null,
 ) {
+    val retainedBytes: Long
+        get() =
+            (baselineArgb.size.toLong() +
+                experimentalArgb.size +
+                differenceHeatmapArgb.size +
+                (maskArgb?.size ?: 0)) * 4L
+
     fun compactMetricJson(): String =
         buildString {
             append('{')
@@ -53,6 +63,11 @@ data class DebugComparisonArtifact(
             append("\"chromaMae\":").append(metrics.chromaMeanAbsoluteError)
             append('}')
         }
+}
+
+enum class DebugComparisonResolution(val label: String) {
+    BoundedPreview("미리보기 해상도"),
+    EditorWorking("편집 해상도"),
 }
 
 object QualityRegressionMetricsV2 {
@@ -219,14 +234,14 @@ object QualityRegressionMetricsV2 {
                 -0x1000000 or (delta shl 16)
             }
         return DebugComparisonArtifact(
-            fixtureVersion,
-            width,
-            height,
-            baseline.copyOf(),
-            experimental.copyOf(),
-            maskArgb?.copyOf(),
-            heatmap,
-            metrics,
+            fixtureVersion = fixtureVersion,
+            width = width,
+            height = height,
+            baselineArgb = baseline.copyOf(),
+            experimentalArgb = experimental.copyOf(),
+            maskArgb = maskArgb?.copyOf(),
+            differenceHeatmapArgb = heatmap,
+            metrics = metrics,
         )
     }
 
