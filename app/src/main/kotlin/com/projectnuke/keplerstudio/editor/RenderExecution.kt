@@ -8,7 +8,6 @@ data class RenderIdentity(
     val documentGeneration: String,
     val baseContentToken: String,
     val revision: Int,
-    val nativeCancellationIdentity: String,
 )
 
 data class RenderParticipation(
@@ -16,6 +15,23 @@ data class RenderParticipation(
     val rule: Boolean = false,
     val manual: Boolean = false,
 )
+
+internal data class AlgorithmVersionResolution(
+    val executedVersion: String,
+    val migratedFromVersion: String?,
+)
+
+internal fun resolveExecutedAlgorithmVersion(
+    actualRoute: NativeRenderRoute,
+    storedVersion: String?,
+): AlgorithmVersionResolution {
+    val current = if (actualRoute == NativeRenderRoute.V2) "native-v2" else "native-v1"
+    val stored = storedVersion?.trim()?.takeIf(String::isNotEmpty)
+    return AlgorithmVersionResolution(
+        executedVersion = current,
+        migratedFromVersion = stored?.takeUnless { it == current },
+    )
+}
 
 internal data class RenderRequest(
     val operation: RenderOperation,
@@ -57,6 +73,7 @@ sealed interface RenderResult {
         val decision: RenderRouteDecision,
         val usedDebugOverride: Boolean,
         val algorithmVersion: String,
+        val migratedFromAlgorithmVersion: String? = null,
         val participation: RenderParticipation,
         val durationMillis: Long,
         val knownTransientBytes: Long?,
@@ -77,11 +94,6 @@ sealed interface RenderResult {
         val attemptedRoute: NativeRenderRoute,
     ) : RenderResult
 
-    data class Stale(
-        override val operation: RenderOperation,
-        override val requestedRoute: NativeRenderRoute,
-        val actualRoute: NativeRenderRoute,
-    ) : RenderResult
 }
 
 internal class V2RenderException(cause: Throwable) :
@@ -96,7 +108,6 @@ internal fun RenderResult.successOrThrow(): RenderResult.Success =
         is RenderResult.Failure -> throw RenderFailedException(this)
         is RenderResult.Cancelled ->
             throw CancellationException("render cancelled: $operation/$attemptedRoute")
-        is RenderResult.Stale -> error("stale render cannot be adopted")
     }
 
 /**
@@ -212,6 +223,7 @@ internal object EditorRenderer {
         output: Bitmap,
         startedNanos: Long,
     ): RenderResult.Success =
+        resolveExecutedAlgorithmVersion(actualRoute, request.storedAlgorithmVersion).let { version ->
         RenderResult.Success(
             operation = request.operation,
             requestedRoute = requestedRoute,
@@ -219,13 +231,19 @@ internal object EditorRenderer {
             actualRoute = actualRoute,
             decision = decision,
             usedDebugOverride = usedDebugOverride,
-            algorithmVersion =
-                request.storedAlgorithmVersion
-                    ?: if (actualRoute == NativeRenderRoute.V2) "native-v2" else "native-v1",
+            // Rendering always executes the current implementation. Historical metadata may
+            // describe the source being migrated, but must never relabel these new pixels.
+            algorithmVersion = version.executedVersion,
+            migratedFromAlgorithmVersion = version.migratedFromVersion,
             participation = request.storedParticipation ?: RenderParticipation(),
             durationMillis = (System.nanoTime() - startedNanos) / 1_000_000L,
-            knownTransientBytes = null,
+            knownTransientBytes =
+                BitmapMemoryBudget.saturatingMultiply(
+                    BitmapMemoryBudget.bytes(output),
+                    if (request.selectionLayers.any(SelectionLayer::enabled)) 2L else 1L,
+                ),
         )
+        }
 
     private suspend fun renderRoute(
         request: RenderRequest,
@@ -276,6 +294,7 @@ internal object EditorRenderer {
                             mask = layer.bitmap,
                             inverted = layer.inverted,
                             opacity = layer.opacity.coerceIn(0f, 1f),
+                            diagnostics = request.diagnostics,
                         )
                     if (blend < 0) {
                         throw IllegalStateException("native selection blend failed: code=$blend")

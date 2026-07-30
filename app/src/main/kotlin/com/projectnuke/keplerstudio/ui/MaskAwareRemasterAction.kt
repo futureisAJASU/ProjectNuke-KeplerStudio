@@ -68,8 +68,12 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         } else {
             null
         }
-    if (useModel && !modelLoaded || !useModel && manualMaskAtEntry == null) {
-        updateUiState { it.copy(message = "Edge Masker 모델 파일과 런타임이 준비된 뒤 사용할 수 있습니다.") }
+    if (useModel && !modelLoaded) {
+        updateUiState { it.copy(message = "모델 보조 V2를 사용할 수 없습니다. 모델과 런타임 상태를 확인해 주세요.") }
+        return
+    }
+    if (!useModel && manualMaskAtEntry == null) {
+        updateUiState { it.copy(message = "수동 마스크 V2를 사용하려면 선택 영역을 만들거나 활성화해 주세요.") }
         return
     }
 

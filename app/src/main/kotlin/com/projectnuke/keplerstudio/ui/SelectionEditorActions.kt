@@ -84,11 +84,20 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         }
         return
     }
-    if (useModel && !modelLoaded || !useModel && manualMaskAtEntry == null) {
+    if (useModel && !modelLoaded) {
         updateUiState {
             it.copy(
                 message =
-                    "Edge Masker \uBAA8\uB378\uC744 \uBA3C\uC800 \uB85C\uB4DC\uD574 \uC8FC\uC138\uC694."
+                    "\uBAA8\uB378 \uBCF4\uC870 V2\uB97C \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uBAA8\uB378\uACFC \uB7F0\uD0C0\uC784 \uC0C1\uD0DC\uB97C \uD655\uC778\uD574 \uC8FC\uC138\uC694."
+            )
+        }
+        return
+    }
+    if (!useModel && manualMaskAtEntry == null) {
+        updateUiState {
+            it.copy(
+                message =
+                    "\uC218\uB3D9 \uC120\uD0DD V2\uB97C \uC0AC\uC6A9\uD558\uB824\uBA74 \uC120\uD0DD \uC601\uC5ED\uC744 \uB9CC\uB4E4\uAC70\uB098 \uD65C\uC131\uD654\uD574 \uC8FC\uC138\uC694."
             )
         }
         return

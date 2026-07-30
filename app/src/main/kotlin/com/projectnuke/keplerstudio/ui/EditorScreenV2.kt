@@ -1100,14 +1100,16 @@ internal fun V2SettingsScreen(
                     color = V2TextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                TextButton(onClick = { showRecoveryDetails = !showRecoveryDetails }) {
-                    Text(if (showRecoveryDetails) "개발자 진단 숨기기" else "개발자 진단 보기")
-                }
-                if (showRecoveryDetails) {
-                    Text("draft_source: ${recoveryDebugInfo.draftSourcePath ?: "없음"}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
-                    Text("draft_source 파일 존재: ${if (recoveryDebugInfo.draftSourceExists) "예" else "아니오"}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
-                    Text("filesDir draft 존재: ${if (recoveryDebugInfo.filesDirDraftExists) "예" else "아니오"}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
-                    Text("filesDir 경로: ${recoveryDebugInfo.filesDirDraftPath}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
+                if (BuildConfig.DEBUG) {
+                    TextButton(onClick = { showRecoveryDetails = !showRecoveryDetails }) {
+                        Text(if (showRecoveryDetails) "개발자 진단 숨기기" else "개발자 진단 보기")
+                    }
+                    if (showRecoveryDetails) {
+                        Text("draft_source: ${recoveryDebugInfo.draftSourcePath ?: "없음"}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
+                        Text("draft_source 파일 존재: ${if (recoveryDebugInfo.draftSourceExists) "예" else "아니오"}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
+                        Text("filesDir draft 존재: ${if (recoveryDebugInfo.filesDirDraftExists) "예" else "아니오"}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
+                        Text("filesDir 경로: ${recoveryDebugInfo.filesDirDraftPath}", color = V2TextMuted, style = MaterialTheme.typography.labelSmall)
+                    }
                 }
                 TextButton(onClick = onDismissRecoveryDebugCard) { Text("닫기") }
             }

@@ -798,7 +798,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         }
                     }
-                    is RenderResult.Stale -> Unit
                 }
             } catch (ce: CancellationException) {
                 val current = _uiState.value
@@ -1103,8 +1102,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     documentGeneration = generation,
                     baseContentToken = state.baseContentToken,
                     revision = revision,
-                    nativeCancellationIdentity =
-                        "$generation:${state.baseContentToken}:$revision:${operation.name}",
                 ),
             debugOverride =
                 ExperimentalLabController.debugOverrides().nativeRender
@@ -1567,7 +1564,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         restoreSnapshotWithoutHistory(snapshot)
     }
 
-    private fun restoreSnapshotWithoutHistory(snapshot: EditorHistorySnapshot) {
+    private fun restoreSnapshotWithoutHistory(
+        snapshot: EditorHistorySnapshot,
+        retainedFailure: RenderResult.Failure? = null,
+    ) {
         val metadataOnly = snapshot.storage == HistorySnapshotStorage.MetadataOnly
         updateUiState { current ->
             current.copy(
@@ -1577,7 +1577,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         documentEngine = snapshot.correctionEngine,
                         pendingEngine = null,
                         visiblePreview = snapshot.toVisiblePreviewState(),
-                        lastRenderFailure = null,
+                        lastRenderFailure =
+                            retainedFailure?.let {
+                                current.correctionEngineState
+                                    .withFailedRender(snapshot.correctionEngine, it)
+                                    .lastRenderFailure
+                            },
                     ),
                 noiseEngine = snapshot.noiseEngine,
                 detailEngine = snapshot.detailEngine,
@@ -2302,7 +2307,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 rendered?.recycle()
                 if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                 if (isManagedEditCurrent(operationToken, nextRevision)) {
-                    (t as? RenderFailedException)?.failure?.let { failure ->
+                    val renderFailure = (t as? RenderFailedException)?.failure
+                    renderFailure?.let { failure ->
                         updateUiState {
                             it.copy(
                                 correctionEngineState =
@@ -2326,7 +2332,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     } else {
                         val snapshot = takePendingParamUndoSnapshotForRollback()
-                        snapshot?.let { restoreSnapshotWithoutHistory(it) }
+                        snapshot?.let { restoreSnapshotWithoutHistory(it, renderFailure) }
                         updateUiStateAndRecycleReplaced {
                             it.copy(
                                 params = lastSuccessfullyRenderedParams,
@@ -3176,7 +3182,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                                                 exportDocumentGeneration,
                                                                 exportBaseToken,
                                                                 exportRevision + 1,
-                                                                "export:$token:$exportRevision",
                                                             ),
                                                         storedRequestedRoute =
                                                             exportRequestedRoute ?: actualRoute,
@@ -3218,7 +3223,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                                                 exportDocumentGeneration,
                                                                 exportBaseToken,
                                                                 exportRevision + 1,
-                                                                "export:$token:$exportRevision",
                                                             ),
                                                         storedRequestedRoute =
                                                             exportRequestedRoute ?: actualRoute,
@@ -4741,7 +4745,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     viewport = ViewportState(),
                     flareGuardRuntimeStatus = null,
                     revision = nextRevision,
-                    message = "임시저장된 편집을 불러왔습니다",
+                    message =
+                        if (checkNotNull(restoreRenderSuccess).migratedFromAlgorithmVersion != null) {
+                            "임시저장 편집을 현재 알고리즘으로 마이그레이션했습니다."
+                        } else {
+                            "임시저장된 편집을 불러왔습니다"
+                        },
                 )
             val previousSession = nativeSession
             restorePreviousBaseline = draftPointerBaseline
