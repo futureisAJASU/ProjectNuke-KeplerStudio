@@ -1575,12 +1575,24 @@ private fun DebugComparisonViewerDialog(
                             Image(
                                 bitmap = artifact.baseline.asImageBitmap(),
                                 contentDescription = "${artifact.baselineLabel} 분할 비교",
+                                // Keep the split clip in viewport coordinates and apply the
+                                // shared image transform inside it. Reversing this modifier order
+                                // would move/scale the clip with the image while the divider stays
+                                // fixed, desynchronizing the comparison under pan/zoom.
                                 modifier =
-                                    transformed.drawWithContent {
-                                        clipRect(right = size.width * splitPosition) {
-                                            this@drawWithContent.drawContent()
+                                    Modifier
+                                        .fillMaxSize()
+                                        .drawWithContent {
+                                            clipRect(right = size.width * splitPosition) {
+                                                this@drawWithContent.drawContent()
+                                            }
                                         }
-                                    },
+                                        .graphicsLayer {
+                                            scaleX = scale
+                                            scaleY = scale
+                                            translationX = offset.x
+                                            translationY = offset.y
+                                        },
                                 contentScale = ContentScale.Fit,
                             )
                             if (viewportSize.width > 0) {
