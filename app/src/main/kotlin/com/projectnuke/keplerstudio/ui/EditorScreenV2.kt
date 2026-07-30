@@ -86,7 +86,6 @@ import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
-import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
@@ -1620,9 +1619,8 @@ private fun DebugComparisonViewerDialog(
                                                         )
                                                 }
                                             }
-                                            .semantics {
-                                                role = Role.Adjustable
-                                                contentDescription =
+                                             .semantics {
+                                                 contentDescription =
                                                     "${artifact.baselineLabel}과 ${artifact.experimentalLabel} 비교 분할선"
                                                 stateDescription =
                                                     "${artifact.baselineLabel} ${(splitPosition * 100).toInt()}퍼센트"
