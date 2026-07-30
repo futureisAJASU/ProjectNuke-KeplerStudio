@@ -96,20 +96,17 @@ bool reduceChromaNoise(
         for (int x = 0; x < width; ++x) {
             const auto* center = inputRow + static_cast<std::size_t>(x) * 4U;
             float meanR = 0.0F;
-            float meanG = 0.0F;
             float meanB = 0.0F;
             float meanY = 0.0F;
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     const auto* sample = pixelAt(input, stride, width, height, x + dx, y + dy);
                     meanR += sample[0];
-                    meanG += sample[1];
                     meanB += sample[2];
                     meanY += luma(sample);
                 }
             }
             meanR /= 9.0F;
-            meanG /= 9.0F;
             meanB /= 9.0F;
             meanY /= 9.0F;
             const float centerY = luma(center);

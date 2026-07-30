@@ -559,7 +559,9 @@ object SubjectSelectionV2 {
                 activationThreshold = 0.45f,
             )
         val refinement = MaskRefinement.plan(width, height, options).knownPeakTransientBytes
-        val inputs = plane * if (includesManualMask) 3L else 2L
+        // Without a manual mask, the caller-owned raw mask overlaps the prepared copy.
+        // Manual refinement additionally overlaps the manual input and combined mask.
+        val inputs = plane * if (includesManualMask) 4L else 2L
         return ExperimentalPipelinePlan(
             count,
             Math.addExact(inputs, refinement),
