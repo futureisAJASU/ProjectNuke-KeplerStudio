@@ -121,43 +121,17 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         )
     var undoSnapshot: EditorHistorySnapshot? =
         captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
-    var ownedBase: Bitmap? =
-        try {
-            base.copyOrThrow(mutable = false).also {
-                selectionTracker?.track(it, "subjectSelection:base")
-            }
-        } catch (t: Throwable) {
-            selectionTracker?.end()
-            undoSnapshot?.let(::recycleHistorySnapshot)
-            updateUiState { it.copy(message = "마스크 입력 이미지를 준비하지 못했습니다.") }
-            if (t is BitmapAllocationRejectedException)
-                requestAllocationRecovery(MemoryRetryAction.SubjectSelection, t.requiredBytes)
-            return
-        }
-    var ownedManualMask: Bitmap? =
-        try {
-            manualMaskAtEntry?.copyOrThrow(mutable = false)?.also {
-                selectionTracker?.track(it, "subjectSelection:manualInput")
-            }
-        } catch (t: Throwable) {
-            ownedBase?.takeUnless(Bitmap::isRecycled)?.recycle()
-            ownedBase = null
-            selectionTracker?.end()
-            undoSnapshot?.let(::recycleHistorySnapshot)
-            updateUiState { it.copy(message = "Selection mask preparation failed.") }
-            if (t is BitmapAllocationRejectedException)
-                requestAllocationRecovery(MemoryRetryAction.SubjectSelection, t.requiredBytes)
-            return
-        }
+    val baseBaseConfig = base.config ?: Bitmap.Config.ARGB_8888
+    val manualMaskConfig = manualMaskAtEntry?.config ?: Bitmap.Config.ARGB_8888
+    val originalBaseRef = base
+    val manualMaskRef = manualMaskAtEntry
     updateUiState { it.copy(isBusy = true, message = busyMessage) }
     launchManagedEditWithPreparedResources(
         { operationToken ->
-            var ownedBaseOwned = ownedBase
-            ownedBase = null
+            var ownedBaseOwned: Bitmap? = null
+            var ownedManualMaskOwned: Bitmap? = null
             var undoSnapshotOwned = undoSnapshot
             undoSnapshot = null
-            var ownedManualMaskOwned = ownedManualMask
-            ownedManualMask = null
             var pendingLayerBitmap: Bitmap? = null
             var featureMaskSummary: FeatureMaskSummary? = null
             try {
@@ -179,6 +153,27 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                     )
                 val layer =
                     withContext(Dispatchers.Default) {
+                        if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
+                        val workerState = uiState.value
+                        if (workerState.sourcePath != sourcePath) return@withContext null
+                        if (workerState.revision != sourceRevision) return@withContext null
+                        val workerBase = workerState.originalPreviewBitmap ?: workerState.previewBitmap
+                        if (workerBase == null) return@withContext null
+                        ownedBaseOwned =
+                            (if (workerBase === originalBaseRef && !originalBaseRef.isRecycled) originalBaseRef else workerBase)
+                                .copyOrThrow(baseBaseConfig, false)
+                                .also { selectionTracker?.track(it, "subjectSelection:base") }
+                        if (manualMaskRef != null && useModel == false) {
+                            val workerManualMask = workerState.selectionLayers
+                                .firstOrNull { it.id == state.activeSelectionLayerId && it.enabled }
+                                ?.bitmap
+                            if (workerManualMask != null) {
+                                val manualSource = if (workerManualMask === manualMaskRef && !manualMaskRef.isRecycled) manualMaskRef else workerManualMask
+                                ownedManualMaskOwned =
+                                    manualSource.copyOrThrow(manualMaskConfig, false)
+                                        .also { selectionTracker?.track(it, "subjectSelection:manualInput") }
+                            }
+                        }
                         val rawTracked =
                             if (useModel) {
                                 val loaded = RemasterModelSession.ensureEdgeLoaded(appContext())
@@ -395,14 +390,6 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         handoff =
             PreparedResourceHandoff.create(
                 "subjectSelection",
-                {
-                    ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                    ownedBase = null
-                },
-                {
-                    ownedManualMask?.takeIf { !it.isRecycled }?.recycle()
-                    ownedManualMask = null
-                },
                 {
                     undoSnapshot?.let(::recycleHistorySnapshot)
                     undoSnapshot = null

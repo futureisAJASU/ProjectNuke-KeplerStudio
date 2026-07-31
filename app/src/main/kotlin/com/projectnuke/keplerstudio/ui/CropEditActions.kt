@@ -8,6 +8,7 @@ import com.projectnuke.keplerstudio.editor.CropState
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
@@ -186,50 +187,12 @@ fun EditorViewModel.applyCropTransform() {
     val original = state.originalPreviewBitmap
     if (preview == null && original == null) return
 
+    // History snapshot is captured synchronously here because capture may itself reserve
+    // scarce in-process memory before a large worker allocation; failing to capture leaves
+    // the previous document in the redo stack intact. The actual full-resolution bitmap
+    // *copies* are deferred to the worker (see [applyCropTransformBackground]) so Compose
+    // event handlers do not block the Main dispatcher.
     var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
-    var previewInput: Bitmap? = null
-    var originalInput: Bitmap? = null
-    val maskInputs = ArrayList<SelectionLayer>(state.selectionLayers.size)
-    val cropPrepareTracker =
-        beginMemoryTracking(
-            "applyCropTransform:prepare",
-            snapshotState = "copying",
-            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
-        )
-
-    try {
-        previewInput = preview?.copyOrThrow()
-        previewInput?.let { cropPrepareTracker?.track(it, "crop:previewInput") }
-        originalInput =
-            if (original == null || original === preview) previewInput else original.copyOrThrow()
-        originalInput
-            ?.takeIf { it !== previewInput }
-            ?.let { cropPrepareTracker?.track(it, "crop:originalInput") }
-        state.selectionLayers.forEach { layer ->
-            try {
-                maskInputs +=
-                    layer.copy(
-                        bitmap =
-                            layer.bitmap.copyOrThrow().also {
-                                cropPrepareTracker?.track(it, "crop:maskInput:${layer.id}")
-                            }
-                    )
-            } catch (t: Throwable) {
-                maskInputs.forEach { created ->
-                    created.bitmap.takeIf { !it.isRecycled }?.recycle()
-                }
-                throw t
-            }
-        }
-    } catch (t: Throwable) {
-        previewInput?.takeIf { !it.isRecycled }?.recycle()
-        if (originalInput !== previewInput) originalInput?.takeIf { !it.isRecycled }?.recycle()
-        maskInputs.forEach { it.bitmap.takeIf { !it.isRecycled }?.recycle() }
-        undoSnapshot?.let(::recycleHistorySnapshot)
-        cropPrepareTracker?.end()
-        updateUiState { it.copy(message = "자르기 준비에 실패했습니다. 기존 편집 상태를 유지합니다.") }
-        return
-    }
 
     val crop = state.cropState.normalized()
     val nextRevision = state.revision + 1
@@ -238,197 +201,304 @@ fun EditorViewModel.applyCropTransform() {
     val baseContentToken = state.baseContentToken
     val activeSelectionLayerId = state.activeSelectionLayerId
     val capturedSelectionLayers = state.selectionLayers.toList()
+    val capturedPreviewWidth = preview?.width ?: 0
+    val capturedPreviewHeight = preview?.height ?: 0
+
+    val cropPrepareTracker =
+        beginMemoryTracking(
+            "applyCropTransform:prepare",
+            snapshotState = "copying",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
+        )
 
     updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "변경사항을 적용하는 중입니다.") }
 
     launchManagedEditWithPreparedResources(
         { operationToken ->
-            var transformedOriginal: Bitmap? = null
-            var transformedPreview: Bitmap? = null
-            var transformedMasks: List<SelectionLayer>? = null
-            var adoptionConfirmed = false
-            var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
-            undoSnapshot = null
-            val previewInputOwned: Bitmap? = previewInput
-            previewInput = null
-            val originalInputOwned: Bitmap? = originalInput
-            originalInput = null
-            val maskInputsOwned = maskInputs.toList()
-            maskInputs.clear()
-            val cropTracker =
-                beginMemoryTracking(
-                    "applyCropTransform",
-                    snapshotState = "rendering",
-                    transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
-                )
-            previewInputOwned?.let { cropTracker?.track(it, "crop:previewInput") }
-            originalInputOwned
-                ?.takeIf { it !== previewInputOwned }
-                ?.let { cropTracker?.track(it, "crop:originalInput") }
-            maskInputsOwned.forEach { cropTracker?.track(it.bitmap, "crop:maskInput:${it.id}") }
-            cropPrepareTracker?.end()
-
-            try {
-                withContext(Dispatchers.Default) {
-                    val o = originalInputOwned?.let { renderCropTransform(it, crop) }
-                    transformedOriginal = o
-                    o?.let { cropTracker?.track(it, "crop:transformedOriginal") }
-                }
-                withContext(Dispatchers.Default) {
-                    val p =
-                        if (previewInputOwned === originalInputOwned) transformedOriginal
-                        else previewInputOwned?.let { renderCropTransform(it, crop) }
-                    transformedPreview = p
-                    p?.takeIf { it !== transformedOriginal }
-                        ?.let { cropTracker?.track(it, "crop:transformedPreview") }
-                }
-                withContext(Dispatchers.Default) {
-                    val transformed = ArrayList<SelectionLayer>(maskInputsOwned.size)
-                    try {
-                        maskInputsOwned.forEach { layer ->
-                            transformed +=
-                                layer.copy(
-                                    bitmap =
-                                        renderCropTransform(layer.bitmap, crop).also {
-                                            cropTracker?.track(
-                                                it,
-                                                "crop:transformedMask:${layer.id}",
-                                            )
-                                        }
-                                )
-                        }
-                        transformedMasks = transformed
-                    } catch (t: Throwable) {
-                        transformed.forEach { created ->
-                            created.bitmap.takeIf { !it.isRecycled }?.recycle()
-                        }
-                        throw t
-                    }
-                }
-
-                val expectedOriginal = transformedOriginal ?: transformedPreview
-                val expectedPreview = transformedPreview ?: transformedOriginal
-                val expectedTransformedLayers = transformedMasks
-                val adoptable =
-                    isManagedEditCurrent(operationToken, nextRevision) &&
-                        isCropOperationCurrent(cropToken) &&
-                        uiState.value.sourcePath == sourcePath &&
-                        uiState.value.baseContentToken == baseContentToken &&
-                        uiState.value.activeSelectionLayerId == activeSelectionLayerId &&
-                        uiState.value.selectionLayers == capturedSelectionLayers
-
-                if (adoptable) {
-                    var stateUpdateException: Throwable? = null
-                    try {
-                        updateUiStateAndRecycleReplaced {
-                            val adoptedOriginal =
-                                expectedOriginal ?: error("missing transformed original")
-                            val adoptedPreview =
-                                expectedPreview ?: error("missing transformed preview")
-                            it.copy(
-                                originalPreviewBitmap = adoptedOriginal,
-                                previewBitmap = adoptedPreview,
-                                baseBitmapDirty = true,
-                                baseContentToken = newBaseContentToken(),
-                                cropState = CropState(),
-                                selectionLayers = checkNotNull(expectedTransformedLayers),
-                                isBusy = false,
-                                message = "변경사항을 적용했습니다.",
-                            )
-                        }
-                    } catch (t: Throwable) {
-                        stateUpdateException = t
-                        if (t is CancellationException) throw t
-                    }
-                    val liveStateAfter = uiState.value
-                    val originalAdopted = liveStateAfter.originalPreviewBitmap === expectedOriginal
-                    val previewAdopted = liveStateAfter.previewBitmap === expectedPreview
-                    val masksAdopted =
-                        expectedTransformedLayers != null &&
-                            liveStateAfter.selectionLayers == expectedTransformedLayers
-                    val fullyAdopted = originalAdopted && previewAdopted && masksAdopted
-
-                    if (fullyAdopted) {
-                        adoptionConfirmed = true
-                        transformedOriginal = null
-                        transformedPreview = null
-                        transformedMasks = null
-                        markParamsSuccessfullyRendered(liveStateAfter.params)
-                        settleAdoptedEditHistory(undoSnapshotOwned)
-                        undoSnapshotOwned = null
-                        persistDraftSnapshot()
-                    } else if (stateUpdateException != null) {
-                        throw stateUpdateException
-                    }
-                } else if (isManagedEditTokenCurrent(operationToken)) {
-                    updateUiState { it.copy(isBusy = false) }
-                }
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (t: Throwable) {
-                val failureAdoptable =
-                    isManagedEditCurrent(operationToken, nextRevision) &&
-                        isCropOperationCurrent(cropToken) &&
-                        uiState.value.sourcePath == sourcePath &&
-                        uiState.value.baseContentToken == baseContentToken &&
-                        uiState.value.activeSelectionLayerId == activeSelectionLayerId &&
-                        uiState.value.selectionLayers == capturedSelectionLayers
-                val failureManagedCurrent = isManagedEditTokenCurrent(operationToken)
-                if (failureAdoptable) {
-                    updateUiState { it.copy(isBusy = false, message = "자르기에 실패했습니다: ${t.message}") }
-                } else if (failureManagedCurrent) {
-                    updateUiState { it.copy(isBusy = false) }
-                }
-            } finally {
-                val retained = identityBitmapSetForFinally()
-                uiState.value.originalPreviewBitmap?.let(retained::add)
-                uiState.value.previewBitmap?.let(retained::add)
-                uiState.value.selectionLayers.forEach { retained.add(it.bitmap) }
-                transformedOriginal?.takeIf { it !in retained && !it.isRecycled }?.recycle()
-                if (transformedPreview !== transformedOriginal)
-                    transformedPreview?.takeIf { it !in retained && !it.isRecycled }?.recycle()
-                transformedMasks?.forEach { layer ->
-                    layer.bitmap.takeIf { it !in retained && !it.isRecycled }?.recycle()
-                }
-                previewInputOwned?.takeIf { !it.isRecycled }?.recycle()
-                if (originalInputOwned !== previewInputOwned)
-                    originalInputOwned?.takeIf { !it.isRecycled }?.recycle()
-                maskInputsOwned.forEach { it.bitmap.takeIf { !it.isRecycled }?.recycle() }
-                undoSnapshotOwned?.let(::recycleHistorySnapshot)
-                cropTracker?.end()
-            }
+            applyCropTransformBackground(
+                operationToken = operationToken,
+                crop = crop,
+                nextRevision = nextRevision,
+                cropToken = cropToken,
+                sourcePath = sourcePath,
+                baseContentToken = baseContentToken,
+                activeSelectionLayerId = activeSelectionLayerId,
+                capturedSelectionLayers = capturedSelectionLayers,
+                capturedPreviewWidth = capturedPreviewWidth,
+                capturedPreviewHeight = capturedPreviewHeight,
+                originalUndoSnapshotRef = { undoSnapshot },
+                cropPrepareTracker = cropPrepareTracker,
+                consumeUndoSnapshot = { undoSnapshot = null },
+                releaseUndoSnapshot = { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            )
         },
         handoff =
             PreparedResourceHandoff.create(
                 "cropApply",
-                buildList {
-                    maskInputs.forEach { layer ->
-                        add { if (!layer.bitmap.isRecycled) layer.bitmap.recycle() }
+                {
+                    undoSnapshot?.let(::recycleHistorySnapshot)
+                    undoSnapshot = null
+                },
+                { cropPrepareTracker?.end() },
+                {
+                    val live = uiState.value
+                    if (
+                        isCropOperationCurrent(cropToken) &&
+                            live.revision == nextRevision &&
+                            live.sourcePath == sourcePath &&
+                            live.baseContentToken == baseContentToken
+                    ) {
+                        updateUiState { it.copy(isBusy = false) }
                     }
-                    add { previewInput?.takeIf { !it.isRecycled }?.recycle() }
-                    add {
-                        if (originalInput !== previewInput)
-                            originalInput?.takeIf { !it.isRecycled }?.recycle()
-                    }
-                    add {
-                        undoSnapshot?.let(::recycleHistorySnapshot)
-                        undoSnapshot = null
-                    }
-                    add { cropPrepareTracker?.end() }
-                    add {
-                        val live = uiState.value
-                        if (
-                            isCropOperationCurrent(cropToken) &&
-                                live.revision == nextRevision &&
-                                live.sourcePath == sourcePath &&
-                                live.baseContentToken == baseContentToken
-                        ) {
-                            updateUiState { it.copy(isBusy = false) }
-                        }
-                    }
-                }
+                },
             ),
     )
+}
+
+/**
+ * Background implementation of [applyCropTransform]. The full-resolution base, original, and
+ * mask bitmaps are copied here on `Dispatchers.Default`, after the captured identity gates
+ * have been re-checked, so that Compose event handlers do not block the Main dispatcher and a
+ * superseded crop request recycles its owned inputs without adopting the document.
+ *
+ * The captured identity (sourcePath, baseContentToken, activeSelectionLayerId, the captured
+ * selection layer list and preview dimensions) is used only to compare against the
+ * authoritative state read inside the worker. The worker itself re-reads the live state
+ * (rather than the synchronous snapshot) and only copies bitmaps from the authoritative
+ * refs, so the worker is robust against an in-flight preview replacement between the
+ * synchronous start and the worker launch.
+ */
+private suspend fun EditorViewModel.applyCropTransformBackground(
+    operationToken: Long,
+    crop: CropState,
+    nextRevision: Int,
+    cropToken: Long,
+    sourcePath: String?,
+    baseContentToken: String,
+    activeSelectionLayerId: String?,
+    capturedSelectionLayers: List<SelectionLayer>,
+    capturedPreviewWidth: Int,
+    capturedPreviewHeight: Int,
+    originalUndoSnapshotRef: () -> EditorHistorySnapshot?,
+    cropPrepareTracker: MemoryTrackerScope?,
+    consumeUndoSnapshot: () -> Unit,
+    releaseUndoSnapshot: () -> Unit,
+) {
+    var previewInput: Bitmap? = null
+    var originalInput: Bitmap? = null
+    val maskInputs = ArrayList<SelectionLayer>(capturedSelectionLayers.size)
+    var transformedOriginal: Bitmap? = null
+    var transformedPreview: Bitmap? = null
+    var transformedMasks: List<SelectionLayer>? = null
+    var undoSnapshotOwned: EditorHistorySnapshot? = originalUndoSnapshotRef()
+    consumeUndoSnapshot()
+    val cropTracker =
+        beginMemoryTracking(
+            "applyCropTransform",
+            snapshotState = "rendering",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
+        )
+
+    fun releasePreparedInputs() {
+        previewInput?.takeIf { !it.isRecycled }?.recycle()
+        if (originalInput !== previewInput) originalInput?.takeIf { !it.isRecycled }?.recycle()
+        maskInputs.forEach { it.bitmap.takeIf { !it.isRecycled }?.recycle() }
+        maskInputs.clear()
+        previewInput = null
+        originalInput = null
+    }
+
+    try {
+        // Worker-side re-read: the authoritative state may differ from the synchronous
+        // snapshot (e.g., a param render that completed in between); only the matching
+        // identity may proceed.
+        val prepared = withContext(Dispatchers.Default) {
+            // Validate adoption identity upfront so an obviously-superseded request never
+            // performs a full-resolution copy.
+            if (!isManagedEditTokenCurrent(operationToken) || !isCropOperationCurrent(cropToken)) return@withContext null
+            val workerState = uiState.value
+            if (workerState.sourcePath != sourcePath) return@withContext null
+            if (workerState.baseContentToken != baseContentToken) return@withContext null
+            if (workerState.activeSelectionLayerId != activeSelectionLayerId) return@withContext null
+            if (workerState.selectionLayers != capturedSelectionLayers) return@withContext null
+
+            val wPreview = workerState.previewBitmap
+            val wOriginal = workerState.originalPreviewBitmap
+            if (wPreview == null && wOriginal == null) return@withContext null
+            // Defense-in-depth against a recycler race: dimensions must match those captured at
+            // the synchronous start. If mismatched, treat as superseded.
+            if (wPreview != null && (wPreview.width != capturedPreviewWidth || wPreview.height != capturedPreviewHeight)) return@withContext null
+
+            previewInput = wPreview?.copyOrThrow()
+            previewInput?.let { cropTracker?.track(it, "crop:previewInput") }
+            originalInput =
+                if (wOriginal == null || wOriginal === wPreview) previewInput else wOriginal.copyOrThrow()
+            originalInput
+                ?.takeIf { it !== previewInput }
+                ?.let { cropTracker?.track(it, "crop:originalInput") }
+
+            try {
+                workerState.selectionLayers.forEach { layer ->
+                    try {
+                        maskInputs +=
+                            layer.copy(
+                                bitmap =
+                                    layer.bitmap.copyOrThrow().also {
+                                        cropTracker?.track(it, "crop:mask:${layer.id}")
+                                    }
+                            )
+                    } catch (t: Throwable) {
+                        maskInputs.forEach { created ->
+                            created.bitmap.takeIf { !created.bitmap.isRecycled }?.recycle()
+                        }
+                        throw t
+                    }
+                }
+            } catch (t: Throwable) {
+                // Allocation failed: leave the previous document exactly as it was.
+                previewInput?.takeIf { !it.isRecycled }?.recycle()
+                if (originalInput !== previewInput) originalInput?.takeIf { !it.isRecycled }?.recycle()
+                previewInput = null
+                originalInput = null
+                throw t
+            }
+            previewInput to originalInput
+        }
+
+        if (prepared == null) {
+            // Superseded or otherwise not adoptable: settle silently, release transients.
+            cropPrepareTracker?.end()
+            return
+        }
+
+        cropPrepareTracker?.end()
+
+        withContext(Dispatchers.Default) {
+            val o = originalInput?.let { renderCropTransform(it, crop) }
+            transformedOriginal = o
+            o?.let { cropTracker?.track(it, "crop:transformedOriginal") }
+        }
+        withContext(Dispatchers.Default) {
+            val p =
+                if (previewInput === originalInput) transformedOriginal
+                else previewInput?.let { renderCropTransform(it, crop) }
+            transformedPreview = p
+            p?.takeIf { it !== transformedOriginal }
+                ?.let { cropTracker?.track(it, "crop:transformedPreview") }
+        }
+        withContext(Dispatchers.Default) {
+            val transformed = ArrayList<SelectionLayer>(maskInputs.size)
+            try {
+                maskInputs.forEach { layer ->
+                    transformed +=
+                        layer.copy(
+                            bitmap =
+                                renderCropTransform(layer.bitmap, crop).also {
+                                    cropTracker?.track(
+                                        it,
+                                        "crop:transformedMask:${layer.id}",
+                                    )
+                                }
+                        )
+                }
+                transformedMasks = transformed
+            } catch (t: Throwable) {
+                transformed.forEach { created ->
+                    created.bitmap.takeIf { !created.bitmap.isRecycled }?.recycle()
+                }
+                throw t
+            }
+        }
+
+        val expectedOriginal = transformedOriginal ?: transformedPreview
+        val expectedPreview = transformedPreview ?: transformedOriginal
+        val expectedTransformedLayers = transformedMasks
+        val adoptable =
+            isManagedEditCurrent(operationToken, nextRevision) &&
+                isCropOperationCurrent(cropToken) &&
+                uiState.value.sourcePath == sourcePath &&
+                uiState.value.baseContentToken == baseContentToken &&
+                uiState.value.activeSelectionLayerId == activeSelectionLayerId &&
+                uiState.value.selectionLayers == capturedSelectionLayers
+
+        if (adoptable) {
+            var stateUpdateException: Throwable? = null
+            try {
+                updateUiStateAndRecycleReplaced {
+                    val adoptedOriginal =
+                        expectedOriginal ?: error("missing transformed original")
+                    val adoptedPreview =
+                        expectedPreview ?: error("missing transformed preview")
+                    it.copy(
+                        originalPreviewBitmap = adoptedOriginal,
+                        previewBitmap = adoptedPreview,
+                        baseBitmapDirty = true,
+                        baseContentToken = newBaseContentToken(),
+                        cropState = CropState(),
+                        selectionLayers = checkNotNull(expectedTransformedLayers),
+                        isBusy = false,
+                        message = "변경사항을 적용했습니다.",
+                    )
+                }
+            } catch (t: Throwable) {
+                stateUpdateException = t
+                if (t is CancellationException) throw t
+            }
+            val liveStateAfter = uiState.value
+            val originalAdopted = liveStateAfter.originalPreviewBitmap === expectedOriginal
+            val previewAdopted = liveStateAfter.previewBitmap === expectedPreview
+            val masksAdopted =
+                expectedTransformedLayers != null &&
+                    liveStateAfter.selectionLayers == expectedTransformedLayers
+            val fullyAdopted = originalAdopted && previewAdopted && masksAdopted
+
+            if (fullyAdopted) {
+                transformedOriginal = null
+                transformedPreview = null
+                transformedMasks = null
+                markParamsSuccessfullyRendered(liveStateAfter.params)
+                settleAdoptedEditHistory(undoSnapshotOwned)
+                undoSnapshotOwned = null
+                persistDraftSnapshot()
+            } else if (stateUpdateException != null) {
+                throw stateUpdateException
+            }
+        } else if (isManagedEditTokenCurrent(operationToken)) {
+            updateUiState { it.copy(isBusy = false) }
+        }
+    } catch (ce: CancellationException) {
+        throw ce
+    } catch (t: Throwable) {
+        val failureAdoptable =
+            isManagedEditCurrent(operationToken, nextRevision) &&
+                isCropOperationCurrent(cropToken) &&
+                uiState.value.sourcePath == sourcePath &&
+                uiState.value.baseContentToken == baseContentToken &&
+                uiState.value.activeSelectionLayerId == activeSelectionLayerId &&
+                uiState.value.selectionLayers == capturedSelectionLayers
+        val failureManagedCurrent = isManagedEditTokenCurrent(operationToken)
+        if (failureAdoptable) {
+            updateUiState { it.copy(isBusy = false, message = "자르기에 실패했습니다: ${t.message}") }
+        } else if (failureManagedCurrent) {
+            updateUiState { it.copy(isBusy = false) }
+        }
+    } finally {
+        val retained = identityBitmapSetForFinally()
+        uiState.value.originalPreviewBitmap?.let(retained::add)
+        uiState.value.previewBitmap?.let(retained::add)
+        uiState.value.selectionLayers.forEach { retained.add(it.bitmap) }
+        transformedOriginal?.takeIf { it !in retained && !it.isRecycled }?.recycle()
+        if (transformedPreview !== transformedOriginal)
+            transformedPreview?.takeIf { it !in retained && !it.isRecycled }?.recycle()
+        transformedMasks?.forEach { layer ->
+            layer.bitmap.takeIf { it !in retained && !it.isRecycled }?.recycle()
+        }
+        releasePreparedInputs()
+        undoSnapshotOwned?.let(::recycleHistorySnapshot)
+        undoSnapshotOwned = null
+        releaseUndoSnapshot()
+        cropTracker?.end()
+    }
 }
 
 private fun EditorViewModel.identityBitmapSetForFinally(): MutableSet<Bitmap> =

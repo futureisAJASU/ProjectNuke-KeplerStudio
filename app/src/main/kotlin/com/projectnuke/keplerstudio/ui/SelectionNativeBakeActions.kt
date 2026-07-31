@@ -58,35 +58,6 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
             snapshotState = "copying",
             transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
         )
-    var ownedBase: Bitmap? =
-        runCatching { baseOriginal.copyOrThrow() }
-            .getOrElse { failure ->
-                prepareTracker?.end()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
-                if (failure is BitmapAllocationRejectedException)
-                    requestAllocationRecovery(
-                        MemoryRetryAction.ApplySelectionNative,
-                        failure.requiredBytes,
-                    )
-                return
-            }
-    prepareTracker?.track(checkNotNull(ownedBase), "selectionBake:base")
-    var ownedLayers: List<SelectionLayer> =
-        runCatching { enabledLayers.copyBitmapsOwned() }
-            .getOrElse { failure ->
-                ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                prepareTracker?.end()
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                updateUiState { it.copy(message = "선택 마스크 보정 준비에 실패했습니다.") }
-                if (failure is BitmapAllocationRejectedException)
-                    requestAllocationRecovery(
-                        MemoryRetryAction.ApplySelectionNative,
-                        failure.requiredBytes,
-                    )
-                return
-            }
-    ownedLayers.forEach { prepareTracker?.track(it.bitmap, "selectionBake:layer:${it.id}") }
     val nextRevision = current.revision + 1
     updateUiState {
         it.copy(isBusy = true, revision = nextRevision, message = "선택 마스크 보정을 적용하는 중입니다.")
@@ -94,150 +65,28 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
 
     launchManagedEditWithPreparedResources(
         { operationToken ->
-            var ownedBaseOwned = ownedBase
-            ownedBase = null
-            var ownedLayersOwned = ownedLayers
-            ownedLayers = emptyList()
-            var undoSnapshotOwned = undoSnapshot
-            undoSnapshot = null
-            var bakedOriginal: Bitmap? = null
-            var renderedPreview: Bitmap? = null
-            var bakeSuccess: RenderResult.Success? = null
-            var previewSuccess: RenderResult.Success? = null
-            val bakeTracker =
-                beginMemoryTracking(
-                    "selectionNativeBake",
-                    snapshotState = "rendering",
-                    transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
-                )
-            bakeTracker?.track(checkNotNull(ownedBaseOwned), "selectionBake:base")
-            ownedLayersOwned.forEach {
-                bakeTracker?.track(it.bitmap, "selectionBake:layer:${it.id}")
-            }
-            prepareTracker?.end()
-            try {
-                withContext(Dispatchers.Default) {
-                    val localOnlyState =
-                        current.copy(params = EditParams(), activeQuickEffects = emptyList())
-                    bakeSuccess =
-                        EditorRenderer.render(
-                            createRenderRequest(
-                                state = localOnlyState,
-                                operation = RenderOperation.SelectionNativeBake,
-                                basePreview = checkNotNull(ownedBaseOwned),
-                                revision = nextRevision,
-                                params = EditParams(),
-                                quickEffects = emptyList(),
-                                selectionLayers = ownedLayersOwned,
-                                diagnostics = bakeTracker,
-                            )
-                        ).successOrThrow()
-                    bakedOriginal = checkNotNull(bakeSuccess).output
-                    bakeTracker?.track(checkNotNull(bakedOriginal), "selectionBake:original")
-                }
-                withContext(Dispatchers.Default) {
-                    previewSuccess =
-                        EditorRenderer.render(
-                            createRenderRequest(
-                                state = current,
-                                operation = RenderOperation.SelectionNativeBake,
-                                basePreview = checkNotNull(bakedOriginal),
-                                revision = nextRevision,
-                                params = params,
-                                engines = engines,
-                                look = presetLook,
-                                quickEffects = quickEffects,
-                                selectionLayers = emptyList(),
-                                exactRoute = checkNotNull(bakeSuccess).actualRoute,
-                                fallbackPolicy = FallbackPolicy.NoFallback,
-                                diagnostics = bakeTracker,
-                            )
-                        ).successOrThrow()
-                    renderedPreview = checkNotNull(previewSuccess).output
-                    bakeTracker?.track(checkNotNull(renderedPreview), "selectionBake:preview")
-                }
-                val adoptedOriginal = bakedOriginal ?: error("missing baked original")
-                val adoptedPreview = renderedPreview ?: error("missing rendered preview")
-                if (
-                    isManagedEditCurrent(operationToken, nextRevision) &&
-                        uiState.value.sourcePath == sourcePath &&
-                        uiState.value.baseContentToken == baseContentToken &&
-                        uiState.value.selectionLayers == capturedSelectionLayers &&
-                        uiState.value.activeSelectionLayerId == capturedActiveSelectionLayerId &&
-                        !isShuttingDown()
-                ) {
-                    updateUiStateAndRecycleReplaced {
-                        it.copy(
-                            originalPreviewBitmap = adoptedOriginal,
-                            previewBitmap = adoptedPreview,
-                            baseBitmapDirty = true,
-                            baseContentToken = newBaseContentToken(),
-                            selectionLayers = emptyList(),
-                            activeSelectionLayerId = null,
-                            isBusy = false,
-                            correctionEngineState =
-                                it.correctionEngineState.withSuccessfulRender(
-                                    current.correctionEngineState.documentEngine,
-                                    checkNotNull(previewSuccess),
-                                ),
-                            message = "선택 마스크 보정을 원본에 적용했습니다. 저장 결과에도 반영됩니다.",
-                        )
-                    }
-                    bakedOriginal = null
-                    renderedPreview = null
-                    settleAdoptedEditHistory(undoSnapshotOwned)
-                    undoSnapshotOwned = null
-                    persistDraftSnapshot()
-                } else if (isManagedEditTokenCurrent(operationToken)) {
-                    updateUiState { it.copy(isBusy = false) }
-                }
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (failure: Throwable) {
-                if (
-                    isManagedEditCurrent(operationToken, nextRevision) &&
-                        uiState.value.sourcePath == sourcePath &&
-                        uiState.value.baseContentToken == baseContentToken &&
-                        uiState.value.selectionLayers == capturedSelectionLayers &&
-                        uiState.value.activeSelectionLayerId == capturedActiveSelectionLayerId
-                ) {
-                    (failure as? RenderFailedException)?.failure?.let { renderFailure ->
-                        updateUiState {
-                            it.copy(
-                                correctionEngineState =
-                                    it.correctionEngineState.withFailedRender(
-                                        current.correctionEngineState.documentEngine,
-                                        renderFailure,
-                                    )
-                            )
-                        }
-                    }
-                    updateUiState { it.copy(isBusy = false, message = "선택 마스크 보정 적용에 실패했습니다.") }
-                } else if (isManagedEditTokenCurrent(operationToken)) {
-                    updateUiState { it.copy(isBusy = false) }
-                }
-            } finally {
-                ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
-                ownedLayersOwned.forEach {
-                    it.bitmap.takeIf { bitmap -> !bitmap.isRecycled }?.recycle()
-                }
-                undoSnapshotOwned?.let(::recycleHistorySnapshot)
-                bakedOriginal?.takeIf { !it.isRecycled }?.recycle()
-                renderedPreview?.takeIf { !it.isRecycled }?.recycle()
-                bakeTracker?.end()
-            }
+            applySelectionNativeBakeBackground(
+                operationToken = operationToken,
+                capturedCurrent = current,
+                enabledLayers = enabledLayers,
+                params = params,
+                engines = engines,
+                presetLook = presetLook,
+                quickEffects = quickEffects,
+                sourcePath = sourcePath,
+                baseContentToken = baseContentToken,
+                capturedSelectionLayers = capturedSelectionLayers,
+                capturedActiveSelectionLayerId = capturedActiveSelectionLayerId,
+                nextRevision = nextRevision,
+                originalUndoSnapshotRef = { undoSnapshot },
+                consumeUndoSnapshot = { undoSnapshot = null },
+                releaseUndoSnapshot = { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+                prepareTracker = prepareTracker,
+            )
         },
         handoff =
             PreparedResourceHandoff.create(
                 "nativeSelectionBake",
-                {
-                    ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                    ownedBase = null
-                },
-                {
-                    ownedLayers.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
-                    ownedLayers = emptyList()
-                },
                 {
                     undoSnapshot?.let(::recycleHistorySnapshot)
                     undoSnapshot = null
@@ -252,4 +101,201 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 },
             ),
     )
+}
+
+/**
+ * Worker-side preparation and bake of the captured selection-native-bake request. The
+ * full-resolution base and selection-mask bitmaps are copied here on `Dispatchers.Default`,
+ * after the captured identity is re-validated against the authoritative state, so the
+ * Compose event handler does not block the Main dispatcher and a superseded request recycles
+ * its owned inputs without adopting the document.
+ */
+private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
+    operationToken: Long,
+    capturedCurrent: com.projectnuke.keplerstudio.editor.EditorUiState,
+    enabledLayers: List<SelectionLayer>,
+    params: com.projectnuke.keplerstudio.editor.EditParams,
+    engines: com.projectnuke.keplerstudio.editor.EngineSelection,
+    presetLook: com.projectnuke.keplerstudio.editor.PresetColorLook?,
+    quickEffects: List<com.projectnuke.keplerstudio.editor.ActiveQuickEffect>,
+    sourcePath: String?,
+    baseContentToken: String,
+    capturedSelectionLayers: List<SelectionLayer>,
+    capturedActiveSelectionLayerId: String?,
+    nextRevision: Int,
+    originalUndoSnapshotRef: () -> EditorHistorySnapshot?,
+    consumeUndoSnapshot: () -> Unit,
+    releaseUndoSnapshot: () -> Unit,
+    prepareTracker: com.projectnuke.keplerstudio.editor.MemoryTrackerScope?,
+) {
+    var ownedBase: Bitmap? = null
+    var ownedLayers: List<SelectionLayer> = emptyList()
+    var bakedOriginal: Bitmap? = null
+    var renderedPreview: Bitmap? = null
+    var bakeSuccess: RenderResult.Success? = null
+    var previewSuccess: RenderResult.Success? = null
+    var undoSnapshotOwned: EditorHistorySnapshot? = originalUndoSnapshotRef()
+    consumeUndoSnapshot()
+    val bakeTracker =
+        beginMemoryTracking(
+            "selectionNativeBake",
+            snapshotState = "rendering",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
+        )
+
+    fun releaseTransients() {
+        ownedBase?.takeIf { !it.isRecycled }?.recycle()
+        ownedBase = null
+        ownedLayers.forEach { layer -> layer.bitmap.takeIf { !layer.bitmap.isRecycled }?.recycle() }
+        ownedLayers = emptyList()
+    }
+
+    try {
+        val prepared = withContext(Dispatchers.Default) {
+            if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
+            val workerState = uiState.value
+            if (workerState.sourcePath != sourcePath) return@withContext null
+            if (workerState.baseContentToken != baseContentToken) return@withContext null
+            if (workerState.selectionLayers != capturedSelectionLayers) return@withContext null
+            if (workerState.activeSelectionLayerId != capturedActiveSelectionLayerId) return@withContext null
+            val baseOriginal =
+                workerState.originalPreviewBitmap ?: workerState.previewBitmap
+                    ?: return@withContext null
+            ownedBase =
+                baseOriginal.copyOrThrow().also { bakeTracker?.track(it, "selectionBake:base") }
+            ownedLayers =
+                try {
+                    enabledLayers.copyBitmapsOwned()
+                } catch (failure: Throwable) {
+                    ownedBase?.takeIf { !it.isRecycled }?.recycle()
+                    ownedBase = null
+                    throw failure
+                }
+            ownedLayers.forEach {
+                bakeTracker?.track(it.bitmap, "selectionBake:layer:${it.id}")
+            }
+            prepareTracker?.end()
+            true
+        }
+
+        if (prepared == null) {
+            prepareTracker?.end()
+            return
+        }
+
+        withContext(Dispatchers.Default) {
+            val localOnlyState =
+                capturedCurrent.copy(params = EditParams(), activeQuickEffects = emptyList())
+            bakeSuccess =
+                EditorRenderer.render(
+                    createRenderRequest(
+                        state = localOnlyState,
+                        operation = RenderOperation.SelectionNativeBake,
+                        basePreview = checkNotNull(ownedBase),
+                        revision = nextRevision,
+                        params = EditParams(),
+                        quickEffects = emptyList(),
+                        selectionLayers = ownedLayers,
+                        diagnostics = bakeTracker,
+                    )
+                ).successOrThrow()
+            bakedOriginal = checkNotNull(bakeSuccess).output
+            bakeTracker?.track(checkNotNull(bakedOriginal), "selectionBake:original")
+        }
+        withContext(Dispatchers.Default) {
+            previewSuccess =
+                EditorRenderer.render(
+                    createRenderRequest(
+                        state = capturedCurrent,
+                        operation = RenderOperation.SelectionNativeBake,
+                        basePreview = checkNotNull(bakedOriginal),
+                        revision = nextRevision,
+                        params = params,
+                        engines = engines,
+                        look = presetLook,
+                        quickEffects = quickEffects,
+                        selectionLayers = emptyList(),
+                        exactRoute = checkNotNull(bakeSuccess).actualRoute,
+                        fallbackPolicy = FallbackPolicy.NoFallback,
+                        diagnostics = bakeTracker,
+                    )
+                ).successOrThrow()
+            renderedPreview = checkNotNull(previewSuccess).output
+            bakeTracker?.track(checkNotNull(renderedPreview), "selectionBake:preview")
+        }
+        val adoptedOriginal = bakedOriginal ?: error("missing baked original")
+        val adoptedPreview = renderedPreview ?: error("missing rendered preview")
+        if (
+            isManagedEditCurrent(operationToken, nextRevision) &&
+                uiState.value.sourcePath == sourcePath &&
+                uiState.value.baseContentToken == baseContentToken &&
+                uiState.value.selectionLayers == capturedSelectionLayers &&
+                uiState.value.activeSelectionLayerId == capturedActiveSelectionLayerId &&
+                !isShuttingDown()
+        ) {
+            updateUiStateAndRecycleReplaced {
+                it.copy(
+                    originalPreviewBitmap = adoptedOriginal,
+                    previewBitmap = adoptedPreview,
+                    baseBitmapDirty = true,
+                    baseContentToken = newBaseContentToken(),
+                    selectionLayers = emptyList(),
+                    activeSelectionLayerId = null,
+                    isBusy = false,
+                    correctionEngineState =
+                        it.correctionEngineState.withSuccessfulRender(
+                            capturedCurrent.correctionEngineState.documentEngine,
+                            checkNotNull(previewSuccess),
+                        ),
+                    message = "선택 마스크 보정을 원본에 적용했습니다. 저장 결과에도 반영됩니다.",
+                )
+            }
+            bakedOriginal = null
+            renderedPreview = null
+            settleAdoptedEditHistory(undoSnapshotOwned)
+            undoSnapshotOwned = null
+            persistDraftSnapshot()
+        } else if (isManagedEditTokenCurrent(operationToken)) {
+            updateUiState { it.copy(isBusy = false) }
+        }
+    } catch (ce: CancellationException) {
+        throw ce
+    } catch (failure: Throwable) {
+        if (
+            isManagedEditCurrent(operationToken, nextRevision) &&
+                uiState.value.sourcePath == sourcePath &&
+                uiState.value.baseContentToken == baseContentToken &&
+                uiState.value.selectionLayers == capturedSelectionLayers &&
+                uiState.value.activeSelectionLayerId == capturedActiveSelectionLayerId
+        ) {
+            (failure as? RenderFailedException)?.failure?.let { renderFailure ->
+                updateUiState {
+                    it.copy(
+                        correctionEngineState =
+                            it.correctionEngineState.withFailedRender(
+                                capturedCurrent.correctionEngineState.documentEngine,
+                                renderFailure,
+                            )
+                    )
+                }
+            }
+            updateUiState { it.copy(isBusy = false, message = "선택 마스크 보정 적용에 실패했습니다.") }
+            if (failure is BitmapAllocationRejectedException) {
+                requestAllocationRecovery(
+                    MemoryRetryAction.ApplySelectionNative,
+                    failure.requiredBytes,
+                )
+            }
+        } else if (isManagedEditTokenCurrent(operationToken)) {
+            updateUiState { it.copy(isBusy = false) }
+        }
+    } finally {
+        releaseTransients()
+        undoSnapshotOwned?.let(::recycleHistorySnapshot)
+        undoSnapshotOwned = null
+        releaseUndoSnapshot()
+        bakedOriginal?.takeIf { !it.isRecycled }?.recycle()
+        renderedPreview?.takeIf { !it.isRecycled }?.recycle()
+        bakeTracker?.end()
+    }
 }
