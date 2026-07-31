@@ -44,15 +44,19 @@ internal fun parseCropStateFromJson(json: JSONObject): CropState? = runCatching 
     val aspect = runCatching { CropAspectRatio.valueOf(aspectName) }.getOrDefault(CropAspectRatio.Original)
     CropState(
         aspectRatio = aspect,
-        cropLeft = json.optDouble("cropLeft", 0.0).toFloat(),
-        cropTop = json.optDouble("cropTop", 0.0).toFloat(),
-        cropRight = json.optDouble("cropRight", 1.0).toFloat(),
-        cropBottom = json.optDouble("cropBottom", 1.0).toFloat(),
+        cropLeft = json.optDouble("cropLeft", 0.0).toFiniteOrDefault(0f),
+        cropTop = json.optDouble("cropTop", 0.0).toFiniteOrDefault(0f),
+        cropRight = json.optDouble("cropRight", 1.0).toFiniteOrDefault(1f),
+        cropBottom = json.optDouble("cropBottom", 1.0).toFiniteOrDefault(1f),
         rotationDegrees = json.optInt("rotationDegrees", 0),
-        straightenDegrees = json.optDouble("straightenDegrees", 0.0).toFloat(),
+        straightenDegrees = json.optDouble("straightenDegrees", 0.0).toFiniteOrDefault(0f),
         flipHorizontal = json.optBoolean("flipHorizontal", false)
     )
 }.getOrNull()
+
+private fun Double.toFiniteOrDefault(default: Float): Float {
+    return toFloat().let { if (it.isFinite()) it else default }
+}
 
 private fun normalizeRange(a: Float, b: Float, minSize: Float): Pair<Float, Float> {
     val safeMinSize = minSize.coerceIn(0f, 1f)

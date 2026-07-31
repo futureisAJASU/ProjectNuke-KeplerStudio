@@ -776,6 +776,8 @@ private fun V2ZoomablePreview(
                             }
                             showOriginal = false
                         }
+                        offset = clampZoomOffset(offset, scale, bitmap.width, bitmap.height, containerSize, paddingPx)
+                        showOriginal = false
                     }
                 }
                 .pointerInput(bitmap, originalBitmap, containerSize, paintMode) {
@@ -1718,7 +1720,7 @@ private fun DebugComparisonViewerDialog(
                                                     )
                                                 setProgress { requested ->
                                                     splitPosition =
-                                                        requested.coerceIn(0.05f, 0.95f)
+                                                        if (requested.isFinite()) requested.coerceIn(0.05f, 0.95f) else 0.5f
                                                     true
                                                 }
                                             },
@@ -2011,3 +2013,29 @@ private fun BrushCursorOverlay(
 }
 
 private val DefaultMaskTint = Color(0xFFE91E63)
+
+/**
+ * Clamps a zoomed-and-panned [offset] so the content never moves beyond half its extent
+ * from the container center. After container resize, orientation change or scale change,
+ * this keeps the entire image reachable while allowing intentional edge movement.
+ */
+internal fun clampZoomOffset(
+    offset: Offset,
+    scale: Float,
+    contentWidth: Int,
+    contentHeight: Int,
+    containerSize: IntSize,
+    paddingPx: Float,
+): Offset {
+    if (scale <= 1f || containerSize.width <= 0 || containerSize.height <= 0) return Offset.Zero
+    val innerW = (containerSize.width - 2 * paddingPx).coerceAtLeast(1f)
+    val innerH = (containerSize.height - 2 * paddingPx).coerceAtLeast(1f)
+    val contentAspect = if (contentHeight > 0) contentWidth.toFloat() / contentHeight.toFloat() else 1f
+    val containerAspect = if (innerH > 0) innerW / innerH else 1f
+    val maxX = (if (contentAspect > containerAspect) 0f else (innerW * (1f - contentAspect / containerAspect) / 2f)) * scale
+    val maxY = (if (contentAspect < containerAspect) 0f else (innerH * (1f - containerAspect / contentAspect) / 2f)) * scale
+    return Offset(
+        offset.x.coerceIn(-maxX, maxX),
+        offset.y.coerceIn(-maxY, maxY),
+    )
+}

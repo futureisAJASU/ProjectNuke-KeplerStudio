@@ -165,7 +165,7 @@ internal fun fittedPreviewRect(size: Size, imageWidth: Int, imageHeight: Int): R
 
 private suspend fun createBoundedHistogram(bitmap: Bitmap): PreviewHistogram? {
     val sampledBitmap =
-        withContext(Dispatchers.Main.immediate) {
+        withContext(Dispatchers.Default) {
             if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return@withContext null
             val maxSide = 256
             val scale = min(1f, maxSide.toFloat() / max(bitmap.width, bitmap.height).toFloat())
@@ -195,7 +195,7 @@ private suspend fun createBoundedHistogram(bitmap: Bitmap): PreviewHistogram? {
             calculatePreviewHistogram(pixels)
         }
     } finally {
-        withContext(Dispatchers.Main.immediate) {
+        withContext(Dispatchers.Default) {
             if (!sampledBitmap.isRecycled) sampledBitmap.recycle()
         }
     }

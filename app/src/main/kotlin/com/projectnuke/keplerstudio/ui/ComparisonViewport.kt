@@ -20,6 +20,9 @@ internal fun moveComparisonSplit(
     dragAmountPx: Float,
     viewportWidthPx: Int,
 ): Float {
-    if (viewportWidthPx <= 0) return current.coerceIn(0.05f, 0.95f)
-    return (current + dragAmountPx / viewportWidthPx.toFloat()).coerceIn(0.05f, 0.95f)
+    val safe = if (current.isFinite()) current else 0.5f
+    val safeDrag = if (dragAmountPx.isFinite()) dragAmountPx else 0f
+    if (viewportWidthPx <= 0) return safe.coerceIn(0.05f, 0.95f)
+    val delta = safeDrag / viewportWidthPx.toFloat()
+    return (safe + if (delta.isFinite()) delta else 0f).coerceIn(0.05f, 0.95f)
 }
