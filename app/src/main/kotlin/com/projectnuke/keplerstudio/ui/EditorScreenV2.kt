@@ -14,6 +14,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -276,6 +277,10 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                             onToggleChrome = {
                                 if (state.previewBitmap != null) chromeHidden = !chromeHidden
                             },
+                            onPaintAt = { mx, my -> viewModel.paintActiveSelectionAt(mx, my) },
+                            onStrokeStart = { viewModel.beginBrushStroke() },
+                            onStrokeEnd = { viewModel.finishBrushStroke() },
+                            onStrokeCancel = { viewModel.cancelBrushStroke() },
                             modifier = Modifier.weight(1f).fillMaxWidth()
                         )
                         AnimatedVisibility(
@@ -541,6 +546,10 @@ private fun V2PreviewArea(
     onToggleGrid: () -> Unit,
     onCropRectChanged: (Float, Float, Float, Float) -> Unit,
     onToggleChrome: () -> Unit,
+    onPaintAt: (maskX: Float, maskY: Float) -> Unit,
+    onStrokeStart: () -> Unit,
+    onStrokeEnd: () -> Unit,
+    onStrokeCancel: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var showMessage by remember(message, isBusy) { mutableStateOf(!message.isNullOrBlank()) }
@@ -578,6 +587,11 @@ private fun V2PreviewArea(
                     selectionLayers = selectionLayers,
                     activeSelectionLayerId = activeSelectionLayerId,
                     showSelectionOverlay = showSelectionOverlay,
+                    paintMode = selectedTool == V2EditorTool.Masking && activeSelectionLayerId != null && showSelectionOverlay,
+                    onPaintAt = onPaintAt,
+                    onStrokeStart = onStrokeStart,
+                    onStrokeEnd = onStrokeEnd,
+                    onStrokeCancel = onStrokeCancel,
                 )
             }
         }
@@ -696,13 +710,21 @@ private fun V2ZoomablePreview(
     selectionLayers: List<SelectionLayer> = emptyList(),
     activeSelectionLayerId: String? = null,
     showSelectionOverlay: Boolean = false,
+    paintMode: Boolean = false,
+    onPaintAt: (maskX: Float, maskY: Float) -> Unit = { _, _ -> },
+    onStrokeStart: () -> Unit = {},
+    onStrokeEnd: () -> Unit = {},
+    onStrokeCancel: () -> Unit = {},
 ) {
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
     var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
     var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }
     var containerSize by remember(bitmap) { mutableStateOf(IntSize.Zero) }
+    var cursorPosition by remember { mutableStateOf<Offset?>(null) }
     val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
     val activeMaskLayer = selectionLayers.firstOrNull { it.id == activeSelectionLayerId }
+    val density = LocalDensity.current
+    val paddingPx = with(density) { 8.dp.toPx() }
 
     Box(
         modifier = Modifier
@@ -718,41 +740,67 @@ private fun V2ZoomablePreview(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(8.dp)
-                .pointerInput(bitmap) {
-                    detectTransformGestures { centroid, pan, zoom, _ ->
-                        val oldScale = scale
-                        val nextScale = (oldScale * zoom).coerceIn(1f, 8f)
-                        scale = nextScale
-                        offset = if (nextScale <= 1.01f) {
-                            Offset.Zero
-                        } else {
-                            val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
-                            ((offset + centroid - center) * (nextScale / oldScale)) - (centroid - center) + pan
-                        }
-                        showOriginal = false
-                    }
-                }
-                .pointerInput(bitmap, originalBitmap, containerSize) {
-                    detectTapGestures(
-                        onTap = { onToggleChrome() },
-                        onDoubleTap = { tap ->
-                            if (scale > 1.01f) {
-                                scale = 1f
-                                offset = Offset.Zero
+                .pointerInput(bitmap, paintMode) {
+                    if (paintMode && activeMaskLayer != null) {
+                        detectDragGestures(
+                            onDragStart = { off ->
+                                onStrokeStart()
+                                val mask = activeMaskLayer.bitmap
+                                val (mX, mY) = mapPointerToMask(
+                                    off, containerSize, mask.width, mask.height, scale, offset, paddingPx,
+                                )
+                                onPaintAt(mX, mY)
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                cursorPosition = change.position
+                                val mask = activeMaskLayer.bitmap
+                                val (mX, mY) = mapPointerToMask(
+                                    change.position, containerSize, mask.width, mask.height, scale, offset, paddingPx,
+                                )
+                                onPaintAt(mX, mY)
+                            },
+                            onDragEnd = { onStrokeEnd(); cursorPosition = null },
+                            onDragCancel = { onStrokeCancel(); cursorPosition = null },
+                        )
+                    } else {
+                        detectTransformGestures { centroid, pan, zoom, _ ->
+                            val oldScale = scale
+                            val nextScale = (oldScale * zoom).coerceIn(1f, 8f)
+                            scale = nextScale
+                            offset = if (nextScale <= 1.01f) {
+                                Offset.Zero
                             } else {
-                                val targetScale = 2.5f
                                 val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
-                                offset = (center - tap) * (targetScale - 1f)
-                                scale = targetScale
+                                ((offset + centroid - center) * (nextScale / oldScale)) - (centroid - center) + pan
                             }
                             showOriginal = false
-                        },
-                        onLongPress = { if (originalBitmap != null) showOriginal = true },
-                        onPress = {
-                            tryAwaitRelease()
-                            showOriginal = false
                         }
-                    )
+                    }
+                }
+                .pointerInput(bitmap, originalBitmap, containerSize, paintMode) {
+                    if (!paintMode) {
+                        detectTapGestures(
+                            onTap = { onToggleChrome() },
+                            onDoubleTap = { tap ->
+                                if (scale > 1.01f) {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                } else {
+                                    val targetScale = 2.5f
+                                    val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
+                                    offset = (center - tap) * (targetScale - 1f)
+                                    scale = targetScale
+                                }
+                                showOriginal = false
+                            },
+                            onLongPress = { if (originalBitmap != null) showOriginal = true },
+                            onPress = {
+                                tryAwaitRelease()
+                                showOriginal = false
+                            }
+                        )
+                    }
                 }
                 .graphicsLayer {
                     scaleX = scale
@@ -784,6 +832,22 @@ private fun V2ZoomablePreview(
                 scale = scale,
                 offset = offset,
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+        if (paintMode && cursorPosition != null && activeMaskLayer != null) {
+            BrushCursorOverlay(
+                position = cursorPosition!!,
+                radiusPx = with(density) { 16.dp.toPx() },
+                color = DefaultMaskTint,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(8.dp)
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offset.x
+                        translationY = offset.y
+                    },
             )
         }
 
@@ -1873,3 +1937,77 @@ private fun previewResultLabel(result: PreviewResultClass): String =
         PreviewResultClass.DebugForcedV1 -> "개발자 설정으로 V1 강제"
         PreviewResultClass.DebugForcedV2 -> "개발자 설정으로 V2 강제"
     }
+
+/**
+ * Maps a pointer position in the preview's local coordinate space (the surface after the
+ * 8dp padding) to the mask's pixel coordinates, given the ContentScale.Fit layout, the
+ * graphicsLayer scale and offset, and the container size.
+ *
+ * Steps:
+ *   1. Undo the graphicsLayer transform: posInLayer = (posInLocal - offset) / scale.
+ *   2. Compute the fitted image rect inside the padded container.
+ *   3. Map posInLayer into a fraction of the fitted image rect.
+ *   4. Clamp to [0,1] and scale by the mask's pixel dimensions.
+ */
+internal fun mapPointerToMask(
+    pointerLocal: Offset,
+    containerSize: IntSize,
+    maskWidth: Int,
+    maskHeight: Int,
+    scale: Float,
+    offset: Offset,
+    paddingPx: Float,
+): Pair<Float, Float> {
+    val effectiveScale = if (scale > 0f) scale else 1f
+    val xInLayer = (pointerLocal.x - offset.x) / effectiveScale
+    val yInLayer = (pointerLocal.y - offset.y) / effectiveScale
+    // Container after padding
+    val innerW = (containerSize.width - 2 * paddingPx).coerceAtLeast(1f)
+    val innerH = (containerSize.height - 2 * paddingPx).coerceAtLeast(1f)
+    // Fitted rect inside the inner container (ContentScale.Fit)
+    val imageAspect = if (maskHeight > 0) maskWidth.toFloat() / maskHeight.toFloat() else 1f
+    val containerAspect = if (innerH > 0) innerW / innerH else 1f
+    val fitW: Float
+    val fitH: Float
+    if (imageAspect > containerAspect) {
+        fitW = innerW
+        fitH = innerW / imageAspect
+    } else {
+        fitH = innerH
+        fitW = innerH * imageAspect
+    }
+    val fitLeft = paddingPx + (innerW - fitW) / 2f
+    val fitTop = paddingPx + (innerH - fitH) / 2f
+    val fracX = ((xInLayer - fitLeft) / fitW).coerceIn(0f, 1f)
+    val fracY = ((yInLayer - fitTop) / fitH).coerceIn(0f, 1f)
+    return fracX * maskWidth to fracY * maskHeight
+}
+
+/**
+ * A brush cursor circle drawn on the Compose surface at the current pointer position,
+ * scaled with the same graphicsLayer as the preview to reflect the true brush size on
+ * the actual image. This is purely a UI indicator; no Bitmap is allocated.
+ */
+@Composable
+private fun BrushCursorOverlay(
+    position: Offset,
+    radiusPx: Float,
+    color: Color,
+    modifier: Modifier = Modifier,
+) {
+    androidx.compose.foundation.Canvas(modifier = modifier) {
+        drawCircle(
+            color = color.copy(alpha = 0.85f),
+            radius = radiusPx,
+            center = position,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f),
+        )
+        drawCircle(
+            color = color.copy(alpha = 0.18f),
+            radius = radiusPx,
+            center = position,
+        )
+    }
+}
+
+private val DefaultMaskTint = Color(0xFFE91E63)

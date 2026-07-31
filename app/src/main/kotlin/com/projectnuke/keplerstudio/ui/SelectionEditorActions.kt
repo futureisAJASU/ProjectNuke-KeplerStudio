@@ -516,11 +516,49 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
         cancelBrushStroke()
         return
     }
-    val painted = applyPaintStroke(layer.bitmap, maskX, maskY, state.selectionPaintSettings)
+    val settings = state.selectionPaintSettings
+    val startValid = !brushLastX.isNaN() && !brushLastY.isNaN()
+    val painted =
+        if (startValid) {
+            applyPaintSegment(layer.bitmap, brushLastX, brushLastY, maskX, maskY, settings)
+        } else {
+            applyPaintStroke(layer.bitmap, maskX, maskY, settings)
+        }
+    setBrushLastPosition(maskX, maskY)
     if (painted) {
         markBrushChanged(true)
         nextBrushPreviewEpoch()
     }
+}
+
+/**
+ * Paints a continuous interpolated segment between [startX,startY] and [endX,endY] by stamping
+ * the brush disk at sub-radius intervals along the line, so fast pointer movement does not
+ * leave holes.
+ */
+internal fun EditorViewModel.applyPaintSegment(
+    bitmap: Bitmap,
+    startX: Float,
+    startY: Float,
+    endX: Float,
+    endY: Float,
+    settings: com.projectnuke.keplerstudio.editor.SelectionPaintSettings,
+): Boolean {
+    val radius = settings.sizePx.coerceAtLeast(1f) * 0.5f
+    val dx = endX - startX
+    val dy = endY - startY
+    val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+    var changed = false
+    // Step by a fraction of the brush radius to guarantee full coverage.
+    val step = (radius * 0.5f).coerceAtLeast(1f)
+    val steps = (dist / step).toInt().coerceIn(1, 4096)
+    for (i in 0..steps) {
+        val t = if (steps == 0) 0f else i.toFloat() / steps.toFloat()
+        val px = startX + dx * t
+        val py = startY + dy * t
+        if (applyPaintStroke(bitmap, px, py, settings)) changed = true
+    }
+    return changed
 }
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {

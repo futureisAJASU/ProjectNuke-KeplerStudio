@@ -106,6 +106,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var brushRevision: Int = 0
     private var brushChanged: Boolean = false
     private var brushEpochCounter: Long = 0L
+    internal var brushLastX: Float = Float.NaN
+        private set
+    internal var brushLastY: Float = Float.NaN
+        private set
+    internal fun setBrushLastPosition(x: Float, y: Float) {
+        brushLastX = x
+        brushLastY = y
+    }
     private var paramUndoWindowJob: Job? = null
     private var paramUndoWindowOpen: Boolean = false
     private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
@@ -1714,6 +1722,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         brushChanged = false
         brushEpochCounter = 0L
         _brushPreviewEpoch.value = 0L
+        brushLastX = Float.NaN
+        brushLastY = Float.NaN
         updateUiState { current ->
             current.copy(
                 selectionLayers =
@@ -1753,6 +1763,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             brushLayerId = null
             brushBaseToken = null
             brushChanged = false
+            brushLastX = Float.NaN
+            brushLastY = Float.NaN
             recycleHistorySnapshot(snapshot)
             return
         }
@@ -1765,6 +1777,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         brushBaseToken = null
         val changed = brushChanged
         brushChanged = false
+        brushLastX = Float.NaN
+        brushLastY = Float.NaN
         if (changed) {
             updateUiState { it.copy(revision = it.revision + 1, isBusy = false) }
             commitUndoSnapshot(snapshot, clearRedo = true)
@@ -1780,6 +1794,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         brushLayerId = null
         brushBaseToken = null
         brushChanged = false
+        brushLastX = Float.NaN
+        brushLastY = Float.NaN
         if (shuttingDown) {
             recycleHistorySnapshot(snapshot)
             return
