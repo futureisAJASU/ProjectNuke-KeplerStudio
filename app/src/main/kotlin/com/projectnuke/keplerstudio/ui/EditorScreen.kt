@@ -177,7 +177,10 @@ fun EditorScreen(viewModel: EditorViewModel) {
                                 ZoomablePreview(
                                     bitmap = bitmap,
                                     originalBitmap = state.originalPreviewBitmap,
-                                    onViewportChanged = viewModel::updateViewport
+                                    onViewportChanged = viewModel::updateViewport,
+                                    selectionLayers = state.selectionLayers,
+                                    activeSelectionLayerId = state.activeSelectionLayerId,
+                                    showSelectionOverlay = state.showSelectionOverlay,
                                 )
                             }
 
@@ -428,7 +431,10 @@ private fun SettingsCard(title: String, content: @Composable () -> Unit) {
 private fun ZoomablePreview(
     bitmap: Bitmap,
     originalBitmap: Bitmap?,
-    onViewportChanged: (ViewportState) -> Unit
+    onViewportChanged: (ViewportState) -> Unit,
+    selectionLayers: List<com.projectnuke.keplerstudio.editor.SelectionLayer> = emptyList(),
+    activeSelectionLayerId: String? = null,
+    showSelectionOverlay: Boolean = false,
 ) {
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
     var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
@@ -437,6 +443,7 @@ private fun ZoomablePreview(
     var isMultiTouch by remember(bitmap) { mutableStateOf(false) }
     var isTransforming by remember(bitmap) { mutableStateOf(false) }
     val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
+    val activeMaskLayer = selectionLayers.firstOrNull { it.id == activeSelectionLayerId }
 
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Image(
@@ -500,6 +507,15 @@ private fun ZoomablePreview(
                     .padding(top = 14.dp)
                     .background(CompareBadgeBackground)
                     .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+        if (showSelectionOverlay) {
+            SelectionMaskOverlay(
+                layer = activeMaskLayer,
+                visible = showSelectionOverlay,
+                scale = scale,
+                offset = offset,
+                modifier = Modifier.fillMaxSize(),
             )
         }
     }

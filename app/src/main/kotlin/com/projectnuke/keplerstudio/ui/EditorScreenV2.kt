@@ -124,6 +124,7 @@ import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
 import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.RouteResolver
 import com.projectnuke.keplerstudio.editor.SavedExport
+import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import java.text.SimpleDateFormat
@@ -258,6 +259,9 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                             histogramVisible = histogramVisible,
                             histogramMode = histogramMode,
                             gridVisible = gridVisible,
+                            selectionLayers = state.selectionLayers,
+                            activeSelectionLayerId = state.activeSelectionLayerId,
+                            showSelectionOverlay = state.showSelectionOverlay,
                             onToggleHistogram = { histogramVisible = !histogramVisible },
                             onToggleHistogramMode = {
                                 histogramModeName =
@@ -529,6 +533,9 @@ private fun V2PreviewArea(
     histogramVisible: Boolean,
     histogramMode: PreviewHistogramMode,
     gridVisible: Boolean,
+    selectionLayers: List<SelectionLayer>,
+    activeSelectionLayerId: String?,
+    showSelectionOverlay: Boolean,
     onToggleHistogram: () -> Unit,
     onToggleHistogramMode: () -> Unit,
     onToggleGrid: () -> Unit,
@@ -568,6 +575,9 @@ private fun V2PreviewArea(
                     originalBitmap = originalBitmap,
                     showGrid = gridVisible,
                     onToggleChrome = onToggleChrome,
+                    selectionLayers = selectionLayers,
+                    activeSelectionLayerId = activeSelectionLayerId,
+                    showSelectionOverlay = showSelectionOverlay,
                 )
             }
         }
@@ -682,13 +692,17 @@ private fun V2ZoomablePreview(
     bitmap: Bitmap,
     originalBitmap: Bitmap?,
     showGrid: Boolean,
-    onToggleChrome: () -> Unit
+    onToggleChrome: () -> Unit,
+    selectionLayers: List<SelectionLayer> = emptyList(),
+    activeSelectionLayerId: String? = null,
+    showSelectionOverlay: Boolean = false,
 ) {
     var scale by remember(bitmap) { mutableFloatStateOf(1f) }
     var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
     var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }
     var containerSize by remember(bitmap) { mutableStateOf(IntSize.Zero) }
     val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
+    val activeMaskLayer = selectionLayers.firstOrNull { it.id == activeSelectionLayerId }
 
     Box(
         modifier = Modifier
@@ -761,6 +775,15 @@ private fun V2ZoomablePreview(
                             translationX = offset.x
                             translationY = offset.y
                         },
+            )
+        }
+        if (showSelectionOverlay) {
+            SelectionMaskOverlay(
+                layer = activeMaskLayer,
+                visible = showSelectionOverlay,
+                scale = scale,
+                offset = offset,
+                modifier = Modifier.fillMaxSize(),
             )
         }
 
