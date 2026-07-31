@@ -58,8 +58,9 @@ fun MaskingToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
     val edgeLoaded = RemasterModelSession.isModelLoaded && RemasterModelSession.activeModel?.id == edgeMasker.id
     val modelCapability by com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry.state.collectAsState()
-    val edgeModelCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.SubjectSelection]
+val edgeModelCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.SubjectSelection]
     val edgeAvailable = edgeModelCapability?.executable == true || edgeMasker.canExecuteFromRegistry(edgeModelCapability)
+    val edgeExecutable = edgeAvailable || edgeLoaded
     val hasImage = state.previewBitmap != null || state.originalPreviewBitmap != null
     val actionsEnabled = !state.isBusy || editorViewModel.isBusyOwnedByMaskSupersedable()
 
@@ -79,9 +80,9 @@ fun MaskingToolPanel(editorViewModel: EditorViewModel = viewModel()) {
         ) {
             Text("마스크 레이어", color = MaskTextPrimary, fontWeight = FontWeight.SemiBold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
-                TextButton(
+TextButton(
                     onClick = { editorViewModel.addSubjectSelectionFromEdgeModel() },
-                    enabled = actionsEnabled && hasImage && edgeAvailable && edgeLoaded
+                    enabled = actionsEnabled && hasImage && edgeExecutable
                 ) {
                     Text("피사체 가져오기")
                 }
