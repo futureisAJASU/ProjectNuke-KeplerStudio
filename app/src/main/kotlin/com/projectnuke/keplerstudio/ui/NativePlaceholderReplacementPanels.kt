@@ -187,31 +187,34 @@ private fun NativeQuickEffectButton(
 fun NativeModelToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     val context = LocalContext.current
     val state by editorViewModel.uiState.collectAsState()
+    val modelCapability by com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry.state.collectAsState()
     val flareMasker = OnDeviceRemasterModels.first { it.id == "flare_masker" }
     val flareRestorer = OnDeviceRemasterModels.first { it.id == "flare_restorer" }
     val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
-    val flareMaskerStatus = RemasterModelSession.modelAvailability(context, flareMasker)
-    val flareRestorerStatus = RemasterModelSession.modelAvailability(context, flareRestorer)
-    val edgeMaskerStatus = RemasterModelSession.modelAvailability(context, edgeMasker)
-    val flareMaskerAvailable = flareMaskerStatus.hasValidatedAsset()
+    val flareGuardCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.FlareGuard]
+    val remasterCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.Remaster]
+    val flareMaskerAvailable = flareGuardCapability?.executable == true || flareMasker.canExecuteFromRegistry(flareGuardCapability)
+    val flareMaskerStatusLabel = flareMasker.registryStatus(flareGuardCapability)
+    val flareRestorerStatusLabel = flareRestorer.registryStatus(null)
+    val edgeMaskerStatusLabel = edgeMasker.registryStatus(remasterCapability)
     NativeToolCard(
         title = "모델 허브",
         description = "모델 파일과 런타임 상태에 따라 사용할 수 있는 기능만 실행합니다."
     ) {
         Text(
-            text = "플레어 자동 선택: ${flareMaskerStatus.uiLabel()}",
+            text = "플레어 자동 선택: $flareMaskerStatusLabel",
             color = NativePanelTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 4.dp)
         )
         Text(
-            text = "AI 번짐 보정: ${flareRestorerStatus.uiLabel()}",
+            text = "AI 번짐 보정: $flareRestorerStatusLabel",
             color = NativePanelTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 4.dp)
         )
         Text(
-            text = "Edge Masker: ${edgeMaskerStatus.uiLabel()}",
+            text = "Edge Masker: $edgeMaskerStatusLabel",
             color = NativePanelTextMuted,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(bottom = 4.dp)

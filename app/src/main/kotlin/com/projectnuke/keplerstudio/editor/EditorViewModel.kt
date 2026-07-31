@@ -153,6 +153,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     probeGeneration,
                 )
             }
+        } else {
+            val releaseGeneration = ModelAvailabilityRegistry.beginProbe()
+            viewModelScope.launch(Dispatchers.IO) {
+                ModelAvailabilityRegistry.probeReleasePackagedCapabilities(
+                    app.applicationContext,
+                    releaseGeneration,
+                )
+            }
         }
     }
 

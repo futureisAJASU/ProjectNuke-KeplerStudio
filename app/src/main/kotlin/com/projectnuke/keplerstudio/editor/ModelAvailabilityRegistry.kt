@@ -244,7 +244,7 @@ object ModelAvailabilityRegistry {
         )
     }
 
-    fun probePackagedCapabilities(context: Context, generation: Long = beginProbe()) {
+fun probePackagedCapabilities(context: Context, generation: Long = beginProbe()) {
         apply(
             ModelFeature.FlareGuard,
             probeAsset(
@@ -263,6 +263,48 @@ object ModelAvailabilityRegistry {
             )
         applyToFeatures(listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection), edge)
     }
+
+    /**
+     * Lightweight release probe that does not expose internal asset paths or SHA detail in
+     * error messages. The observer derives the observable phase from the same [probeAsset]
+     * validation mechanics, but the failure detail strings are replaced with safe public labels
+     * that never leak internal file names or hash values.
+     */
+    fun probeReleasePackagedCapabilities(context: Context, generation: Long = beginProbe()) {
+        apply(
+            ModelFeature.FlareGuard,
+            sanitizeForRelease(
+                probeAsset(
+                    context,
+                    generation,
+                    "flare_masker",
+                    "org.tensorflow.lite.InterpreterApi",
+                ),
+            ),
+        )
+        val edge =
+            sanitizeForRelease(
+                probeAsset(
+                    context,
+                    generation,
+                    "edge_masker",
+                    "com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter",
+                ),
+            )
+        applyToFeatures(listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection), edge)
+    }
+
+    private fun sanitizeForRelease(observation: ModelCapabilityObservation): ModelCapabilityObservation =
+        if (observation.failure != null) {
+            val safeDetail = when (observation.phase) {
+                ModelCapabilityPhase.AssetMissing -> "model asset not found"
+                ModelCapabilityPhase.AssetInvalid -> "model asset validation failed"
+                ModelCapabilityPhase.RuntimeUnavailable -> "model runtime unavailable"
+                ModelCapabilityPhase.ContractUnsupported -> "model contract version unsupported"
+                else -> "model capability unavailable"
+            }
+            observation.copy(failure = ModelCapabilityFailure(observation.phase, safeDetail))
+        } else observation
 
     fun reportLoading(feature: ModelFeature): Long =
         loadGeneration.incrementAndGet().also { generation ->

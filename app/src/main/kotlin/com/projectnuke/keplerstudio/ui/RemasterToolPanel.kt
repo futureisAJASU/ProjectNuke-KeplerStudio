@@ -37,18 +37,21 @@ fun RemasterToolPanel(
 ) {
     val context = LocalContext.current
     val editorState by editorViewModel.uiState.collectAsState()
+    val modelCapability by com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry.state.collectAsState()
     val activeModel = RemasterModelSession.activeModel
     val loaded = RemasterModelSession.isModelLoaded
     val flareMasker = OnDeviceRemasterModels.first { it.id == "flare_masker" }
     val flareRestorer = OnDeviceRemasterModels.first { it.id == "flare_restorer" }
     val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
     val autoRouter = OnDeviceRemasterModels.first { it.id == "universal_auto_router" }
-    val flareMaskerStatus = RemasterModelSession.modelAvailability(context, flareMasker)
-    val flareRestorerStatus = RemasterModelSession.modelAvailability(context, flareRestorer)
-    val edgeMaskerStatus = RemasterModelSession.modelAvailability(context, edgeMasker)
-    val flareMaskerAvailable = flareMaskerStatus.hasValidatedAsset()
-    val flareRestorerAvailable = flareRestorerStatus.hasValidatedAsset()
-    val edgeAssetAvailable = edgeMaskerStatus.hasValidatedAsset()
+    val flareGuardCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.FlareGuard]
+    val remasterCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.Remaster]
+    val flareMaskerAvailable = flareGuardCapability?.executable == true || flareMasker.canExecuteFromRegistry(flareGuardCapability)
+    val flareRestorerAvailable = flareRestorer.canExecuteFromRegistry(null)
+    val edgeAssetAvailable = remasterCapability?.executable == true || edgeMasker.canExecuteFromRegistry(remasterCapability)
+    val flareMaskerStatusLabel = flareMasker.registryStatus(flareGuardCapability)
+    val flareRestorerStatusLabel = flareRestorer.registryStatus(null)
+    val edgeMaskerStatusLabel = edgeMasker.registryStatus(remasterCapability)
     val edgeLoaded = loaded && activeModel?.id == "edge_masker"
     val hasImage = editorState.previewBitmap != null || editorState.originalPreviewBitmap != null
 
@@ -83,7 +86,7 @@ fun RemasterToolPanel(
 
         ModelHubCard(
             title = "플레어 자동 선택",
-            status = flareMaskerStatus.uiLabel(),
+            status = flareMaskerStatusLabel,
             explanation = if (flareMaskerAvailable) {
                 "현재 모델은 번짐 영역 감지에 사용됩니다. 자동 복원 모델은 아닙니다."
             } else {
@@ -128,7 +131,7 @@ fun RemasterToolPanel(
 
         ModelHubCard(
             title = "AI 번짐 보정",
-            status = flareRestorerStatus.uiLabel(),
+            status = flareRestorerStatusLabel,
             explanation = if (flareRestorerAvailable) {
                 "플레어 복원 모델 파일이 감지되었습니다. 실행 경로 연결은 별도 단계에서 진행합니다."
             } else {
@@ -144,7 +147,7 @@ fun RemasterToolPanel(
 
         ModelHubCard(
             title = edgeMasker.title,
-            status = edgeMaskerStatus.uiLabel(),
+            status = edgeMaskerStatusLabel,
             explanation = if (edgeAssetAvailable) {
                 "모델 마스크 보조를 사용할 수 있도록 런타임을 로드합니다."
             } else {
