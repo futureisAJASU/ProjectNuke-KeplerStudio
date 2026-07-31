@@ -160,6 +160,29 @@ internal object BitmapMemoryBudget {
         return min(afterReserves / 2L, min(classBound, min(fraction, 192L * MIB))).coerceAtLeast(16L * MIB)
     }
 
+    fun maxSelectionMaskLayers(): Int = if (profile.lowRamDevice) 4 else 16
+
+    fun selectionMaskBudgetBytes(): Long {
+        val heapFraction = if (profile.lowRamDevice) profile.maxHeapBytes / 16L else profile.maxHeapBytes / 8L
+        val classBound = if (profile.lowRamDevice) profile.normalMemoryClassBytes / 10L else max(
+            profile.normalMemoryClassBytes / 6L, profile.largeMemoryClassBytes / 10L,
+        )
+        val internalBound = profile.maxHeapBytes / 12L
+        return min(heapFraction, min(classBound, internalBound)).coerceIn(8L * MIB, 512L * MIB)
+    }
+
+    fun canAdmitSelectionLayer(
+        existingMaskBytes: Long,
+        candidateBytes: Long,
+        existingLayerCount: Int,
+    ): Boolean {
+        if (candidateBytes <= 0L) return false
+        if (existingLayerCount >= maxSelectionMaskLayers()) return false
+        val hardCeiling = selectionMaskBudgetBytes() * 2L
+        val total = saturatingAdd(existingMaskBytes, candidateBytes)
+        return total <= hardCeiling && canAllocate(candidateBytes)
+    }
+
     fun thumbnailBudgetBytes(): Long = min(if (profile.lowRamDevice) 8L * MIB else 32L * MIB, min(profile.normalMemoryClassBytes / 16L, profile.maxHeapBytes / 24L)).coerceAtLeast(4L * MIB)
 
     fun historyDiskBudgetBytes(): Long = min(768L * MIB, max(128L * MIB, saturatingMultiply(profile.largeMemoryClassBytes, 2L)))

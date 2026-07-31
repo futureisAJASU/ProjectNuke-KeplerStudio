@@ -175,6 +175,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     return
                 }
         val brushTracker = beginMemoryTracking("createBrushSelection", snapshotState = "allocating")
+        if (!tryAdmitSelectionMaskLayer(base.width, base.height)) {
+            brushTracker?.end()
+            if (allowRecovery) {
+                val requiredBytes = BitmapMemoryBudget.bytes(base.width, base.height)
+                requestAllocationRecovery(
+                    MemoryRetryAction.CreateBrushSelection,
+                    requiredBytes,
+                )
+            } else {
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "선택 마스크를 더 만들 수 없습니다. 먼저 불필요한 마스크를 삭제해 주세요.")
+                }
+            }
+            return
+        }
         val mask =
             try {
                 createBitmapOrThrow(base.width, base.height, Bitmap.Config.ARGB_8888)
@@ -6367,6 +6382,28 @@ internal fun createBitmapOrThrow(
     } catch (_: OutOfMemoryError) {
         throw BitmapAllocationRejectedException(required)
     }
+}
+
+/**
+ * Pre-checks whether a selection-mask layer of [width * height] pixels may be admitted into
+ * the current document without exceeding the bitmaps-per-document mask budget.
+ *
+ * Callers must pass the current document identity (sourcePath, baseContentToken) to gate
+ * against document replacement races. If admission is denied, the action must leave the
+ * previous document unchanged.
+ */
+internal fun EditorViewModel.tryAdmitSelectionMaskLayer(
+    targetWidth: Int,
+    targetHeight: Int,
+): Boolean {
+    val state = uiState.value
+    val existingBytes =
+        state.selectionLayers.sumOf { BitmapMemoryBudget.bytes(it.bitmap) }
+    val candidateBytes = BitmapMemoryBudget.bytes(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+    val currentCount = state.selectionLayers.size
+    return BitmapMemoryBudget.canAdmitSelectionLayer(
+        existingBytes, candidateBytes, currentCount,
+    )
 }
 
 internal fun createScaledBitmapOrThrow(
