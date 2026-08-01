@@ -10,6 +10,7 @@ import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
+import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.RenderFailedException
@@ -50,11 +51,11 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
         return
     }
 
-    var undoSnapshot = captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
+    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("ruleFlare")
     var ownedBase: Bitmap? =
         runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
             .getOrElse { failure ->
-                undoSnapshot?.let(::recycleHistorySnapshot)
+                pendingHistory?.close()
                 updateUiState { it.copy(message = "이미지를 준비하지 못했습니다.") }
                 if (failure is BitmapAllocationRejectedException) {
                     requestAllocationRecovery(
@@ -82,8 +83,11 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
 
     launchManagedEditWithPreparedResources(
         { operationToken ->
-            var undoSnapshotOwned = undoSnapshot
-            undoSnapshot = null
+            var pendingHistoryOwned: PendingHistorySnapshot? = pendingHistory
+            pendingHistory = null
+            var undoSnapshotOwned =
+                withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+            pendingHistoryOwned = null
             var ownedBaseOwned = ownedBase
             ownedBase = null
             var adoptedFlare = ownedBaseOwned
@@ -202,6 +206,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                 ownedBaseOwned?.let { if (!it.isRecycled) it.recycle() }
                 ownedPreview?.let { if (!it.isRecycled) it.recycle() }
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
+                pendingHistoryOwned?.close()
             }
         },
         handoff =
@@ -212,8 +217,8 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                     ownedBase = null
                 },
                 {
-                    undoSnapshot?.let(::recycleHistorySnapshot)
-                    undoSnapshot = null
+                    pendingHistory?.close()
+                    pendingHistory = null
                 },
                 {
                     val live = uiState.value

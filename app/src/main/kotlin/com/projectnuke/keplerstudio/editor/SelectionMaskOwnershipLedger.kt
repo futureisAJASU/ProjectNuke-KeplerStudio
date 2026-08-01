@@ -28,8 +28,8 @@ import kotlin.concurrent.withLock
  *   [acquire] to declare a [MaskOwnerKind].
  */
 internal class SelectionMaskOwnershipLedger(
-    private val byteBudget: () -> Long = { Long.MAX_VALUE },
     private val pinBitmap: ((Bitmap) -> BitmapLease.BitmapPin?)? = null,
+    private val byteBudget: () -> Long = { Long.MAX_VALUE },
 ) {
     private val lock = ReentrantLock()
     private val reservationIds = AtomicLong(1L)

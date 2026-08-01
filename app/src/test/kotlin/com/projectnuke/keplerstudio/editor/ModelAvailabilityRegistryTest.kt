@@ -186,6 +186,31 @@ class ModelAvailabilityRegistryTest {
         assertTrue(state.runtimeAvailable == true)
         assertTrue(state.contractSupported == true)
     }
+
+    @Test
+    fun loaderGateReturnsExactRegistryRejectionCategories() {
+        assertTrue(ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster)
+            is ModelLoadResult.RuntimeUnavailable)
+
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.AssetMissing("missing"))
+        assertTrue(ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster)
+            is ModelLoadResult.AssetMissing)
+
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.AssetInvalid("invalid"))
+        assertTrue(ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster)
+            is ModelLoadResult.AssetInvalid)
+
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.UnsupportedContract("contract"))
+        assertTrue(ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster)
+            is ModelLoadResult.UnsupportedContract)
+    }
+
+    @Test
+    fun loadableRegistryCapabilityAuthorizesLoader() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        assertEquals(null, ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster))
+        assertEquals(null, ModelAvailabilityRegistry.loaderRejection(ModelFeature.SubjectSelection))
+    }
     @Test
     fun lateLoaderCannotDowngradeOrFailAnActiveReadySession() {
         val ready =

@@ -71,6 +71,9 @@ internal fun ModelFailureReason.fallbackReason(): FlareGuardFallbackReason =
         ModelFailureReason.RunnerNotImplemented -> FlareGuardFallbackReason.UnsupportedContract
         ModelFailureReason.AssetMissing -> FlareGuardFallbackReason.AssetMissing
         ModelFailureReason.AssetInvalid -> FlareGuardFallbackReason.AssetInvalid
+        ModelFailureReason.RuntimeUnavailable,
+        ModelFailureReason.CapabilityUnknown -> FlareGuardFallbackReason.RuntimeUnavailable
+        ModelFailureReason.ContractUnsupported -> FlareGuardFallbackReason.UnsupportedContract
         ModelFailureReason.UnsupportedVersion -> FlareGuardFallbackReason.UnsupportedContract
         ModelFailureReason.LoadingFailed -> FlareGuardFallbackReason.LoadFailed
         ModelFailureReason.InvalidInput -> FlareGuardFallbackReason.InferenceFailed

@@ -6,6 +6,7 @@ import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
+import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FallbackPolicy
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
@@ -52,8 +53,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     val sourcePath = current.sourcePath
     val baseContentToken = current.baseContentToken
 
-    var undoSnapshot: EditorHistorySnapshot? =
-        captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
+    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("selectionNativeBake")
     val prepareTracker =
         beginMemoryTracking(
             "selectionNativeBake:prepare",
@@ -80,9 +80,9 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 capturedSelectionLayers = capturedSelectionLayers,
                 capturedActiveSelectionLayerId = capturedActiveSelectionLayerId,
                 nextRevision = nextRevision,
-                originalUndoSnapshotRef = { undoSnapshot },
-                consumeUndoSnapshot = { undoSnapshot = null },
-                releaseUndoSnapshot = { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+                originalHistoryRef = { pendingHistory },
+                consumeHistory = { pendingHistory = null },
+                releaseHistory = { pendingHistory?.close(); pendingHistory = null },
                 prepareTracker = prepareTracker,
             )
         },
@@ -90,8 +90,8 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
             PreparedResourceHandoff.create(
                 "nativeSelectionBake",
                 {
-                    undoSnapshot?.let(::recycleHistorySnapshot)
-                    undoSnapshot = null
+                    pendingHistory?.close()
+                    pendingHistory = null
                 },
                 { prepareTracker?.end() },
                 {
@@ -125,9 +125,9 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     capturedSelectionLayers: List<SelectionLayer>,
     capturedActiveSelectionLayerId: String?,
     nextRevision: Int,
-    originalUndoSnapshotRef: () -> EditorHistorySnapshot?,
-    consumeUndoSnapshot: () -> Unit,
-    releaseUndoSnapshot: () -> Unit,
+    originalHistoryRef: () -> PendingHistorySnapshot?,
+    consumeHistory: () -> Unit,
+    releaseHistory: () -> Unit,
     prepareTracker: com.projectnuke.keplerstudio.editor.MemoryTrackerScope?,
 ) {
     var leasedSnapshot: LeasedEditorSnapshot? = null
@@ -137,8 +137,11 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     var renderedPreview: Bitmap? = null
     var bakeSuccess: RenderResult.Success? = null
     var previewSuccess: RenderResult.Success? = null
-    var undoSnapshotOwned: EditorHistorySnapshot? = originalUndoSnapshotRef()
-    consumeUndoSnapshot()
+    var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
+    consumeHistory()
+    var undoSnapshotOwned: EditorHistorySnapshot? =
+        withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+    pendingHistoryOwned = null
     val bakeTracker =
         beginMemoryTracking(
             "selectionNativeBake",
@@ -297,7 +300,8 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
         releaseTransients()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
-        releaseUndoSnapshot()
+        pendingHistoryOwned?.close()
+        releaseHistory()
         bakedOriginal?.takeIf { !it.isRecycled }?.recycle()
         renderedPreview?.takeIf { !it.isRecycled }?.recycle()
         leasedSnapshot?.close()

@@ -10,6 +10,7 @@ import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
+import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
@@ -100,7 +101,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             snapshotState = "copying",
             transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
         )
-    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("maskAwareRemaster")
     var ownedBase: Bitmap? = null
     var ownedManualMask: Bitmap? = null
     try {
@@ -115,8 +116,8 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         ownedBase = null
         ownedManualMask?.takeUnless(Bitmap::isRecycled)?.recycle()
         ownedManualMask = null
-        undoSnapshot?.let(::recycleHistorySnapshot)
-        undoSnapshot = null
+        pendingHistory?.close()
+        pendingHistory = null
         updateUiState { it.copy(message = "모델 마스크 보조 준비에 실패했습니다.") }
         if (t is BitmapAllocationRejectedException)
             requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
@@ -139,7 +140,11 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             var renderedPreview: Bitmap? = null
             var previewSuccess: RenderResult.Success? = null
             var featureMaskSummary: FeatureMaskSummary? = null
-            var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
+            var pendingHistoryOwned: PendingHistorySnapshot? = pendingHistory
+            pendingHistory = null
+            var undoSnapshotOwned: EditorHistorySnapshot? =
+                withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+            pendingHistoryOwned = null
             var ownedBaseOwned: Bitmap? = ownedBase
             var ownedManualMaskOwned: Bitmap? = ownedManualMask
             val remasterTracker =
@@ -150,7 +155,6 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 )
             ownedBaseOwned?.let { remasterTracker?.track(it, "remaster:ownedBase") }
             remasterPrepareTracker?.end()
-            undoSnapshot = null
             ownedBase = null
             ownedManualMask = null
             try {
@@ -390,6 +394,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
                 ownedManualMaskOwned?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
+                pendingHistoryOwned?.close()
                 remasterTracker?.end()
             }
         },
@@ -405,8 +410,8 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     ownedManualMask = null
                 },
                 {
-                    undoSnapshot?.let(::recycleHistorySnapshot)
-                    undoSnapshot = null
+                    pendingHistory?.close()
+                    pendingHistory = null
                 },
                 { remasterPrepareTracker?.end() },
                 {

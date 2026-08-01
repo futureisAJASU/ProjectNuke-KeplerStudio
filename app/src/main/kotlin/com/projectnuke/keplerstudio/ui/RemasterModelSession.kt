@@ -148,7 +148,7 @@ object RemasterModelSession : ModelRunnerContract {
                     )
                     return@withLock
                 }
-                if (!hasModelAsset(context, candidate.assetPath)) {
+                if (ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster) is ModelLoadResult.AssetMissing) {
                     isModelLoading = false
                     lifecycle = ModelRunnerLifecycle.Failed
                     ModelAvailabilityRegistry.reportEdgeLoad(
@@ -296,6 +296,17 @@ object RemasterModelSession : ModelRunnerContract {
         operation: ModelOperationContext,
     ): ModelRunResult<TrackedMask> =
         modelMutex.withLock {
+            val capability =
+                ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]
+            if (capability?.phase != ModelCapabilityPhase.Ready || !capability.sessionActive) {
+                return@withLock ModelRunResult.Failure(
+                    ModelFailure(
+                        modelCapabilityFailureReason(capability?.phase),
+                        capability?.lastFailure?.detail,
+                    ),
+                    DeterministicModelFallback.NoResult,
+                )
+            }
             if (activeModel?.id != "edge_masker" || !isModelLoaded) {
                 return@withLock ModelRunResult.Failure(
                     ModelFailure(ModelFailureReason.Closed),
@@ -394,11 +405,6 @@ object RemasterModelSession : ModelRunnerContract {
             statusText = "로드된 모델이 없습니다."
             true
         }
-
-    fun hasModelAsset(context: Context, assetPath: String): Boolean {
-        if (assetPath.isBlank()) return false
-        return runCatching { context.assets.open(assetPath).use { true } }.getOrDefault(false)
-    }
 
     fun modelAvailability(
         context: Context,
@@ -682,3 +688,20 @@ internal fun categoryMaskAlpha(category: Int, foregroundCategoryIds: Set<Int>): 
     require(foregroundCategoryIds.isNotEmpty()) { "Foreground category mapping must be explicit" }
     return if (category in foregroundCategoryIds) 255 else 0
 }
+
+private fun modelCapabilityFailureReason(phase: ModelCapabilityPhase?): ModelFailureReason =
+    when (phase) {
+        ModelCapabilityPhase.AssetMissing -> ModelFailureReason.AssetMissing
+        ModelCapabilityPhase.AssetInvalid -> ModelFailureReason.AssetInvalid
+        ModelCapabilityPhase.ContractUnsupported -> ModelFailureReason.ContractUnsupported
+        ModelCapabilityPhase.RuntimeUnavailable,
+        ModelCapabilityPhase.RunnerUnavailable -> ModelFailureReason.RuntimeUnavailable
+        ModelCapabilityPhase.Unknown,
+        ModelCapabilityPhase.Probing,
+        ModelCapabilityPhase.Loading,
+        null -> ModelFailureReason.CapabilityUnknown
+        ModelCapabilityPhase.Failed -> ModelFailureReason.LoadingFailed
+        ModelCapabilityPhase.Loadable,
+        ModelCapabilityPhase.Ready,
+        ModelCapabilityPhase.Unloaded -> ModelFailureReason.Closed
+    }

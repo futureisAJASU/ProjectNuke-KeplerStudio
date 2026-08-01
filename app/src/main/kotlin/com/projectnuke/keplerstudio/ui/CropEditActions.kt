@@ -6,6 +6,7 @@ import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.CropAspectRatio
 import com.projectnuke.keplerstudio.editor.CropState
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
+import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
@@ -194,7 +195,7 @@ fun EditorViewModel.applyCropTransform() {
     // the previous document in the redo stack intact. The actual full-resolution bitmap
     // *copies* are deferred to the worker (see [applyCropTransformBackground]) so Compose
     // event handlers do not block the Main dispatcher.
-    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("cropApply")
 
     val crop = state.cropState.normalized()
     val nextRevision = state.revision + 1
@@ -228,18 +229,18 @@ fun EditorViewModel.applyCropTransform() {
                 capturedSelectionLayers = capturedSelectionLayers,
                 capturedPreviewWidth = capturedPreviewWidth,
                 capturedPreviewHeight = capturedPreviewHeight,
-                originalUndoSnapshotRef = { undoSnapshot },
+                originalHistoryRef = { pendingHistory },
                 cropPrepareTracker = cropPrepareTracker,
-                consumeUndoSnapshot = { undoSnapshot = null },
-                releaseUndoSnapshot = { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+                consumeHistory = { pendingHistory = null },
+                releaseHistory = { pendingHistory?.close(); pendingHistory = null },
             )
         },
         handoff =
             PreparedResourceHandoff.create(
                 "cropApply",
                 {
-                    undoSnapshot?.let(::recycleHistorySnapshot)
-                    undoSnapshot = null
+                    pendingHistory?.close()
+                    pendingHistory = null
                 },
                 { cropPrepareTracker?.end() },
                 {
@@ -281,10 +282,10 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
     capturedSelectionLayers: List<SelectionLayer>,
     capturedPreviewWidth: Int,
     capturedPreviewHeight: Int,
-    originalUndoSnapshotRef: () -> EditorHistorySnapshot?,
+    originalHistoryRef: () -> PendingHistorySnapshot?,
     cropPrepareTracker: MemoryTrackerScope?,
-    consumeUndoSnapshot: () -> Unit,
-    releaseUndoSnapshot: () -> Unit,
+    consumeHistory: () -> Unit,
+    releaseHistory: () -> Unit,
 ) {
     var leasedSnapshot: LeasedEditorSnapshot? = null
     var previewInput: Bitmap? = null
@@ -293,8 +294,11 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
     var transformedOriginal: Bitmap? = null
     var transformedPreview: Bitmap? = null
     var transformedMasks: List<SelectionLayer>? = null
-    var undoSnapshotOwned: EditorHistorySnapshot? = originalUndoSnapshotRef()
-    consumeUndoSnapshot()
+    var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
+    consumeHistory()
+    var undoSnapshotOwned: EditorHistorySnapshot? =
+        withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+    pendingHistoryOwned = null
     val cropTracker =
         beginMemoryTracking(
             "applyCropTransform",
@@ -500,7 +504,8 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
         releasePreparedInputs()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
-        releaseUndoSnapshot()
+        pendingHistoryOwned?.close()
+        releaseHistory()
         leasedSnapshot?.close()
         cropTracker?.end()
     }
