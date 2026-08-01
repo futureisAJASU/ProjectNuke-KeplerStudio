@@ -1,15 +1,11 @@
 package com.projectnuke.keplerstudio.ui
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
@@ -24,16 +20,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditParams
@@ -129,8 +119,6 @@ TextButton(
             }
         }
 
-        MaskPaintCard(activeLayer = activeLayer, editorViewModel = editorViewModel, enabled = actionsEnabled)
-
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -163,71 +151,6 @@ TextButton(
 
         LocalMaskEditCard(activeLayer = activeLayer, editorViewModel = editorViewModel, enabled = actionsEnabled)
     }
-}
-
-@Composable
-private fun MaskPaintCard(activeLayer: SelectionLayer?, editorViewModel: EditorViewModel, enabled: Boolean) {
-    val epoch by editorViewModel.brushPreviewEpoch.collectAsState()
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 10.dp)
-            .background(MaskCardBackground)
-            .padding(12.dp)
-    ) {
-        Text("마스크 미리보기", color = MaskTextPrimary, fontWeight = FontWeight.SemiBold)
-        Text(
-            "아래 영역을 드래그하면 선택된 마스크에 브러시가 적용됩니다",
-            color = MaskTextMuted,
-            style = MaterialTheme.typography.bodySmall,
-            modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
-        )
-        var boxSize by remember { mutableStateOf(IntSize.Zero) }
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(180.dp)
-                .background(Color(0xFF111111))
-                .onSizeChanged { boxSize = it }
-                .pointerInput(activeLayer?.id, boxSize, enabled) {
-                    if (!enabled) return@pointerInput
-                    detectDragGestures(
-                        onDragStart = { offset ->
-                            if (!editorViewModel.beginBrushStroke()) return@detectDragGestures
-                            paintAtOffset(editorViewModel, activeLayer?.id, offset.x, offset.y, boxSize)
-                        },
-                        onDrag = { change, _ ->
-                            paintAtOffset(editorViewModel, activeLayer?.id, change.position.x, change.position.y, boxSize)
-                            change.consume()
-                        },
-                        onDragEnd = { editorViewModel.finishBrushStroke() },
-                        onDragCancel = { editorViewModel.cancelBrushStroke() }
-                    )
-                },
-            contentAlignment = Alignment.Center
-        ) {
-            if (activeLayer == null) {
-                Text("선택된 마스크가 없습니다", color = MaskTextMuted, style = MaterialTheme.typography.bodySmall)
-            } else {
-                androidx.compose.runtime.key(epoch) {
-                    Image(
-                        bitmap = activeLayer.bitmap.asImageBitmap(),
-                        contentDescription = null,
-                        contentScale = ContentScale.FillBounds,
-                        modifier = Modifier.fillMaxWidth().height(180.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-private fun paintAtOffset(editorViewModel: EditorViewModel, activeLayerId: String?, x: Float, y: Float, boxSize: IntSize) {
-    val layer = editorViewModel.uiState.value.selectionLayers.firstOrNull { it.id == activeLayerId } ?: return
-    if (boxSize.width <= 0 || boxSize.height <= 0) return
-    val maskX = (x / boxSize.width.toFloat()).coerceIn(0f, 1f) * layer.bitmap.width
-    val maskY = (y / boxSize.height.toFloat()).coerceIn(0f, 1f) * layer.bitmap.height
-    editorViewModel.paintActiveSelectionAt(maskX, maskY)
 }
 
 @Composable

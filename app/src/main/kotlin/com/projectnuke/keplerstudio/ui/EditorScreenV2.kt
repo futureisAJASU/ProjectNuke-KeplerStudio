@@ -121,6 +121,7 @@ import com.projectnuke.keplerstudio.editor.IMPLEMENTED_TONE_ENGINES
 import com.projectnuke.keplerstudio.editor.NoiseEngine
 import com.projectnuke.keplerstudio.editor.NativeRenderRoute
 import com.projectnuke.keplerstudio.editor.PresetColorLook
+import com.projectnuke.keplerstudio.editor.PreviewGeometry
 import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
 import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.RouteResolver
@@ -743,25 +744,35 @@ private fun V2ZoomablePreview(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(8.dp)
-                .pointerInput(bitmap, paintMode) {
+                .pointerInput(bitmap, paintMode, containerSize, scale, offset) {
                     if (paintMode && activeMaskLayer != null) {
                         detectDragGestures(
                             onDragStart = { off ->
                                 onStrokeStart()
                                 val mask = activeMaskLayer.bitmap
-                                val (mX, mY) = mapPointerToMask(
-                                    off, containerSize, mask.width, mask.height, scale, offset, paddingPx,
-                                )
-                                onPaintAt(mX, mY)
+                                val mapped = PreviewGeometry(
+                                    container = containerSize,
+                                    imageWidth = mask.width,
+                                    imageHeight = mask.height,
+                                    padding = paddingPx,
+                                    zoom = scale,
+                                    pan = offset,
+                                ).viewToImage(off)
+                                if (mapped != null) onPaintAt(mapped.first, mapped.second)
                             },
                             onDrag = { change, _ ->
                                 change.consume()
                                 cursorPosition = change.position
                                 val mask = activeMaskLayer.bitmap
-                                val (mX, mY) = mapPointerToMask(
-                                    change.position, containerSize, mask.width, mask.height, scale, offset, paddingPx,
-                                )
-                                onPaintAt(mX, mY)
+                                val mapped = PreviewGeometry(
+                                    container = containerSize,
+                                    imageWidth = mask.width,
+                                    imageHeight = mask.height,
+                                    padding = paddingPx,
+                                    zoom = scale,
+                                    pan = offset,
+                                ).viewToImage(change.position)
+                                if (mapped != null) onPaintAt(mapped.first, mapped.second)
                             },
                             onDragEnd = { onStrokeEnd(); cursorPosition = null },
                             onDragCancel = { onStrokeCancel(); cursorPosition = null },
@@ -1942,51 +1953,6 @@ private fun previewResultLabel(result: PreviewResultClass): String =
         PreviewResultClass.DebugForcedV1 -> "개발자 설정으로 V1 강제"
         PreviewResultClass.DebugForcedV2 -> "개발자 설정으로 V2 강제"
     }
-
-/**
- * Maps a pointer position in the preview's local coordinate space (the surface after the
- * 8dp padding) to the mask's pixel coordinates, given the ContentScale.Fit layout, the
- * graphicsLayer scale and offset, and the container size.
- *
- * Steps:
- *   1. Undo the graphicsLayer transform: posInLayer = (posInLocal - offset) / scale.
- *   2. Compute the fitted image rect inside the padded container.
- *   3. Map posInLayer into a fraction of the fitted image rect.
- *   4. Clamp to [0,1] and scale by the mask's pixel dimensions.
- */
-internal fun mapPointerToMask(
-    pointerLocal: Offset,
-    containerSize: IntSize,
-    maskWidth: Int,
-    maskHeight: Int,
-    scale: Float,
-    offset: Offset,
-    paddingPx: Float,
-): Pair<Float, Float> {
-    val effectiveScale = if (scale > 0f) scale else 1f
-    val xInLayer = (pointerLocal.x - offset.x) / effectiveScale
-    val yInLayer = (pointerLocal.y - offset.y) / effectiveScale
-    // Container after padding
-    val innerW = (containerSize.width - 2 * paddingPx).coerceAtLeast(1f)
-    val innerH = (containerSize.height - 2 * paddingPx).coerceAtLeast(1f)
-    // Fitted rect inside the inner container (ContentScale.Fit)
-    val imageAspect = if (maskHeight > 0) maskWidth.toFloat() / maskHeight.toFloat() else 1f
-    val containerAspect = if (innerH > 0) innerW / innerH else 1f
-    val fitW: Float
-    val fitH: Float
-    if (imageAspect > containerAspect) {
-        fitW = innerW
-        fitH = innerW / imageAspect
-    } else {
-        fitH = innerH
-        fitW = innerH * imageAspect
-    }
-    val fitLeft = paddingPx + (innerW - fitW) / 2f
-    val fitTop = paddingPx + (innerH - fitH) / 2f
-    val fracX = ((xInLayer - fitLeft) / fitW).coerceIn(0f, 1f)
-    val fracY = ((yInLayer - fitTop) / fitH).coerceIn(0f, 1f)
-    return fracX * maskWidth to fracY * maskHeight
-}
 
 /**
  * A brush cursor circle drawn on the Compose surface at the current pointer position,
