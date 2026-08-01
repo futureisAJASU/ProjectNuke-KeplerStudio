@@ -228,6 +228,15 @@ internal class BitmapLeaseLedger {
         recycle(toRecycle)
     }
 
+    /** Retire every state owner without invalidating outstanding worker leases. */
+    fun shutdown(): List<Bitmap> = lock.withLock {
+        slots.values.forEach {
+            it.stateRefs = 0
+            it.retired = true
+        }
+        collectRetiredLocked(slots.keys.toSet())
+    }
+
     fun resetForTest() = lock.withLock {
         slots.clear()
         leases.clear()

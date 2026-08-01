@@ -6074,7 +6074,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         historyCoordinator.close()
         uiStateOwnership?.releaseAll()
         bitmapLeaseLedger.releaseState(uiState.value)
-        bitmapLeaseLedger.releaseAll()
+        recycleBitmaps(bitmapLeaseLedger.shutdown())
         tracker.logSnapshot("preTrackerClose")
         tracker.close()
         super.onCleared()
