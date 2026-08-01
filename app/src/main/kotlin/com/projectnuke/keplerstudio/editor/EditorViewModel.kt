@@ -127,6 +127,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         EditorHistoryCoordinator(app.applicationContext, viewModelScope, trackerSession)
     private val uiStateOwnership: UiStateOwnershipReconciler? =
         trackerSession?.let(::UiStateOwnershipReconciler)
+    internal val bitmapLeaseLedger = BitmapLeaseLedger()
     private var historyIoJob: Job? = null
     private var memoryRecoveryToken: Long = 0L
     private var pendingMemoryRetry: MemoryRetryDescriptor? = null
@@ -640,7 +641,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             if (layer.bitmap !in stillRetained && !layer.bitmap.isRecycled)
                 toRelease.add(layer.bitmap)
         }
-        toRelease.forEach { it.recycle() }
+        for (orphan in toRelease) {
+            val immediate = bitmapLeaseLedger.retireStateBitmap(orphan)
+            if (immediate != null) {
+                try { immediate.recycle() } catch (_: Throwable) {}
+            }
+        }
     }
 
     /**
@@ -6353,6 +6359,9 @@ private fun historyIsZero(value: Float): Boolean = kotlin.math.abs(value) < 0.00
 
 private fun historySignedValue(value: Float): String =
     if (historyIsZero(value)) "0.00" else String.format(Locale.US, "%+.2f", value)
+
+internal fun EditorViewModel.acquireBitmapLease(tag: String): BitmapLease? =
+    BitmapLease.acquire(tag, uiState.value, bitmapLeaseLedger)
 
 private fun identityBitmapSet(): MutableSet<Bitmap> =
     Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
