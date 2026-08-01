@@ -31,6 +31,24 @@ internal class BitmapLease internal constructor(
     private val bitmaps: Set<Bitmap>,
     val leaseId: Long,
 ) : AutoCloseable {
+
+    /**
+     * A minimal single-Bitmap pin: blocks retirement/recycle of [bitmap] until [close].
+     * Used by transient UI consumers (e.g. histogram sampler) that hold one source Bitmap
+     * across a worker hop without claiming the broader state identity.
+     */
+    internal class BitmapPin internal constructor(
+        private val ledger: BitmapLeaseLedger,
+        private val bitmap: Bitmap?,
+    ) : AutoCloseable {
+        @Volatile private var closed = false
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            ledger.releasePin(bitmap)
+        }
+    }
     @Volatile private var closed = false
 
     fun matchesIdentity(
@@ -156,6 +174,36 @@ internal class BitmapLeaseLedger {
                 val slot = entry.value
                 slot.leaseRef = 0
                 slot.stateRemovedCount = 0
+                slots.remove(bitmap)
+                if (!bitmap.isRecycled) toRecycle.add(bitmap)
+            }
+        }
+        for (b in toRecycle) {
+            try { b.recycle() } catch (_: Throwable) {}
+        }
+    }
+
+    /**
+     * Pin a single Bitmap against retirement/recycle until [BitmapLease.BitmapPin.close].
+     * Returns null if [bitmap] is recycled or null. The pin is identity-keyed: equal
+     * Bitmap references share the same slot, so concurrent pin callers are ref-counted.
+     */
+    fun pinBitmap(bitmap: Bitmap?): BitmapLease.BitmapPin? {
+        if (bitmap == null || bitmap.isRecycled) return null
+        lock.withLock {
+            val slot = slots.getOrElse(bitmap) { Slot().also { slots[bitmap] = it } }
+            slot.leaseRef++
+            return BitmapLease.BitmapPin(this, bitmap)
+        }
+    }
+
+    internal fun releasePin(bitmap: Bitmap?) {
+        if (bitmap == null) return
+        val toRecycle = ArrayList<Bitmap>(1)
+        lock.withLock {
+            val slot = slots[bitmap] ?: return
+            if (slot.leaseRef > 0) slot.leaseRef--
+            if (slot.stateRemovedCount > 0 && slot.leaseRef == 0) {
                 slots.remove(bitmap)
                 if (!bitmap.isRecycled) toRecycle.add(bitmap)
             }

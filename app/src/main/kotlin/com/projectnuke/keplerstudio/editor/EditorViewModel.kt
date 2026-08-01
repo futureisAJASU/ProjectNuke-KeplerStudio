@@ -44,9 +44,11 @@ import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -56,6 +58,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -105,6 +108,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var brushBaseToken: String? = null
     private var brushRevision: Int = 0
     private var brushChanged: Boolean = false
+    /**
+     * Deferred history-snapshot capture for the active brush stroke. Off-Main because the
+     * full Exact snapshot copies previewBitmap + originalPreviewBitmap + every layer bitmap.
+     * The painter does not need the snapshot — it paints into a separately owned layer bitmap
+     * installed synchronously in [beginBrushStroke]. The snapshot is only consumed on finish
+     * or cancel, which awaits this job via [runBlocking] on Default (acceptable: stroke end).
+     */
+    private var brushSnapshotJob: Job? = null
     private var brushEpochCounter: Long = 0L
     internal var brushLastX: Float = Float.NaN
         private set
@@ -1517,16 +1528,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun beginSelectionParamGesture(): Boolean {
         if (selectionParamTransaction != null) return true
-        val snapshot = captureCurrentHistorySnapshot() ?: return false
         val state = _uiState.value
+        // Defer the full Exact snapshot capture to a worker. The transaction holds a
+        // Deferred handle so consumers (settlement, rollback) await the actual snapshot.
+        // The lightweight params-only transaction identity is created synchronously so the
+        // user-driven preview updates remain gated on Main.
+        val pendingSnapshot =
+            viewModelScope.async(Dispatchers.Default) {
+                captureCurrentHistorySnapshot()
+            }
         selectionParamTransaction =
             SelectionParamTransaction(
                 gestureId = ++selectionGestureCounter,
-                snapshot = snapshot,
+                snapshot = null,
                 startRevision = state.revision,
                 baseContentToken = state.baseContentToken,
                 activeSelectionLayerId = state.activeSelectionLayerId,
             )
+        selectionParamTransaction?.let { tx ->
+            tx.pendingSnapshot = pendingSnapshot
+        }
         return true
     }
 
@@ -1614,8 +1635,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      *
      * No-op when [transaction] is no longer the active one. Clears the active slot itself.
      */
-    private fun settleSelectionParamTransaction(transaction: SelectionParamTransaction) {
+    private suspend fun settleSelectionParamTransaction(transaction: SelectionParamTransaction) {
         if (selectionParamTransaction !== transaction) return
+        transaction.awaitPendingSnapshot()
         if (transaction.settled) return
         transaction.settled = true
         val state = _uiState.value
@@ -1644,30 +1666,35 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         ) {
             if (!transaction.committed) {
                 transaction.committed = true
-                commitUndoSnapshot(transaction.snapshot, clearRedo = true)
+                val snapshot = transaction.snapshot
+                if (snapshot != null) commitUndoSnapshot(snapshot, clearRedo = true)
             }
             forceDraftSaveAsync()
             clearSelectionParamTransaction(transaction)
         } else if (stillCurrent && !transaction.hasOptimisticLiveParams(state)) {
-            recycleHistorySnapshot(transaction.snapshot)
+            transaction.snapshot?.let { recycleHistorySnapshot(it) }
             clearSelectionParamTransaction(transaction)
         } else {
             restoreSelectionParamTransaction(transaction)
         }
     }
 
-    private fun restoreSelectionParamTransaction(transaction: SelectionParamTransaction) {
+    private suspend fun restoreSelectionParamTransaction(transaction: SelectionParamTransaction) {
         if (selectionParamTransaction !== transaction) return
+        transaction.awaitPendingSnapshot()
         if (transaction.committed) {
             clearSelectionParamTransaction(transaction)
             return
         }
         if (shuttingDown) {
-            recycleHistorySnapshot(transaction.snapshot)
+            transaction.snapshot?.let { recycleHistorySnapshot(it) }
             clearSelectionParamTransaction(transaction)
             return
         }
-        restoreSnapshotWithoutHistory(transaction.snapshot)
+        val snapshot = transaction.snapshot
+        if (snapshot != null) {
+            restoreSnapshotWithoutHistory(snapshot)
+        }
         clearSelectionParamTransaction(transaction)
     }
 
@@ -1680,7 +1707,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun settleSelectionParamTransactionForSupersession() {
-        selectionParamTransaction?.let { settleSelectionParamTransaction(it) }
+        val tx = selectionParamTransaction ?: return
+        runBlocking(Dispatchers.Default) {
+            tx.awaitPendingSnapshot()
+            settleSelectionParamTransaction(tx)
+        }
         selectionLivePreviewJob?.cancel()
         selectionPreviewCounter += 1L
         clearSelectionParamTransaction(selectionParamTransaction ?: return)
@@ -1709,6 +1740,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun negateBrushStrokeDuringShutdownIfPresent() {
+        awaitBrushSnapshot()
         val snapshot = brushingSnapshot
         if (snapshot == null) return
         brushingSnapshot = null
@@ -1727,17 +1759,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
         prepareForMaskInteraction()
         if (uiState.value.isBusy) return false
-        if (brushingSnapshot != null) return true
+        if (brushingSnapshot != null || brushSnapshotJob?.isActive == true) return true
         val state = _uiState.value
         val layerId = state.activeSelectionLayerId ?: return false
         val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
         if (state.params != lastSuccessfullyRenderedParams || activeParamRenderRevision != null)
             return false
-        val snapshot = captureCurrentHistorySnapshot() ?: return false
+        // Pre-capture bitmap REFERENCES for the rollback snapshot before installing the owned
+        // mask. The painter will mutate the owned mask; the references captured here are the
+        // originals and remain pristine for rollback. The bitmap copy work runs on Default.
+        val previewRef = state.previewBitmap
+        val originalRef = state.originalPreviewBitmap
+        val layerRefs = state.selectionLayers.map { it.id to it.bitmap }
         val ownedMask =
             runCatching { layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
                 .getOrElse { failure ->
-                    recycleHistorySnapshot(snapshot)
                     if (failure is BitmapAllocationRejectedException) {
                         updateUiStateAndRecycleReplaced {
                             it.copy(message = "메모리가 부족하여 브러시 작업을 시작하지 못했습니다.")
@@ -1745,7 +1781,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     return false
                 }
-        brushingSnapshot = snapshot
         brushLayerId = layerId
         brushBaseToken = state.baseContentToken
         brushRevision = state.revision
@@ -1754,6 +1789,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         _brushPreviewEpoch.value = 0L
         brushLastX = Float.NaN
         brushLastY = Float.NaN
+        val capturedBaseContentToken = state.baseContentToken
+        val capturedRevision = state.revision
         updateUiState { current ->
             current.copy(
                 selectionLayers =
@@ -1762,7 +1799,74 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
             )
         }
+        // Defer the full Exact history snapshot bitmap copies to a worker — copying
+        // previewBitmap + originalPreviewBitmap + every layer bitmap on Main blocks the
+        // gesture thread. Finish/cancel await this job before touching brushingSnapshot.
+        brushSnapshotJob =
+            viewModelScope.launch(Dispatchers.Default) {
+                val snapshot =
+                    captureHistorySnapshotFromRefs(state, previewRef, originalRef, layerRefs)
+                withContext(Dispatchers.Main) {
+                    if (
+                        snapshot != null &&
+                        brushLayerId == layerId &&
+                        brushBaseToken == capturedBaseContentToken &&
+                        brushRevision == capturedRevision &&
+                        brushingSnapshot == null
+                    ) {
+                        brushingSnapshot = snapshot
+                    } else {
+                        snapshot?.recycleBitmaps()
+                    }
+                    brushSnapshotJob = null
+                }
+            }
         return true
+    }
+
+    /**
+     * Capture an Exact history snapshot using pre-captured bitmap references (taken before
+     * the state was mutated). Used by [beginBrushStroke] so the rollback target reflects the
+     * pre-paint bitmaps. Runs bitmap copies on the calling dispatcher (typically Default).
+     */
+    private suspend fun captureHistorySnapshotFromRefs(
+        state: EditorUiState,
+        previewRef: Bitmap?,
+        originalRef: Bitmap?,
+        layerRefs: List<Pair<String, Bitmap>>,
+    ): EditorHistorySnapshot? {
+        val required = state.historyBitmapBytesFor(previewRef, originalRef, layerRefs)
+        if (!historyCoordinator.canCapture(required)) {
+            withContext(Dispatchers.Main) {
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
+                }
+            }
+            return null
+        }
+        return runCatching {
+            state
+                .toHistorySnapshotFromRefs(
+                    HistorySnapshotStorage.Exact,
+                    previewRef,
+                    originalRef,
+                    layerRefs,
+                ).also {
+                    val generation = historyCoordinator.currentGeneration()
+                    it.coordinatorGeneration = generation
+                    it.attachLocalDiagnostics(trackerSession, generation)
+                }
+        }.getOrNull()
+    }
+
+    /**
+     * Block (on the calling thread) until the brush stroke's deferred history snapshot is
+     * captured. Called from [finishBrushStroke] / [cancelBrushStroke] / stroke teardown on
+     * Main; the brief join is acceptable because stroke-end is a user-driven transition.
+     */
+    private fun awaitBrushSnapshot() {
+        val job = brushSnapshotJob ?: return
+        runBlocking(Dispatchers.Default) { job.join() }
     }
 
     internal fun markBrushChanged(changed: Boolean) {
@@ -1787,6 +1891,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun finishBrushStroke() {
+        awaitBrushSnapshot()
         val snapshot = brushingSnapshot ?: return
         if (shuttingDown) {
             brushingSnapshot = null
@@ -1819,6 +1924,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun cancelBrushStroke() {
+        awaitBrushSnapshot()
         val snapshot = brushingSnapshot ?: return
         brushingSnapshot = null
         brushLayerId = null
@@ -6088,11 +6194,37 @@ internal class HistorySnapshotDiagnostics(session: TrackerSession, private val h
  */
 internal class SelectionParamTransaction(
     val gestureId: Long,
-    val snapshot: EditorHistorySnapshot,
+    var snapshot: EditorHistorySnapshot?,
     val startRevision: Int,
     val baseContentToken: String,
     val activeSelectionLayerId: String?,
 ) {
+    /**
+     * Optional deferred history snapshot capture. When the snapshot is captured asynchronously
+     * (e.g. from beginSelectionParamGesture off Main), this holds the work and consumers
+     * (settlement, rollback) must await it before reading [snapshot].
+     */
+    @Volatile var pendingSnapshot: Deferred<EditorHistorySnapshot?>? = null
+
+    /**
+     * Await the pending snapshot capture (if any). When complete, the result is materialized
+     * into [snapshot] and the pending job cleared. Callers that need the snapshot must invoke
+     * this before reading [snapshot].
+     */
+    suspend fun awaitPendingSnapshot() {
+        val pending = pendingSnapshot ?: return
+        pendingSnapshot = null
+        try {
+            val result = pending.await()
+            if (this.snapshot == null) this.snapshot = result
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            // Snapshot capture failed; leave snapshot null so consumers fall through to
+            // no-history rollback (acceptable: the user can retry the gesture).
+        }
+    }
+
     var latestPreviewToken: Long = 0L
     var finalPreviewToken: Long? = null
     var finalPreviewRevision: Int? = null
@@ -6112,8 +6244,9 @@ internal class SelectionParamTransaction(
         if (activeSelectionLayerId == null) return false
         val liveLayer =
             state.selectionLayers.firstOrNull { it.id == activeSelectionLayerId } ?: return true
+        val captured = snapshot ?: return true
         val snapshotLayer =
-            snapshot.selectionLayers.firstOrNull { it.id == activeSelectionLayerId } ?: return true
+            captured.selectionLayers.firstOrNull { it.id == activeSelectionLayerId } ?: return true
         return liveLayer.localParams != snapshotLayer.localParams
     }
 }
@@ -6174,6 +6307,79 @@ private fun EditorUiState.toHistorySnapshot(
             selectionCopies.add(
                 layer.copy(bitmap = layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true))
             )
+        }
+        return EditorHistorySnapshot(
+            params = params,
+            correctionEngine = correctionEngineState.documentEngine,
+            requestedRoute = correctionEngineState.requestedRoute,
+            previewEngine = correctionEngineState.previewEngine,
+            previewRoute = correctionEngineState.previewRoute,
+            previewResultClass = correctionEngineState.previewResultClass,
+            fallbackReason = correctionEngineState.fallbackReason,
+            renderDecision =
+                (correctionEngineState.visiblePreview as? VisiblePreviewState.Rendered)?.decision,
+            renderParticipation =
+                correctionEngineState.participation ?: RenderParticipation(),
+            algorithmVersion = correctionEngineState.algorithmVersion,
+            noiseEngine = noiseEngine,
+            detailEngine = detailEngine,
+            toneEngine = toneEngine,
+            hazeEngine = hazeEngine,
+            baseBitmapDirty = baseBitmapDirty,
+            baseContentToken = baseContentToken,
+            previewBitmap = previewCopy,
+            originalPreviewBitmap = originalCopy,
+            presetLook = presetLook,
+            cropState = cropState,
+            selectionLayers = selectionCopies,
+            activeSelectionLayerId = activeSelectionLayerId,
+            selectionPaintSettings = selectionPaintSettings,
+            showSelectionOverlay = showSelectionOverlay,
+            activeQuickEffects = activeQuickEffects,
+            flareGuardRuntimeStatus = flareGuardRuntimeStatus,
+            storage = storage,
+            algorithmContracts = algorithmContracts,
+            baseProvenance = baseProvenance,
+        )
+    } catch (t: Throwable) {
+        previewCopy?.takeIf { it !== originalCopy && !it.isRecycled }?.recycle()
+        originalCopy?.takeIf { !it.isRecycled }?.recycle()
+        selectionCopies.forEach { it.bitmap.takeIf { bitmap -> !bitmap.isRecycled }?.recycle() }
+        throw t
+    }
+}
+
+/**
+ * Capture an Exact snapshot using pre-captured bitmap references. Used by callers that
+ * need to snapshot a moment-in-time before mutating state on the calling thread; the bitmap
+ * copy work itself can then run on a worker.
+ */
+private fun EditorUiState.toHistorySnapshotFromRefs(
+    storage: HistorySnapshotStorage,
+    previewRef: Bitmap?,
+    originalRef: Bitmap?,
+    layerRefs: List<Pair<String, Bitmap>>,
+): EditorHistorySnapshot {
+    if (storage == HistorySnapshotStorage.MetadataOnly) {
+        check(supportsMetadataOnlyHistory())
+        return toHistorySnapshot(storage)
+    }
+    val refsById = HashMap<String, Bitmap>(layerRefs.size)
+    layerRefs.forEach { (id, b) -> refsById[id] = b }
+    var previewCopy: Bitmap? = null
+    var originalCopy: Bitmap? = null
+    val selectionCopies = ArrayList<SelectionLayer>(selectionLayers.size)
+    try {
+        previewCopy = previewRef?.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+        originalCopy =
+            when {
+                originalRef == null -> null
+                originalRef === previewRef -> previewCopy
+                else -> originalRef.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+            }
+        selectionLayers.forEach { layer ->
+            val source = refsById[layer.id] ?: layer.bitmap
+            selectionCopies.add(layer.copy(bitmap = source.copyOrThrow(Bitmap.Config.ARGB_8888, true)))
         }
         return EditorHistorySnapshot(
             params = params,
@@ -6362,6 +6568,14 @@ private fun historySignedValue(value: Float): String =
 
 internal fun EditorViewModel.acquireBitmapLease(tag: String): BitmapLease? =
     BitmapLease.acquire(tag, uiState.value, bitmapLeaseLedger)
+
+/**
+ * Pin a single Bitmap against retirement/recycle until the returned handle's `close()` runs.
+ * Used by transient consumers (e.g. histogram sampler) that need to keep one source Bitmap
+ * alive across a worker hop without claiming the broader document identity.
+ */
+internal fun EditorViewModel.pinBitmapLease(bitmap: Bitmap?): BitmapLease.BitmapPin? =
+    bitmapLeaseLedger.pinBitmap(bitmap)
 
 private fun identityBitmapSet(): MutableSet<Bitmap> =
     Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
@@ -7533,6 +7747,18 @@ private fun EditorUiState.historyBitmapBytes(): Long {
     previewBitmap?.let(bitmaps::add)
     originalPreviewBitmap?.let(bitmaps::add)
     selectionLayers.forEach { bitmaps.add(it.bitmap) }
+    return BitmapMemoryBudget.saturatingAdd(*bitmaps.map(BitmapMemoryBudget::bytes).toLongArray())
+}
+
+private fun EditorUiState.historyBitmapBytesFor(
+    previewRef: Bitmap?,
+    originalRef: Bitmap?,
+    layerRefs: List<Pair<String, Bitmap>>,
+): Long {
+    val bitmaps = identityBitmapSet()
+    previewRef?.let(bitmaps::add)
+    originalRef?.let(bitmaps::add)
+    layerRefs.forEach { (_, b) -> bitmaps.add(b) }
     return BitmapMemoryBudget.saturatingAdd(*bitmaps.map(BitmapMemoryBudget::bytes).toLongArray())
 }
 

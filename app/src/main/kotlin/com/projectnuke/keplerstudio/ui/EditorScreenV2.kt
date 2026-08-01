@@ -252,6 +252,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         V2PreviewArea(
                             bitmap = state.previewBitmap,
                             originalBitmap = state.originalPreviewBitmap,
+                            viewModel = viewModel,
                             selectedTool = selectedTool,
                             cropState = state.cropState,
                             isBusy = state.isBusy,
@@ -530,6 +531,7 @@ internal fun V2TopBar(
 private fun V2PreviewArea(
     bitmap: Bitmap?,
     originalBitmap: Bitmap?,
+    viewModel: EditorViewModel,
     selectedTool: V2EditorTool,
     cropState: CropState,
     isBusy: Boolean,
@@ -599,6 +601,7 @@ private fun V2PreviewArea(
             PreviewHistogramOverlay(
                 bitmap = bitmap,
                 mode = histogramMode,
+                viewModel = viewModel,
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 52.dp),
             )
         }

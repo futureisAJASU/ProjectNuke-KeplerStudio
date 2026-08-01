@@ -18,6 +18,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.pinBitmapLease
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -63,12 +65,20 @@ internal fun calculatePreviewHistogram(pixels: IntArray): PreviewHistogram {
 internal fun PreviewHistogramOverlay(
     bitmap: Bitmap,
     mode: PreviewHistogramMode,
+    viewModel: EditorViewModel,
     modifier: Modifier = Modifier,
 ) {
     val bitmapGeneration = bitmap.generationId
     val histogram by
         produceState<PreviewHistogram?>(initialValue = null, bitmap, bitmapGeneration) {
-            value = createBoundedHistogram(bitmap)
+            val pin = viewModel.pinBitmapLease(bitmap)
+            try {
+                if (pin != null && !bitmap.isRecycled) {
+                    value = createBoundedHistogram(bitmap)
+                }
+            } finally {
+                pin?.close()
+            }
         }
     val data = histogram ?: return
     Box(
