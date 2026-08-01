@@ -18,6 +18,8 @@ import com.projectnuke.keplerstudio.editor.estimateAutoStraightenDegreesV0
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.normalized
 import com.projectnuke.keplerstudio.editor.renderCropTransform
+import com.projectnuke.keplerstudio.editor.BitmapLease
+import com.projectnuke.keplerstudio.editor.acquireBitmapLease
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.Locale
@@ -284,6 +286,7 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
     consumeUndoSnapshot: () -> Unit,
     releaseUndoSnapshot: () -> Unit,
 ) {
+    var lease: BitmapLease? = null
     var previewInput: Bitmap? = null
     var originalInput: Bitmap? = null
     val maskInputs = ArrayList<SelectionLayer>(capturedSelectionLayers.size)
@@ -316,6 +319,7 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
             // Validate adoption identity upfront so an obviously-superseded request never
             // performs a full-resolution copy.
             if (!isManagedEditTokenCurrent(operationToken) || !isCropOperationCurrent(cropToken)) return@withContext null
+            lease = acquireBitmapLease("applyCropTransform") ?: return@withContext null
             val workerState = uiState.value
             if (workerState.sourcePath != sourcePath) return@withContext null
             if (workerState.baseContentToken != baseContentToken) return@withContext null
@@ -497,6 +501,7 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
         releaseUndoSnapshot()
+        lease?.close()
         cropTracker?.end()
     }
 }

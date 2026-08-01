@@ -11,6 +11,8 @@ import com.projectnuke.keplerstudio.editor.RenderFailedException
 import com.projectnuke.keplerstudio.editor.RenderOperation
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionParamTransaction
+import com.projectnuke.keplerstudio.editor.BitmapLease
+import com.projectnuke.keplerstudio.editor.acquireBitmapLease
 import com.projectnuke.keplerstudio.editor.SelectionPreviewPreparationGateway
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
@@ -114,6 +116,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
     previewToken: Long,
     activeId: String,
 ) {
+    var lease: BitmapLease? = null
     var ownedBase: Bitmap? = null
     var ownedLayers: List<SelectionLayer>? = null
     var previewResult: Bitmap? = null
@@ -122,6 +125,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
     try {
         val prepared = withContext(Dispatchers.Default) {
             ensureActive()
+            lease = acquireBitmapLease("selectionLivePreview") ?: return@withContext null
             val stateForCopy = uiState.value
             if (stateForCopy.baseContentToken != transaction.baseContentToken) return@withContext null
             if (stateForCopy.activeSelectionLayerId != activeId) return@withContext null
@@ -225,6 +229,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
             baseToken = transaction.baseContentToken,
             activeId = activeId,
         )
+        lease?.close()
         previewTracker?.end()
     }
 }

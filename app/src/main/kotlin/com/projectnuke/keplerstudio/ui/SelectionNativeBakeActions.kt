@@ -15,6 +15,8 @@ import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.RenderFailedException
 import com.projectnuke.keplerstudio.editor.RenderOperation
 import com.projectnuke.keplerstudio.editor.RenderResult
+import com.projectnuke.keplerstudio.editor.BitmapLease
+import com.projectnuke.keplerstudio.editor.acquireBitmapLease
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -128,6 +130,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     releaseUndoSnapshot: () -> Unit,
     prepareTracker: com.projectnuke.keplerstudio.editor.MemoryTrackerScope?,
 ) {
+    var lease: BitmapLease? = null
     var ownedBase: Bitmap? = null
     var ownedLayers: List<SelectionLayer> = emptyList()
     var bakedOriginal: Bitmap? = null
@@ -153,6 +156,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     try {
         val prepared = withContext(Dispatchers.Default) {
             if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
+            lease = acquireBitmapLease("selectionNativeBake") ?: return@withContext null
             val workerState = uiState.value
             if (workerState.sourcePath != sourcePath) return@withContext null
             if (workerState.baseContentToken != baseContentToken) return@withContext null
@@ -296,6 +300,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
         releaseUndoSnapshot()
         bakedOriginal?.takeIf { !it.isRecycled }?.recycle()
         renderedPreview?.takeIf { !it.isRecycled }?.recycle()
+        lease?.close()
         bakeTracker?.end()
     }
 }
