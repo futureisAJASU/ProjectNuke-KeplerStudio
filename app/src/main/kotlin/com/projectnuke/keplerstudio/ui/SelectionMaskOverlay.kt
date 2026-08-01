@@ -65,7 +65,7 @@ internal fun selectionOverlayAlpha(
 fun SelectionMaskOverlay(
     layer: SelectionLayer?,
     visible: Boolean,
-    viewModel: EditorViewModel,
+    viewModel: EditorViewModel? = null,
     scale: Float,
     offset: Offset,
     modifier: Modifier = Modifier,
@@ -73,9 +73,9 @@ fun SelectionMaskOverlay(
 ) {
     if (!visible || layer == null || !layer.enabled) return
     val maskBitmap: Bitmap = layer.bitmap
-    val bitmapPin = remember(maskBitmap, viewModel) { viewModel.pinBitmapLease(maskBitmap) }
+    val bitmapPin = remember(maskBitmap, viewModel) { viewModel?.pinBitmapLease(maskBitmap) }
     DisposableEffect(bitmapPin) { onDispose { bitmapPin?.close() } }
-    if (bitmapPin == null || maskBitmap.isRecycled) return
+    if ((viewModel != null && bitmapPin == null) || maskBitmap.isRecycled) return
     val inverted = layer.inverted
     val overlayAlpha = layer.opacity.coerceIn(0f, 1f) * 0.42f
 
