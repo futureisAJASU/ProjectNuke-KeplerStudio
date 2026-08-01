@@ -116,6 +116,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * or cancel, which awaits this job via [runBlocking] on Default (acceptable: stroke end).
      */
     private var brushSnapshotJob: Job? = null
+    /**
+     * Named-owner handle for the brush stroke's owned working mask. Released on finish,
+     * cancel, or supersession so the bitmap can be recycled once the stroke is over and no
+     * worker is still reading it.
+     */
+    private var brushOwnedMaskHandle: MaskOwnerHandle? = null
     private var brushEpochCounter: Long = 0L
     internal var brushLastX: Float = Float.NaN
         private set
@@ -139,6 +145,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val uiStateOwnership: UiStateOwnershipReconciler? =
         trackerSession?.let(::UiStateOwnershipReconciler)
     internal val bitmapLeaseLedger = BitmapLeaseLedger()
+    internal val selectionMaskOwnership = SelectionMaskOwnershipLedger()
     private var historyIoJob: Job? = null
     private var memoryRecoveryToken: Long = 0L
     private var pendingMemoryRetry: MemoryRetryDescriptor? = null
@@ -1742,6 +1749,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun negateBrushStrokeDuringShutdownIfPresent() {
         awaitBrushSnapshot()
         val snapshot = brushingSnapshot
+        brushOwnedMaskHandle?.close()
+        brushOwnedMaskHandle = null
         if (snapshot == null) return
         brushingSnapshot = null
         brushLayerId = null
@@ -1781,6 +1790,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     return false
                 }
+        // Tag the owned working mask with a named owner so the selection-mask ledger can
+        // identify brush-strokes in flight and defer recycling until the stroke ends.
+        brushOwnedMaskHandle = acquireMaskOwner(ownedMask, MaskOwnerKind.BrushWorkingCopy)
         brushLayerId = layerId
         brushBaseToken = state.baseContentToken
         brushRevision = state.revision
@@ -1893,6 +1905,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun finishBrushStroke() {
         awaitBrushSnapshot()
         val snapshot = brushingSnapshot ?: return
+        brushOwnedMaskHandle?.close()
+        brushOwnedMaskHandle = null
         if (shuttingDown) {
             brushingSnapshot = null
             brushLayerId = null
@@ -1926,6 +1940,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun cancelBrushStroke() {
         awaitBrushSnapshot()
         val snapshot = brushingSnapshot ?: return
+        brushOwnedMaskHandle?.close()
+        brushOwnedMaskHandle = null
         brushingSnapshot = null
         brushLayerId = null
         brushBaseToken = null
@@ -6576,6 +6592,16 @@ internal fun EditorViewModel.acquireBitmapLease(tag: String): BitmapLease? =
  */
 internal fun EditorViewModel.pinBitmapLease(bitmap: Bitmap?): BitmapLease.BitmapPin? =
     bitmapLeaseLedger.pinBitmap(bitmap)
+
+/**
+ * Acquire a typed named-owner handle for a selection-mask bitmap. The bitmap will not be
+ * recycled while the returned handle is open. Every mask-reference site should declare
+ * which [MaskOwnerKind] role it is serving.
+ */
+internal fun EditorViewModel.acquireMaskOwner(
+    bitmap: Bitmap?,
+    kind: MaskOwnerKind,
+): MaskOwnerHandle? = selectionMaskOwnership.acquire(bitmap, kind)
 
 private fun identityBitmapSet(): MutableSet<Bitmap> =
     Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
