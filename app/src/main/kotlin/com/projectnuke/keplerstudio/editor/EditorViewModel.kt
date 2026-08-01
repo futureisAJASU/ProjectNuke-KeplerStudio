@@ -128,6 +128,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var brushOwnedMaskHandle: MaskOwnerHandle? = null
     private var brushMaskReservation: MaskReservation? = null
+    private var brushPixelScratch = IntArray(0)
     private var brushEpochCounter: Long = 0L
     internal var brushLastX: Float = Float.NaN
         private set
@@ -1960,6 +1961,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (brushTransactionState != BrushTransactionState.Preparing) return
         if (pendingBrushPoints.size >= 128) pendingBrushPoints.removeFirst()
         pendingBrushPoints.addLast(x to y)
+    }
+
+    internal fun brushScratch(width: Int): IntArray {
+        if (brushPixelScratch.size < width) brushPixelScratch = IntArray(width)
+        return brushPixelScratch
     }
 
     internal fun nextBrushPreviewEpoch(): Long {

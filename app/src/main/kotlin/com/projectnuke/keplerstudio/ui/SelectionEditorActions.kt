@@ -524,9 +524,9 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
     val startValid = !brushLastX.isNaN() && !brushLastY.isNaN()
     val painted =
         if (startValid) {
-            applyPaintSegment(layer.bitmap, brushLastX, brushLastY, maskX, maskY, settings)
+            applyPaintSegment(layer.bitmap, brushLastX, brushLastY, maskX, maskY, settings, brushScratch(layer.bitmap.width))
         } else {
-            applyPaintStroke(layer.bitmap, maskX, maskY, settings)
+            applyPaintStroke(layer.bitmap, maskX, maskY, settings, brushScratch(layer.bitmap.width))
         }
     setBrushLastPosition(maskX, maskY)
     if (painted) {
@@ -547,6 +547,7 @@ internal fun EditorViewModel.applyPaintSegment(
     endX: Float,
     endY: Float,
     settings: com.projectnuke.keplerstudio.editor.SelectionPaintSettings,
+    scratch: IntArray,
 ): Boolean {
     val radius = settings.sizePx.coerceAtLeast(1f) * 0.5f
     val dx = endX - startX
@@ -560,7 +561,7 @@ internal fun EditorViewModel.applyPaintSegment(
         val t = if (steps == 0) 0f else i.toFloat() / steps.toFloat()
         val px = startX + dx * t
         val py = startY + dy * t
-        if (applyPaintStroke(bitmap, px, py, settings)) changed = true
+        if (applyPaintStroke(bitmap, px, py, settings, scratch)) changed = true
     }
     return changed
 }
@@ -733,6 +734,7 @@ private fun applyPaintStroke(
     cx: Float,
     cy: Float,
     settings: SelectionPaintSettings,
+    row: IntArray,
 ): Boolean {
     val radius = settings.sizePx.coerceAtLeast(1f) * 0.5f
     val left = (cx - radius).toInt().coerceIn(0, bitmap.width - 1)
@@ -744,7 +746,7 @@ private fun applyPaintStroke(
 
     val feather = settings.feather.coerceIn(0f, 0.98f)
     val hardRadius = radius * (1f - feather)
-    val row = IntArray(width)
+    if (row.size < width) return false
     var changed = false
     for (y in top..bottom) {
         bitmap.getPixels(row, 0, width, left, y, width, 1)
