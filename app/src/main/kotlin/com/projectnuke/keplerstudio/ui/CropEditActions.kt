@@ -104,13 +104,18 @@ fun EditorViewModel.setStraightenDegrees(value: Float) {
 fun EditorViewModel.autoStraightenCrop() {
     if (!canEnterEditorAction()) return
     val state = uiState.value
-    val bitmap = state.previewBitmap ?: state.originalPreviewBitmap ?: return
+    val sourceSnapshot = acquireEditorSnapshot("autoStraightenCrop") ?: return
+    val bitmap = sourceSnapshot.previewBitmap ?: sourceSnapshot.originalPreviewBitmap ?: run {
+        sourceSnapshot.close()
+        return
+    }
     val cropToken = beginCropOperation()
     val cropTracker = beginMemoryTracking("autoStraightenCrop", snapshotState = "analyzing")
     val input =
         runCatching { bitmap.copyOrThrow(mutable = false) }
             .getOrElse { failure ->
                 cropTracker?.end()
+                sourceSnapshot.close()
                 updateUiState {
                     it.copy(
                         message =
@@ -133,6 +138,7 @@ fun EditorViewModel.autoStraightenCrop() {
             "autoStraighten",
             { if (!input.isRecycled) input.recycle() },
             { cropTracker?.end() },
+            { sourceSnapshot.close() },
         )
     val launchedJob =
         viewModelScope.launch {
@@ -155,6 +161,7 @@ fun EditorViewModel.autoStraightenCrop() {
                 if (isCropResultCurrent(cropToken, state.revision))
                     updateUiState { it.copy(message = "기울기 보정에 실패했습니다: ${t.message}") }
             } finally {
+                sourceSnapshot.close()
                 handoff.settleChildOwned()
             }
         }

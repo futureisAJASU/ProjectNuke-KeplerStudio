@@ -2338,7 +2338,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     DraftPointerSnapshot(diskPointer)
                 }
             } ?: return false
-        val draftState = _uiState.value
+        val draftSnapshot = acquireEditorSnapshot("draftSave") ?: return false
+        val draftState = draftSnapshot.state
         val draftTracker =
             beginMemoryTracking(
                 "persistDraftSnapshot",
@@ -2347,12 +2348,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         val payload =
             try {
-                createDraftSavePayload(
-                    context,
-                    draftState,
-                    draftEpoch,
-                    expectedPointer.generationId,
-                )
+                withContext(Dispatchers.Default) {
+                    createDraftSavePayload(
+                        context,
+                        draftState,
+                        draftEpoch,
+                        expectedPointer.generationId,
+                    )
+                }
             } catch (ce: CancellationException) {
                 draftTracker?.end()
                 throw ce
@@ -2373,6 +2376,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     else it
                 }
                 return false
+            } finally {
+                draftSnapshot.close()
             }
         payload.dirtyBitmapCopy?.let { draftTracker?.track(it, "persistDraftSnapshot:dirtyCopy") }
         payload.editedPreviewCopy?.let {
@@ -5908,11 +5913,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun captureHistorySnapshotForNavigation(
+    private suspend fun captureHistorySnapshotForNavigation(
         preferredStorage: HistorySnapshotStorage,
         targetBaseToken: String,
     ): EditorHistorySnapshot? {
-        val state = _uiState.value
+        val leased = acquireEditorSnapshot("historyNavigation") ?: return null
+        val state = leased.state
         val storage =
             if (
                 preferredStorage == HistorySnapshotStorage.MetadataOnly &&
@@ -5925,17 +5931,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
         val required =
             if (storage == HistorySnapshotStorage.Exact) state.historyBitmapBytes() else 0L
-        if (!BitmapMemoryBudget.canAllocate(required)) return null
+        if (!BitmapMemoryBudget.canAllocate(required)) {
+            leased.close()
+            return null
+        }
         return try {
-            state.toHistorySnapshot(storage).also { snapshot ->
-                val generation = historyCoordinator.currentGeneration()
-                snapshot.coordinatorGeneration = generation
-                snapshot.attachLocalDiagnostics(trackerSession, generation)
+            withContext(Dispatchers.Default) {
+                state.toHistorySnapshot(storage).also { snapshot ->
+                    val generation = historyCoordinator.currentGeneration()
+                    snapshot.coordinatorGeneration = generation
+                    snapshot.attachLocalDiagnostics(trackerSession, generation)
+                }
             }
         } catch (failure: BitmapAllocationRejectedException) {
             throw failure
         } catch (_: Throwable) {
             null
+        } finally {
+            leased.close()
         }
     }
 
@@ -5945,14 +5958,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         diagnostics: MemoryTrackerScope?,
     ): EditorHistorySnapshot? {
         if (snapshot.storage == HistorySnapshotStorage.Exact) return snapshot.also(register)
-        val current = _uiState.value
-        val base = current.originalPreviewBitmap ?: return null
+        val leased = acquireEditorSnapshot("historyMaterialization") ?: return null
+        val current = leased.state
+        val base = leased.originalPreviewBitmap ?: run {
+            leased.close()
+            return null
+        }
         if (
             current.baseContentToken != snapshot.baseContentToken ||
                 current.selectionLayers.isNotEmpty() ||
                 current.cropState != snapshot.cropState
-        )
+        ) {
+            leased.close()
             return null
+        }
         var ownedBase: Bitmap? = null
         var rendered: Bitmap? = null
         var renderSuccess: RenderResult.Success? = null
@@ -6061,6 +6080,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             diagnostics?.release(baseEdge)
             rendered?.takeIf { !it.isRecycled }?.recycle()
             if (rendered != null) diagnostics?.release(renderedEdge)
+            leased.close()
         }
     }
 

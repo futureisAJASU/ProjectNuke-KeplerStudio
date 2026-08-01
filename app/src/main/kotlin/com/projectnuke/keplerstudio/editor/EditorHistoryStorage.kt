@@ -346,7 +346,7 @@ internal class EditorHistoryCoordinator(
         undoDirection: Boolean,
         expectedTargetId: String? = null,
         currentCaptureBytes: Long,
-        captureCurrent: (HistorySnapshotStorage, String) -> EditorHistorySnapshot?,
+        captureCurrent: suspend (HistorySnapshotStorage, String) -> EditorHistorySnapshot?,
         materialize: suspend (EditorHistorySnapshot, (EditorHistorySnapshot) -> Unit) -> EditorHistorySnapshot?,
         adopt: (EditorHistorySnapshot) -> Boolean
     ): HistoryNavigationResult {
