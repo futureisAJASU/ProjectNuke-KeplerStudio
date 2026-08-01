@@ -1,10 +1,10 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.RectF
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -21,29 +21,29 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.SelectionLayer
+import com.projectnuke.keplerstudio.editor.fittedImageRect
+import androidx.compose.ui.geometry.Size
 
 private val OverlayBadgeBackground = Color(0xAA000000)
 private val DefaultMaskTint = Color(0xFFE91E63)
 
 /**
- * Overlay that renders the active selection mask over the editor preview.
+ * Overlay that renders the active selection mask aligned to the fitted image rect.
  *
- * The mask is a grayscale ARGB bitmap (R=G=B=intensity, A=0xFF). Drawing it directly would
- * render a uniformly opaque black image. We therefore apply a [ColorMatrixColorFilter] that
- * remaps the intensity channel into a bounded tint color and an output alpha proportional to
- * the mask intensity, so nonselected pixels stay fully transparent and selected pixels are
- * drawn with a bounded, accessible tint.
+ * The mask is a grayscale ARGB bitmap (R=G=B=I, A=0xFF). The color matrix is:
+ * - RGB: always stable tint color (independent of mask intensity)
+ * - Alpha: derived from mask intensity * layer opacity * overlay alpha
  *
- * [inverted] masks display the complementary selected region.
- * Layer [opacity] is reflected via the overlay alpha coefficient.
+ * Non-inverted: alpha = I/255 * opacity * overlayFactor
+ * Inverted:     alpha = (1 - I/255) * opacity * overlayFactor
  *
- * The caller passes the same [scale] and [offset] the preview image is rendered with so the
- * overlay always aligns with the active content rectangle and follows zoom and pan gestures.
- * The mask bitmap is never copied, mutated or allocated; only a [Paint] with filter is used.
- * The overlay is drawn in the Compose layer tree only and is therefore never included in
- * export pixels.
+ * The overlay is drawn into the [graphicsLayer] that mirrors the preview image
+ * transform, so it follows zoom and pan. The destination rect is clamped to the
+ * fitted image rectangle so the overlay is correctly letterboxed for portrait,
+ * landscape and ultra-wide images.
  */
 @Composable
 fun SelectionMaskOverlay(
@@ -59,47 +59,39 @@ fun SelectionMaskOverlay(
     if (maskBitmap.isRecycled) return
     val inverted = layer.inverted
     val overlayAlpha = layer.opacity.coerceIn(0f, 1f) * 0.42f
-    val tR = tint.red * 255f
-    val tG = tint.green * 255f
-    val tB = tint.blue * 255f
-    val tA = (overlayAlpha * 255f).coerceIn(1f, 255f)
 
-    // ColorMatrix rows: out = matrix * [R, G, B, A, 1]
-    // Mask channels: R=G=B=intensity I (0..255), A=0xFF
-    // Target: out = (tintR, tintG, tintB, tA * (inverted ? 1 - I/255 : I/255))
-    // Non-inverted: out_R = tR/255 * R
-    // Inverted:    out_R = tR - tR/255 * R = -tR/255 * R + tR
-    val rScale = if (inverted) -tR / 255f else tR / 255f
-    val gScale = if (inverted) -tG / 255f else tG / 255f
-    val bScale = if (inverted) -tB / 255f else tB / 255f
-    val aScale = if (inverted) -tA / 255f else tA / 255f
-    val rAdd = if (inverted) tR else 0f
-    val gAdd = if (inverted) tG else 0f
-    val bAdd = if (inverted) tB else 0f
+    // ColorMatrix: stable RGB tint, alpha modulated by mask intensity.
+    // Mask channels: R=G=B=I (0..255), A=0xFF (ignored)
+    // Output: R = tR (constant), G = tG (constant), B = tB (constant)
+    //         A = overlayAlpha * (I/255 or 1-I/255)
+    // Non-inverted: RGB constant, alpha = overlayAlpha * I/255
+    // Inverted:     RGB constant, alpha = overlayAlpha * (1 - I/255)
+    val tA = overlayAlpha
+    val aMul = if (inverted) -tA / 255f else tA / 255f
     val aAdd = if (inverted) tA else 0f
 
-    val paint = remember(maskBitmap, inverted, overlayAlpha, tint) {
+    val paint = remember(maskBitmap, tint, inverted, overlayAlpha) {
         Paint(Paint.FILTER_BITMAP_FLAG).apply {
             colorFilter = ColorMatrixColorFilter(
                 ColorMatrix(
                     floatArrayOf(
-                        rScale, 0f, 0f, 0f, rAdd,
-                        0f, gScale, 0f, 0f, gAdd,
-                        0f, 0f, bScale, 0f, bAdd,
-                        // Alpha comes from the intensity channel (R), not the A input.
-                        aScale, 0f, 0f, 0f, aAdd,
-                        0f, 0f, 0f, 0f, 1f,
+                        0f, 0f, 0f, 0f, tint.red,    // R = tR (constant)
+                        0f, 0f, 0f, 0f, tint.green,  // G = tG (constant)
+                        0f, 0f, 0f, 0f, tint.blue,   // B = tB (constant)
+                        aMul, 0f, 0f, 0f, aAdd,       // A = aMul*R + aAdd
                     ),
                 ),
             )
         }
     }
 
+    val density = LocalDensity.current
+    val paddingPx = with(density) { 8.dp.toPx() }
+
     Box(modifier = modifier.fillMaxSize()) {
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(8.dp)
                 .graphicsLayer {
                     scaleX = scale
                     scaleY = scale
@@ -107,21 +99,26 @@ fun SelectionMaskOverlay(
                     translationY = offset.y
                 },
         ) {
-            drawIntoCanvas { canvas ->
-                val native = canvas.nativeCanvas
-                val dst = RectF(0f, 0f, size.width, size.height)
-                native.drawBitmap(maskBitmap, null, dst, paint)
+            val fitted = fittedImageRect(
+                size, maskBitmap.width, maskBitmap.height, paddingPx,
+            )
+            if (!fitted.isEmpty) {
+                drawIntoCanvas { canvas ->
+                    val native = canvas.nativeCanvas
+                    val dst = RectF(fitted.left, fitted.top, fitted.right, fitted.bottom)
+                    native.drawBitmap(maskBitmap, null, dst, paint)
+                }
             }
         }
         Text(
-            text = layer.name,
+            text = "${layer.name}${if (inverted) "" else ""}",
             color = Color.White,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(12.dp)
                 .background(OverlayBadgeBackground)
-                .padding(horizontal = 8.dp, vertical = 4.dp)
+                .padding(horizontal = 8.dp, vertical = 4.dp),
         )
     }
 }

@@ -151,17 +151,8 @@ internal fun PreviewGridOverlay(
     }
 }
 
-internal fun fittedPreviewRect(size: Size, imageWidth: Int, imageHeight: Int): Rect {
-    if (size.width <= 0f || size.height <= 0f || imageWidth <= 0 || imageHeight <= 0) {
-        return Rect.Zero
-    }
-    val scale = min(size.width / imageWidth.toFloat(), size.height / imageHeight.toFloat())
-    val width = imageWidth * scale
-    val height = imageHeight * scale
-    val left = (size.width - width) * 0.5f
-    val top = (size.height - height) * 0.5f
-    return Rect(left, top, left + width, top + height)
-}
+internal fun fittedPreviewRect(size: Size, imageWidth: Int, imageHeight: Int): Rect =
+    com.projectnuke.keplerstudio.editor.fittedImageRect(size, imageWidth, imageHeight)
 
 private suspend fun createBoundedHistogram(bitmap: Bitmap): PreviewHistogram? {
     val sampledBitmap =
