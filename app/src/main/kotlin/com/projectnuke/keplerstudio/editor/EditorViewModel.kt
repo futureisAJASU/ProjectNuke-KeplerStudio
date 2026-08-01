@@ -414,6 +414,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null) }
     }
 
+    @Suppress("DEPRECATION")
     fun onTrimMemory(level: Int) {
         if (
             shuttingDown ||
