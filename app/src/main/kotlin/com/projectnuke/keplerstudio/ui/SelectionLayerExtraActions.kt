@@ -5,7 +5,7 @@ import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
-import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
+import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -42,7 +42,7 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
     val activeBitmap = active.bitmap
     val sourceActiveConfig = activeBitmap.config ?: Bitmap.Config.ARGB_8888
     val nextRevision = state.revision + 1
-    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("duplicateSelection")
 
     updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "마스크를 복제하는 중입니다.") }
 
@@ -58,17 +58,17 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
                 activeKind = activeKind,
                 sourceBitmap = activeBitmap,
                 sourceConfig = sourceActiveConfig,
-                originalUndoSnapshotRef = { undoSnapshot },
-                consumeUndoSnapshot = { undoSnapshot = null },
-                releaseUndoSnapshot = { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+                originalHistoryRef = { pendingHistory },
+                consumeHistory = { pendingHistory = null },
+                releaseHistory = { pendingHistory?.close(); pendingHistory = null },
             )
         },
         handoff =
             PreparedResourceHandoff.create(
                 "duplicateSelection",
                 {
-                    undoSnapshot?.let(::recycleHistorySnapshot)
-                    undoSnapshot = null
+                    pendingHistory?.close()
+                    pendingHistory = null
                 },
                 {
                     val live = uiState.value
@@ -91,14 +91,17 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
     activeKind: SelectionLayerKind,
     sourceBitmap: Bitmap,
     sourceConfig: Bitmap.Config,
-    originalUndoSnapshotRef: () -> EditorHistorySnapshot?,
-    consumeUndoSnapshot: () -> Unit,
-    releaseUndoSnapshot: () -> Unit,
+    originalHistoryRef: () -> PendingHistorySnapshot?,
+    consumeHistory: () -> Unit,
+    releaseHistory: () -> Unit,
 ) {
     var leasedSnapshot: LeasedEditorSnapshot? = null
     var ownedCopy: Bitmap? = null
-    var undoSnapshotOwned: EditorHistorySnapshot? = originalUndoSnapshotRef()
-    consumeUndoSnapshot()
+    var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
+    consumeHistory()
+    var undoSnapshotOwned: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? =
+        withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+    pendingHistoryOwned = null
     try {
         val prepared = withContext(Dispatchers.Default) {
             if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
@@ -173,7 +176,8 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
         ownedCopy?.takeIf { !it.isRecycled }?.recycle()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
-        releaseUndoSnapshot()
+        pendingHistoryOwned?.close()
+        releaseHistory()
     }
 }
 
@@ -195,7 +199,7 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
     val activeBitmap = active.bitmap
     val sourceActiveConfig = activeBitmap.config ?: Bitmap.Config.ARGB_8888
     val nextRevision = state.revision + 1
-    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("backgroundSelection")
 
     updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "배경 마스크를 만드는 중입니다.") }
 
@@ -213,17 +217,17 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
                 activeLocalParams = activeLocalParams,
                 sourceBitmap = activeBitmap,
                 sourceConfig = sourceActiveConfig,
-                originalUndoSnapshotRef = { undoSnapshot },
-                consumeUndoSnapshot = { undoSnapshot = null },
-                releaseUndoSnapshot = { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+                originalHistoryRef = { pendingHistory },
+                consumeHistory = { pendingHistory = null },
+                releaseHistory = { pendingHistory?.close(); pendingHistory = null },
             )
         },
         handoff =
             PreparedResourceHandoff.create(
                 "backgroundSelection",
                 {
-                    undoSnapshot?.let(::recycleHistorySnapshot)
-                    undoSnapshot = null
+                    pendingHistory?.close()
+                    pendingHistory = null
                 },
                 {
                     val live = uiState.value
@@ -248,14 +252,17 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
     activeLocalParams: com.projectnuke.keplerstudio.editor.EditParams,
     sourceBitmap: Bitmap,
     sourceConfig: Bitmap.Config,
-    originalUndoSnapshotRef: () -> EditorHistorySnapshot?,
-    consumeUndoSnapshot: () -> Unit,
-    releaseUndoSnapshot: () -> Unit,
+    originalHistoryRef: () -> PendingHistorySnapshot?,
+    consumeHistory: () -> Unit,
+    releaseHistory: () -> Unit,
 ) {
     var leasedSnapshot: LeasedEditorSnapshot? = null
     var ownedCopy: Bitmap? = null
-    var undoSnapshotOwned: EditorHistorySnapshot? = originalUndoSnapshotRef()
-    consumeUndoSnapshot()
+    var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
+    consumeHistory()
+    var undoSnapshotOwned: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? =
+        withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+    pendingHistoryOwned = null
     try {
         val prepared = withContext(Dispatchers.Default) {
             if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
@@ -335,7 +342,8 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
         ownedCopy?.takeIf { !it.isRecycled }?.recycle()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
-        releaseUndoSnapshot()
+        pendingHistoryOwned?.close()
+        releaseHistory()
     }
 }
 

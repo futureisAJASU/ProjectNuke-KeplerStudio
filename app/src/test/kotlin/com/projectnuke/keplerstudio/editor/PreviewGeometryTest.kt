@@ -100,4 +100,40 @@ class PreviewGeometryTest {
         assertTrue(clamped.x < 500f, "should clamp overshoot")
         assertTrue(clamped.y < 500f, "should clamp overshoot")
     }
+
+    @Test
+    fun `image and view mappings round trip with center pivot`() {
+        val cases = listOf(
+            PreviewGeometry(IntSize(800, 600), 400, 300, padding = 12f, zoom = 1f),
+            PreviewGeometry(IntSize(800, 600), 300, 900, padding = 24f, zoom = 1.75f, pan = Offset(30f, -42f)),
+            PreviewGeometry(IntSize(1200, 500), 2400, 600, padding = 8f, zoom = 2.25f, pan = Offset(-70f, 18f)),
+        )
+        for (geometry in cases) {
+            val image = 0.37f * geometry.imageWidth to 0.61f * geometry.imageHeight
+            val view = geometry.imageToView(image.first, image.second)
+            assertNotNull(view)
+            val roundTrip = geometry.viewToImage(view!!)
+            assertNotNull(roundTrip)
+            assertEquals(image.first, roundTrip!!.first, 0.01f)
+            assertEquals(image.second, roundTrip.second, 0.01f)
+        }
+    }
+
+    @Test
+    fun `padding and letterbox remain outside mapped image`() {
+        val geometry = PreviewGeometry(IntSize(600, 900), 300, 400, padding = 20f)
+        val rect = geometry.imageRect
+        assertNull(geometry.viewToImage(Offset(20f, 20f)))
+        assertNull(geometry.viewToImage(Offset(rect.left - 1f, rect.center.y)))
+        assertNotNull(geometry.viewToImage(rect.center))
+    }
+
+    @Test
+    fun `invalid geometry and resize safely reject input`() {
+        assertNull(PreviewGeometry(IntSize(0, 0), 100, 100).viewToImage(Offset.Zero))
+        assertTrue(PreviewGeometry(IntSize(100, 100), 100, 100, zoom = Float.NaN).clampedPan() == Offset.Zero)
+        val resized = PreviewGeometry(IntSize(1000, 400), 400, 400, padding = 16f)
+        assertTrue(resized.imageRect.width > 0f)
+        assertTrue(resized.imageRect.height > 0f)
+    }
 }

@@ -589,6 +589,7 @@ private fun V2PreviewArea(
                 V2ZoomablePreview(
                     bitmap = bitmap,
                     originalBitmap = originalBitmap,
+                    viewModel = viewModel,
                     showGrid = gridVisible,
                     onToggleChrome = onToggleChrome,
                     selectionLayers = selectionLayers,
@@ -714,6 +715,7 @@ private fun V2CropPreview(
 private fun V2ZoomablePreview(
     bitmap: Bitmap,
     originalBitmap: Bitmap?,
+    viewModel: EditorViewModel,
     showGrid: Boolean,
     onToggleChrome: () -> Unit,
     selectionLayers: List<SelectionLayer> = emptyList(),
@@ -860,6 +862,7 @@ private fun V2ZoomablePreview(
             SelectionMaskOverlay(
                 layer = activeMaskLayer,
                 visible = showSelectionOverlay,
+                viewModel = viewModel,
                 scale = scale,
                 offset = offset,
                 modifier = Modifier.fillMaxSize(),

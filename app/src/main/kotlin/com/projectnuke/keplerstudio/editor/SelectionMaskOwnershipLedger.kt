@@ -29,6 +29,7 @@ import kotlin.concurrent.withLock
  */
 internal class SelectionMaskOwnershipLedger(
     private val byteBudget: () -> Long = { Long.MAX_VALUE },
+    private val pinBitmap: ((Bitmap) -> BitmapLease.BitmapPin?)? = null,
 ) {
     private val lock = ReentrantLock()
     private val reservationIds = AtomicLong(1L)
@@ -48,7 +49,7 @@ internal class SelectionMaskOwnershipLedger(
 
     fun reserve(owner: String, bytes: Long, layers: Int = 1): MaskReservation? {
         if (owner.isBlank() || bytes <= 0L || layers <= 0) return null
-        lock.withLock {
+        return lock.withLock {
             val limit = byteBudget().coerceAtLeast(0L)
             if (bytes > limit - reservedBytes) return null
             val id = reservationIds.getAndIncrement()
@@ -74,10 +75,15 @@ internal class SelectionMaskOwnershipLedger(
 
     fun acquire(bitmap: Bitmap?, kind: MaskOwnerKind): MaskOwnerHandle? {
         if (bitmap == null || bitmap.isRecycled) return null
-        lock.withLock {
-            val slot = slots.getOrElse(bitmap) { Slot().also { slots[bitmap] = it } }
-            slot.owners[kind] = (slot.owners[kind] ?: 0) + 1
-            return MaskOwnerHandle(this, bitmap, kind)
+        return lock.withLock {
+            val pin = pinBitmap?.invoke(bitmap)
+            if (pinBitmap != null && pin == null) {
+                null
+            } else {
+                val slot = slots.getOrElse(bitmap) { Slot().also { slots[bitmap] = it } }
+                slot.owners[kind] = (slot.owners[kind] ?: 0) + 1
+                MaskOwnerHandle(this, bitmap, kind, pin)
+            }
         }
     }
 
@@ -209,6 +215,7 @@ internal class MaskOwnerHandle internal constructor(
     private val ledger: SelectionMaskOwnershipLedger,
     private val bitmap: Bitmap?,
     private val kind: MaskOwnerKind,
+    private val bitmapPin: BitmapLease.BitmapPin?,
 ) : AutoCloseable {
     @Volatile private var closed = false
     val ownerKind: MaskOwnerKind get() = kind
@@ -217,5 +224,6 @@ internal class MaskOwnerHandle internal constructor(
         if (closed) return
         closed = true
         ledger.release(bitmap, kind)
+        bitmapPin?.close()
     }
 }

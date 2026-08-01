@@ -65,12 +65,14 @@ data class PreviewGeometry(
             zoom.isFinite() && zoom > 0f && pan.x.isFinite() && pan.y.isFinite()
 
     fun clampedPan(): Offset {
-        if (zoom <= 1f) return Offset.Zero
+        val effZoom = zoom.takeIf { it.isFinite() && it >= 1f } ?: return Offset.Zero
+        if (effZoom == 1f) return Offset.Zero
+        if (!isValid()) return Offset.Zero
         val rect = imageRect
         val innerW = (container.width - 2 * padding).coerceAtLeast(1f)
         val innerH = (container.height - 2 * padding).coerceAtLeast(1f)
-        val maxX = max(0f, (rect.width * zoom - innerW) / 2f)
-        val maxY = max(0f, (rect.height * zoom - innerH) / 2f)
+        val maxX = max(0f, (rect.width * effZoom - innerW) / 2f)
+        val maxY = max(0f, (rect.height * effZoom - innerH) / 2f)
         return Offset(
             pan.x.coerceIn(-maxX, maxX),
             pan.y.coerceIn(-maxY, maxY),

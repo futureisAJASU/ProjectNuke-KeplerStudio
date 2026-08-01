@@ -9,6 +9,7 @@ import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
+import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
@@ -20,6 +21,7 @@ import com.projectnuke.keplerstudio.editor.FeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.RenderParticipation
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
+import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
@@ -119,8 +121,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             snapshotState = "inferring",
             transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
         )
-    var undoSnapshot: EditorHistorySnapshot? =
-        captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact)
+    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("subjectSelection")
     val baseBaseConfig = base.config ?: Bitmap.Config.ARGB_8888
     val manualMaskConfig = manualMaskAtEntry?.config ?: Bitmap.Config.ARGB_8888
     val originalBaseRef = base
@@ -130,8 +131,11 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         { operationToken ->
             var ownedBaseOwned: Bitmap? = null
             var ownedManualMaskOwned: Bitmap? = null
-            var undoSnapshotOwned = undoSnapshot
-            undoSnapshot = null
+            var pendingHistoryOwned = pendingHistory
+            pendingHistory = null
+            var undoSnapshotOwned: EditorHistorySnapshot? =
+                withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+            pendingHistoryOwned = null
             var pendingLayerBitmap: Bitmap? = null
             var featureMaskSummary: FeatureMaskSummary? = null
             try {
@@ -384,6 +388,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
                 ownedManualMaskOwned?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
+                pendingHistoryOwned?.close()
                 selectionTracker?.end()
             }
         },
@@ -391,8 +396,8 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             PreparedResourceHandoff.create(
                 "subjectSelection",
                 {
-                    undoSnapshot?.let(::recycleHistorySnapshot)
-                    undoSnapshot = null
+                    pendingHistory?.close()
+                    pendingHistory = null
                 },
                 { selectionTracker?.end() },
                 {
@@ -599,13 +604,19 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         updateUiState { it.copy(message = "적용할 마스크 또는 이미지가 없습니다.") }
         return
     }
-    var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+    val sourceSnapshot = acquireEditorSnapshot("activeSelectionLocalEdit") ?: return
+    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("activeSelectionLocalEdit")
     val nextRevision = state.revision + 1
     updateUiState {
         it.copy(isBusy = true, revision = nextRevision, message = "마스크 보정을 적용하는 중입니다.")
     }
     launchManagedEditWithPreparedResources(
         { operationToken ->
+        var pendingHistoryOwned = pendingHistory
+        pendingHistory = null
+        var undoSnapshot: EditorHistorySnapshot? =
+            withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+        pendingHistoryOwned = null
         var renderedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null
         var previewSuccess: RenderResult.Success? = null
@@ -620,13 +631,14 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                 withContext(Dispatchers.Default) {
                     EditorRenderer.render(
                         createRenderRequest(
-                            state = state,
+                            state = sourceSnapshot.state,
                             operation = RenderOperation.SelectionLocal,
-                            basePreview = base,
+                            basePreview = sourceSnapshot.originalPreviewBitmap ?: sourceSnapshot.previewBitmap
+                                ?: error("missing selection base"),
                             revision = nextRevision,
                             look = null,
                             quickEffects = emptyList(),
-                            selectionLayers = listOf(layer),
+                            selectionLayers = sourceSnapshot.selectionLayers.filter { it.id == layer.id },
                             diagnostics = selectionTracker,
                         )
                     ).successOrThrow().output
@@ -637,7 +649,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                     previewSuccess =
                         EditorRenderer.render(
                             createRenderRequest(
-                                state = state,
+                                state = sourceSnapshot.state,
                                 operation = RenderOperation.SelectionNativeBake,
                                 basePreview =
                                     renderedOriginal ?: error("missing selection render"),
@@ -708,14 +720,17 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                 }
             }
         } finally {
+            pendingHistoryOwned?.close()
+            sourceSnapshot.close()
             selectionTracker?.end()
         }
     },
         PreparedResourceHandoff.create(
             "activeSelectionLocalEdit",
             {
-                undoSnapshot?.let(::recycleHistorySnapshot)
-                undoSnapshot = null
+                pendingHistory?.close()
+                pendingHistory = null
+                sourceSnapshot.close()
             },
             {
                 val live = uiState.value

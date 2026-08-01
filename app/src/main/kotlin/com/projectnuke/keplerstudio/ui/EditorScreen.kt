@@ -177,6 +177,7 @@ fun EditorScreen(viewModel: EditorViewModel) {
                                 ZoomablePreview(
                                     bitmap = bitmap,
                                     originalBitmap = state.originalPreviewBitmap,
+                                    viewModel = viewModel,
                                     onViewportChanged = viewModel::updateViewport,
                                     selectionLayers = state.selectionLayers,
                                     activeSelectionLayerId = state.activeSelectionLayerId,
@@ -431,6 +432,7 @@ private fun SettingsCard(title: String, content: @Composable () -> Unit) {
 private fun ZoomablePreview(
     bitmap: Bitmap,
     originalBitmap: Bitmap?,
+    viewModel: EditorViewModel,
     onViewportChanged: (ViewportState) -> Unit,
     selectionLayers: List<com.projectnuke.keplerstudio.editor.SelectionLayer> = emptyList(),
     activeSelectionLayerId: String? = null,
@@ -513,6 +515,7 @@ private fun ZoomablePreview(
             SelectionMaskOverlay(
                 layer = activeMaskLayer,
                 visible = showSelectionOverlay,
+                viewModel = viewModel,
                 scale = scale,
                 offset = offset,
                 modifier = Modifier.fillMaxSize(),

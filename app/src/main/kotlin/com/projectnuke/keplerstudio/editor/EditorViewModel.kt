@@ -64,6 +64,18 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
+internal class PendingHistorySnapshot(
+    private val deferred: Deferred<EditorHistorySnapshot?>,
+) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+
+    suspend fun await(): EditorHistorySnapshot? = deferred.await()
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) deferred.cancel()
+    }
+}
+
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val _uiState =
         MutableStateFlow(
@@ -153,7 +165,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         trackerSession?.let(::UiStateOwnershipReconciler)
     internal val bitmapLeaseLedger = BitmapLeaseLedger()
     internal val selectionMaskOwnership =
-        SelectionMaskOwnershipLedger { BitmapMemoryBudget.selectionMaskBudgetBytes() }
+        SelectionMaskOwnershipLedger(
+            byteBudget = { BitmapMemoryBudget.selectionMaskBudgetBytes() },
+            pinBitmap = { bitmap -> bitmapLeaseLedger.pinBitmap(bitmap) },
+        )
     private var historyIoJob: Job? = null
     private var memoryRecoveryToken: Long = 0L
     private var pendingMemoryRetry: MemoryRetryDescriptor? = null
@@ -1888,14 +1903,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         snapshot?.recycleBitmaps()
                         ownedMask?.takeIf { !it.isRecycled }?.recycle()
                     }
-                    if (snapshot == null) {
+                    if (snapshot == null || brushTransactionState != BrushTransactionState.Active) {
+                        brushOwnedMaskHandle?.close()
+                        brushOwnedMaskHandle = null
                         brushMaskReservation?.close()
                         brushMaskReservation = null
                         brushStartSnapshot?.close()
                         brushStartSnapshot = null
+                        brushingSnapshot = null
+                        pendingBrushPoints.clear()
                         brushTransactionState = BrushTransactionState.Idle
                         brushLayerId = null
                         brushBaseToken = null
+                        brushChanged = false
                         brushLastX = Float.NaN
                         brushLastY = Float.NaN
                     }
@@ -1915,8 +1935,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         previewRef: Bitmap?,
         originalRef: Bitmap?,
         layerRefs: List<Pair<String, Bitmap>>,
+        storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
     ): EditorHistorySnapshot? {
-        val required = state.historyBitmapBytesFor(previewRef, originalRef, layerRefs)
+        val effectiveStorage =
+            if (storage == HistorySnapshotStorage.MetadataOnly && state.supportsMetadataOnlyHistory()) {
+                storage
+            } else {
+                HistorySnapshotStorage.Exact
+            }
+        val required =
+            if (effectiveStorage == HistorySnapshotStorage.Exact) {
+                state.historyBitmapBytesFor(previewRef, originalRef, layerRefs)
+            } else {
+                0L
+            }
         if (!historyCoordinator.canCapture(required)) {
             withContext(Dispatchers.Main) {
                 updateUiStateAndRecycleReplaced {
@@ -1928,7 +1960,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return runCatching {
             state
                 .toHistorySnapshotFromRefs(
-                    HistorySnapshotStorage.Exact,
+                    effectiveStorage,
                     previewRef,
                     originalRef,
                     layerRefs,
@@ -1938,6 +1970,32 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     it.attachLocalDiagnostics(trackerSession, generation)
                 }
         }.getOrNull()
+    }
+
+    /**
+     * Captures the exact gesture-start references and performs all full-resolution history
+     * copies on Default. Callers must await this before adoption and cancel it on abort.
+     */
+    internal fun prepareHistorySnapshot(
+        tag: String,
+        storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
+    ): PendingHistorySnapshot? {
+        val leased = acquireEditorSnapshot(tag) ?: return null
+        val deferred =
+            viewModelScope.async(Dispatchers.Default) {
+                try {
+                    captureHistorySnapshotFromRefs(
+                        leased.state,
+                        leased.previewBitmap,
+                        leased.originalPreviewBitmap,
+                        leased.selectionLayers.map { it.id to it.bitmap },
+                        storage,
+                    )
+                } finally {
+                    leased.close()
+                }
+            }
+        return PendingHistorySnapshot(deferred)
     }
 
     internal fun markBrushChanged(changed: Boolean) {

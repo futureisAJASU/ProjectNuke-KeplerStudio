@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,11 +25,26 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.SelectionLayer
+import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.pinBitmapLease
 import com.projectnuke.keplerstudio.editor.fittedImageRect
 import androidx.compose.ui.geometry.Size
 
 private val OverlayBadgeBackground = Color(0xAA000000)
 private val DefaultMaskTint = Color(0xFFE91E63)
+
+internal fun selectionOverlayAlpha(
+    maskIntensity: Int,
+    layerOpacity: Float,
+    overlayOpacity: Float,
+    inverted: Boolean,
+): Int {
+    val intensity = maskIntensity.coerceIn(0, 255) / 255f
+    val mask = if (inverted) 1f - intensity else intensity
+    return (mask * layerOpacity.coerceIn(0f, 1f) * overlayOpacity.coerceIn(0f, 1f) * 255f)
+        .toInt()
+        .coerceIn(0, 255)
+}
 
 /**
  * Overlay that renders the active selection mask aligned to the fitted image rect.
@@ -49,6 +65,7 @@ private val DefaultMaskTint = Color(0xFFE91E63)
 fun SelectionMaskOverlay(
     layer: SelectionLayer?,
     visible: Boolean,
+    viewModel: EditorViewModel,
     scale: Float,
     offset: Offset,
     modifier: Modifier = Modifier,
@@ -56,7 +73,9 @@ fun SelectionMaskOverlay(
 ) {
     if (!visible || layer == null || !layer.enabled) return
     val maskBitmap: Bitmap = layer.bitmap
-    if (maskBitmap.isRecycled) return
+    val bitmapPin = remember(maskBitmap, viewModel) { viewModel.pinBitmapLease(maskBitmap) }
+    DisposableEffect(bitmapPin) { onDispose { bitmapPin?.close() } }
+    if (bitmapPin == null || maskBitmap.isRecycled) return
     val inverted = layer.inverted
     val overlayAlpha = layer.opacity.coerceIn(0f, 1f) * 0.42f
 
