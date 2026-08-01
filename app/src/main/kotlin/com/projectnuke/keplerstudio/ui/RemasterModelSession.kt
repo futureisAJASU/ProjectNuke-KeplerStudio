@@ -21,6 +21,7 @@ import com.projectnuke.keplerstudio.editor.ModelConfidence
 import com.projectnuke.keplerstudio.editor.ModelFailure
 import com.projectnuke.keplerstudio.editor.ModelFailureReason
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
+import com.projectnuke.keplerstudio.editor.ModelCapabilityPhase
 import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.ModelInputContract
 import com.projectnuke.keplerstudio.editor.ModelLoadResult
@@ -229,6 +230,23 @@ object RemasterModelSession : ModelRunnerContract {
                     ?: return@withLock ModelLoadResult.AssetMissing(
                         "edge_masker catalog entry missing"
                     )
+            val edgeState =
+                ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]
+            if (edgeState != null) {
+                val rejected =
+                    edgeState.phase in setOf(
+                        ModelCapabilityPhase.AssetMissing,
+                        ModelCapabilityPhase.AssetInvalid,
+                        ModelCapabilityPhase.RuntimeUnavailable,
+                        ModelCapabilityPhase.ContractUnsupported,
+                        ModelCapabilityPhase.RunnerUnavailable,
+                    ) && !edgeState.executable && !edgeState.factsLoadable
+                if (rejected) {
+                    return@withLock ModelLoadResult.AssetMissing(
+                        "Edge Masker rejected by registry: phase=${edgeState.phase.name}"
+                    )
+                }
+            }
             val loadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
             activeModel = candidate
             isModelLoading = true

@@ -26,6 +26,39 @@ data class CropState(
 ) {
     val cropWidth: Float get() = (cropRight - cropLeft).coerceIn(0f, 1f)
     val cropHeight: Float get() = (cropBottom - cropTop).coerceIn(0f, 1f)
+
+    fun validate(): CropState {
+        val fixedLeft = if (cropLeft.isFinite()) cropLeft else 0f
+        val fixedTop = if (cropTop.isFinite()) cropTop else 0f
+        val fixedRight = if (cropRight.isFinite()) cropRight else 1f
+        val fixedBottom = if (cropBottom.isFinite()) cropBottom else 1f
+        val fixedStraighten = if (straightenDegrees.isFinite()) straightenDegrees else 0f
+
+        val (l, r) = if (fixedLeft > fixedRight) fixedRight to fixedLeft else fixedLeft to fixedRight
+        val (t, b) = if (fixedTop > fixedBottom) fixedBottom to fixedTop else fixedTop to fixedBottom
+
+        val width = r - l
+        val height = b - t
+
+        val (cl, cr) = if (width <= 0f) 0f to 1f else l to r
+        val (ct, cb) = if (height <= 0f) 0f to 1f else t to b
+
+        return copy(
+            cropLeft = cl,
+            cropTop = ct,
+            cropRight = cr,
+            cropBottom = cb,
+            straightenDegrees = fixedStraighten
+        )
+    }
+}
+
+fun CropState.isFinite(): Boolean {
+    return cropLeft.isFinite() && cropTop.isFinite() &&
+            cropRight.isFinite() && cropBottom.isFinite() &&
+            straightenDegrees.isFinite() &&
+            cropLeft <= cropRight && cropTop <= cropBottom &&
+            (cropRight - cropLeft) > 0f && (cropBottom - cropTop) > 0f
 }
 
 internal fun CropState.toJsonObject(): JSONObject = JSONObject().apply {

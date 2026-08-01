@@ -772,11 +772,11 @@ private fun V2ZoomablePreview(
                                 Offset.Zero
                             } else {
                                 val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
-                                ((offset + centroid - center) * (nextScale / oldScale)) - (centroid - center) + pan
+                                val newOffset = ((offset + centroid - center) * (nextScale / oldScale)) - (centroid - center) + pan
+                                clampZoomOffset(newOffset, nextScale, bitmap.width, bitmap.height, containerSize, paddingPx)
                             }
                             showOriginal = false
                         }
-                        offset = clampZoomOffset(offset, scale, bitmap.width, bitmap.height, containerSize, paddingPx)
                         showOriginal = false
                     }
                 }
@@ -2028,12 +2028,26 @@ internal fun clampZoomOffset(
     paddingPx: Float,
 ): Offset {
     if (scale <= 1f || containerSize.width <= 0 || containerSize.height <= 0) return Offset.Zero
-    val innerW = (containerSize.width - 2 * paddingPx).coerceAtLeast(1f)
-    val innerH = (containerSize.height - 2 * paddingPx).coerceAtLeast(1f)
-    val contentAspect = if (contentHeight > 0) contentWidth.toFloat() / contentHeight.toFloat() else 1f
-    val containerAspect = if (innerH > 0) innerW / innerH else 1f
-    val maxX = (if (contentAspect > containerAspect) 0f else (innerW * (1f - contentAspect / containerAspect) / 2f)) * scale
-    val maxY = (if (contentAspect < containerAspect) 0f else (innerH * (1f - containerAspect / contentAspect) / 2f)) * scale
+    val viewportWidth = (containerSize.width - 2 * paddingPx).coerceAtLeast(1f)
+    val viewportHeight = (containerSize.height - 2 * paddingPx).coerceAtLeast(1f)
+    val fittedWidth: Float
+    val fittedHeight: Float
+    if (contentHeight > 0 && viewportHeight > 0f) {
+        val contentAspect = contentWidth.toFloat() / contentHeight.toFloat()
+        val viewportAspect = viewportWidth / viewportHeight
+        if (contentAspect > viewportAspect) {
+            fittedWidth = viewportWidth
+            fittedHeight = viewportWidth / contentAspect
+        } else {
+            fittedHeight = viewportHeight
+            fittedWidth = viewportHeight * contentAspect
+        }
+    } else {
+        fittedWidth = viewportWidth
+        fittedHeight = viewportHeight
+    }
+    val maxX = maxOf(0f, (fittedWidth * scale - viewportWidth) / 2f)
+    val maxY = maxOf(0f, (fittedHeight * scale - viewportHeight) / 2f)
     return Offset(
         offset.x.coerceIn(-maxX, maxX),
         offset.y.coerceIn(-maxY, maxY),
