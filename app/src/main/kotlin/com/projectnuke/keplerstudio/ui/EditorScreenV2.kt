@@ -67,6 +67,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -127,6 +128,7 @@ import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.RouteResolver
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.SelectionLayer
+import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import java.text.SimpleDateFormat
@@ -264,6 +266,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                             gridVisible = gridVisible,
                             selectionLayers = state.selectionLayers,
                             activeSelectionLayerId = state.activeSelectionLayerId,
+                            selectionPaintSettings = state.selectionPaintSettings,
                             showSelectionOverlay = state.showSelectionOverlay,
                             onToggleHistogram = { histogramVisible = !histogramVisible },
                             onToggleHistogramMode = {
@@ -543,6 +546,7 @@ private fun V2PreviewArea(
     gridVisible: Boolean,
     selectionLayers: List<SelectionLayer>,
     activeSelectionLayerId: String?,
+    selectionPaintSettings: SelectionPaintSettings,
     showSelectionOverlay: Boolean,
     onToggleHistogram: () -> Unit,
     onToggleHistogramMode: () -> Unit,
@@ -589,6 +593,7 @@ private fun V2PreviewArea(
                     onToggleChrome = onToggleChrome,
                     selectionLayers = selectionLayers,
                     activeSelectionLayerId = activeSelectionLayerId,
+                    selectionPaintSettings = selectionPaintSettings,
                     showSelectionOverlay = showSelectionOverlay,
                     paintMode = selectedTool == V2EditorTool.Masking && activeSelectionLayerId != null && showSelectionOverlay,
                     onPaintAt = onPaintAt,
@@ -713,6 +718,7 @@ private fun V2ZoomablePreview(
     onToggleChrome: () -> Unit,
     selectionLayers: List<SelectionLayer> = emptyList(),
     activeSelectionLayerId: String? = null,
+    selectionPaintSettings: SelectionPaintSettings = SelectionPaintSettings(),
     showSelectionOverlay: Boolean = false,
     paintMode: Boolean = false,
     onPaintAt: (maskX: Float, maskY: Float) -> Unit = { _, _ -> },
@@ -727,6 +733,9 @@ private fun V2ZoomablePreview(
     var cursorPosition by remember { mutableStateOf<Offset?>(null) }
     val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
     val activeMaskLayer = selectionLayers.firstOrNull { it.id == activeSelectionLayerId }
+    val currentScale = rememberUpdatedState(scale)
+    val currentOffset = rememberUpdatedState(offset)
+    val currentMaskLayer = rememberUpdatedState(activeMaskLayer)
     val density = LocalDensity.current
     val paddingPx = with(density) { 8.dp.toPx() }
 
@@ -744,34 +753,40 @@ private fun V2ZoomablePreview(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(8.dp)
-                .pointerInput(bitmap, paintMode, containerSize, scale, offset) {
-                    if (paintMode && activeMaskLayer != null) {
+                .pointerInput(bitmap, paintMode) {
+                    if (paintMode && currentMaskLayer.value != null) {
                         detectDragGestures(
                             onDragStart = { off ->
                                 onStrokeStart()
-                                val mask = activeMaskLayer.bitmap
+                                val mask = currentMaskLayer.value?.bitmap ?: return@detectDragGestures
                                 val mapped = PreviewGeometry(
                                     container = containerSize,
                                     imageWidth = mask.width,
                                     imageHeight = mask.height,
                                     padding = paddingPx,
-                                    zoom = scale,
-                                    pan = offset,
-                                ).viewToImage(off)
+                                    zoom = currentScale.value,
+                                    pan = currentOffset.value,
+                                ).viewToImage(off + Offset(paddingPx, paddingPx))
                                 if (mapped != null) onPaintAt(mapped.first, mapped.second)
                             },
                             onDrag = { change, _ ->
                                 change.consume()
-                                cursorPosition = change.position
-                                val mask = activeMaskLayer.bitmap
+                                val innerCenter = Offset(
+                                    (containerSize.width - paddingPx * 2f) / 2f,
+                                    (containerSize.height - paddingPx * 2f) / 2f,
+                                )
+                                cursorPosition = innerCenter +
+                                    (change.position - innerCenter - currentOffset.value) /
+                                        currentScale.value.coerceAtLeast(0.001f)
+                                val mask = currentMaskLayer.value?.bitmap ?: return@detectDragGestures
                                 val mapped = PreviewGeometry(
                                     container = containerSize,
                                     imageWidth = mask.width,
                                     imageHeight = mask.height,
                                     padding = paddingPx,
-                                    zoom = scale,
-                                    pan = offset,
-                                ).viewToImage(change.position)
+                                    zoom = currentScale.value,
+                                    pan = currentOffset.value,
+                                ).viewToImage(change.position + Offset(paddingPx, paddingPx))
                                 if (mapped != null) onPaintAt(mapped.first, mapped.second)
                             },
                             onDragEnd = { onStrokeEnd(); cursorPosition = null },
@@ -853,7 +868,16 @@ private fun V2ZoomablePreview(
         if (paintMode && cursorPosition != null && activeMaskLayer != null) {
             BrushCursorOverlay(
                 position = cursorPosition!!,
-                radiusPx = with(density) { 16.dp.toPx() },
+                radiusPx = activeMaskLayer?.let { mask ->
+                    val fitted = PreviewGeometry(
+                        container = containerSize,
+                        imageWidth = mask.bitmap.width,
+                        imageHeight = mask.bitmap.height,
+                        padding = paddingPx,
+                    ).imageRect
+                    selectionPaintSettings.sizePx.coerceAtLeast(1f) *
+                        (fitted.width / mask.bitmap.width.coerceAtLeast(1)) * 0.5f
+                } ?: 0f,
                 color = DefaultMaskTint,
                 modifier = Modifier
                     .fillMaxSize()

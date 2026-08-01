@@ -123,6 +123,7 @@ object RemasterModelSession : ModelRunnerContract {
             }
 
     fun load(context: Context, candidate: RemasterModelCandidate) {
+        if (ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster) != null) return
         val generation = commandGeneration.incrementAndGet()
         val registryLoadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
         isModelLoading = true
@@ -222,31 +223,17 @@ object RemasterModelSession : ModelRunnerContract {
 
     internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> =
         modelMutex.withLock {
+            ModelAvailabilityRegistry.loaderRejection(ModelFeature.SubjectSelection)?.let {
+                return@withLock it
+            }
             if (activeModel?.id == "edge_masker" && isModelLoaded && closeableModel != null) {
                 return@withLock ModelLoadResult.Ready(Unit)
             }
             val candidate =
                 OnDeviceRemasterModels.firstOrNull { it.id == "edge_masker" }
-                    ?: return@withLock ModelLoadResult.AssetMissing(
-                        "edge_masker catalog entry missing"
+                    ?: return@withLock ModelLoadResult.RuntimeUnavailable(
+                        "Edge Masker runner is not registered"
                     )
-            val edgeState =
-                ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]
-            if (edgeState != null) {
-                val rejected =
-                    edgeState.phase in setOf(
-                        ModelCapabilityPhase.AssetMissing,
-                        ModelCapabilityPhase.AssetInvalid,
-                        ModelCapabilityPhase.RuntimeUnavailable,
-                        ModelCapabilityPhase.ContractUnsupported,
-                        ModelCapabilityPhase.RunnerUnavailable,
-                    ) && !edgeState.executable && !edgeState.factsLoadable
-                if (rejected) {
-                    return@withLock ModelLoadResult.AssetMissing(
-                        "Edge Masker rejected by registry: phase=${edgeState.phase.name}"
-                    )
-                }
-            }
             val loadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
             activeModel = candidate
             isModelLoading = true
@@ -257,13 +244,6 @@ object RemasterModelSession : ModelRunnerContract {
                 return@withLock ModelLoadResult.UnsupportedContract(
                     "unsupported Edge Masker contract"
                 ).also {
-                    ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
-                }
-            }
-            if (!hasModelAsset(context, candidate.assetPath)) {
-                isModelLoading = false
-                lifecycle = ModelRunnerLifecycle.Failed
-                return@withLock ModelLoadResult.AssetMissing(candidate.assetPath).also {
                     ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
                 }
             }

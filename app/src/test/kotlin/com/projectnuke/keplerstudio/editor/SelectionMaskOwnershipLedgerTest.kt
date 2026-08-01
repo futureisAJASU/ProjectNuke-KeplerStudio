@@ -164,4 +164,18 @@ class SelectionMaskOwnershipLedgerTest {
         assertTrue(ledger.tryRetire(b))
         assertTrue(b.isRecycled)
     }
+
+    @Test
+    fun `mask reservation is atomic additive and owner scoped`() {
+        val ledger = SelectionMaskOwnershipLedger { 100L }
+        val first = ledger.reserve("first", 60L)!!
+        assertNull(ledger.reserve("second", 50L))
+        assertEquals(60L, ledger.reservedBytes())
+        assertEquals(1, ledger.reservedLayers())
+        first.close()
+        first.close()
+        assertEquals(0L, ledger.reservedBytes())
+        assertEquals(0, ledger.reservedLayers())
+        assertNotNull(ledger.reserve("second", 100L))
+    }
 }

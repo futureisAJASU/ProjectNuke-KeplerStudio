@@ -39,7 +39,6 @@ fun RemasterToolPanel(
     val editorState by editorViewModel.uiState.collectAsState()
     val modelCapability by com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry.state.collectAsState()
     val activeModel = RemasterModelSession.activeModel
-    val loaded = RemasterModelSession.isModelLoaded
     val flareMasker = OnDeviceRemasterModels.first { it.id == "flare_masker" }
     val flareRestorer = OnDeviceRemasterModels.first { it.id == "flare_restorer" }
     val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
@@ -52,7 +51,8 @@ fun RemasterToolPanel(
     val flareMaskerStatusLabel = flareMasker.registryStatus(flareGuardCapability)
     val flareRestorerStatusLabel = flareRestorer.registryStatus(null)
     val edgeMaskerStatusLabel = edgeMasker.registryStatus(remasterCapability)
-    val edgeLoaded = loaded && activeModel?.id == "edge_masker"
+    val edgeLoaded = remasterCapability?.phase ==
+        com.projectnuke.keplerstudio.editor.ModelCapabilityPhase.Ready
     val edgeExecutable = remasterCapability?.executable == true || edgeLoaded
     val edgeLoadingOrInferring = RemasterModelSession.isModelLoading || RemasterModelSession.isInferring
     val hasImage = editorState.previewBitmap != null || editorState.originalPreviewBitmap != null

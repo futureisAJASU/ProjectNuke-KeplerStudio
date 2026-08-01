@@ -3,7 +3,8 @@ package com.projectnuke.keplerstudio.editor
 import android.graphics.Bitmap
 import java.util.Collections
 import java.util.IdentityHashMap
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.LinkedHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -12,18 +13,26 @@ internal data class DocumentIdentity(
     val sourcePath: String?,
     val baseContentToken: String,
     val generation: String,
+    val revision: Int,
 )
 
 /**
- * A lifetime lease pinning state-owned Bitmaps so they are not recycled while a worker thread
- * copies or reads them.
- *
- * - [BitmapLease.acquire] captures the current document identity and all non-recycled Bitmaps.
- * - State updates that replace or remove leased Bitmaps register a retirement but defer
- *   recycling until [close] is called on this lease.
- * - Cancellation, failure and supersession must close in `finally`.
- * - No global lock is held during Bitmap copy, scale, render or native operations.
+ * Immutable capture of one editor state and the lease which keeps every referenced Bitmap
+ * alive.  Callers must use these fields rather than reading uiState again after acquisition.
  */
+internal class LeasedEditorSnapshot internal constructor(
+    val state: EditorUiState,
+    val identity: DocumentIdentity,
+    val previewBitmap: Bitmap?,
+    val originalPreviewBitmap: Bitmap?,
+    val selectionLayers: List<SelectionLayer>,
+    private val lease: BitmapLease,
+) : AutoCloseable {
+    val leaseId: Long get() = lease.leaseId
+    override fun close() = lease.close()
+}
+
+/** A lifetime lease pinning a precisely captured set of state-owned Bitmaps. */
 internal class BitmapLease internal constructor(
     val tag: String,
     val identity: DocumentIdentity,
@@ -31,194 +40,219 @@ internal class BitmapLease internal constructor(
     private val bitmaps: Set<Bitmap>,
     val leaseId: Long,
 ) : AutoCloseable {
-
-    /**
-     * A minimal single-Bitmap pin: blocks retirement/recycle of [bitmap] until [close].
-     * Used by transient UI consumers (e.g. histogram sampler) that hold one source Bitmap
-     * across a worker hop without claiming the broader state identity.
-     */
     internal class BitmapPin internal constructor(
         private val ledger: BitmapLeaseLedger,
-        private val bitmap: Bitmap?,
+        private val bitmap: Bitmap,
     ) : AutoCloseable {
-        @Volatile private var closed = false
-
+        private val closed = AtomicBoolean(false)
         override fun close() {
-            if (closed) return
-            closed = true
-            ledger.releasePin(bitmap)
+            if (closed.compareAndSet(false, true)) ledger.releasePin(bitmap)
         }
     }
-    @Volatile private var closed = false
+
+    private val closed = AtomicBoolean(false)
 
     fun matchesIdentity(
         sourcePath: String?,
         baseContentToken: String,
         revision: Int,
         generation: String? = null,
-    ): Boolean {
-        val g = generation ?: identity.generation
-        return identity.sourcePath == sourcePath &&
+    ): Boolean =
+        identity.sourcePath == sourcePath &&
             identity.baseContentToken == baseContentToken &&
-            identity.generation == g
-    }
+            identity.revision == revision &&
+            (generation == null || identity.generation == generation)
 
     override fun close() {
-        if (closed) return
-        closed = true
-        ledger.release(leaseId, bitmaps)
+        if (closed.compareAndSet(false, true)) ledger.release(leaseId)
     }
 
     companion object {
         fun identityBitmapSet(): MutableSet<Bitmap> =
             Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
 
-        fun acquire(
+        internal fun capture(
             tag: String,
             state: EditorUiState,
             ledger: BitmapLeaseLedger,
-        ): BitmapLease? {
-            val captured = identityBitmapSet()
-            state.previewBitmap?.takeUnless(Bitmap::isRecycled)?.let(captured::add)
-            state.originalPreviewBitmap?.takeUnless(Bitmap::isRecycled)?.let(captured::add)
-            state.selectionLayers.forEach { layer ->
-                layer.bitmap.takeUnless(Bitmap::isRecycled)?.let(captured::add)
-            }
-            if (captured.isEmpty()) return null
+            documentGeneration: String,
+        ): LeasedEditorSnapshot? = ledger.capture(tag, state, documentGeneration)
 
-            val docId = DocumentIdentity(
-                sourcePath = state.sourcePath,
-                baseContentToken = state.baseContentToken,
-                generation = ledger.nextGeneration(),
-            )
-            val leaseId = ledger.nextLeaseId()
-            ledger.registerLease(leaseId, captured, docId)
-            return BitmapLease(tag, docId, ledger, captured, leaseId)
-        }
+        /** Compatibility only for old unit tests; production callers use LeasedEditorSnapshot. */
+        fun acquire(tag: String, state: EditorUiState, ledger: BitmapLeaseLedger): BitmapLease? =
+            ledger.legacyAcquire(tag, state)
     }
 }
 
 /**
- * Ledger that defers Bitmap recycling until all state-owner refs and all leases are released.
+ * The single managed-Bitmap lifetime authority. State transitions and snapshot acquisition
+ * share this lock; no lock is held while a caller copies, scales, renders, or calls JNI.
  */
 internal class BitmapLeaseLedger {
     private val lock = ReentrantLock()
     private val leaseIdCounter = AtomicLong(1L)
-    private val generationCounter = AtomicInteger(0)
 
     private data class Slot(
-        var stateRemovedCount: Int = 0,
-        var leaseRef: Int = 0,
+        var stateRefs: Int = 0,
+        var leaseRefs: Int = 0,
+        var retired: Boolean = false,
     )
-    private data class LeaseEntry(
-        val identity: DocumentIdentity,
-        val bitmaps: MutableSet<Bitmap>,
-    )
-
+    private data class LeaseEntry(val bitmaps: MutableSet<Bitmap>)
     private val slots = IdentityHashMap<Bitmap, Slot>()
     private val leases = LinkedHashMap<Long, LeaseEntry>()
 
-    fun nextGeneration(): String = generationCounter.incrementAndGet().toString()
-    fun nextLeaseId(): Long = leaseIdCounter.getAndIncrement()
-
-    fun registerLease(leaseId: Long, bitmaps: Set<Bitmap>, identity: DocumentIdentity) {
-        lock.withLock {
-            val entry = LeaseEntry(identity, BitmapLease.identityBitmapSet())
-            for (bitmap in bitmaps) {
-                entry.bitmaps.add(bitmap)
-                val slot = slots.getOrElse(bitmap) { Slot().also { slots[bitmap] = it } }
-                slot.leaseRef++
-            }
-            leases[leaseId] = entry
+    fun capture(
+        tag: String,
+        state: EditorUiState,
+        documentGeneration: String,
+    ): LeasedEditorSnapshot? = lock.withLock {
+        val captured = BitmapLease.identityBitmapSet()
+        state.previewBitmap?.let(captured::add)
+        state.originalPreviewBitmap?.let(captured::add)
+        state.selectionLayers.forEach { captured.add(it.bitmap) }
+        if (captured.isEmpty() || captured.any { it.isRecycled }) return@withLock null
+        val identity =
+            DocumentIdentity(
+                state.sourcePath,
+                state.baseContentToken,
+                documentGeneration,
+                state.revision,
+            )
+        val leaseId = leaseIdCounter.getAndIncrement()
+        val entry = LeaseEntry(BitmapLease.identityBitmapSet())
+        captured.forEach { bitmap ->
+            entry.bitmaps.add(bitmap)
+            slots.getOrPut(bitmap) { Slot() }.leaseRefs++
         }
+        leases[leaseId] = entry
+        LeasedEditorSnapshot(
+            state = state,
+            identity = identity,
+            previewBitmap = state.previewBitmap,
+            originalPreviewBitmap = state.originalPreviewBitmap,
+            selectionLayers = state.selectionLayers,
+            lease = BitmapLease(tag, identity, this, entry.bitmaps, leaseId),
+        )
     }
 
-    fun retireStateBitmap(bitmap: Bitmap): Bitmap? {
-        if (bitmap.isRecycled) return null
-        lock.withLock {
-            val slot = slots[bitmap] ?: return bitmap
-            slot.stateRemovedCount++
-            return if (slot.leaseRef == 0) {
-                slots.remove(bitmap)
-                bitmap
-            } else {
-                null
-            }
-        }
+    internal fun legacyAcquire(tag: String, state: EditorUiState): BitmapLease? = lock.withLock {
+        val captured = BitmapLease.identityBitmapSet()
+        state.previewBitmap?.let(captured::add)
+        state.originalPreviewBitmap?.let(captured::add)
+        state.selectionLayers.forEach { captured.add(it.bitmap) }
+        if (captured.isEmpty() || captured.any { it.isRecycled }) return@withLock null
+        val id = DocumentIdentity(state.sourcePath, state.baseContentToken, "", state.revision)
+        val leaseId = leaseIdCounter.getAndIncrement()
+        val entry = LeaseEntry(captured)
+        captured.forEach { slots.getOrPut(it) { Slot() }.leaseRefs++ }
+        leases[leaseId] = entry
+        BitmapLease(tag, id, this, captured, leaseId)
     }
 
-    fun release(leaseId: Long, bitmaps: Set<Bitmap>) {
-        val toRecycle = ArrayList<Bitmap>(bitmaps.size)
-        lock.withLock {
-            leases.remove(leaseId) ?: return
-            for (bitmap in bitmaps) {
-                val slot = slots[bitmap] ?: continue
-                if (slot.leaseRef > 0) slot.leaseRef--
-                if (slot.stateRemovedCount > 0 && slot.leaseRef == 0) {
-                    slots.remove(bitmap)
-                    if (!bitmap.isRecycled) toRecycle.add(bitmap)
-                }
+    /** Must be called while the caller's state publication is still inside this lock. */
+    fun <T> withStateTransition(block: () -> T): T = lock.withLock(block)
+
+    /** Replace the one state-owner set and return only Bitmaps safe to recycle. */
+    fun replaceState(previous: EditorUiState, next: EditorUiState): List<Bitmap> = lock.withLock {
+        val before = stateBitmapSet(previous)
+        val after = stateBitmapSet(next)
+        before.forEach { bitmap ->
+            if (bitmap !in after) {
+                val slot = slots.getOrPut(bitmap) { Slot() }
+                slot.stateRefs = (slot.stateRefs - 1).coerceAtLeast(0)
+                slot.retired = true
             }
         }
-        for (b in toRecycle) {
-            try { b.recycle() } catch (_: Throwable) {}
+        after.forEach { bitmap ->
+            if (bitmap !in before) {
+                slots.getOrPut(bitmap) { Slot() }.stateRefs++
+                slots[bitmap]?.retired = false
+            }
         }
+        collectRetiredLocked(before + after)
+    }
+
+    /** Compatibility hook for narrow callers; state transitions should use [replaceState]. */
+    fun retireStateBitmap(bitmap: Bitmap): Bitmap? = lock.withLock {
+        val slot = slots[bitmap] ?: return@withLock if (!bitmap.isRecycled) bitmap else null
+        slot.stateRefs = (slot.stateRefs - 1).coerceAtLeast(0)
+        slot.retired = true
+        collectRetiredLocked(setOf(bitmap)).firstOrNull()
+    }
+
+    fun release(leaseId: Long) {
+        val toRecycle = lock.withLock {
+            val entry = leases.remove(leaseId) ?: return@withLock emptyList()
+            entry.bitmaps.forEach { bitmap ->
+                slots[bitmap]?.let { it.leaseRefs = (it.leaseRefs - 1).coerceAtLeast(0) }
+            }
+            collectRetiredLocked(entry.bitmaps)
+        }
+        recycle(toRecycle)
+    }
+
+    fun pinBitmap(bitmap: Bitmap?): BitmapLease.BitmapPin? = lock.withLock {
+        val value = bitmap ?: return@withLock null
+        if (value.isRecycled) return@withLock null
+        slots.getOrPut(value) { Slot() }.leaseRefs++
+        BitmapLease.BitmapPin(this, value)
+    }
+
+    internal fun releasePin(bitmap: Bitmap) {
+        val toRecycle = lock.withLock {
+            slots[bitmap]?.let { it.leaseRefs = (it.leaseRefs - 1).coerceAtLeast(0) }
+            collectRetiredLocked(setOf(bitmap))
+        }
+        recycle(toRecycle)
+    }
+
+    fun releaseState(state: EditorUiState) {
+        val toRecycle = lock.withLock {
+            val set = stateBitmapSet(state)
+            set.forEach { bitmap ->
+            slots[bitmap]?.let { it.stateRefs = (it.stateRefs - 1).coerceAtLeast(0) }
+            slots[bitmap]?.retired = true
+            }
+            collectRetiredLocked(set)
+        }
+        recycle(toRecycle)
     }
 
     fun releaseAll() {
-        val toRecycle = ArrayList<Bitmap>()
-        lock.withLock {
+        val toRecycle = lock.withLock {
+            val all = slots.keys.toList()
             leases.clear()
-            for (entry in slots.entries.toList()) {
-                val bitmap = entry.key
-                val slot = entry.value
-                slot.leaseRef = 0
-                slot.stateRemovedCount = 0
-                slots.remove(bitmap)
-                if (!bitmap.isRecycled) toRecycle.add(bitmap)
-            }
-        }
-        for (b in toRecycle) {
-            try { b.recycle() } catch (_: Throwable) {}
-        }
-    }
-
-    /**
-     * Pin a single Bitmap against retirement/recycle until [BitmapLease.BitmapPin.close].
-     * Returns null if [bitmap] is recycled or null. The pin is identity-keyed: equal
-     * Bitmap references share the same slot, so concurrent pin callers are ref-counted.
-     */
-    fun pinBitmap(bitmap: Bitmap?): BitmapLease.BitmapPin? {
-        if (bitmap == null || bitmap.isRecycled) return null
-        lock.withLock {
-            val slot = slots.getOrElse(bitmap) { Slot().also { slots[bitmap] = it } }
-            slot.leaseRef++
-            return BitmapLease.BitmapPin(this, bitmap)
-        }
-    }
-
-    internal fun releasePin(bitmap: Bitmap?) {
-        if (bitmap == null) return
-        val toRecycle = ArrayList<Bitmap>(1)
-        lock.withLock {
-            val slot = slots[bitmap] ?: return
-            if (slot.leaseRef > 0) slot.leaseRef--
-            if (slot.stateRemovedCount > 0 && slot.leaseRef == 0) {
-                slots.remove(bitmap)
-                if (!bitmap.isRecycled) toRecycle.add(bitmap)
-            }
-        }
-        for (b in toRecycle) {
-            try { b.recycle() } catch (_: Throwable) {}
-        }
-    }
-
-    fun resetForTest() {
-        lock.withLock {
             slots.clear()
-            leases.clear()
-            leaseIdCounter.set(1L)
-            generationCounter.set(0)
+            all
         }
+        recycle(toRecycle)
+    }
+
+    fun resetForTest() = lock.withLock {
+        slots.clear()
+        leases.clear()
+        leaseIdCounter.set(1L)
+    }
+
+    private fun stateBitmapSet(state: EditorUiState): Set<Bitmap> = BitmapLease.identityBitmapSet().apply {
+        state.previewBitmap?.let(::add)
+        state.originalPreviewBitmap?.let(::add)
+        state.selectionLayers.forEach { add(it.bitmap) }
+    }
+
+    private fun collectRetiredLocked(candidates: Set<Bitmap>): List<Bitmap> {
+        val result = ArrayList<Bitmap>()
+        candidates.forEach { bitmap ->
+            val slot = slots[bitmap] ?: return@forEach
+            if (slot.retired && slot.stateRefs == 0 && slot.leaseRefs == 0) {
+                slots.remove(bitmap)
+                if (!bitmap.isRecycled) result += bitmap
+            }
+        }
+        return result
+    }
+
+    private fun recycle(bitmaps: List<Bitmap>) {
+        bitmaps.forEach { bitmap -> runCatching { if (!bitmap.isRecycled) bitmap.recycle() } }
     }
 }

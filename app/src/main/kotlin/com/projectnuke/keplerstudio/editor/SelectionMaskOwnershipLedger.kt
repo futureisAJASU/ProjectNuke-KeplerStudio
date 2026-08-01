@@ -3,6 +3,9 @@ package com.projectnuke.keplerstudio.editor
 import android.graphics.Bitmap
 import java.util.EnumMap
 import java.util.IdentityHashMap
+import java.util.LinkedHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -24,8 +27,15 @@ import kotlin.concurrent.withLock
  * - Force typed ownership at every future mask-reference site by requiring
  *   [acquire] to declare a [MaskOwnerKind].
  */
-internal class SelectionMaskOwnershipLedger {
+internal class SelectionMaskOwnershipLedger(
+    private val byteBudget: () -> Long = { Long.MAX_VALUE },
+) {
     private val lock = ReentrantLock()
+    private val reservationIds = AtomicLong(1L)
+    private data class ReservationEntry(val owner: String, val bytes: Long, val layers: Int)
+    private val reservations = LinkedHashMap<Long, ReservationEntry>()
+    private var reservedBytes: Long = 0L
+    private var reservedLayers: Int = 0
 
     private data class Slot(
         val owners: EnumMap<MaskOwnerKind, Int> = EnumMap(MaskOwnerKind::class.java),
@@ -35,6 +45,32 @@ internal class SelectionMaskOwnershipLedger {
     }
 
     private val slots = IdentityHashMap<Bitmap, Slot>()
+
+    fun reserve(owner: String, bytes: Long, layers: Int = 1): MaskReservation? {
+        if (owner.isBlank() || bytes <= 0L || layers <= 0) return null
+        lock.withLock {
+            val limit = byteBudget().coerceAtLeast(0L)
+            if (bytes > limit - reservedBytes) return null
+            val id = reservationIds.getAndIncrement()
+            reservations[id] = ReservationEntry(owner, bytes, layers)
+            reservedBytes += bytes
+            reservedLayers += layers
+            return MaskReservation(this, id, owner, bytes, layers)
+        }
+    }
+
+    fun reservedBytes(): Long = lock.withLock { reservedBytes }
+    fun reservedLayers(): Int = lock.withLock { reservedLayers }
+
+    internal fun releaseReservation(id: Long, owner: String, bytes: Long, layers: Int) {
+        lock.withLock {
+            val entry = reservations[id] ?: return
+            if (entry.owner != owner || entry.bytes != bytes || entry.layers != layers) return
+            reservations.remove(id)
+            reservedBytes = (reservedBytes - bytes).coerceAtLeast(0L)
+            reservedLayers = (reservedLayers - layers).coerceAtLeast(0)
+        }
+    }
 
     fun acquire(bitmap: Bitmap?, kind: MaskOwnerKind): MaskOwnerHandle? {
         if (bitmap == null || bitmap.isRecycled) return null
@@ -86,7 +122,13 @@ internal class SelectionMaskOwnershipLedger {
     }
 
     fun resetForTest() {
-        lock.withLock { slots.clear() }
+        lock.withLock {
+            slots.clear()
+            reservations.clear()
+            reservedBytes = 0L
+            reservedLayers = 0
+            reservationIds.set(1L)
+        }
     }
 
     /**
@@ -107,6 +149,19 @@ internal class SelectionMaskOwnershipLedger {
                 slots.remove(bitmap)
             }
         }
+    }
+}
+
+internal class MaskReservation internal constructor(
+    private val ledger: SelectionMaskOwnershipLedger,
+    private val id: Long,
+    private val owner: String,
+    private val bytes: Long,
+    private val layers: Int,
+) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+    override fun close() {
+        if (closed.compareAndSet(false, true)) ledger.releaseReservation(id, owner, bytes, layers)
     }
 }
 

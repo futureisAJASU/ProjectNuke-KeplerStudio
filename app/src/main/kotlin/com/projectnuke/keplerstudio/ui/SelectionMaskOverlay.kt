@@ -67,17 +67,20 @@ fun SelectionMaskOverlay(
     // Non-inverted: RGB constant, alpha = overlayAlpha * I/255
     // Inverted:     RGB constant, alpha = overlayAlpha * (1 - I/255)
     val tA = overlayAlpha
-    val aMul = if (inverted) -tA / 255f else tA / 255f
-    val aAdd = if (inverted) tA else 0f
+    // Android ColorMatrix operates on 0..255 channels, while Compose Color stores 0..1.
+    // Keep the conversion explicit so the tint is not rendered nearly black and the alpha
+    // remains maskIntensity * layerOpacity * overlayOpacity.
+    val aMul = if (inverted) -tA else tA
+    val aAdd = if (inverted) tA * 255f else 0f
 
     val paint = remember(maskBitmap, tint, inverted, overlayAlpha) {
         Paint(Paint.FILTER_BITMAP_FLAG).apply {
             colorFilter = ColorMatrixColorFilter(
                 ColorMatrix(
                     floatArrayOf(
-                        0f, 0f, 0f, 0f, tint.red,    // R = tR (constant)
-                        0f, 0f, 0f, 0f, tint.green,  // G = tG (constant)
-                        0f, 0f, 0f, 0f, tint.blue,   // B = tB (constant)
+                        0f, 0f, 0f, 0f, tint.red * 255f,    // R = tR (constant)
+                        0f, 0f, 0f, 0f, tint.green * 255f,  // G = tG (constant)
+                        0f, 0f, 0f, 0f, tint.blue * 255f,   // B = tB (constant)
                         aMul, 0f, 0f, 0f, aAdd,       // A = aMul*R + aAdd
                     ),
                 ),

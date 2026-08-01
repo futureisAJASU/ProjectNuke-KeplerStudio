@@ -1,10 +1,10 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
-import com.projectnuke.keplerstudio.editor.BitmapLease
+import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
-import com.projectnuke.keplerstudio.editor.acquireBitmapLease
+import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
@@ -95,21 +95,20 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
     consumeUndoSnapshot: () -> Unit,
     releaseUndoSnapshot: () -> Unit,
 ) {
-    var lease: BitmapLease? = null
+    var leasedSnapshot: LeasedEditorSnapshot? = null
     var ownedCopy: Bitmap? = null
     var undoSnapshotOwned: EditorHistorySnapshot? = originalUndoSnapshotRef()
     consumeUndoSnapshot()
     try {
         val prepared = withContext(Dispatchers.Default) {
             if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
-            lease = acquireBitmapLease("duplicateSelection") ?: return@withContext null
-            val workerState = uiState.value
+            leasedSnapshot = acquireEditorSnapshot("duplicateSelection") ?: return@withContext null
+            val workerState = leasedSnapshot!!.state
             if (workerState.sourcePath != sourcePath) return@withContext null
             if (workerState.baseContentToken != baseContentToken) return@withContext null
             val workerActive = workerState.selectionLayers.firstOrNull { it.id == activeId }
                 ?: return@withContext null
-            val source = if (workerActive.bitmap === sourceBitmap && !sourceBitmap.isRecycled) sourceBitmap else workerActive.bitmap
-            ownedCopy = source.copyOrThrow(sourceConfig, true)
+            ownedCopy = workerActive.bitmap.copyOrThrow(sourceConfig, true)
             ownedCopy
         }
         if (prepared == null) return
@@ -170,7 +169,7 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
                 requestAllocationRecovery(MemoryRetryAction.DuplicateSelection, t.requiredBytes)
         }
     } finally {
-        lease?.close()
+        leasedSnapshot?.close()
         ownedCopy?.takeIf { !it.isRecycled }?.recycle()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
@@ -253,15 +252,15 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
     consumeUndoSnapshot: () -> Unit,
     releaseUndoSnapshot: () -> Unit,
 ) {
-    var lease: BitmapLease? = null
+    var leasedSnapshot: LeasedEditorSnapshot? = null
     var ownedCopy: Bitmap? = null
     var undoSnapshotOwned: EditorHistorySnapshot? = originalUndoSnapshotRef()
     consumeUndoSnapshot()
     try {
         val prepared = withContext(Dispatchers.Default) {
             if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
-            lease = acquireBitmapLease("createBackgroundSelection") ?: return@withContext null
-            val workerState = uiState.value
+            leasedSnapshot = acquireEditorSnapshot("createBackgroundSelection") ?: return@withContext null
+            val workerState = leasedSnapshot!!.state
             if (workerState.sourcePath != sourcePath) return@withContext null
             if (workerState.baseContentToken != baseContentToken) return@withContext null
             val workerActive = workerState.selectionLayers.firstOrNull { it.id == activeId }
@@ -332,7 +331,7 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
                 requestAllocationRecovery(MemoryRetryAction.BackgroundSelection, t.requiredBytes)
         }
     } finally {
-        lease?.close()
+        leasedSnapshot?.close()
         ownedCopy?.takeIf { !it.isRecycled }?.recycle()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null

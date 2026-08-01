@@ -15,8 +15,8 @@ import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.RenderFailedException
 import com.projectnuke.keplerstudio.editor.RenderOperation
 import com.projectnuke.keplerstudio.editor.RenderResult
-import com.projectnuke.keplerstudio.editor.BitmapLease
-import com.projectnuke.keplerstudio.editor.acquireBitmapLease
+import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
+import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -130,7 +130,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     releaseUndoSnapshot: () -> Unit,
     prepareTracker: com.projectnuke.keplerstudio.editor.MemoryTrackerScope?,
 ) {
-    var lease: BitmapLease? = null
+    var leasedSnapshot: LeasedEditorSnapshot? = null
     var ownedBase: Bitmap? = null
     var ownedLayers: List<SelectionLayer> = emptyList()
     var bakedOriginal: Bitmap? = null
@@ -156,8 +156,8 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     try {
         val prepared = withContext(Dispatchers.Default) {
             if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
-            lease = acquireBitmapLease("selectionNativeBake") ?: return@withContext null
-            val workerState = uiState.value
+            leasedSnapshot = acquireEditorSnapshot("selectionNativeBake") ?: return@withContext null
+            val workerState = leasedSnapshot!!.state
             if (workerState.sourcePath != sourcePath) return@withContext null
             if (workerState.baseContentToken != baseContentToken) return@withContext null
             if (workerState.selectionLayers != capturedSelectionLayers) return@withContext null
@@ -169,7 +169,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
                 baseOriginal.copyOrThrow().also { bakeTracker?.track(it, "selectionBake:base") }
             ownedLayers =
                 try {
-                    enabledLayers.copyBitmapsOwned()
+                workerState.selectionLayers.filter { it.enabled }.copyBitmapsOwned()
                 } catch (failure: Throwable) {
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null
@@ -300,7 +300,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
         releaseUndoSnapshot()
         bakedOriginal?.takeIf { !it.isRecycled }?.recycle()
         renderedPreview?.takeIf { !it.isRecycled }?.recycle()
-        lease?.close()
+        leasedSnapshot?.close()
         bakeTracker?.end()
     }
 }

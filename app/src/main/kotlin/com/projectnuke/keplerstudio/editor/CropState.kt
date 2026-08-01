@@ -5,8 +5,8 @@ import kotlin.math.min
 import org.json.JSONObject
 
 enum class CropAspectRatio(val label: String, val ratio: Float?) {
-    Free("자유", null),
-    Original("원본", -1f),
+    Free("?먯쑀", null),
+    Original("?먮낯", -1f),
     Square("1:1", 1f),
     FourThree("4:3", 4f / 3f),
     ThreeFour("3:4", 3f / 4f),
@@ -22,44 +22,17 @@ data class CropState(
     val cropBottom: Float = 1f,
     val rotationDegrees: Int = 0,
     val straightenDegrees: Float = 0f,
-    val flipHorizontal: Boolean = false
+    val flipHorizontal: Boolean = false,
 ) {
     val cropWidth: Float get() = (cropRight - cropLeft).coerceIn(0f, 1f)
     val cropHeight: Float get() = (cropBottom - cropTop).coerceIn(0f, 1f)
-
-    fun validate(): CropState {
-        val fixedLeft = if (cropLeft.isFinite()) cropLeft else 0f
-        val fixedTop = if (cropTop.isFinite()) cropTop else 0f
-        val fixedRight = if (cropRight.isFinite()) cropRight else 1f
-        val fixedBottom = if (cropBottom.isFinite()) cropBottom else 1f
-        val fixedStraighten = if (straightenDegrees.isFinite()) straightenDegrees else 0f
-
-        val (l, r) = if (fixedLeft > fixedRight) fixedRight to fixedLeft else fixedLeft to fixedRight
-        val (t, b) = if (fixedTop > fixedBottom) fixedBottom to fixedTop else fixedTop to fixedBottom
-
-        val width = r - l
-        val height = b - t
-
-        val (cl, cr) = if (width <= 0f) 0f to 1f else l to r
-        val (ct, cb) = if (height <= 0f) 0f to 1f else t to b
-
-        return copy(
-            cropLeft = cl,
-            cropTop = ct,
-            cropRight = cr,
-            cropBottom = cb,
-            straightenDegrees = fixedStraighten
-        )
-    }
+    fun validate(): CropState = normalized(0.001f)
 }
 
-fun CropState.isFinite(): Boolean {
-    return cropLeft.isFinite() && cropTop.isFinite() &&
-            cropRight.isFinite() && cropBottom.isFinite() &&
-            straightenDegrees.isFinite() &&
-            cropLeft <= cropRight && cropTop <= cropBottom &&
-            (cropRight - cropLeft) > 0f && (cropBottom - cropTop) > 0f
-}
+fun CropState.isFinite(): Boolean =
+    cropLeft.isFinite() && cropTop.isFinite() && cropRight.isFinite() && cropBottom.isFinite() &&
+        straightenDegrees.isFinite() && cropLeft in 0f..1f && cropTop in 0f..1f &&
+        cropRight in 0f..1f && cropBottom in 0f..1f && cropLeft < cropRight && cropTop < cropBottom
 
 internal fun CropState.toJsonObject(): JSONObject = JSONObject().apply {
     put("aspectRatio", aspectRatio.name)
@@ -73,8 +46,9 @@ internal fun CropState.toJsonObject(): JSONObject = JSONObject().apply {
 }
 
 internal fun parseCropStateFromJson(json: JSONObject): CropState? = runCatching {
-    val aspectName = json.optString("aspectRatio", CropAspectRatio.Original.name)
-    val aspect = runCatching { CropAspectRatio.valueOf(aspectName) }.getOrDefault(CropAspectRatio.Original)
+    val aspect = runCatching {
+        CropAspectRatio.valueOf(json.optString("aspectRatio", CropAspectRatio.Original.name))
+    }.getOrDefault(CropAspectRatio.Original)
     CropState(
         aspectRatio = aspect,
         cropLeft = json.optDouble("cropLeft", 0.0).toFiniteOrDefault(0f),
@@ -83,50 +57,39 @@ internal fun parseCropStateFromJson(json: JSONObject): CropState? = runCatching 
         cropBottom = json.optDouble("cropBottom", 1.0).toFiniteOrDefault(1f),
         rotationDegrees = json.optInt("rotationDegrees", 0),
         straightenDegrees = json.optDouble("straightenDegrees", 0.0).toFiniteOrDefault(0f),
-        flipHorizontal = json.optBoolean("flipHorizontal", false)
-    )
+        flipHorizontal = json.optBoolean("flipHorizontal", false),
+    ).validate()
 }.getOrNull()
 
-private fun Double.toFiniteOrDefault(default: Float): Float {
-    return toFloat().let { if (it.isFinite()) it else default }
-}
+private fun Double.toFiniteOrDefault(default: Float): Float = toFloat().let { if (it.isFinite()) it else default }
 
 private fun normalizeRange(a: Float, b: Float, minSize: Float): Pair<Float, Float> {
-    val safeMinSize = minSize.coerceIn(0f, 1f)
+    val safeMinSize = minSize.takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0.001f
     var start = min(a, b).coerceIn(0f, 1f)
     var end = max(a, b).coerceIn(0f, 1f)
-
     if (end - start < safeMinSize) {
         val center = ((start + end) * 0.5f).coerceIn(0f, 1f)
-        start = center - safeMinSize * 0.5f
-        end = center + safeMinSize * 0.5f
-
-        if (start < 0f) {
-            end -= start
-            start = 0f
-        }
-        if (end > 1f) {
-            start -= end - 1f
-            end = 1f
-        }
-
-        start = start.coerceIn(0f, 1f)
-        end = end.coerceIn(0f, 1f)
+        start = (center - safeMinSize * 0.5f).coerceAtLeast(0f)
+        end = (start + safeMinSize).coerceAtMost(1f)
+        start = (end - safeMinSize).coerceAtLeast(0f)
     }
-
     return start to end
 }
 
 fun CropState.normalized(minSize: Float = 0.08f): CropState {
-    val (left, right) = normalizeRange(cropLeft, cropRight, minSize)
-    val (top, bottom) = normalizeRange(cropTop, cropBottom, minSize)
+    val safeLeft = cropLeft.takeIf { it.isFinite() } ?: 0f
+    val safeTop = cropTop.takeIf { it.isFinite() } ?: 0f
+    val safeRight = cropRight.takeIf { it.isFinite() } ?: 1f
+    val safeBottom = cropBottom.takeIf { it.isFinite() } ?: 1f
+    val (left, right) = normalizeRange(safeLeft, safeRight, minSize)
+    val (top, bottom) = normalizeRange(safeTop, safeBottom, minSize)
     return copy(
         cropLeft = left,
         cropTop = top,
         cropRight = right,
         cropBottom = bottom,
         rotationDegrees = ((rotationDegrees % 360) + 360) % 360,
-        straightenDegrees = straightenDegrees.coerceIn(-45f, 45f)
+        straightenDegrees = (straightenDegrees.takeIf { it.isFinite() } ?: 0f).coerceIn(-45f, 45f),
     )
 }
 
@@ -137,9 +100,7 @@ fun centeredCropForAspect(imageWidth: Int, imageHeight: Int, aspect: CropAspectR
         CropAspectRatio.Original -> imageRatio
         else -> aspect.ratio
     }
-    if (targetRatio == null || targetRatio <= 0f) {
-        return CropState(aspectRatio = aspect)
-    }
+    if (targetRatio == null || targetRatio <= 0f) return CropState(aspectRatio = aspect)
     val normalizedWidth: Float
     val normalizedHeight: Float
     if (imageRatio > targetRatio) {
@@ -156,6 +117,6 @@ fun centeredCropForAspect(imageWidth: Int, imageHeight: Int, aspect: CropAspectR
         cropLeft = left,
         cropTop = top,
         cropRight = left + normalizedWidth,
-        cropBottom = top + normalizedHeight
+        cropBottom = top + normalizedHeight,
     )
 }

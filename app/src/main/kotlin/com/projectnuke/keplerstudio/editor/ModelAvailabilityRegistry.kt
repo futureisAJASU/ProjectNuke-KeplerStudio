@@ -233,6 +233,33 @@ object ModelAvailabilityRegistry {
     fun snapshot(): ModelCapabilitySnapshot = ModelCapabilitySnapshot(mutable.value)
     fun routeAvailability(): RouteModelAvailability = snapshot().routeAvailability()
 
+    /**
+     * Loader gate.  A loader may proceed only after the registry has completed probing and
+     * validated the asset/runtime/contract facts.  Null means the registry authorizes the
+     * loader; a non-null result is the exact rejection category to return to the caller.
+     */
+    fun loaderRejection(feature: ModelFeature): ModelLoadResult<Unit>? {
+        val capability = state.value[feature] ?: return ModelLoadResult.RuntimeUnavailable("capability unavailable")
+        return when (capability.phase) {
+            ModelCapabilityPhase.Unknown,
+            ModelCapabilityPhase.Probing,
+            ModelCapabilityPhase.Loading ->
+                ModelLoadResult.RuntimeUnavailable("model capability validation is incomplete")
+            ModelCapabilityPhase.AssetMissing -> ModelLoadResult.AssetMissing(capability.lastFailure?.detail)
+            ModelCapabilityPhase.AssetInvalid -> ModelLoadResult.AssetInvalid(capability.lastFailure?.detail ?: "validated asset is invalid")
+            ModelCapabilityPhase.RuntimeUnavailable,
+            ModelCapabilityPhase.RunnerUnavailable ->
+                ModelLoadResult.RuntimeUnavailable(capability.lastFailure?.detail ?: "model runtime unavailable")
+            ModelCapabilityPhase.ContractUnsupported ->
+                ModelLoadResult.UnsupportedContract(capability.lastFailure?.detail ?: "model contract unsupported")
+            ModelCapabilityPhase.Failed -> ModelLoadResult.LoadFailed(capability.lastFailure?.detail ?: "model load failed")
+            ModelCapabilityPhase.Ready -> null
+            ModelCapabilityPhase.Loadable,
+            ModelCapabilityPhase.Unloaded -> if (capability.factsLoadable) null
+            else ModelLoadResult.RuntimeUnavailable("model capability facts are incomplete")
+        }
+    }
+
     fun beginProbe(): Long = probeGeneration.incrementAndGet().also { generation ->
         applyToFeatures(
             ModelFeature.entries,

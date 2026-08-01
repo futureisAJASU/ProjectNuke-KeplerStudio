@@ -201,7 +201,7 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
         rotationDegrees = cropObject.requiredInt("rotationDegrees"),
         straightenDegrees = cropObject.requiredFloat("straightenDegrees", -45f..45f),
         flipHorizontal = cropObject.requiredBoolean("flipHorizontal")
-    )
+    ).validate()
     if (cropState.rotationDegrees !in 0..270 || cropState.rotationDegrees % 90 != 0 ||
         cropState.cropLeft >= cropState.cropRight || cropState.cropTop >= cropState.cropBottom) return null
     val presetObject = json.optJSONObject("presetLook")

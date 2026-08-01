@@ -226,4 +226,36 @@ class BitmapLeaseTest {
         pin.close()
         assertTrue(bitmap.isRecycled)
     }
+
+    @Test
+    fun `atomic snapshot pins exact state across replacement and re adoption`() {
+        val oldBitmap = createTestBitmap()
+        val newBitmap = createTestBitmap()
+        val oldState = EditorUiState(previewBitmap = oldBitmap, revision = 7)
+        val newState = EditorUiState(previewBitmap = newBitmap, revision = 8)
+        ledger.replaceState(EditorUiState(), oldState).forEach { it.recycle() }
+        val snapshot = ledger.capture("atomic", oldState, "document-1")!!
+
+        assertTrue(ledger.replaceState(oldState, newState).isEmpty())
+        assertFalse(oldBitmap.isRecycled)
+        ledger.replaceState(newState, oldState).forEach { it.recycle() }
+        snapshot.close()
+        assertFalse(oldBitmap.isRecycled, "re-adoption cancels retirement")
+        ledger.replaceState(oldState, EditorUiState()).forEach { it.recycle() }
+        assertTrue(oldBitmap.isRecycled)
+        ledger.replaceState(newState, EditorUiState()).forEach { it.recycle() }
+        assertTrue(newBitmap.isRecycled)
+    }
+
+    @Test
+    fun `atomic snapshot deduplicates same bitmap in state fields`() {
+        val bitmap = createTestBitmap()
+        val state = EditorUiState(previewBitmap = bitmap, originalPreviewBitmap = bitmap)
+        ledger.replaceState(EditorUiState(), state).forEach { it.recycle() }
+        val snapshot = ledger.capture("duplicate", state, "document-1")!!
+        ledger.replaceState(state, EditorUiState()).forEach { it.recycle() }
+        assertFalse(bitmap.isRecycled)
+        snapshot.close()
+        assertTrue(bitmap.isRecycled)
+    }
 }

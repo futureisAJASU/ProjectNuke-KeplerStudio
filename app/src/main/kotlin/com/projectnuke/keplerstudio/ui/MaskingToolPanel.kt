@@ -46,11 +46,10 @@ fun MaskingToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     val settings = state.selectionPaintSettings
     val context = LocalContext.current
     val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
-    val edgeLoaded = RemasterModelSession.isModelLoaded && RemasterModelSession.activeModel?.id == edgeMasker.id
     val modelCapability by com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry.state.collectAsState()
 val edgeModelCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.SubjectSelection]
     val edgeAvailable = edgeModelCapability?.executable == true || edgeMasker.canExecuteFromRegistry(edgeModelCapability)
-    val edgeExecutable = edgeAvailable || edgeLoaded
+    val edgeExecutable = edgeAvailable
     val hasImage = state.previewBitmap != null || state.originalPreviewBitmap != null
     val actionsEnabled = !state.isBusy || editorViewModel.isBusyOwnedByMaskSupersedable()
 

@@ -507,8 +507,12 @@ fun EditorViewModel.updateSelectionPaintSettings(
 }
 
 fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    if (isShuttingDown()) return
     if (!hasActiveBrushStroke()) return
+    if (isBrushPreparing()) {
+        queueBrushPoint(maskX, maskY)
+        return
+    }
     val state = uiState.value
     val activeId = state.activeSelectionLayerId
     val layer = state.selectionLayers.firstOrNull { it.id == activeId }
