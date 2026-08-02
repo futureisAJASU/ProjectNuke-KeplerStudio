@@ -11,6 +11,8 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
+import com.projectnuke.keplerstudio.editor.OwnedHandoff
+import com.projectnuke.keplerstudio.editor.OwnedRenderSuccess
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
@@ -137,6 +139,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             var remasteredOriginal: Bitmap? = null
             var renderedPreview: Bitmap? = null
             var previewSuccess: RenderResult.Success? = null
+            val previewRenderSlot = OwnedHandoff<OwnedRenderSuccess>()
             var featureMaskSummary: FeatureMaskSummary? = null
             var pendingHistoryOwned: PendingHistorySnapshot? = pendingHistory
             pendingHistory = null
@@ -256,8 +259,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
 
                 withContext(Dispatchers.Default) {
                     val base = remasteredOriginal ?: error("missing mask-aware render")
-                    previewSuccess =
-                        EditorRenderer.render(
+                    val success = EditorRenderer.render(
                             createRenderRequest(
                                 state = current,
                                 operation = RenderOperation.Remaster,
@@ -276,10 +278,12 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                                     ),
                             )
                         }
-                    val created = checkNotNull(previewSuccess).output
-                    renderedPreview = created
-                    remasterTracker?.track(created, "remaster:preview")
+                    previewRenderSlot.publish(OwnedRenderSuccess(success))
                 }
+                val previewOwner = checkNotNull(previewRenderSlot.take())
+                previewSuccess = previewOwner.result
+                renderedPreview = checkNotNull(previewOwner.takeOutput())
+                remasterTracker?.track(checkNotNull(renderedPreview), "remaster:preview")
 
                 val adoptionIdentityUnchanged =
                     !isShuttingDown() &&
@@ -402,6 +406,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
                 }
             } finally {
+                previewRenderSlot.close()
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
                 remasteredOriginal?.takeIf { !it.isRecycled }?.recycle()
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
