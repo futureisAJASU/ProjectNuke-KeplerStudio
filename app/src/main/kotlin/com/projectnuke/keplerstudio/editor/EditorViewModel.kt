@@ -2489,6 +2489,44 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    internal fun applyAsyncMetadataEdit(
+        tag: String,
+        transform: (EditorUiState) -> EditorUiState,
+    ): Boolean {
+        val leased = acquireEditorSnapshot(tag) ?: return false
+        val startIdentity = leased.identity
+        val pending = prepareHistorySnapshot(tag, leased)
+        viewModelScope.launch(Dispatchers.Default) {
+            var snapshot: EditorHistorySnapshot? = null
+            try {
+                snapshot = pending.await()
+                withContext(Dispatchers.Main) {
+                    val current = _uiState.value
+                    val currentIdentity =
+                        current.sourcePath == startIdentity.sourcePath &&
+                            current.baseContentToken == startIdentity.baseContentToken &&
+                            current.revision == startIdentity.revision &&
+                            historyCoordinator.currentGeneration() == startIdentity.generation
+                    if (snapshot != null && currentIdentity) {
+                        updateUiStateAndRecycleReplaced { state ->
+                            transform(state).copy(revision = state.revision + 1)
+                        }
+                        settleAdoptedEditHistory(snapshot)
+                        snapshot = null
+                        forceDraftSaveAsync()
+                    }
+                }
+            } catch (_: CancellationException) {
+                throw CancellationException()
+            } finally {
+                snapshot?.let(::recycleHistorySnapshot)
+                pending.close()
+                leased.close()
+            }
+        }
+        return true
+    }
+
     internal fun captureCurrentHistorySnapshot(
         storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact
     ): EditorHistorySnapshot? {

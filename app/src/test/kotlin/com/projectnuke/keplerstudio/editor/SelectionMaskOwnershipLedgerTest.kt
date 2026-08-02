@@ -178,4 +178,25 @@ class SelectionMaskOwnershipLedgerTest {
         assertEquals(0, ledger.reservedLayers())
         assertNotNull(ledger.reserve("second", 100L))
     }
+
+    @Test
+    fun `active mask ownership consumes additive byte and layer admission`() {
+        val ledger =
+            SelectionMaskOwnershipLedger(
+                byteBudget = { 100L },
+                layerBudget = { 2 },
+            )
+        val bitmap = bitmap(4, 4)
+        val layer = SelectionLayer("active", "active", SelectionLayerKind.Brush, bitmap)
+
+        ledger.reconcileActiveState(listOf(layer))
+
+        assertEquals(BitmapMemoryBudget.bytes(bitmap), ledger.activeBytes())
+        assertEquals(1, ledger.activeLayers())
+        assertNull(ledger.reserve("pending", 40L))
+
+        ledger.reconcileActiveState(emptyList())
+        ledger.reserve("pending", 40L)!!.close()
+        bitmap.recycle()
+    }
 }
