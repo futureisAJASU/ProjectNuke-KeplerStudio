@@ -125,6 +125,7 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
                 "duplicate:$activeId",
                 workerActive.bitmap,
                 sourceConfig,
+                documentLayerDelta = 1,
             ) ?: throw BitmapAllocationRejectedException(
                 BitmapMemoryBudget.bytes(workerActive.bitmap.width, workerActive.bitmap.height, sourceConfig)
             )
@@ -302,6 +303,7 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
                 "background:$activeId",
                 source,
                 sourceConfig,
+                documentLayerDelta = 1,
             ) ?: throw BitmapAllocationRejectedException(
                 BitmapMemoryBudget.bytes(source.width, source.height, sourceConfig)
             )

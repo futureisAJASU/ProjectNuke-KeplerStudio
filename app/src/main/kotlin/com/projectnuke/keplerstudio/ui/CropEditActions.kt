@@ -111,32 +111,12 @@ fun EditorViewModel.autoStraightenCrop() {
     }
     val cropToken = beginCropOperation()
     val cropTracker = beginMemoryTracking("autoStraightenCrop", snapshotState = "analyzing")
-    val input =
-        runCatching { bitmap.copyOrThrow(mutable = false) }
-            .getOrElse { failure ->
-                cropTracker?.end()
-                sourceSnapshot.close()
-                updateUiState {
-                    it.copy(
-                        message =
-                            if (failure is BitmapAllocationRejectedException)
-                                "메모리가 부족하여 기울기 보정 이미지를 준비하지 못했습니다."
-                            else "기울기 보정용 이미지를 준비하지 못했습니다."
-                    )
-                }
-                if (failure is BitmapAllocationRejectedException)
-                    requestAllocationRecovery(
-                        MemoryRetryAction.AutoStraightenCrop,
-                        failure.requiredBytes,
-                    )
-                return
-            }
-    cropTracker?.track(input, "autoStraightenCrop:input")
+    var input: Bitmap? = null
     cropJob?.cancel()
     val handoff =
         PreparedResourceHandoff.create(
             "autoStraighten",
-            { if (!input.isRecycled) input.recycle() },
+            { input?.takeIf { !it.isRecycled }?.recycle(); input = null },
             { cropTracker?.end() },
             { sourceSnapshot.close() },
         )
@@ -144,8 +124,12 @@ fun EditorViewModel.autoStraightenCrop() {
         viewModelScope.launch {
             if (!handoff.claimForChild()) return@launch
             try {
+                input = withContext(Dispatchers.Default) { bitmap.copyOrThrow(mutable = false) }
+                cropTracker?.track(checkNotNull(input), "autoStraightenCrop:input")
                 val angle =
-                    withContext(Dispatchers.Default) { estimateAutoStraightenDegreesV0(input) }
+                    withContext(Dispatchers.Default) {
+                        estimateAutoStraightenDegreesV0(checkNotNull(input))
+                    }
                 if (isCropResultCurrent(cropToken, state.revision)) {
                     updateUiState { current ->
                         current.copy(
@@ -159,7 +143,16 @@ fun EditorViewModel.autoStraightenCrop() {
                 throw ce
             } catch (t: Throwable) {
                 if (isCropResultCurrent(cropToken, state.revision))
-                    updateUiState { it.copy(message = "기울기 보정에 실패했습니다: ${t.message}") }
+                    updateUiState {
+                        it.copy(
+                            message =
+                                if (t is BitmapAllocationRejectedException)
+                                    "메모리가 부족하여 기울기 보정 이미지를 준비하지 못했습니다."
+                                else "기울기 보정에 실패했습니다: ${t.message}"
+                        )
+                    }
+                if (t is BitmapAllocationRejectedException)
+                    requestAllocationRecovery(MemoryRetryAction.AutoStraightenCrop, t.requiredBytes)
             } finally {
                 sourceSnapshot.close()
                 handoff.settleChildOwned()

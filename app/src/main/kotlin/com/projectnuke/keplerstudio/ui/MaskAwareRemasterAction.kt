@@ -126,36 +126,6 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     var ownedBase: Bitmap? = null
     var ownedManualMask: Bitmap? = null
     var maskReservation: MaskReservation? = null
-    try {
-        ownedBase = basePreview.copyOrThrow()
-        remasterPrepareTracker?.track(checkNotNull(ownedBase), "remaster:ownedBase")
-        maskReservation = reserveSelectionMaskCopy(
-            owner = "maskAwareRemaster:${startSnapshot.identity.generation}:${current.revision}",
-            source = if (manualMaskAtEntry != null) manualMaskAtEntry else basePreview,
-            config = Bitmap.Config.ARGB_8888,
-        ) ?: throw BitmapAllocationRejectedException(
-            BitmapMemoryBudget.bytes(basePreview.width, basePreview.height, Bitmap.Config.ARGB_8888)
-        )
-        manualMaskAtEntry?.let {
-            ownedManualMask = it.copyOrThrow()
-            remasterPrepareTracker?.track(checkNotNull(ownedManualMask), "remaster:manualMask")
-        }
-    } catch (t: Throwable) {
-        ownedBase?.takeUnless(Bitmap::isRecycled)?.recycle()
-        ownedBase = null
-        ownedManualMask?.takeUnless(Bitmap::isRecycled)?.recycle()
-        ownedManualMask = null
-        maskReservation?.close()
-        maskReservation = null
-        pendingHistory?.close()
-        pendingHistory = null
-        startSnapshot.close()
-        updateUiState { it.copy(message = "모델 마스크 보조 준비에 실패했습니다.") }
-        if (t is BitmapAllocationRejectedException)
-            requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
-        remasterPrepareTracker?.end()
-        return
-    }
 
     val sourcePath = current.sourcePath
     val baseContentToken = current.baseContentToken
@@ -177,21 +147,33 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             var undoSnapshotOwned: EditorHistorySnapshot? =
                 withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
             pendingHistoryOwned = null
-            var ownedBaseOwned: Bitmap? = ownedBase
-            var ownedManualMaskOwned: Bitmap? = ownedManualMask
+            var ownedBaseOwned: Bitmap? = null
+            var ownedManualMaskOwned: Bitmap? = null
             val remasterTracker =
                 beginMemoryTracking(
                     "applyMaskAwareRemaster",
                     snapshotState = "inferring",
                     transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
                 )
-            ownedBaseOwned?.let { remasterTracker?.track(it, "remaster:ownedBase") }
-            remasterPrepareTracker?.end()
-            ownedBase = null
-            ownedManualMask = null
-            val maskReservationOwned = maskReservation
-            maskReservation = null
+            var maskReservationOwned: MaskReservation? = null
             try {
+                withContext(Dispatchers.Default) {
+                    ownedBaseOwned = basePreview.copyOrThrow()
+                    remasterPrepareTracker?.track(checkNotNull(ownedBaseOwned), "remaster:ownedBase")
+                    maskReservationOwned = reserveSelectionMaskCopy(
+                        owner = "maskAwareRemaster:${startSnapshot.identity.generation}:${current.revision}",
+                        source = if (manualMaskAtEntry != null) manualMaskAtEntry else basePreview,
+                        config = Bitmap.Config.ARGB_8888,
+                    ) ?: throw BitmapAllocationRejectedException(
+                        BitmapMemoryBudget.bytes(basePreview.width, basePreview.height, Bitmap.Config.ARGB_8888)
+                    )
+                    manualMaskAtEntry?.let {
+                        ownedManualMaskOwned = it.copyOrThrow()
+                        remasterPrepareTracker?.track(checkNotNull(ownedManualMaskOwned), "remaster:manualMask")
+                    }
+                }
+                remasterTracker?.let { ownedBaseOwned?.let { base -> it.track(base, "remaster:ownedBase") } }
+                remasterPrepareTracker?.end()
                 val inferenceJob = currentCoroutineContext()[Job]
                 val modelOperation =
                     ModelOperationContext(
@@ -429,6 +411,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
                 ownedManualMaskOwned?.takeIf { !it.isRecycled }?.recycle()
                 maskReservationOwned?.close()
+                remasterPrepareTracker?.end()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 pendingHistoryOwned?.close()
                 remasterTracker?.end()

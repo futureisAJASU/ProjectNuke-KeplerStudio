@@ -168,8 +168,8 @@ class SelectionMaskOwnershipLedgerTest {
     @Test
     fun `mask reservation is atomic additive and owner scoped`() {
         val ledger = SelectionMaskOwnershipLedger { 100L }
-        val first = ledger.reserve("first", 60L)!!
-        assertNull(ledger.reserve("second", 50L))
+        val first = ledger.reserve("first", 60L, documentLayerDelta = 1)!!
+        assertNull(ledger.reserve("second", 50L, documentLayerDelta = 1))
         assertEquals(60L, ledger.reservedBytes())
         assertEquals(1, ledger.reservedLayers())
         first.close()
@@ -197,6 +197,32 @@ class SelectionMaskOwnershipLedgerTest {
 
         ledger.reconcileActiveState(emptyList())
         ledger.reserve("pending", 40L)!!.close()
+        bitmap.recycle()
+    }
+
+    @Test
+    fun `existing layer copy reserves bytes without consuming document layer slot`() {
+        val ledger = SelectionMaskOwnershipLedger(byteBudget = { 200L }, layerBudget = { 1 })
+        val bitmap = bitmap(4, 4)
+        ledger.reconcileActiveState(listOf(SelectionLayer("active", "active", SelectionLayerKind.Brush, bitmap)))
+
+        val copy = ledger.reserve("history-copy", 64L)
+        assertNotNull(copy)
+        assertEquals(0, ledger.reservedLayers())
+        copy!!.close()
+        ledger.reconcileActiveState(emptyList())
+        bitmap.recycle()
+    }
+
+    @Test
+    fun `new document layer is rejected at layer limit before allocation`() {
+        val ledger = SelectionMaskOwnershipLedger(byteBudget = { 200L }, layerBudget = { 1 })
+        val bitmap = bitmap(4, 4)
+        ledger.reconcileActiveState(listOf(SelectionLayer("active", "active", SelectionLayerKind.Brush, bitmap)))
+
+        assertNull(ledger.reserve("duplicate", 64L, documentLayerDelta = 1))
+        assertEquals(0L, ledger.reservedBytes())
+        ledger.reconcileActiveState(emptyList())
         bitmap.recycle()
     }
 }

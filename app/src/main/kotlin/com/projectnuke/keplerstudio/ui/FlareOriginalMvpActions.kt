@@ -57,21 +57,6 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
 
     var pendingHistory: PendingHistorySnapshot? =
         prepareHistorySnapshot("ruleFlare", startSnapshot)
-    var ownedBase: Bitmap? =
-        runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
-            .getOrElse { failure ->
-                pendingHistory?.close()
-                startSnapshot.close()
-                updateUiState { it.copy(message = "이미지를 준비하지 못했습니다.") }
-                if (failure is BitmapAllocationRejectedException) {
-                    requestAllocationRecovery(
-                        if (mode == FlareGuardMode.NightLight) MemoryRetryAction.FlareNight
-                        else MemoryRetryAction.FlareSun,
-                        failure.requiredBytes,
-                    )
-                }
-                return
-            }
 
     val sourcePath = current.sourcePath
     val baseToken = current.baseContentToken
@@ -94,12 +79,15 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
             var undoSnapshotOwned =
                 withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
             pendingHistoryOwned = null
-            var ownedBaseOwned = ownedBase
-            ownedBase = null
+            var ownedBaseOwned: Bitmap? = null
             var adoptedFlare = ownedBaseOwned
             var ownedPreview: Bitmap? = null
             var previewSuccess: RenderResult.Success? = null
             try {
+                ownedBaseOwned =
+                    withContext(Dispatchers.Default) {
+                        baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+                    }
                 withContext(Dispatchers.Default) {
                     val result =
                         NativePhotoCore.nativeApplyFlareGuardInPlace(
@@ -221,10 +209,6 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                 "ruleFlare",
                 {
                     startSnapshot.close()
-                    ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                    ownedBase = null
-                },
-                {
                     pendingHistory?.close()
                     pendingHistory = null
                 },

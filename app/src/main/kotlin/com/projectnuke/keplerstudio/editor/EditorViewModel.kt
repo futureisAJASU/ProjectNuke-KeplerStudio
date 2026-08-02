@@ -346,6 +346,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             selectionMaskOwnership.reserve(
                 owner = "brushSelection:${state.revision}",
                 bytes = BitmapMemoryBudget.bytes(base.width, base.height, Bitmap.Config.ARGB_8888),
+                documentLayerDelta = 1,
             ) ?: run {
                 brushTracker?.end()
                 updateUiStateAndRecycleReplaced {
@@ -421,6 +422,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             selectionMaskOwnership.reserve(
                 owner = "brushSelection:${start.identity.revision}:${UUID.randomUUID()}",
                 bytes = BitmapMemoryBudget.bytes(base.width, base.height, Bitmap.Config.ARGB_8888),
+                documentLayerDelta = 1,
             )
         if (reservation == null) {
             start.close()
@@ -2218,9 +2220,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val reservations = ArrayList<MaskReservation>(state.selectionLayers.size)
         if (effectiveStorage == HistorySnapshotStorage.Exact) state.selectionLayers.forEach { layer ->
             val reservation =
-                selectionMaskOwnership.reserve(
-                    owner = "history:${historyCoordinator.currentGeneration()}:${layer.id}",
-                    bytes = BitmapMemoryBudget.bytes(layer.bitmap),
+            selectionMaskOwnership.reserve(
+                owner = "history:${historyCoordinator.currentGeneration()}:${layer.id}",
+                bytes = BitmapMemoryBudget.bytes(layer.bitmap),
+                documentLayerDelta = 0,
                 )
             if (reservation == null) {
                 reservations.forEach(MaskReservation::close)
@@ -2766,6 +2769,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 selectionMaskOwnership.reserve(
                     owner = "$ownerPrefix:${snapshot.coordinatorGeneration ?: "unknown"}:${layer.id}",
                     bytes = BitmapMemoryBudget.bytes(layer.bitmap),
+                    documentLayerDelta = 0,
                 )
             if (reservation == null) {
                 reservations.forEach(MaskReservation::close)
@@ -7488,10 +7492,12 @@ internal fun EditorViewModel.reserveSelectionMaskCopy(
     owner: String,
     source: Bitmap,
     config: Bitmap.Config? = source.config,
+    documentLayerDelta: Int = 0,
 ): MaskReservation? =
     selectionMaskOwnership.reserve(
         owner = owner,
         bytes = BitmapMemoryBudget.bytes(source.width, source.height, config),
+        documentLayerDelta = documentLayerDelta,
     )
 
 private fun identityBitmapSet(): MutableSet<Bitmap> =

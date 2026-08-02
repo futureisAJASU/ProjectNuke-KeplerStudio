@@ -50,17 +50,17 @@ internal class SelectionMaskOwnershipLedger(
 
     private val slots = IdentityHashMap<Bitmap, Slot>()
 
-    fun reserve(owner: String, bytes: Long, layers: Int = 1): MaskReservation? {
-        if (owner.isBlank() || bytes <= 0L || layers <= 0) return null
+    fun reserve(owner: String, bytes: Long, documentLayerDelta: Int = 0): MaskReservation? {
+        if (owner.isBlank() || bytes <= 0L || documentLayerDelta < 0) return null
         return lock.withLock {
             val limit = byteBudget().coerceAtLeast(0L)
             if (bytes > limit - activeBytes - reservedBytes) return null
-            if (layers > layerBudget().coerceAtLeast(0) - activeLayers - reservedLayers) return null
+            if (documentLayerDelta > layerBudget().coerceAtLeast(0) - activeLayers - reservedLayers) return null
             val id = reservationIds.getAndIncrement()
-            reservations[id] = ReservationEntry(owner, bytes, layers)
+            reservations[id] = ReservationEntry(owner, bytes, documentLayerDelta)
             reservedBytes += bytes
-            reservedLayers += layers
-            return MaskReservation(this, id, owner, bytes, layers)
+            reservedLayers += documentLayerDelta
+            return MaskReservation(this, id, owner, bytes, documentLayerDelta)
         }
     }
 

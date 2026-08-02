@@ -257,6 +257,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                                     "subject:$sourceRevision",
                                     finalTracked.bitmap,
                                     Bitmap.Config.ARGB_8888,
+                                    documentLayerDelta = 1,
                                 ) ?: throw BitmapAllocationRejectedException(
                                     BitmapMemoryBudget.bytes(
                                         finalTracked.bitmap.width,
