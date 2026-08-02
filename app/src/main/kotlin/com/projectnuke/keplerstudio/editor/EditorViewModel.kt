@@ -2094,6 +2094,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return pending
     }
 
+    internal suspend fun captureHistorySnapshotForLeasedSnapshot(
+        leased: LeasedEditorSnapshot,
+        storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
+    ): EditorHistorySnapshot? =
+        captureHistorySnapshotFromRefs(
+            leased.state,
+            leased.previewBitmap,
+            leased.originalPreviewBitmap,
+            leased.selectionLayers.map { it.id to it.bitmap },
+            storage,
+        )
+
     internal fun markBrushChanged(changed: Boolean) {
         brushChanged = brushChanged || changed
     }

@@ -103,8 +103,8 @@ fun EditorViewModel.setStraightenDegrees(value: Float) {
 
 fun EditorViewModel.autoStraightenCrop() {
     if (!canEnterEditorAction()) return
-    val state = uiState.value
     val sourceSnapshot = acquireEditorSnapshot("autoStraightenCrop") ?: return
+    val state = sourceSnapshot.state
     val bitmap = sourceSnapshot.previewBitmap ?: sourceSnapshot.originalPreviewBitmap ?: run {
         sourceSnapshot.close()
         return
@@ -192,18 +192,15 @@ fun EditorViewModel.applyCropTransform() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
 
-    val state = prepareForExternalEdit()
+    prepareForExternalEdit()
+    val startSnapshot = acquireEditorSnapshot("cropApply") ?: return
+    val state = startSnapshot.state
     val preview = state.previewBitmap
     val original = state.originalPreviewBitmap
-    if (preview == null && original == null) return
-
-    // History snapshot is captured synchronously here because capture may itself reserve
-    // scarce in-process memory before a large worker allocation; failing to capture leaves
-    // the previous document in the redo stack intact. The actual full-resolution bitmap
-    // *copies* are deferred to the worker (see [applyCropTransformBackground]) so Compose
-    // event handlers do not block the Main dispatcher.
-    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("cropApply")
-
+    if (preview == null && original == null) {
+        startSnapshot.close()
+        return
+    }
     val crop = state.cropState.normalized()
     val nextRevision = state.revision + 1
     val cropToken = beginCropOperation()
@@ -236,18 +233,15 @@ fun EditorViewModel.applyCropTransform() {
                 capturedSelectionLayers = capturedSelectionLayers,
                 capturedPreviewWidth = capturedPreviewWidth,
                 capturedPreviewHeight = capturedPreviewHeight,
-                originalHistoryRef = { pendingHistory },
+                startSnapshot = startSnapshot,
                 cropPrepareTracker = cropPrepareTracker,
-                consumeHistory = { pendingHistory = null },
-                releaseHistory = { pendingHistory?.close(); pendingHistory = null },
             )
         },
         handoff =
             PreparedResourceHandoff.create(
                 "cropApply",
                 {
-                    pendingHistory?.close()
-                    pendingHistory = null
+                    startSnapshot.close()
                 },
                 { cropPrepareTracker?.end() },
                 {
@@ -289,23 +283,17 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
     capturedSelectionLayers: List<SelectionLayer>,
     capturedPreviewWidth: Int,
     capturedPreviewHeight: Int,
-    originalHistoryRef: () -> PendingHistorySnapshot?,
+    startSnapshot: LeasedEditorSnapshot,
     cropPrepareTracker: MemoryTrackerScope?,
-    consumeHistory: () -> Unit,
-    releaseHistory: () -> Unit,
 ) {
-    var leasedSnapshot: LeasedEditorSnapshot? = null
+    val leasedSnapshot = startSnapshot
     var previewInput: Bitmap? = null
     var originalInput: Bitmap? = null
     val maskInputs = ArrayList<SelectionLayer>(capturedSelectionLayers.size)
     var transformedOriginal: Bitmap? = null
     var transformedPreview: Bitmap? = null
     var transformedMasks: List<SelectionLayer>? = null
-    var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
-    consumeHistory()
-    var undoSnapshotOwned: EditorHistorySnapshot? =
-        withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
-    pendingHistoryOwned = null
+    var undoSnapshotOwned: EditorHistorySnapshot? = null
     val cropTracker =
         beginMemoryTracking(
             "applyCropTransform",
@@ -323,6 +311,8 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
     }
 
     try {
+        undoSnapshotOwned = captureHistorySnapshotForLeasedSnapshot(leasedSnapshot)
+        if (undoSnapshotOwned == null) return
         // Worker-side re-read: the authoritative state may differ from the synchronous
         // snapshot (e.g., a param render that completed in between); only the matching
         // identity may proceed.
@@ -330,8 +320,7 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
             // Validate adoption identity upfront so an obviously-superseded request never
             // performs a full-resolution copy.
             if (!isManagedEditTokenCurrent(operationToken) || !isCropOperationCurrent(cropToken)) return@withContext null
-            leasedSnapshot = acquireEditorSnapshot("applyCropTransform") ?: return@withContext null
-            val workerState = leasedSnapshot!!.state
+            val workerState = leasedSnapshot.state
             if (workerState.sourcePath != sourcePath) return@withContext null
             if (workerState.baseContentToken != baseContentToken) return@withContext null
             if (workerState.activeSelectionLayerId != activeSelectionLayerId) return@withContext null
@@ -511,8 +500,6 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
         releasePreparedInputs()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
-        pendingHistoryOwned?.close()
-        releaseHistory()
         leasedSnapshot?.close()
         cropTracker?.end()
     }
