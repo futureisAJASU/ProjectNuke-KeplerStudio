@@ -60,6 +60,7 @@ import com.projectnuke.keplerstudio.editor.IMPLEMENTED_DETAIL_ENGINES
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_NOISE_ENGINES
 import com.projectnuke.keplerstudio.editor.IMPLEMENTED_TONE_ENGINES
 import com.projectnuke.keplerstudio.editor.NoiseEngine
+import com.projectnuke.keplerstudio.editor.PreviewGeometry
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import com.projectnuke.keplerstudio.editor.ViewportState
@@ -447,6 +448,19 @@ private fun ZoomablePreview(
     val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
     val activeMaskLayer = selectionLayers.firstOrNull { it.id == activeSelectionLayerId }
 
+    fun settledViewport(nextScale: Float, nextOffset: Offset, viewportSize: androidx.compose.ui.unit.IntSize): ViewportState {
+        val safeScale = nextScale.takeIf { it.isFinite() }?.coerceIn(1f, 8f) ?: 1f
+        val geometry =
+            PreviewGeometry(
+                container = viewportSize,
+                imageWidth = displayedBitmap.width,
+                imageHeight = displayedBitmap.height,
+                zoom = safeScale,
+                pan = nextOffset,
+            )
+        return ViewportState(safeScale, geometry.clampedPan(), viewportSize.width, viewportSize.height)
+    }
+
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Image(
             bitmap = displayedBitmap.asImageBitmap(),
@@ -456,7 +470,10 @@ private fun ZoomablePreview(
                 .fillMaxSize()
                 .onSizeChanged {
                     size = it
-                    onViewportChanged(ViewportState(scale, offset, it.width, it.height))
+                    val settled = settledViewport(scale, offset, it)
+                    scale = settled.scale
+                    offset = settled.offset
+                    onViewportChanged(settled)
                 }
                 .pointerInput(bitmap) {
                     awaitPointerEventScope {
@@ -473,10 +490,10 @@ private fun ZoomablePreview(
                     detectTransformGestures { _, pan, zoom, _ ->
                         isTransforming = true
                         showOriginal = false
-                        scale = (scale * zoom).coerceIn(1f, 8f)
-                        offset += pan
-                        if (scale <= 1.01f) offset = Offset.Zero
-                        onViewportChanged(ViewportState(scale, offset, size.width, size.height))
+                        val settled = settledViewport(scale * zoom, offset + pan, size)
+                        scale = settled.scale
+                        offset = settled.offset
+                        onViewportChanged(settled)
                     }
                 }
                 .pointerInput(bitmap, originalBitmap) {
