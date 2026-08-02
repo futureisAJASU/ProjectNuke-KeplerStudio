@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Looper
 import android.system.Os
 import android.system.OsConstants
@@ -1080,6 +1081,7 @@ internal class EditorHistoryCoordinator(
 internal class EditorHistoryStorage(
     context: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    internal val fullDecodeObserverForTest: ((File) -> Unit)? = null,
 ) : HistoryStorageBackend {
     private val root = File(context.filesDir, "editor_history_v3")
 
@@ -1170,8 +1172,10 @@ internal class EditorHistoryStorage(
             check(json.getString("documentGeneration") == expectedGeneration)
             check(json.getString("storage") in HistorySnapshotStorage.entries.map(Enum<*>::name))
             val bitmapSpecs = json.getJSONArray("bitmaps")
+            check(bitmapSpecs.length() in 1..MAX_BITMAP_PAYLOADS)
             val keys = HashSet<String>()
             val fileNames = HashSet<String>()
+            val validatedFiles = HashMap<String, File>()
             for (i in 0 until bitmapSpecs.length()) {
                 val spec = bitmapSpecs.getJSONObject(i)
                 val key = spec.getString("key")
@@ -1182,21 +1186,30 @@ internal class EditorHistoryStorage(
                 check(spec.getString("config") == Bitmap.Config.ARGB_8888.name)
                 val file = File(directory, fileName)
                 check(file.isFile && file.canonicalFile.parentFile == directory.canonicalFile)
+                val bounds = BitmapFactory.Options().also { it.inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.absolutePath, bounds)
+                check(bounds.outWidth == width && bounds.outHeight == height)
+                validatedFiles[key] = file
                 requiredBytes = BitmapMemoryBudget.saturatingAdd(requiredBytes, BitmapMemoryBudget.bytes(width, height))
             }
             val metadata = json.getJSONObject("metadata")
             val layerSpecs = metadata.getJSONArray("layers")
+            check(layerSpecs.length() <= BitmapMemoryBudget.maxSelectionMaskLayers())
             val maskKeys = HashSet<String>()
             for (index in 0 until layerSpecs.length()) {
                 maskKeys += layerSpecs.getJSONObject(index).getString("bitmapKey")
             }
-            val maskBytes = maskKeys.sumOf { key ->
+            var maskBytes = 0L
+            maskKeys.forEach { key ->
                 val spec = (0 until bitmapSpecs.length())
                     .asSequence()
                     .map { bitmapSpecs.getJSONObject(it) }
                     .firstOrNull { it.getString("key") == key }
                     ?: error("missing selection mask payload")
-                BitmapMemoryBudget.bytes(spec.getInt("width"), spec.getInt("height"))
+                maskBytes = BitmapMemoryBudget.saturatingAdd(
+                    maskBytes,
+                    BitmapMemoryBudget.bytes(spec.getInt("width"), spec.getInt("height")),
+                )
             }
             candidateAdmission =
                 preflight(
@@ -1209,7 +1222,9 @@ internal class EditorHistoryStorage(
             val bitmaps = HashMap<String, Bitmap>()
             for (i in 0 until bitmapSpecs.length()) {
                 val spec = bitmapSpecs.getJSONObject(i)
-                val bitmap = decodeMutableBitmapOrThrow(File(directory, spec.getString("file")).absolutePath)
+                val file = checkNotNull(validatedFiles[spec.getString("key")])
+                fullDecodeObserverForTest?.invoke(file)
+                val bitmap = decodeMutableBitmapOrThrow(file.absolutePath)
                 owned += bitmap
                 check(bitmap.width == spec.getInt("width") && bitmap.height == spec.getInt("height") && bitmap.config == Bitmap.Config.ARGB_8888)
                 check(bitmaps.put(spec.getString("key"), bitmap) == null)
@@ -1564,6 +1579,7 @@ internal class EditorHistoryStorage(
 
     private companion object {
         const val VERSION = 3
+        const val MAX_BITMAP_PAYLOADS = 512
         const val SESSION_PREFIX = "session-"
         const val ENTRY_PREFIX = "entry-"
         const val STAGING_PREFIX = ".staging-"

@@ -134,13 +134,22 @@ internal fun RenderResult.successOrThrow(): RenderResult.Success =
  */
 internal object EditorRenderer {
     @Volatile private var rendererOverrideForTest: (suspend (RenderRequest) -> RenderResult)? = null
+    private val rendererOverrideLock = Any()
 
-    internal fun installRendererOverrideForTest(renderer: suspend (RenderRequest) -> RenderResult) {
-        rendererOverrideForTest = renderer
+    internal fun installRendererOverrideForTest(renderer: suspend (RenderRequest) -> RenderResult): AutoCloseable {
+        synchronized(rendererOverrideLock) {
+            check(rendererOverrideForTest == null) { "renderer test override already installed" }
+            rendererOverrideForTest = renderer
+        }
+        return AutoCloseable {
+            synchronized(rendererOverrideLock) {
+                if (rendererOverrideForTest === renderer) rendererOverrideForTest = null
+            }
+        }
     }
 
     internal fun clearRendererOverrideForTest() {
-        rendererOverrideForTest = null
+        synchronized(rendererOverrideLock) { rendererOverrideForTest = null }
     }
 
     suspend fun render(request: RenderRequest): RenderResult {

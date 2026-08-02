@@ -332,6 +332,8 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
             // Defense-in-depth against a recycler race: dimensions must match those captured at
             // the synchronous start. If mismatched, treat as superseded.
             if (wPreview != null && (wPreview.width != capturedPreviewWidth || wPreview.height != capturedPreviewHeight)) return@withContext null
+            if (wOriginal != null && (wOriginal.width != capturedPreviewWidth || wOriginal.height != capturedPreviewHeight)) return@withContext null
+            if (workerState.selectionLayers.any { it.bitmap.width != capturedPreviewWidth || it.bitmap.height != capturedPreviewHeight }) return@withContext null
 
             maskReservations =
                 reserveSelectionMaskCopies("crop:$operationToken", workerState.selectionLayers)
@@ -384,10 +386,9 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
         cropPrepareTracker?.end()
 
         if (maskInputs.isNotEmpty()) {
-            val dimensions =
-                cropTransformedDimensions(maskInputs.first().bitmap.width, maskInputs.first().bitmap.height, crop)
             var outputBytes = 0L
             maskInputs.forEach {
+                val dimensions = cropTransformedDimensions(it.bitmap.width, it.bitmap.height, crop)
                 outputBytes =
                     BitmapMemoryBudget.saturatingAdd(
                         outputBytes,
