@@ -23,3 +23,11 @@ internal data class SelectionPreviewIdentity(
             stateBaseContentToken == baseContentToken &&
             stateActiveSelectionLayerId == activeSelectionLayerId
 }
+
+internal enum class SelectionPreviewFailureKind {
+    StaleOrSuperseded,
+    Cancelled,
+    AllocationFailure,
+    RenderFailure,
+    InvariantFailure,
+}

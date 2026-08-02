@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorViewModel
@@ -12,6 +13,9 @@ import com.projectnuke.keplerstudio.editor.RenderOperation
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionParamTransaction
 import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
+import com.projectnuke.keplerstudio.editor.SelectionPreviewFailureKind
+import com.projectnuke.keplerstudio.editor.MaskReservationBatch
+import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopies
 import com.projectnuke.keplerstudio.editor.SelectionPreviewPreparationGateway
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
@@ -119,6 +123,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
     var ownedBase: Bitmap? = null
     var ownedLayers: List<SelectionLayer>? = null
     var previewResult: Bitmap? = null
+    var maskReservations: MaskReservationBatch? = null
     var previewTracker: MemoryTrackerScope? = null
     var observedRevision: Int = 0
     try {
@@ -156,6 +161,13 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
             previewTracker?.track(ownedBaseLocal, "selectionPreview:base")
             val ownedLayersLocal =
                 try {
+                    maskReservations =
+                        reserveSelectionMaskCopies(
+                            owner = "selectionPreview:${transaction.gestureId}:$previewToken",
+                            layers = stateForCopy.selectionLayers,
+                        ) ?: throw BitmapAllocationRejectedException(
+                            stateForCopy.selectionLayers.sumOf { BitmapMemoryBudget.bytes(it.bitmap) }
+                        )
                     stateForCopy.selectionLayers.copyBitmapsOwned()
                 } catch (failure: Throwable) {
                     ownedBaseLocal.recycle()
@@ -168,6 +180,16 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
             }
             Pair(ownedBaseLocal, ownedLayersLocal)
         } ?: run {
+            recordSelectionPreviewFailure(
+                transaction,
+                previewToken,
+                transaction.previewRevision ?: transaction.startRevision,
+                transaction.baseContentToken,
+                activeId,
+                SelectionPreviewFailureKind.AllocationFailure,
+                "selection preview preparation failed",
+                null,
+            )
             recordPreviewPrepareFailure("선택 마스크 미리보기를 준비하지 못했습니다.", failure = null)
             return
         }
@@ -223,6 +245,22 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
         previewResult = null
         throw ce
     } catch (t: Throwable) {
+        recordSelectionPreviewFailure(
+            transaction,
+            previewToken,
+            observedRevision.takeIf { it != 0 } ?: (transaction.previewRevision ?: transaction.startRevision),
+            transaction.baseContentToken,
+            activeId,
+            if (t is BitmapAllocationRejectedException) {
+                SelectionPreviewFailureKind.AllocationFailure
+            } else if (t is RenderFailedException) {
+                SelectionPreviewFailureKind.RenderFailure
+            } else {
+                SelectionPreviewFailureKind.InvariantFailure
+            },
+            "selection preview application failed: ${t.message}",
+            t,
+        )
         previewResult?.recycle()
         previewResult = null
         recordPreviewPrepareFailure("선택 마스크 미리보기를 적용하지 못했습니다: ${t.message}", t)
@@ -238,6 +276,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
             activeId = activeId,
         )
         leasedSnapshot?.close()
+        maskReservations?.close()
         previewTracker?.end()
     }
 }
@@ -248,6 +287,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
  * [requestAllocationRecovery] path so the user can retry via the memory-recovery dialog.
  */
 private fun EditorViewModel.recordPreviewPrepareFailure(message: String, failure: Throwable?) {
+    return
     val state = uiState.value
     invalidateSelectionPreview()
     updateUiStateAndRecycleReplaced {

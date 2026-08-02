@@ -235,10 +235,10 @@ class SelectionMaskOwnershipLedgerTest {
         )
 
         val candidate = ledger.reserveDocumentCandidate("restore", 64L, documentLayerCount = 1)
-        assertNotNull(candidate)
+        assertTrue(candidate is SelectionMaskOwnershipLedger.MaskAdmission.Reserved)
         assertEquals(64L, ledger.reservedBytes())
         assertEquals(1, ledger.reservedLayers())
-        candidate!!.close()
+        candidate.close()
         assertEquals(0L, ledger.reservedBytes())
         assertEquals(0, ledger.reservedLayers())
         active.recycle()
@@ -254,10 +254,10 @@ class SelectionMaskOwnershipLedgerTest {
 
         val historyCopy = ledger.reserve("history-copy", 64L)!!
         val candidate = ledger.reserveDocumentCandidate("history-adopt", 0L, documentLayerCount = 1)
-        assertNotNull(candidate)
+        assertTrue(candidate is SelectionMaskOwnershipLedger.MaskAdmission.Reserved)
         assertEquals(64L, ledger.reservedBytes())
         assertEquals(1, ledger.reservedLayers())
-        candidate!!.close()
+        candidate.close()
         historyCopy.close()
         active.recycle()
     }
@@ -266,8 +266,36 @@ class SelectionMaskOwnershipLedgerTest {
     fun `replacement candidate rejects over-budget layer count before allocation`() {
         val ledger = SelectionMaskOwnershipLedger(byteBudget = { 256L }, layerBudget = { 1 })
         val candidate = ledger.reserveDocumentCandidate("restore", 64L, documentLayerCount = 2)
-        assertNull(candidate)
+        assertTrue(candidate is SelectionMaskOwnershipLedger.MaskAdmission.Rejected)
         assertEquals(0L, ledger.reservedBytes())
         assertEquals(0, ledger.reservedLayers())
+    }
+
+    @Test
+    fun `empty replacement candidate is allowed without changing reservations`() {
+        val ledger = SelectionMaskOwnershipLedger(byteBudget = { 64L }, layerBudget = { 1 })
+        val pending = ledger.reserve("pending", 64L)!!
+
+        val candidate = ledger.reserveDocumentCandidate("empty-restore", 0L, 0)
+        assertTrue(candidate === SelectionMaskOwnershipLedger.MaskAdmission.AllowedNoReservation)
+        candidate.close()
+        assertEquals(64L, ledger.reservedBytes())
+        assertEquals(0, ledger.reservedLayers())
+        pending.close()
+    }
+
+    @Test
+    fun `empty replacement candidate is allowed over an active mask document`() {
+        val ledger = SelectionMaskOwnershipLedger(byteBudget = { 64L }, layerBudget = { 1 })
+        val active = bitmap(4, 4)
+        ledger.reconcileActiveState(
+            listOf(SelectionLayer("active", "active", SelectionLayerKind.Brush, active))
+        )
+
+        val candidate = ledger.reserveDocumentCandidate("empty-restore", 0L, 0)
+        assertTrue(candidate === SelectionMaskOwnershipLedger.MaskAdmission.AllowedNoReservation)
+        candidate.close()
+        assertEquals(BitmapMemoryBudget.bytes(active), ledger.activeBytes())
+        active.recycle()
     }
 }

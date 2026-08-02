@@ -17,7 +17,9 @@ import com.projectnuke.keplerstudio.editor.RenderFailedException
 import com.projectnuke.keplerstudio.editor.RenderOperation
 import com.projectnuke.keplerstudio.editor.RenderResult
 import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
+import com.projectnuke.keplerstudio.editor.MaskReservationBatch
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
+import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopies
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import com.projectnuke.keplerstudio.editor.copyOrThrow
@@ -141,6 +143,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     val leasedSnapshot = startSnapshot
     var ownedBase: Bitmap? = null
     var ownedLayers: List<SelectionLayer> = emptyList()
+    var maskReservations: MaskReservationBatch? = null
     var bakedOriginal: Bitmap? = null
     var renderedPreview: Bitmap? = null
     var bakeSuccess: RenderResult.Success? = null
@@ -162,6 +165,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
         ownedBase = null
         ownedLayers.forEach { layer -> layer.bitmap.takeIf { !layer.bitmap.isRecycled }?.recycle() }
         ownedLayers = emptyList()
+        maskReservations?.close()
     }
 
     try {
@@ -175,6 +179,12 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
             val baseOriginal =
                 workerState.originalPreviewBitmap ?: workerState.previewBitmap
                     ?: return@withContext null
+            val enabledLayers = workerState.selectionLayers.filter { it.enabled }
+            maskReservations =
+                reserveSelectionMaskCopies("selectionBake:$operationToken", enabledLayers)
+                    ?: throw BitmapAllocationRejectedException(
+                        enabledLayers.sumOf { BitmapMemoryBudget.bytes(it.bitmap) }
+                    )
             ownedBase =
                 baseOriginal.copyOrThrow().also { bakeTracker?.track(it, "selectionBake:base") }
             ownedLayers =

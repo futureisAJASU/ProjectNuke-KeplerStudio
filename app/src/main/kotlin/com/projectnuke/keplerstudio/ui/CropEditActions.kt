@@ -20,7 +20,9 @@ import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.normalized
 import com.projectnuke.keplerstudio.editor.renderCropTransform
 import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
+import com.projectnuke.keplerstudio.editor.MaskReservationBatch
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
+import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopies
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.Locale
@@ -283,6 +285,7 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
     var previewInput: Bitmap? = null
     var originalInput: Bitmap? = null
     val maskInputs = ArrayList<SelectionLayer>(capturedSelectionLayers.size)
+    var maskReservations: MaskReservationBatch? = null
     var transformedOriginal: Bitmap? = null
     var transformedPreview: Bitmap? = null
     var transformedMasks: List<SelectionLayer>? = null
@@ -325,6 +328,12 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
             // Defense-in-depth against a recycler race: dimensions must match those captured at
             // the synchronous start. If mismatched, treat as superseded.
             if (wPreview != null && (wPreview.width != capturedPreviewWidth || wPreview.height != capturedPreviewHeight)) return@withContext null
+
+            maskReservations =
+                reserveSelectionMaskCopies("crop:$operationToken", workerState.selectionLayers)
+                    ?: throw BitmapAllocationRejectedException(
+                        workerState.selectionLayers.sumOf { BitmapMemoryBudget.bytes(it.bitmap) }
+                    )
 
             previewInput = wPreview?.copyOrThrow()
             previewInput?.let { cropTracker?.track(it, "crop:previewInput") }
@@ -491,6 +500,7 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
             layer.bitmap.takeIf { it !in retained && !it.isRecycled }?.recycle()
         }
         releasePreparedInputs()
+        maskReservations?.close()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
         leasedSnapshot?.close()

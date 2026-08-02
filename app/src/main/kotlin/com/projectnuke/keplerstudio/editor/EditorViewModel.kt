@@ -1968,9 +1968,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         startLease?.close()
     }
 
-    private fun settleSelectionParamTransactionForSupersession() {
+    private fun settleSelectionParamTransactionForSupersession(
+        cancelPreviewJob: Boolean = true,
+    ) {
         val tx = selectionParamTransaction ?: return
-        tx.previewJob?.cancel()
+        if (cancelPreviewJob) tx.previewJob?.cancel()
         selectionPreviewCounter += 1L
         if (selectionParamTransaction === tx && !tx.committed) {
             tx.settled = true
@@ -1986,6 +1988,66 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             tx.snapshot?.let(::recycleHistorySnapshot)
             tx.snapshot = null
             clearSelectionParamTransaction(tx)
+        }
+    }
+
+    internal suspend fun recordSelectionPreviewFailure(
+        transaction: SelectionParamTransaction,
+        previewToken: Long,
+        expectedRevision: Int,
+        baseToken: String,
+        activeId: String,
+        kind: SelectionPreviewFailureKind,
+        message: String,
+        failure: Throwable?,
+    ) {
+        if (kind == SelectionPreviewFailureKind.Cancelled) return
+        withContext(Dispatchers.Main) {
+            if (
+                kind == SelectionPreviewFailureKind.StaleOrSuperseded ||
+                    !isSelectionPreviewCurrent(
+                        transaction,
+                        previewToken,
+                        expectedRevision,
+                        baseToken,
+                        activeId,
+                    )
+            ) {
+                return@withContext
+            }
+            val before = _uiState.value
+            if (
+                before.baseContentToken != baseToken ||
+                    before.revision != expectedRevision ||
+                    before.activeSelectionLayerId != activeId ||
+                    historyCoordinator.currentGeneration() != transaction.documentGeneration
+            ) {
+                return@withContext
+            }
+            settleSelectionParamTransactionForSupersession(cancelPreviewJob = false)
+            updateUiStateAndRecycleReplaced { current ->
+                if (
+                    current.baseContentToken != baseToken ||
+                        historyCoordinator.currentGeneration() != transaction.documentGeneration
+                ) {
+                    current
+                } else {
+                    val failedRender =
+                        if (kind == SelectionPreviewFailureKind.RenderFailure) {
+                            (failure as? RenderFailedException)?.failure?.let { renderFailure ->
+                                current.correctionEngineState.withFailedRender(
+                                    current.correctionEngineState.documentEngine,
+                                    renderFailure,
+                                )
+                            }
+                        } else null
+                    current.copy(
+                        isBusy = false,
+                        correctionEngineState = failedRender ?: current.correctionEngineState,
+                        message = message,
+                    )
+                }
+            }
         }
     }
 
@@ -2655,6 +2717,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch(Dispatchers.Default) {
             var before: EditorHistorySnapshot? = null
             var replacement: Bitmap? = null
+            var replacementReservation: MaskReservation? = null
             try {
                 before = captureHistorySnapshotFromRefs(
                     leased.state,
@@ -2664,6 +2727,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 )
                 if (before == null) return@launch
                 if (clear) {
+                    replacementReservation =
+                        reserveSelectionMaskCopy(
+                            owner = "clear-mask:${leased.identity.generation}:$layerId",
+                            source = layer.bitmap,
+                            config = Bitmap.Config.ARGB_8888,
+                        ) ?: throw BitmapAllocationRejectedException(BitmapMemoryBudget.bytes(layer.bitmap))
                     replacement = layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
                     replacement?.eraseColor(0xFF000000.toInt())
                 }
@@ -2712,6 +2781,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 replacement?.takeIf { !it.isRecycled }?.recycle()
+                replacementReservation?.close()
                 before?.let(::recycleHistorySnapshot)
                 withContext(NonCancellable + Dispatchers.Main) {
                     releaseAsyncBusyOwner(busyOwner)
@@ -5814,7 +5884,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         var restorePreviousBaseline: String? = null
         var restoreBaselineChanged = false
         var restoreStateAdopted = false
-        var restoreMaskAdmission: MaskReservation? = null
+        var restoreMaskAdmission: SelectionMaskOwnershipLedger.MaskAdmission? = null
         val restoreTracker =
             beginMemoryTracking(
                 "restoreCurrentDraftGeneration",
@@ -5864,7 +5934,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 reserveSelectionMaskCandidate(
                     owner = "draft-restore:$pointer",
                     layers = layers,
-                ) ?: throw BitmapAllocationRejectedException(selectionMaskCandidateBytes(layers))
+                ).also { admission ->
+                    if (admission is SelectionMaskOwnershipLedger.MaskAdmission.Rejected) {
+                        throw BitmapAllocationRejectedException(selectionMaskCandidateBytes(layers))
+                    }
+                }
             withContext(Dispatchers.Default) {
                 val draftDocumentEngine =
                     runCatching { CorrectionEngine.valueOf(manifest.correctionEngine) }
@@ -6525,8 +6599,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     owner = "history-adopt:${snapshot.coordinatorGeneration ?: "unknown"}",
                     layers = snapshot.selectionLayers,
                     bytesAlreadyReserved = snapshot.maskReservations.isNotEmpty(),
-                ) ?: return false
+                ).takeUnless {
+                    it is SelectionMaskOwnershipLedger.MaskAdmission.Rejected
+                }
             }
+        if (!metadataOnly && candidateAdmission == null) return false
         return try {
             invalidateSelectionPreview()
             lastSuccessfullyRenderedParams = snapshot.params
@@ -7477,6 +7554,34 @@ internal fun EditorViewModel.acquireMaskOwner(
     kind: MaskOwnerKind,
 ): MaskOwnerHandle? = selectionMaskOwnership.acquire(bitmap, kind)
 
+internal class MaskReservationBatch internal constructor(
+    private val reservations: List<MaskReservation>,
+) : AutoCloseable {
+    override fun close() = reservations.forEach(MaskReservation::close)
+}
+
+internal fun EditorViewModel.reserveSelectionMaskCopies(
+    owner: String,
+    layers: List<SelectionLayer>,
+): MaskReservationBatch? {
+    val unique = identityBitmapSet()
+    val reservations = ArrayList<MaskReservation>(layers.size)
+    for (layer in layers) {
+        if (!unique.add(layer.bitmap)) continue
+        val reservation =
+            reserveSelectionMaskCopy(
+                owner = "$owner:${layer.id}",
+                source = layer.bitmap,
+                config = Bitmap.Config.ARGB_8888,
+            ) ?: run {
+                reservations.forEach(MaskReservation::close)
+                return null
+            }
+        reservations += reservation
+    }
+    return MaskReservationBatch(reservations)
+}
+
 internal fun EditorViewModel.reserveSelectionMaskCopy(
     owner: String,
     source: Bitmap,
@@ -7499,7 +7604,7 @@ internal fun EditorViewModel.reserveSelectionMaskCandidate(
     owner: String,
     layers: List<SelectionLayer>,
     bytesAlreadyReserved: Boolean = false,
-): MaskReservation? =
+): SelectionMaskOwnershipLedger.MaskAdmission =
     selectionMaskOwnership.reserveDocumentCandidate(
         owner = owner,
         bytes = if (bytesAlreadyReserved) 0L else selectionMaskCandidateBytes(layers),

@@ -53,6 +53,21 @@ internal class SelectionMaskOwnershipLedger(
     fun reserve(owner: String, bytes: Long, documentLayerDelta: Int = 0): MaskReservation? =
         reserveInternal(owner, bytes, documentLayerDelta, replacingDocument = false)
 
+    /** Explicit admission outcome for a complete document candidate. */
+    internal sealed interface MaskAdmission : AutoCloseable {
+        data object AllowedNoReservation : MaskAdmission {
+            override fun close() = Unit
+        }
+
+        class Reserved internal constructor(val reservation: MaskReservation) : MaskAdmission {
+            override fun close() = reservation.close()
+        }
+
+        class Rejected internal constructor(val reason: String) : MaskAdmission {
+            override fun close() = Unit
+        }
+    }
+
     /**
      * Admits a complete replacement document candidate. Its layer count replaces the current
      * document count, while its bytes are additive until publication and retirement settle.
@@ -61,8 +76,18 @@ internal class SelectionMaskOwnershipLedger(
         owner: String,
         bytes: Long,
         documentLayerCount: Int,
-    ): MaskReservation? =
-        reserveInternal(owner, bytes, documentLayerCount, replacingDocument = true)
+    ): MaskAdmission {
+        if (owner.isBlank()) return MaskAdmission.Rejected("owner is blank")
+        if (bytes < 0L || documentLayerCount < 0) {
+            return MaskAdmission.Rejected("candidate dimensions are negative")
+        }
+        if (bytes == 0L && documentLayerCount == 0) {
+            return MaskAdmission.AllowedNoReservation
+        }
+        return reserveInternal(owner, bytes, documentLayerCount, replacingDocument = true)
+            ?.let(MaskAdmission::Reserved)
+            ?: MaskAdmission.Rejected("selection-mask candidate exceeds the admission budget")
+    }
 
     private fun reserveInternal(
         owner: String,

@@ -142,4 +142,22 @@ class EditorViewModelBrushTransactionTest {
         settle(vm) { vm.currentSelectionParamTransaction() == null }
         assertTrue(vm.canEnterEditorAction())
     }
+
+    @Test
+    fun `real history adoption accepts an exact empty-mask document`() {
+        val vm = viewModel()
+        awaitEditorReady(vm)
+        vm.updateUiState { it.copy(selectionLayers = emptyList(), activeSelectionLayerId = null) }
+
+        val before = vm.captureCurrentHistorySnapshot()!!
+        vm.updateUiState { it.copy(params = it.params.copy(exposure = 0.5f), revision = it.revision + 1) }
+        assertTrue(vm.commitUndoSnapshot(before, clearRedo = true))
+        settle(vm) { !vm.historyCoordinator.flags().busy && vm.uiState.value.canUndo }
+
+        vm.undoEdit()
+        settle(vm) { !vm.historyCoordinator.flags().busy && vm.uiState.value.canRedo }
+
+        assertTrue(vm.uiState.value.selectionLayers.isEmpty())
+        assertEquals(0.0f, vm.uiState.value.params.exposure)
+    }
 }
