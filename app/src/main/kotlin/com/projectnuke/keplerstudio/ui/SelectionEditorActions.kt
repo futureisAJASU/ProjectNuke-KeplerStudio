@@ -788,6 +788,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
 internal class BrushRasterizer {
     private val canvas = Canvas()
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val sourceOver = PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
     private var maskFilterKey = Float.NaN
     private var maskFilter: BlurMaskFilter? = null
 
@@ -822,7 +823,7 @@ internal class BrushRasterizer {
             else android.graphics.Color.BLACK
         paint.alpha = (settings.strength.coerceIn(0f, 1f) * 255f).roundToInt()
         paint.maskFilter = maskFilter
-        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
+        paint.xfermode = sourceOver
 
         synchronized(bitmap) {
             canvas.setBitmap(bitmap)
