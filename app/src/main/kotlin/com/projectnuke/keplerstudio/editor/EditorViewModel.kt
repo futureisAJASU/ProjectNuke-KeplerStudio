@@ -1886,6 +1886,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun beginBrushStroke(): Boolean {
         if (shuttingDown) return false
         if (brushTransactionState != BrushTransactionState.Idle) return true
+        if (historyCoordinator.flags().busy) return false
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
         prepareForMaskInteraction()
         if (uiState.value.isBusy) return false

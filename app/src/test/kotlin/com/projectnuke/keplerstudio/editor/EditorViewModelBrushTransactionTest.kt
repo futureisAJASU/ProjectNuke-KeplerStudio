@@ -1,0 +1,77 @@
+package com.projectnuke.keplerstudio.editor
+
+import android.app.Application
+import android.graphics.Bitmap
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+import com.projectnuke.keplerstudio.ui.paintActiveSelectionAt
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
+import org.robolectric.annotation.Config
+
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [29])
+class EditorViewModelBrushTransactionTest {
+    private fun viewModel(): EditorViewModel {
+        val vm = EditorViewModel(RuntimeEnvironment.getApplication() as Application)
+        val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        val layerBitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        vm.updateUiState {
+            it.copy(
+                sourcePath = "brush-test",
+                baseContentToken = "brush-base",
+                previewBitmap = bitmap,
+                originalPreviewBitmap = bitmap,
+                selectionLayers =
+                    listOf(SelectionLayer("mask", "mask", SelectionLayerKind.Brush, layerBitmap)),
+                activeSelectionLayerId = "mask",
+            )
+        }
+        return vm
+    }
+
+    private fun settle(vm: EditorViewModel, predicate: () -> Boolean) {
+        repeat(200) {
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (predicate()) return
+            Thread.sleep(5)
+        }
+        assertTrue(predicate(), "brush transaction did not settle")
+    }
+
+    private fun awaitEditorReady(vm: EditorViewModel) {
+        settle(vm) { vm.canEnterEditorAction() }
+    }
+
+    @Test
+    fun `cancel during preparation restores exact pre-stroke mask`() {
+        val vm = viewModel()
+
+        awaitEditorReady(vm)
+        assertTrue(vm.beginBrushStroke())
+        vm.paintActiveSelectionAt(16f, 16f)
+        vm.cancelBrushStroke()
+        settle(vm) { !vm.hasActiveBrushStroke() }
+
+        assertEquals(0, vm.uiState.value.revision)
+        assertEquals(0, vm.uiState.value.selectionLayers.single().bitmap.getPixel(16, 16))
+    }
+
+    @Test
+    fun `finish after queued first point creates one changed revision`() {
+        val vm = viewModel()
+
+        awaitEditorReady(vm)
+        assertTrue(vm.beginBrushStroke())
+        vm.paintActiveSelectionAt(16f, 16f)
+        vm.finishBrushStroke()
+        settle(vm) { !vm.hasActiveBrushStroke() }
+
+        assertEquals(1, vm.uiState.value.revision, "message=${vm.uiState.value.message}")
+        settle(vm) { vm.uiState.value.canUndo }
+        assertTrue(vm.uiState.value.canUndo)
+    }
+}
