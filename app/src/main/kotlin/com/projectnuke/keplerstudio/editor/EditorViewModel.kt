@@ -1906,6 +1906,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 state.baseContentToken == finalBaseToken &&
                 state.activeSelectionLayerId == finalLayerId
         ) {
+            if (transaction.historyPreparationFailed || transaction.snapshot == null) {
+                restoreSelectionParamTransactionFields(transaction)
+                transaction.snapshot?.let(::recycleHistorySnapshot)
+                transaction.snapshot = null
+                updateUiState { it.copy(message = "실행 취소 기록을 준비하지 못해 선택 편집을 적용하지 않았습니다.") }
+                clearSelectionParamTransaction(transaction)
+                return
+            }
             if (!transaction.committed) {
                 transaction.committed = true
                 val snapshot = transaction.snapshot
@@ -1933,21 +1941,40 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             clearSelectionParamTransaction(transaction)
             return
         }
-        val snapshot = transaction.snapshot
-        if (snapshot != null) {
-            restoreSnapshotWithoutHistory(snapshot)
-        } else {
-            val current = _uiState.value
-            if (
-                current.sourcePath == transaction.sourcePath &&
-                    current.baseContentToken == transaction.baseContentToken &&
-                    historyCoordinator.currentGeneration() == transaction.documentGeneration
-            ) {
-                updateUiStateAndRecycleReplaced { transaction.startState.copy(isBusy = false) }
-            }
-        }
+        restoreSelectionParamTransactionFields(transaction)
+        transaction.snapshot?.let(::recycleHistorySnapshot)
         transaction.snapshot = null
         clearSelectionParamTransaction(transaction)
+    }
+
+    /** Restores only fields owned by the optimistic selection-parameter transaction. */
+    private fun restoreSelectionParamTransactionFields(transaction: SelectionParamTransaction) {
+        val current = _uiState.value
+        if (
+            current.sourcePath != transaction.sourcePath ||
+                current.baseContentToken != transaction.baseContentToken ||
+                historyCoordinator.currentGeneration() != transaction.documentGeneration
+        ) {
+            return
+        }
+        updateUiStateAndRecycleReplaced { state ->
+            if (
+                state.sourcePath != transaction.sourcePath ||
+                    state.baseContentToken != transaction.baseContentToken ||
+                    historyCoordinator.currentGeneration() != transaction.documentGeneration
+            ) {
+                state
+            } else {
+                state.copy(
+                    selectionLayers = transaction.startState.selectionLayers,
+                    activeSelectionLayerId = transaction.startState.activeSelectionLayerId,
+                    previewBitmap = transaction.startState.previewBitmap,
+                    correctionEngineState = transaction.startState.correctionEngineState,
+                    revision = transaction.startState.revision,
+                    isBusy = false,
+                )
+            }
+        }
     }
 
     private fun clearSelectionParamTransaction(transaction: SelectionParamTransaction) {
@@ -1983,7 +2010,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     current.baseContentToken == tx.baseContentToken &&
                     historyCoordinator.currentGeneration() == tx.documentGeneration
             if (sameDocument) {
-                updateUiStateAndRecycleReplaced { tx.startState.copy(isBusy = false) }
+                restoreSelectionParamTransactionFields(tx)
             }
             tx.snapshot?.let(::recycleHistorySnapshot)
             tx.snapshot = null
@@ -5900,9 +5927,45 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         workingSource.absolutePath,
                         maxSide = 2048,
                         restoreTracker,
-                    )
+                )
                 ownedBase = decodedBase
-                validated.maskFiles.forEach { file ->
+            }
+            val base = checkNotNull(ownedBase)
+            val maskPlan =
+                withContext(Dispatchers.IO) {
+                    if (validated.maskFiles.size != manifest.selectionLayers.size) {
+                        error("draft mask metadata count mismatch")
+                    }
+                    validated.maskFiles.map { file ->
+                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        BitmapFactory.decodeFile(file.absolutePath, bounds)
+                        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                            error("draft mask bounds are invalid")
+                        }
+                        if (bounds.outWidth != base.width || bounds.outHeight != base.height) {
+                            error("draft mask geometry mismatch")
+                        }
+                        file to BitmapMemoryBudget.bytes(
+                            bounds.outWidth,
+                            bounds.outHeight,
+                            Bitmap.Config.ARGB_8888,
+                        )
+                    }
+                }
+            val plannedMaskBytes =
+                maskPlan.sumOf { it.second }
+            restoreMaskAdmission =
+                reserveSelectionMaskCandidateBytes(
+                    owner = "draft-restore:$pointer",
+                    bytes = plannedMaskBytes,
+                    documentLayerCount = manifest.selectionLayers.size,
+                ).also { admission ->
+                    if (admission is SelectionMaskOwnershipLedger.MaskAdmission.Rejected) {
+                        throw BitmapAllocationRejectedException(plannedMaskBytes)
+                    }
+                }
+            withContext(Dispatchers.IO) {
+                maskPlan.forEach { (file, _) ->
                     val mask = decodeMutableBitmapOrThrow(file.absolutePath)
                     try {
                         ownedMasks += mask
@@ -5913,9 +5976,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            val base = checkNotNull(ownedBase)
-            if (ownedMasks.any { it.width != base.width || it.height != base.height })
-                error("draft mask geometry mismatch")
             val nextRevision = restoreStartRevision + 1
             val layers =
                 manifest.selectionLayers.mapIndexed { index, entry ->
@@ -5929,15 +5989,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         opacity = entry.opacity,
                         localParams = entry.localParams,
                     )
-                }
-            restoreMaskAdmission =
-                reserveSelectionMaskCandidate(
-                    owner = "draft-restore:$pointer",
-                    layers = layers,
-                ).also { admission ->
-                    if (admission is SelectionMaskOwnershipLedger.MaskAdmission.Rejected) {
-                        throw BitmapAllocationRejectedException(selectionMaskCandidateBytes(layers))
-                    }
                 }
             withContext(Dispatchers.Default) {
                 val draftDocumentEngine =
@@ -7173,10 +7224,14 @@ internal class SelectionParamTransaction(
         pendingSnapshot = null
         try {
             val result = pending.await()
-            if (this.snapshot == null) this.snapshot = result
+            if (this.snapshot == null) {
+                this.snapshot = result
+                if (result == null) historyPreparationFailed = true
+            }
         } catch (ce: CancellationException) {
             throw ce
         } catch (_: Throwable) {
+            historyPreparationFailed = true
             // Snapshot capture failed; leave snapshot null so consumers fall through to
             // no-history rollback (acceptable: the user can retry the gesture).
         } finally {
@@ -7193,6 +7248,7 @@ internal class SelectionParamTransaction(
     var succeeded: Boolean = false
     var committed: Boolean = false
     var settled: Boolean = false
+    var historyPreparationFailed: Boolean = false
     @Volatile var finished: Boolean = false
     @Volatile var finishJobRef: Job? = null
     var previewRevision: Int? = null
@@ -7599,6 +7655,17 @@ internal fun selectionMaskCandidateBytes(layers: List<SelectionLayer>): Long {
     layers.forEach { unique.add(it.bitmap) }
     return unique.sumOf { BitmapMemoryBudget.bytes(it) }
 }
+
+internal fun EditorViewModel.reserveSelectionMaskCandidateBytes(
+    owner: String,
+    bytes: Long,
+    documentLayerCount: Int,
+): SelectionMaskOwnershipLedger.MaskAdmission =
+    selectionMaskOwnership.reserveDocumentCandidate(
+        owner = owner,
+        bytes = bytes,
+        documentLayerCount = documentLayerCount,
+    )
 
 internal fun EditorViewModel.reserveSelectionMaskCandidate(
     owner: String,

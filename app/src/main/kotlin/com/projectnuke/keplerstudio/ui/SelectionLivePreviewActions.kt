@@ -220,7 +220,38 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
         previewResult = success.output
         previewTracker?.track(previewResult, "selectionPreview:result")
 
-        if (isSelectionPreviewCurrent(transaction, previewToken, stateForRender.revision, transaction.baseContentToken, activeId)) {
+        val producedPreview = previewResult ?: error("missing selection live preview")
+        var adoptedByCurrentTransaction = false
+        withContext(Dispatchers.Main) {
+            if (isSelectionPreviewCurrent(transaction, previewToken, stateForRender.revision, transaction.baseContentToken, activeId)) {
+                updateUiStateAndRecycleReplaced { current ->
+                    val stillCurrent =
+                        current.revision == stateForRender.revision &&
+                            current.baseContentToken == transaction.baseContentToken &&
+                            current.activeSelectionLayerId == activeId &&
+                            currentDocumentGeneration() == transaction.documentGeneration
+                    if (!stillCurrent) current
+                    else {
+                        adoptedByCurrentTransaction = true
+                        current.copy(
+                            previewBitmap = producedPreview,
+                            isBusy = false,
+                            correctionEngineState =
+                                current.correctionEngineState.withSuccessfulRender(
+                                    stateForRender.correctionEngineState.documentEngine,
+                                    success.copy(output = producedPreview),
+                                ),
+                        )
+                    }
+                }
+                if (adoptedByCurrentTransaction) {
+                    markSelectionPreviewSucceeded(transaction, previewToken, stateForRender.revision, transaction.baseContentToken, activeId)
+                }
+            }
+        }
+        if (adoptedByCurrentTransaction) previewResult = null
+        if (adoptedByCurrentTransaction) return
+        if (false && isSelectionPreviewCurrent(transaction, previewToken, stateForRender.revision, transaction.baseContentToken, activeId)) {
             val adopted = previewResult ?: error("missing selection live preview")
             updateUiState {
                 it.copy(

@@ -59,6 +59,7 @@ object RemasterModelSession : ModelRunnerContract {
 
     private var closeableModel: AutoCloseable? = null
     private var sessionValidationIdentity: ModelSessionValidationIdentity? = null
+    private var runnerFactoryOverride: ((Context, String) -> AutoCloseable?)? = null
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
     private val commandGeneration = AtomicLong()
@@ -180,16 +181,18 @@ object RemasterModelSession : ModelRunnerContract {
                     return@withLock
                 }
                 runCatching {
-                        val created =
+                        val createdRunner =
                             when (candidate.id) {
                                 "edge_masker" -> createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
                                 else -> null
                             }
                         if (generation != commandGeneration.get()) {
-                            runCatching { created?.close() }
+                            runCatching { createdRunner?.close() }
+                            isModelLoading = false
+                            lifecycle = ModelRunnerLifecycle.Failed
                             return@withLock
                         }
-                        closeableModel = created
+                        closeableModel = createdRunner
                     }
                     .onSuccess {
                         if (generation != commandGeneration.get() ||
@@ -311,10 +314,10 @@ object RemasterModelSession : ModelRunnerContract {
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 sessionValidationIdentity = null
-                closeableModel = createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
+                val createdRunner =
+                    createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
                 if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
-                    runCatching { closeableModel?.close() }
-                    closeableModel = null
+                    runCatching { createdRunner.close() }
                     isModelLoaded = false
                     isModelLoading = false
                     lifecycle = ModelRunnerLifecycle.Failed
@@ -322,6 +325,7 @@ object RemasterModelSession : ModelRunnerContract {
                     ModelAvailabilityRegistry.reportEdgeLoad(stale, loadGeneration)
                     return@withLock stale
                 }
+                closeableModel = createdRunner
                 isModelLoaded = true
                 sessionValidationIdentity = validationToken.sessionIdentity()
                 isModelLoading = false
@@ -514,7 +518,8 @@ object RemasterModelSession : ModelRunnerContract {
             manifest.asset.requiredContractSchemaVersion == ModelAssetManifest.CONTRACT_SCHEMA_VERSION
     }
 
-    private fun createImageSegmenter(context: Context, assetPath: String): ImageSegmenter {
+    private fun createImageSegmenter(context: Context, assetPath: String): AutoCloseable {
+        runnerFactoryOverride?.invoke(context, assetPath)?.let { return it }
         val baseOptions = BaseOptions.builder().setModelAssetPath(assetPath).build()
         val options =
             ImageSegmenter.ImageSegmenterOptions.builder()
@@ -748,6 +753,15 @@ object RemasterModelSession : ModelRunnerContract {
                     }
                     ?.invoke(image)
         }
+    }
+
+    /** Test seam used by lifecycle tests; production always uses the MediaPipe factory below. */
+    internal fun installRunnerFactoryForTest(factory: (Context, String) -> AutoCloseable?) {
+        runnerFactoryOverride = factory
+    }
+
+    internal fun clearRunnerFactoryForTest() {
+        runnerFactoryOverride = null
     }
 }
 

@@ -9,6 +9,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import java.util.concurrent.TimeUnit
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.launch
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RuntimeEnvironment
@@ -63,13 +65,7 @@ class SelectionPreviewProductionTest {
 
         vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.25f) }
 
-        repeat(400) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (vm.selectionPreviewCopyCount() > 0L) {
-                return@repeat
-            }
-            Thread.sleep(10)
-        }
+        settle { vm.selectionPreviewCopyCount() > 0L }
         assertTrue(
             vm.selectionPreviewCopyCount() > 0L,
             "copy=${vm.selectionPreviewCopyCount()} succeeded=${transaction.succeeded} active=${vm.currentSelectionParamTransaction() === transaction} revision=${vm.uiState.value.revision} busy=${vm.uiState.value.isBusy} message=${vm.uiState.value.message}",
@@ -100,6 +96,45 @@ class SelectionPreviewProductionTest {
                 "mask",
             ) == null
         )
+        vm.finishSelectionParamGesture()
+    }
+
+    @Test
+    fun stalePreviewFailureCannotMutateReplacementState() {
+        val vm = viewModel()
+        settle { vm.canEnterEditorAction() }
+        assertTrue(vm.beginSelectionParamGesture())
+        val transaction = assertNotNull(vm.currentSelectionParamTransaction())
+        vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.1f) }
+        val token = transaction.latestPreviewToken
+        val revision = checkNotNull(transaction.previewRevision)
+        vm.updateUiState {
+            it.copy(
+                sourcePath = "replacement-document",
+                baseContentToken = "replacement-base",
+                isBusy = true,
+                message = "replacement message",
+            )
+        }
+
+        var settled = false
+        vm.viewModelScope.launch {
+            vm.recordSelectionPreviewFailure(
+                transaction,
+                token,
+                revision,
+                "selection-preview-base",
+                "mask",
+                SelectionPreviewFailureKind.RenderFailure,
+                "stale failure",
+                null,
+            )
+            settled = true
+        }
+        settle { settled }
+
+        assertTrue(vm.uiState.value.isBusy)
+        assertEquals("replacement message", vm.uiState.value.message)
         vm.finishSelectionParamGesture()
     }
 }

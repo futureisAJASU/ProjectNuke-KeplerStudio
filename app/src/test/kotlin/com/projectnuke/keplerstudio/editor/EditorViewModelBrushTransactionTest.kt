@@ -160,4 +160,18 @@ class EditorViewModelBrushTransactionTest {
         assertTrue(vm.uiState.value.selectionLayers.isEmpty())
         assertEquals(0.0f, vm.uiState.value.params.exposure)
     }
+
+    @Test
+    fun `selection rollback preserves unrelated export state`() {
+        val vm = viewModel()
+        awaitEditorReady(vm)
+        assertTrue(vm.beginSelectionParamGesture())
+        vm.updateUiState { it.copy(exportFormat = ExportFormat.Png) }
+
+        assertTrue(vm.canEnterEditorAction())
+
+        assertEquals(ExportFormat.Png, vm.uiState.value.exportFormat)
+        assertEquals(0, vm.uiState.value.revision)
+        assertTrue(vm.uiState.value.selectionLayers.isNotEmpty())
+    }
 }
