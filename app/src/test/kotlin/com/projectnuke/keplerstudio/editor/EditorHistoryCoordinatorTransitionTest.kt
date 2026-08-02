@@ -236,6 +236,41 @@ class EditorHistoryCoordinatorTransitionTest {
     }
 
     @Test
+    fun coldUndoRequestsSelectionAdmissionBeforeMaterialization() = testScope.runTest {
+        ramBudget = 8L
+        val target = bitmap(0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        assertTrue(target.isRecycled)
+        ramBudget = 1_024L
+        val current = bitmap(0xffa0b0c0.toInt())
+        val admissionClosed = AtomicInteger()
+        var requested: HistorySelectionMaskPreflight? = null
+
+        val result =
+            coordinator.navigate(
+                undoDirection = true,
+                currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+                captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+                materialize = { value, transfer -> value.also(transfer) },
+                preflightSelectionMasks = { plan ->
+                    requested = plan
+                    AutoCloseable { admissionClosed.incrementAndGet() }
+                },
+                adopt = { it.releaseBitmapOwnership(); true },
+            )
+
+        assertTrue(result is HistoryNavigationResult.Adopted)
+        assertEquals(0L, requested?.uniqueMaskBytes)
+        assertEquals(0, requested?.layerCount)
+        assertEquals(1, admissionClosed.get())
+        assertEquals(1, storage.preflightCalls.get())
+        assertEquals(1, storage.loads.get())
+        coordinator.close()
+        advanceUntilIdle()
+        assertTrue(current.isRecycled)
+    }
+
+    @Test
     fun metadataOnlyUndoMaterializesAndTransfersRenderedBitmap() = testScope.runTest {
         coordinator.admitAdoptedSnapshot(snapshot(null, HistorySnapshotStorage.MetadataOnly), true, 0L)
         val rendered = bitmap(0xffb0c0d0.toInt())
@@ -580,6 +615,7 @@ class EditorHistoryCoordinatorTransitionTest {
         var failPublish = false
         var throwOnDeleteEntries = false
         val loads = AtomicInteger()
+        val preflightCalls = AtomicInteger()
         val deletedPayloads = AtomicInteger()
         val unregisterCalls = AtomicInteger()
         val deleteSessionCalls = AtomicInteger()
@@ -632,6 +668,23 @@ class EditorHistoryCoordinatorTransitionTest {
                     null
                 }
             return rawSnapshot(decoded, record.storage, expectedGeneration).also(register)
+        }
+
+        override suspend fun loadWithSelectionMaskPreflight(
+            entry: EditorHistoryEntry,
+            expectedGeneration: String,
+            preflight: suspend (HistorySelectionMaskPreflight) -> AutoCloseable?,
+            register: (EditorHistorySnapshot) -> Unit,
+        ): EditorHistorySnapshot? {
+            preflightCalls.incrementAndGet()
+            val admission = preflight(HistorySelectionMaskPreflight(0L, 0)) ?: return null
+            val loaded = load(entry, expectedGeneration, register)
+            if (loaded == null) {
+                admission.close()
+                return null
+            }
+            loaded.candidateAdmission = admission
+            return loaded
         }
 
         override suspend fun requiredBitmapBytes(
