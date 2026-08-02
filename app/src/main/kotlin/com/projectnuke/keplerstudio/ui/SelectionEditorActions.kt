@@ -509,7 +509,8 @@ fun EditorViewModel.clearActiveSelectionLayer() {
                 selectionLayers =
                     current.selectionLayers.map { layer ->
                         if (layer.id == activeId) {
-                            layer.bitmap.eraseColor(0xFF000000.toInt())
+                            // The legacy synchronous branch is unreachable; clear uses the
+                            // copy-on-write worker path above.
                             changed = true
                             layer
                         } else {
