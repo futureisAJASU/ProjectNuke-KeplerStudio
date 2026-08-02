@@ -42,6 +42,8 @@ data class ModelCapabilityState(
     val probeGeneration: Long = 0L,
     val loadGeneration: Long = 0L,
     val sessionGeneration: Long = 0L,
+    /** Exact probe epoch whose validated facts authorized this capability. */
+    val validationEpoch: Long = 0L,
     /** True only while a concrete runner/session for this feature is alive. */
     val sessionActive: Boolean = false,
     val observationSequence: Long = 0L,
@@ -108,6 +110,8 @@ class ValidatedModelCapabilityToken internal constructor(
     val semanticVersion: String,
     val contractSchema: Int,
     val runtimeType: ModelRuntimeType,
+    val approvedAssetSha256: String?,
+    val packagingVersion: String,
     val validationSequence: Long,
     val validationGeneration: Long,
 )
@@ -178,6 +182,12 @@ internal fun reduceModelCapability(
                     observation.generation
                 } else {
                     current.sessionGeneration
+                },
+            validationEpoch =
+                if (observation.publisher == ModelCapabilityPublisher.Probe) {
+                    observation.generation
+                } else {
+                    current.validationEpoch
                 },
             sessionActive = nextSessionActive,
             observationSequence = sequence,
@@ -295,12 +305,10 @@ object ModelAvailabilityRegistry {
                 semanticVersion = manifest.asset.semanticModelVersion,
                 contractSchema = manifest.asset.requiredContractSchemaVersion,
                 runtimeType = manifest.asset.runtimeType,
+                approvedAssetSha256 = manifest.asset.sha256,
+                packagingVersion = manifest.asset.packagingVersion,
                 validationSequence = capability.observationSequence,
-                validationGeneration = maxOf(
-                    capability.probeGeneration,
-                    capability.loadGeneration,
-                    capability.sessionGeneration,
-                ),
+                validationGeneration = capability.validationEpoch,
             )
         )
     }
@@ -308,6 +316,7 @@ object ModelAvailabilityRegistry {
     fun isCurrent(token: ValidatedModelCapabilityToken): Boolean {
         val capability = state.value[token.feature] ?: return false
         return capability.factsLoadable &&
+            capability.validationEpoch == token.validationGeneration &&
             capability.phase in
                 setOf(
                     ModelCapabilityPhase.Loadable,
@@ -315,12 +324,7 @@ object ModelAvailabilityRegistry {
                     ModelCapabilityPhase.Ready,
                     ModelCapabilityPhase.Unloaded,
                 ) &&
-            capability.observationSequence >= token.validationSequence &&
-            maxOf(
-                capability.probeGeneration,
-                capability.loadGeneration,
-                capability.sessionGeneration,
-            ) >= token.validationGeneration
+            capability.observationSequence >= token.validationSequence
     }
 
     fun beginProbe(): Long = probeGeneration.incrementAndGet().also { generation ->

@@ -226,6 +226,25 @@ class ModelAvailabilityRegistryTest {
     }
 
     @Test
+    fun olderValidationEpochStaysStaleAfterNewerProbeSucceeds() {
+        ModelAvailabilityRegistry.beginProbe()
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val tokenA =
+            (ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.Remaster)
+                as ModelLoadResult.Ready).runner
+
+        ModelAvailabilityRegistry.beginProbe()
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val tokenB =
+            (ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.Remaster)
+                as ModelLoadResult.Ready).runner
+
+        assertFalse(ModelAvailabilityRegistry.isCurrent(tokenA))
+        assertTrue(ModelAvailabilityRegistry.isCurrent(tokenB))
+        assertTrue(tokenA.validationGeneration < tokenB.validationGeneration)
+    }
+
+    @Test
     fun lateLoaderCannotDowngradeOrFailAnActiveReadySession() {
         val ready =
             reduceModelCapability(

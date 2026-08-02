@@ -519,7 +519,9 @@ class FlareGuardModelRunner private constructor(
                         validationToken.approvedAssetPath != manifest.asset.assetPath ||
                         validationToken.semanticVersion != manifest.asset.semanticModelVersion ||
                         validationToken.contractSchema != manifest.asset.requiredContractSchemaVersion ||
-                        validationToken.runtimeType != manifest.asset.runtimeType)
+                        validationToken.runtimeType != manifest.asset.runtimeType ||
+                        validationToken.approvedAssetSha256 != manifest.asset.sha256 ||
+                        validationToken.packagingVersion != manifest.asset.packagingVersion)
                 ) {
                     return ModelLoadResult.RuntimeUnavailable("model validation became stale before load")
                 }

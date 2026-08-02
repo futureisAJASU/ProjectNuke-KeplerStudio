@@ -123,6 +123,7 @@ object RemasterModelSession : ModelRunnerContract {
             }
 
     fun load(context: Context, candidate: RemasterModelCandidate) {
+        val applicationContext = context.applicationContext
         val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.Remaster)
         val validationToken = (validation as? ModelLoadResult.Ready)?.runner ?: return
         val generation = commandGeneration.incrementAndGet()
@@ -151,7 +152,11 @@ object RemasterModelSession : ModelRunnerContract {
                 activeModel = candidate
                 if (!isSupportedModelContract(candidate) ||
                     candidate.id != validationToken.modelId ||
-                    candidate.assetPath != validationToken.approvedAssetPath
+                    candidate.assetPath != validationToken.approvedAssetPath ||
+                    ModelAssetManifest.byId(candidate.id)?.asset?.sha256 !=
+                        validationToken.approvedAssetSha256 ||
+                    ModelAssetManifest.byId(candidate.id)?.asset?.packagingVersion !=
+                        validationToken.packagingVersion
                 ) {
                     isModelLoading = false
                     lifecycle = ModelRunnerLifecycle.Failed
@@ -177,7 +182,7 @@ object RemasterModelSession : ModelRunnerContract {
                 runCatching {
                         val created =
                             when (candidate.id) {
-                                "edge_masker" -> createImageSegmenter(context, validationToken.approvedAssetPath)
+                                "edge_masker" -> createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
                                 else -> null
                             }
                         if (generation != commandGeneration.get()) {
@@ -238,6 +243,7 @@ object RemasterModelSession : ModelRunnerContract {
 
     internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> =
         modelMutex.withLock {
+            val applicationContext = context.applicationContext
             val validation =
                 ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
             val validationToken =
@@ -278,7 +284,7 @@ object RemasterModelSession : ModelRunnerContract {
                 }
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
-                closeableModel = createImageSegmenter(context, validationToken.approvedAssetPath)
+                closeableModel = createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
                 isModelLoaded = true
                 isModelLoading = false
                 lifecycle = ModelRunnerLifecycle.Loaded
