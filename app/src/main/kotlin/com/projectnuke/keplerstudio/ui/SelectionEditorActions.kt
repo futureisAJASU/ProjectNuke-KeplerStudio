@@ -16,6 +16,8 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
+import com.projectnuke.keplerstudio.editor.OwnedHandoff
+import com.projectnuke.keplerstudio.editor.OwnedRenderSuccess
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
@@ -605,6 +607,8 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
     }
     launchManagedEditWithPreparedResources(
         { operationToken ->
+        val originalRenderSlot = OwnedHandoff<OwnedRenderSuccess>()
+        val previewRenderSlot = OwnedHandoff<OwnedRenderSuccess>()
         var pendingHistoryOwned = pendingHistory
         pendingHistory = null
         var undoSnapshot: EditorHistorySnapshot? =
@@ -620,40 +624,49 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                 transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
             )
         try {
-            renderedOriginal =
-                withContext(Dispatchers.Default) {
-                    EditorRenderer.render(
-                        createRenderRequest(
-                            state = sourceSnapshot.state,
-                            operation = RenderOperation.SelectionLocal,
-                            basePreview = sourceSnapshot.originalPreviewBitmap ?: sourceSnapshot.previewBitmap
-                                ?: error("missing selection base"),
-                            revision = nextRevision,
-                            look = null,
-                            quickEffects = emptyList(),
-                            selectionLayers = sourceSnapshot.selectionLayers.filter { it.id == layer.id },
-                            diagnostics = selectionTracker,
-                        )
-                    ).successOrThrow().output
-                }
+            withContext(Dispatchers.Default) {
+                originalRenderSlot.publish(
+                    OwnedRenderSuccess(
+                        EditorRenderer.render(
+                            createRenderRequest(
+                                state = sourceSnapshot.state,
+                                operation = RenderOperation.SelectionLocal,
+                                basePreview = sourceSnapshot.originalPreviewBitmap ?: sourceSnapshot.previewBitmap
+                                    ?: error("missing selection base"),
+                                revision = nextRevision,
+                                look = null,
+                                quickEffects = emptyList(),
+                                selectionLayers = sourceSnapshot.selectionLayers.filter { it.id == layer.id },
+                                diagnostics = selectionTracker,
+                            )
+                        ).successOrThrow()
+                    )
+                )
+            }
+            val originalOwner = checkNotNull(originalRenderSlot.take())
+            previewSuccess = originalOwner.result
+            renderedOriginal = checkNotNull(originalOwner.takeOutput())
             selectionTracker?.track(checkNotNull(renderedOriginal), "selectionEdit:original")
-            renderedPreview =
-                withContext(Dispatchers.Default) {
-                    previewSuccess =
+            withContext(Dispatchers.Default) {
+                previewRenderSlot.publish(
+                    OwnedRenderSuccess(
                         EditorRenderer.render(
                             createRenderRequest(
                                 state = sourceSnapshot.state,
                                 operation = RenderOperation.SelectionNativeBake,
-                                basePreview =
-                                    renderedOriginal ?: error("missing selection render"),
+                                basePreview = renderedOriginal ?: error("missing selection render"),
                                 revision = nextRevision,
                                 params = EditParams(),
                                 selectionLayers = emptyList(),
                                 diagnostics = selectionTracker,
                             )
                         ).successOrThrow()
-                    checkNotNull(previewSuccess).output
-                }
+                    )
+                )
+            }
+            val previewOwner = checkNotNull(previewRenderSlot.take())
+            previewSuccess = previewOwner.result
+            renderedPreview = checkNotNull(previewOwner.takeOutput())
             selectionTracker?.track(checkNotNull(renderedPreview), "selectionEdit:preview")
             if (isManagedEditCurrent(operationToken, nextRevision)) {
                 val adoptedOriginal = renderedOriginal ?: error("missing selection original")
@@ -713,6 +726,8 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
                 }
             }
         } finally {
+            originalRenderSlot.close()
+            previewRenderSlot.close()
             pendingHistoryOwned?.close()
             sourceSnapshot.close()
             selectionTracker?.end()
