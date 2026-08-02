@@ -3902,7 +3902,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
             var undoSnapshot: EditorHistorySnapshot? =
-                withContext(Dispatchers.Default) { pendingHistory?.await() }
+                pendingHistory?.await()
             pendingHistory = null
             try {
                 withContext(Dispatchers.IO) {
@@ -5431,7 +5431,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
             var undoSnapshot: EditorHistorySnapshot? =
-                withContext(Dispatchers.Default) { pendingHistory?.await() }
+                pendingHistory?.await()
             pendingHistory = null
             var renderedPreview: Bitmap? = null
             var renderSuccess: RenderResult.Success? = null
@@ -5603,7 +5603,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var renderSuccess: RenderResult.Success? = null
             var resolvedFlareRoute: ResolvedFeatureRoute<FlareGuardRoute>? = null
             var undoSnapshotOwned: EditorHistorySnapshot? =
-                withContext(Dispatchers.Default) { pendingHistory?.await() }
+                pendingHistory?.await()
             pendingHistory = null
             var ownedBaseOwned: Bitmap? = null
             val flareTracker =

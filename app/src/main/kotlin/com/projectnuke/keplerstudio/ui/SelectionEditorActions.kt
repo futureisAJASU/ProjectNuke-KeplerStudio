@@ -150,7 +150,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             var pendingHistoryOwned = pendingHistory
             pendingHistory = null
             var undoSnapshotOwned: EditorHistorySnapshot? =
-                withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+                pendingHistoryOwned?.await()
             pendingHistoryOwned = null
             var pendingLayerBitmap: Bitmap? = null
             var outputReservation: MaskReservation? = null
@@ -608,7 +608,7 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
         var pendingHistoryOwned = pendingHistory
         pendingHistory = null
         var undoSnapshot: EditorHistorySnapshot? =
-            withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+            pendingHistoryOwned?.await()
         pendingHistoryOwned = null
         var renderedOriginal: Bitmap? = null
         var renderedPreview: Bitmap? = null

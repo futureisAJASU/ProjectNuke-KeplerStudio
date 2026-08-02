@@ -151,7 +151,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
     consumeHistory()
     var undoSnapshotOwned: EditorHistorySnapshot? =
-        withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+        pendingHistoryOwned?.await()
     pendingHistoryOwned = null
     val bakeTracker =
         beginMemoryTracking(

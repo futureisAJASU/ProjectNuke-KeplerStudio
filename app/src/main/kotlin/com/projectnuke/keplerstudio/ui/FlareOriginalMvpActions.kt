@@ -77,7 +77,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
             var pendingHistoryOwned: PendingHistorySnapshot? = pendingHistory
             pendingHistory = null
             var undoSnapshotOwned =
-                withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+                pendingHistoryOwned?.await()
             pendingHistoryOwned = null
             var ownedBaseOwned: Bitmap? = null
             var adoptedFlare = ownedBaseOwned

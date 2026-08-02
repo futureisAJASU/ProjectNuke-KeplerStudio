@@ -141,7 +141,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             var pendingHistoryOwned: PendingHistorySnapshot? = pendingHistory
             pendingHistory = null
             var undoSnapshotOwned: EditorHistorySnapshot? =
-                withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+                pendingHistoryOwned?.await()
             pendingHistoryOwned = null
             var ownedBaseOwned: Bitmap? = null
             var ownedManualMaskOwned: Bitmap? = null

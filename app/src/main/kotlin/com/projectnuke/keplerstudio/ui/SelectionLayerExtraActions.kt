@@ -111,7 +111,7 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
     var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
     consumeHistory()
     var undoSnapshotOwned: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? =
-        withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+        pendingHistoryOwned?.await()
     pendingHistoryOwned = null
     try {
         val prepared = withContext(Dispatchers.Default) {
@@ -288,7 +288,7 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
     var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
     consumeHistory()
     var undoSnapshotOwned: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? =
-        withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
+        pendingHistoryOwned?.await()
     pendingHistoryOwned = null
     try {
         val prepared = withContext(Dispatchers.Default) {
