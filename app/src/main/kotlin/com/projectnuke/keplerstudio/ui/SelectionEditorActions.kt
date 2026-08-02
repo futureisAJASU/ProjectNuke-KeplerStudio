@@ -1,6 +1,11 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
+import android.graphics.BlurMaskFilter
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.AlgorithmContracts
 import com.projectnuke.keplerstudio.editor.BakedFeatureProvenance
@@ -576,9 +581,9 @@ fun EditorViewModel.paintActiveSelectionAt(maskX: Float, maskY: Float) {
     val startValid = !brushLastX.isNaN() && !brushLastY.isNaN()
     val painted =
         if (startValid) {
-            applyPaintSegment(layer.bitmap, brushLastX, brushLastY, maskX, maskY, settings, brushScratch(layer.bitmap.width))
+            applyPaintSegment(layer.bitmap, brushLastX, brushLastY, maskX, maskY, settings)
         } else {
-            applyPaintStroke(layer.bitmap, maskX, maskY, settings, brushScratch(layer.bitmap.width))
+            brushRasterizer.drawSegment(layer.bitmap, maskX, maskY, maskX, maskY, settings)
         }
     setBrushLastPosition(maskX, maskY)
     if (painted) {
@@ -599,23 +604,8 @@ internal fun EditorViewModel.applyPaintSegment(
     endX: Float,
     endY: Float,
     settings: com.projectnuke.keplerstudio.editor.SelectionPaintSettings,
-    scratch: IntArray,
 ): Boolean {
-    val radius = settings.sizePx.coerceAtLeast(1f) * 0.5f
-    val dx = endX - startX
-    val dy = endY - startY
-    val dist = kotlin.math.sqrt(dx * dx + dy * dy)
-    var changed = false
-    // Step by a fraction of the brush radius to guarantee full coverage.
-    val step = (radius * 0.5f).coerceAtLeast(1f)
-    val steps = (dist / step).toInt().coerceIn(1, 4096)
-    for (i in 0..steps) {
-        val t = if (steps == 0) 0f else i.toFloat() / steps.toFloat()
-        val px = startX + dx * t
-        val py = startY + dy * t
-        if (applyPaintStroke(bitmap, px, py, settings, scratch)) changed = true
-    }
-    return changed
+    return brushRasterizer.drawSegment(bitmap, startX, startY, endX, endY, settings)
 }
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {
@@ -794,54 +784,60 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
     )
 }
 
-private fun applyPaintStroke(
-    bitmap: Bitmap,
-    cx: Float,
-    cy: Float,
-    settings: SelectionPaintSettings,
-    row: IntArray,
-): Boolean {
-    val radius = settings.sizePx.coerceAtLeast(1f) * 0.5f
-    val left = (cx - radius).toInt().coerceIn(0, bitmap.width - 1)
-    val top = (cy - radius).toInt().coerceIn(0, bitmap.height - 1)
-    val right = (cx + radius).toInt().coerceIn(0, bitmap.width - 1)
-    val bottom = (cy + radius).toInt().coerceIn(0, bitmap.height - 1)
-    val width = right - left + 1
-    if (width <= 0 || bottom < top) return false
+/** Canvas-backed rasterization keeps pointer events bounded and avoids row-buffer stamp loops. */
+internal class BrushRasterizer {
+    private val canvas = Canvas()
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var maskFilterKey = Float.NaN
+    private var maskFilter: BlurMaskFilter? = null
 
-    val feather = settings.feather.coerceIn(0f, 0.98f)
-    val hardRadius = radius * (1f - feather)
-    if (row.size < width) return false
-    var changed = false
-    for (y in top..bottom) {
-        bitmap.getPixels(row, 0, width, left, y, width, 1)
-        for (i in 0 until width) {
-            val x = left + i
-            val dist = sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy))
-            if (dist > radius) continue
-            val fade =
-                if (dist <= hardRadius) 1f
-                else {
-                    val t =
-                        ((dist - hardRadius) / (radius - hardRadius).coerceAtLeast(1f)).coerceIn(
-                            0f,
-                            1f,
-                        )
-                    1f - t * t * (3f - 2f * t)
-                }
-            val old = (row[i] ushr 16) and 0xff
-            val delta = (255f * settings.strength.coerceIn(0f, 1f) * fade).roundToInt()
-            val next =
-                when (settings.mode) {
-                    SelectionPaintMode.Add -> (old + delta).coerceIn(0, 255)
-                    SelectionPaintMode.Remove -> (old - delta).coerceIn(0, 255)
-                }
-            if (next != old) changed = true
-            row[i] = -0x1000000 or (next shl 16) or (next shl 8) or next
+    fun drawSegment(
+        bitmap: Bitmap,
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float,
+        settings: SelectionPaintSettings,
+    ): Boolean {
+        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return false
+        if (!startX.isFinite() || !startY.isFinite() || !endX.isFinite() || !endY.isFinite()) return false
+        val maxX = (bitmap.width - 1).toFloat()
+        val maxY = (bitmap.height - 1).toFloat()
+        if (startX !in 0f..maxX || startY !in 0f..maxY || endX !in 0f..maxX || endY !in 0f..maxY) return false
+
+        val radius = settings.sizePx.coerceAtLeast(1f) * 0.5f
+        val filterRadius = (radius * settings.feather.coerceIn(0f, 0.98f)).coerceAtLeast(0f)
+        if (maskFilterKey != filterRadius) {
+            maskFilterKey = filterRadius
+            maskFilter = filterRadius.takeIf { it > 0f }?.let {
+                BlurMaskFilter(it, BlurMaskFilter.Blur.NORMAL)
+            }
         }
-        bitmap.setPixels(row, 0, width, left, y, width, 1)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = radius * 2f
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeJoin = Paint.Join.ROUND
+        paint.color =
+            if (settings.mode == SelectionPaintMode.Add) android.graphics.Color.WHITE
+            else android.graphics.Color.BLACK
+        paint.alpha = (settings.strength.coerceIn(0f, 1f) * 255f).roundToInt()
+        paint.maskFilter = maskFilter
+        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
+
+        synchronized(bitmap) {
+            canvas.setBitmap(bitmap)
+            try {
+                if (startX == endX && startY == endY) {
+                    canvas.drawPoint(startX, startY, paint)
+                } else {
+                    canvas.drawLine(startX, startY, endX, endY, paint)
+                }
+            } finally {
+                canvas.setBitmap(null)
+            }
+        }
+        return paint.alpha > 0
     }
-    return changed
 }
 
 private fun Bitmap.hasForegroundPixel(): Boolean {

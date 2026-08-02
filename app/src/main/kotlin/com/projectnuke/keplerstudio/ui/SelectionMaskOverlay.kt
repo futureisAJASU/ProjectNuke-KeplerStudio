@@ -125,7 +125,9 @@ fun SelectionMaskOverlay(
                 drawIntoCanvas { canvas ->
                     val native = canvas.nativeCanvas
                     val dst = RectF(fitted.left, fitted.top, fitted.right, fitted.bottom)
-                    native.drawBitmap(maskBitmap, null, dst, paint)
+                    synchronized(maskBitmap) {
+                        if (!maskBitmap.isRecycled) native.drawBitmap(maskBitmap, null, dst, paint)
+                    }
                 }
             }
         }
