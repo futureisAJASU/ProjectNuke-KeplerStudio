@@ -810,30 +810,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    private fun releaseOrphanedBitmaps(previous: EditorUiState, next: EditorUiState) {
-        val stillRetained = identityBitmapSet()
-        next.previewBitmap?.let(stillRetained::add)
-        next.originalPreviewBitmap?.let(stillRetained::add)
-        next.selectionLayers.forEach { stillRetained.add(it.bitmap) }
-        val toRelease = ArrayList<Bitmap>(8)
-        previous.previewBitmap
-            ?.takeIf { it !in stillRetained && !it.isRecycled }
-            ?.let(toRelease::add)
-        previous.originalPreviewBitmap
-            ?.takeIf { it !in stillRetained && !it.isRecycled }
-            ?.let(toRelease::add)
-        previous.selectionLayers.forEach { layer ->
-            if (layer.bitmap !in stillRetained && !layer.bitmap.isRecycled)
-                toRelease.add(layer.bitmap)
-        }
-        for (orphan in toRelease) {
-            val immediate = bitmapLeaseLedger.retireStateBitmap(orphan)
-            if (immediate != null) {
-                try { immediate.recycle() } catch (_: Throwable) {}
-            }
-        }
-    }
-
     /**
      * Starts a superseding bitmap/model edit. Callers must gate adoption with
      * [isManagedEditCurrent].
