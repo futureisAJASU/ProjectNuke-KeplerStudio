@@ -4,9 +4,9 @@ import kotlin.math.max
 import kotlin.math.min
 import org.json.JSONObject
 
-enum class CropAspectRatio(private val legacyLabel: String, val ratio: Float?) {
-    Free("?먯쑀", null),
-    Original("?먮낯", -1f),
+enum class CropAspectRatio(private val labelText: String, val ratio: Float?) {
+    Free("\uC790\uC720", null),
+    Original("\uC6D0\uBCF8", -1f),
     Square("1:1", 1f),
     FourThree("4:3", 4f / 3f),
     ThreeFour("3:4", 3f / 4f),
@@ -14,11 +14,7 @@ enum class CropAspectRatio(private val legacyLabel: String, val ratio: Float?) {
     NineSixteen("9:16", 9f / 16f);
 
     val label: String
-        get() = when (this) {
-            Free -> "자유"
-            Original -> "원본"
-            else -> legacyLabel
-        }
+        get() = labelText
 }
 
 data class CropState(
