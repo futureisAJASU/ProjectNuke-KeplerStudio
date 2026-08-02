@@ -6753,6 +6753,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         memoryRecoveryJob?.cancel()
         pendingMemoryRetry = null
         releaseNativeSession()
+        // The model session is process-global but editor-owned; ensure editor teardown
+        // invalidates its command generation and settles the registry out of Ready.
+        RemasterModelSession.unload()
         historyIoJob?.cancel()
         discardPendingParamUndoSnapshot()
         historyCoordinator.close()
