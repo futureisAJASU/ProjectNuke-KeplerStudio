@@ -10,6 +10,7 @@ class SelectionPreviewOwnershipTest {
             gestureId = 4L,
             previewToken = 9L,
             revision = 12,
+            documentGeneration = "generation-A",
             baseContentToken = "base-A",
             activeSelectionLayerId = "layer-A",
         )
@@ -21,6 +22,7 @@ class SelectionPreviewOwnershipTest {
                 activeGestureId = 4L,
                 latestPreviewToken = 9L,
                 stateRevision = 12,
+                stateDocumentGeneration = "generation-A",
                 stateBaseContentToken = "base-A",
                 stateActiveSelectionLayerId = "layer-A",
             ),
@@ -30,17 +32,18 @@ class SelectionPreviewOwnershipTest {
     @Test
     fun newerPreviewOrTransactionCannotBeClearedByOldCompletion() {
         assertFalse(
-            identity.matches(4L, 10L, 12, "base-A", "layer-A"),
+            identity.matches(4L, 10L, 12, "generation-A", "base-A", "layer-A"),
         )
         assertFalse(
-            identity.matches(5L, 9L, 12, "base-A", "layer-A"),
+            identity.matches(5L, 9L, 12, "generation-A", "base-A", "layer-A"),
         )
     }
 
     @Test
     fun replacementRevisionBaseOrLayerRejectsStalePreview() {
-        assertFalse(identity.matches(4L, 9L, 13, "base-A", "layer-A"))
-        assertFalse(identity.matches(4L, 9L, 12, "base-B", "layer-A"))
-        assertFalse(identity.matches(4L, 9L, 12, "base-A", "layer-B"))
+        assertFalse(identity.matches(4L, 9L, 13, "generation-A", "base-A", "layer-A"))
+        assertFalse(identity.matches(4L, 9L, 12, "generation-A", "base-B", "layer-A"))
+        assertFalse(identity.matches(4L, 9L, 12, "generation-A", "base-A", "layer-B"))
+        assertFalse(identity.matches(4L, 9L, 12, "generation-B", "base-A", "layer-A"))
     }
 }

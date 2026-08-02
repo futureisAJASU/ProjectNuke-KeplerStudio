@@ -211,6 +211,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var selectionGestureCounter: Long = 0L
     private var selectionPreviewCounter: Long = 0L
     private var transactionFinishJob: Job? = null
+    private val selectionTransactionGate = Any()
     private var brushingSnapshot: EditorHistorySnapshot? = null
     private enum class BrushTransactionState { Idle, Preparing, Active, Finishing, Cancelling }
     @Volatile private var brushTransactionState = BrushTransactionState.Idle
@@ -1508,6 +1509,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         look: PresetColorLook? = state.presetLook,
         quickEffects: List<ActiveQuickEffect> = state.activeQuickEffects,
         selectionLayers: List<SelectionLayer> = state.selectionLayers,
+        documentGeneration: String = currentDocumentGeneration(),
         storedRequestedRoute: NativeRenderRoute? = null,
         exactRoute: NativeRenderRoute? = null,
         storedDecision: RenderRouteDecision? = null,
@@ -1516,7 +1518,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         fallbackPolicy: FallbackPolicy = state.correctionEngineState.fallbackPolicy,
         diagnostics: MemoryTrackerScope? = null,
     ): RenderRequest {
-        val generation = currentDocumentGeneration()
         return RenderRequest(
             operation = operation,
             basePreview = basePreview,
@@ -1525,7 +1526,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             assignedDocumentEngine = assignedEngine,
             identity =
                 RenderIdentity(
-                    documentGeneration = generation,
+                    documentGeneration = documentGeneration,
                     baseContentToken = state.baseContentToken,
                     revision = revision,
                 ),
@@ -1608,18 +1609,61 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         !shuttingDown && isCropOperationCurrent(token) && _uiState.value.revision == revision
 
     internal fun beginSelectionPreview(transaction: SelectionParamTransaction): Long {
-        val token = ++selectionPreviewCounter
-        transaction.latestPreviewToken = token
-        transaction.finalPreviewToken = null
-        transaction.finalPreviewRevision = null
-        transaction.finalPreviewBaseToken = null
-        transaction.finalPreviewLayerId = null
-        transaction.previewRevision = null
-        transaction.previewBaseToken = null
-        transaction.previewLayerId = null
-        transaction.succeeded = false
-        transaction.previewJob?.cancel()
-        return token
+        return synchronized(selectionTransactionGate) {
+            val token = ++selectionPreviewCounter
+            transaction.latestPreviewToken = token
+            transaction.finalPreviewToken = null
+            transaction.finalPreviewRevision = null
+            transaction.finalPreviewBaseToken = null
+            transaction.finalPreviewLayerId = null
+            transaction.previewRevision = null
+            transaction.previewBaseToken = null
+            transaction.previewLayerId = null
+            transaction.succeeded = false
+            transaction.previewJob?.cancel()
+            token
+        }
+    }
+
+    /**
+     * Captures the exact state for the currently authorized live-preview tick.
+     *
+     * The ordinary editor snapshot gate deliberately rejects an active parameter gesture;
+     * this narrower path is the only exception.  Transaction identity and preview token are
+     * checked while the bitmap lifetime authority registers the lease, so a superseding state
+     * publication cannot make the worker copy a different set of references.
+     */
+    internal fun acquireSelectionPreviewSnapshot(
+        transaction: SelectionParamTransaction,
+        previewToken: Long,
+        expectedRevision: Int,
+        activeLayerId: String,
+    ): LeasedEditorSnapshot? = bitmapLeaseLedger.withStateTransition {
+        synchronized(selectionTransactionGate) {
+            if (
+                selectionParamTransaction !== transaction ||
+                    transaction.settled ||
+                    transaction.committed ||
+                    transaction.latestPreviewToken != previewToken ||
+                    transaction.previewRevision != expectedRevision ||
+                    transaction.previewLayerId != activeLayerId
+            ) {
+                return@withStateTransition null
+            }
+            val state = uiState.value
+            val generation = historyCoordinator.currentGeneration()
+            if (
+                state.sourcePath != transaction.sourcePath ||
+                    state.baseContentToken != transaction.baseContentToken ||
+                    state.revision != expectedRevision ||
+                    state.activeSelectionLayerId != activeLayerId ||
+                    generation != transaction.documentGeneration ||
+                    state.selectionLayers.none { it.id == activeLayerId }
+            ) {
+                return@withStateTransition null
+            }
+            bitmapLeaseLedger.capture("selectionLivePreview", state, generation)
+        }
     }
 
     internal fun isSelectionPreviewCurrent(
@@ -1632,10 +1676,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (shuttingDown) return false
         if (selectionParamTransaction !== transaction) return false
         val state = _uiState.value
+        val generation = historyCoordinator.currentGeneration()
         return SelectionPreviewIdentity(
                 gestureId = transaction.gestureId,
                 previewToken = token,
                 revision = revision,
+                documentGeneration = transaction.documentGeneration,
                 baseContentToken = baseToken,
                 activeSelectionLayerId = activeId,
             )
@@ -1643,6 +1689,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 activeGestureId = selectionParamTransaction?.gestureId,
                 latestPreviewToken = transaction.latestPreviewToken,
                 stateRevision = state.revision,
+                stateDocumentGeneration = generation,
                 stateBaseContentToken = state.baseContentToken,
                 stateActiveSelectionLayerId = state.activeSelectionLayerId,
             )
@@ -1656,11 +1703,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         activeId: String?,
     ) {
         if (selectionParamTransaction !== transaction) return
+        val generation = historyCoordinator.currentGeneration()
         val identity =
             SelectionPreviewIdentity(
                 gestureId = transaction.gestureId,
                 previewToken = token,
                 revision = revision,
+                documentGeneration = transaction.documentGeneration,
                 baseContentToken = baseToken,
                 activeSelectionLayerId = activeId,
             )
@@ -1671,6 +1720,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         activeGestureId = selectionParamTransaction?.gestureId,
                         latestPreviewToken = transaction.latestPreviewToken,
                         stateRevision = state.revision,
+                        stateDocumentGeneration = generation,
                         stateBaseContentToken = state.baseContentToken,
                         stateActiveSelectionLayerId = state.activeSelectionLayerId,
                     )
@@ -1703,16 +1753,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     leased.close()
                 }
             }
-        selectionParamTransaction =
-            SelectionParamTransaction(
-                gestureId = ++selectionGestureCounter,
-                snapshot = null,
-                startRevision = state.revision,
-                baseContentToken = state.baseContentToken,
-                activeSelectionLayerId = state.activeSelectionLayerId,
-            )
-        selectionParamTransaction?.let { tx ->
-            tx.pendingSnapshot = pendingSnapshot
+        synchronized(selectionTransactionGate) {
+            selectionParamTransaction =
+                SelectionParamTransaction(
+                    gestureId = ++selectionGestureCounter,
+                    snapshot = null,
+                    startRevision = state.revision,
+                    sourcePath = state.sourcePath,
+                    documentGeneration = leased.identity.generation,
+                    baseContentToken = state.baseContentToken,
+                    activeSelectionLayerId = state.activeSelectionLayerId,
+                )
+            selectionParamTransaction?.let { tx ->
+                tx.pendingSnapshot = pendingSnapshot
+            }
         }
         return true
     }
@@ -1745,7 +1799,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun currentSelectionParamTransaction(): SelectionParamTransaction? =
-        selectionParamTransaction
+        synchronized(selectionTransactionGate) { selectionParamTransaction }
 
     internal fun bindSelectionPreviewJob(
         transaction: SelectionParamTransaction,
@@ -1865,11 +1919,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun clearSelectionParamTransaction(transaction: SelectionParamTransaction) {
-        if (selectionParamTransaction !== transaction) return
-        selectionParamTransaction = null
-        transaction.previewJob = null
-        if (transactionFinishJob === transaction.finishJobRef) transactionFinishJob = null
-        transaction.finishJobRef = null
+        synchronized(selectionTransactionGate) {
+            if (selectionParamTransaction !== transaction) return
+            selectionParamTransaction = null
+            transaction.previewJob = null
+            if (transactionFinishJob === transaction.finishJobRef) transactionFinishJob = null
+            transaction.finishJobRef = null
+        }
     }
 
     private fun settleSelectionParamTransactionForSupersession() {
@@ -6918,6 +6974,8 @@ internal class SelectionParamTransaction(
     val gestureId: Long,
     var snapshot: EditorHistorySnapshot?,
     val startRevision: Int,
+    val sourcePath: String?,
+    val documentGeneration: String,
     val baseContentToken: String,
     val activeSelectionLayerId: String?,
 ) {

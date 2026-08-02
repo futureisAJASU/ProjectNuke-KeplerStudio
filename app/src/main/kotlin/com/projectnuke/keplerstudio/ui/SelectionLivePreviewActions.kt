@@ -12,7 +12,6 @@ import com.projectnuke.keplerstudio.editor.RenderOperation
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionParamTransaction
 import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
-import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.SelectionPreviewPreparationGateway
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
@@ -125,7 +124,14 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
     try {
         val prepared = withContext(Dispatchers.Default) {
             ensureActive()
-            leasedSnapshot = acquireEditorSnapshot("selectionLivePreview") ?: return@withContext null
+            val expectedRevision = transaction.previewRevision ?: return@withContext null
+            leasedSnapshot =
+                acquireSelectionPreviewSnapshot(
+                    transaction = transaction,
+                    previewToken = previewToken,
+                    expectedRevision = expectedRevision,
+                    activeLayerId = activeId,
+                ) ?: return@withContext null
             val stateForCopy = leasedSnapshot!!.state
             if (stateForCopy.baseContentToken != transaction.baseContentToken) return@withContext null
             if (stateForCopy.activeSelectionLayerId != activeId) return@withContext null
@@ -168,11 +174,12 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
         ownedBase = prepared.first
         ownedLayers = prepared.second
         checkNotNull(ownedBase)
-        val stateForRender = checkNotNull(uiState.value.takeIf {
-            it.baseContentToken == transaction.baseContentToken &&
-                it.activeSelectionLayerId == activeId &&
-                it.revision == observedRevision
-        })
+        val stateForRender =
+            checkNotNull(leasedSnapshot?.state?.takeIf {
+                it.baseContentToken == transaction.baseContentToken &&
+                    it.activeSelectionLayerId == activeId &&
+                    it.revision == observedRevision
+            })
 
         val success =
             withContext(Dispatchers.Default) {
@@ -184,6 +191,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                         revision = stateForRender.revision,
                         diagnostics = previewTracker,
                         selectionLayers = checkNotNull(ownedLayers),
+                        documentGeneration = checkNotNull(leasedSnapshot).identity.generation,
                     )
                 ).successOrThrow()
             }
