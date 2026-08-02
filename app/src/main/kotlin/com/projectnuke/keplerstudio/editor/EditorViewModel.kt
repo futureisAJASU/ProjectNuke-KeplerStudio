@@ -1740,25 +1740,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // Deferred handle so consumers (settlement, rollback) await the actual snapshot.
         // The lightweight params-only transaction identity is created synchronously so the
         // user-driven preview updates remain gated on Main.
-        val pendingSnapshot =
-            viewModelScope.async(Dispatchers.Default) {
-                try {
-                    captureHistorySnapshotFromRefs(
-                        leased.state,
-                        leased.previewBitmap,
-                        leased.originalPreviewBitmap,
-                        leased.selectionLayers.map { it.id to it.bitmap },
-                    )
-                } finally {
-                    leased.close()
-                }
-            }
+        val pendingSnapshot = prepareHistorySnapshot("selectionParamGesture", leased)
         synchronized(selectionTransactionGate) {
             selectionParamTransaction =
                 SelectionParamTransaction(
                     gestureId = ++selectionGestureCounter,
                     snapshot = null,
                     startRevision = state.revision,
+                    startState = state,
+                    startLease = leased,
                     sourcePath = state.sourcePath,
                     documentGeneration = leased.identity.generation,
                     baseContentToken = state.baseContentToken,
@@ -1914,30 +1904,56 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val snapshot = transaction.snapshot
         if (snapshot != null) {
             restoreSnapshotWithoutHistory(snapshot)
+        } else {
+            val current = _uiState.value
+            if (
+                current.sourcePath == transaction.sourcePath &&
+                    current.baseContentToken == transaction.baseContentToken &&
+                    historyCoordinator.currentGeneration() == transaction.documentGeneration
+            ) {
+                updateUiStateAndRecycleReplaced { transaction.startState.copy(isBusy = false) }
+            }
         }
+        transaction.snapshot = null
         clearSelectionParamTransaction(transaction)
     }
 
     private fun clearSelectionParamTransaction(transaction: SelectionParamTransaction) {
+        val pending: PendingHistorySnapshot?
+        val startLease: LeasedEditorSnapshot?
         synchronized(selectionTransactionGate) {
             if (selectionParamTransaction !== transaction) return
             selectionParamTransaction = null
             transaction.previewJob = null
             if (transactionFinishJob === transaction.finishJobRef) transactionFinishJob = null
             transaction.finishJobRef = null
+            pending = transaction.pendingSnapshot
+            transaction.pendingSnapshot = null
+            startLease = transaction.startLease
+            transaction.startLease = null
         }
+        pending?.close()
+        startLease?.close()
     }
 
     private fun settleSelectionParamTransactionForSupersession() {
         val tx = selectionParamTransaction ?: return
         tx.previewJob?.cancel()
         selectionPreviewCounter += 1L
-        viewModelScope.launch {
-            tx.awaitPendingSnapshot()
-            if (selectionParamTransaction === tx && !tx.committed) {
-                tx.snapshot?.let(::recycleHistorySnapshot)
-                clearSelectionParamTransaction(tx)
+        if (selectionParamTransaction === tx && !tx.committed) {
+            tx.settled = true
+            val current = _uiState.value
+            val sameDocument =
+                !shuttingDown &&
+                    current.sourcePath == tx.sourcePath &&
+                    current.baseContentToken == tx.baseContentToken &&
+                    historyCoordinator.currentGeneration() == tx.documentGeneration
+            if (sameDocument) {
+                updateUiStateAndRecycleReplaced { tx.startState.copy(isBusy = false) }
             }
+            tx.snapshot?.let(::recycleHistorySnapshot)
+            tx.snapshot = null
+            clearSelectionParamTransaction(tx)
         }
     }
 
@@ -6974,6 +6990,8 @@ internal class SelectionParamTransaction(
     val gestureId: Long,
     var snapshot: EditorHistorySnapshot?,
     val startRevision: Int,
+    val startState: EditorUiState,
+    var startLease: LeasedEditorSnapshot?,
     val sourcePath: String?,
     val documentGeneration: String,
     val baseContentToken: String,
@@ -6984,7 +7002,7 @@ internal class SelectionParamTransaction(
      * (e.g. from beginSelectionParamGesture off Main), this holds the work and consumers
      * (settlement, rollback) must await it before reading [snapshot].
      */
-    @Volatile var pendingSnapshot: Deferred<EditorHistorySnapshot?>? = null
+    @Volatile var pendingSnapshot: PendingHistorySnapshot? = null
 
     /**
      * Await the pending snapshot capture (if any). When complete, the result is materialized
@@ -7002,6 +7020,8 @@ internal class SelectionParamTransaction(
         } catch (_: Throwable) {
             // Snapshot capture failed; leave snapshot null so consumers fall through to
             // no-history rollback (acceptable: the user can retry the gesture).
+        } finally {
+            pending.close()
         }
     }
 
