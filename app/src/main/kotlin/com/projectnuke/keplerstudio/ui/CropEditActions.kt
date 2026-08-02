@@ -180,6 +180,7 @@ fun EditorViewModel.resetCropState() {
         )
     }
     return
+    /*
     val current = prepareForExternalEdit()
     applySynchronousEditWithHistory { state ->
         val bitmap = current.previewBitmap ?: current.originalPreviewBitmap
@@ -190,6 +191,7 @@ fun EditorViewModel.resetCropState() {
             message = "변경사항을 되돌렸습니다.",
         )
     }
+    */
 }
 
 fun EditorViewModel.applyCropTransform() {

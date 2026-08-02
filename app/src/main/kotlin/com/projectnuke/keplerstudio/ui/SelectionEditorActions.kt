@@ -51,6 +51,8 @@ import com.projectnuke.keplerstudio.editor.toFeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.withFailedRender
 import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import java.util.UUID
+import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlinx.coroutines.CancellationException
@@ -464,19 +466,6 @@ fun EditorViewModel.deleteActiveSelectionLayer() {
         message = "선택 마스크를 삭제했습니다.",
         delete = true,
     )
-    return
-    if (
-        !applySynchronousEditWithHistory { current ->
-            val nextLayers = current.selectionLayers.filterNot { it.id == activeId }
-            current.copy(
-                selectionLayers = nextLayers,
-                activeSelectionLayerId = nextLayers.lastOrNull()?.id,
-                message = "선택한 마스크를 삭제했습니다.",
-            )
-        }
-    )
-        return
-    persistDraftSnapshot()
 }
 
 fun EditorViewModel.invertActiveSelectionLayer() {
@@ -495,20 +484,6 @@ fun EditorViewModel.invertActiveSelectionLayer() {
         message = "마스크를 반전했습니다.",
         invert = true,
     )
-    return
-    if (
-        !applySynchronousEditWithHistory { current ->
-            current.copy(
-                selectionLayers =
-                    current.selectionLayers.map { layer ->
-                        if (layer.id == activeId) layer.copy(inverted = !layer.inverted) else layer
-                    },
-                message = "마스크 반전을 전환했습니다.",
-            )
-        }
-    )
-        return
-    persistDraftSnapshot()
 }
 
 fun EditorViewModel.clearActiveSelectionLayer() {
@@ -533,6 +508,7 @@ fun EditorViewModel.clearActiveSelectionLayer() {
         clear = true,
     )
     return
+    /*
     if (
         !applySynchronousEditWithHistory { current ->
             var changed = false
@@ -555,6 +531,7 @@ fun EditorViewModel.clearActiveSelectionLayer() {
     )
         return
     persistDraftSnapshot()
+    */
 }
 
 fun EditorViewModel.updateSelectionPaintSettings(
@@ -826,6 +803,14 @@ internal class BrushRasterizer {
         paint.maskFilter = maskFilter
         paint.xfermode = sourceOver
 
+        val fringe = (filterRadius * 3f + 1f).roundToInt()
+        val left = floor(minOf(startX, endX) - radius - fringe).toInt().coerceAtLeast(0)
+        val top = floor(minOf(startY, endY) - radius - fringe).toInt().coerceAtLeast(0)
+        val right = ceil(maxOf(startX, endX) + radius + fringe).toInt().coerceAtMost(bitmap.width - 1)
+        val bottom = ceil(maxOf(startY, endY) + radius + fringe).toInt().coerceAtMost(bitmap.height - 1)
+        if (paint.alpha == 0) return false
+        if (maskAlreadyAtTarget(bitmap, left, top, right, bottom, settings.mode)) return false
+
         synchronized(bitmap) {
             canvas.setBitmap(bitmap)
             try {
@@ -839,6 +824,23 @@ internal class BrushRasterizer {
             }
         }
         return paint.alpha > 0
+    }
+
+    private fun maskAlreadyAtTarget(
+        bitmap: Bitmap,
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+        mode: SelectionPaintMode,
+    ): Boolean {
+        val targetAlpha = if (mode == SelectionPaintMode.Add) 255 else 0
+        for (y in top..bottom) {
+            for (x in left..right) {
+                if ((bitmap.getPixel(x, y) ushr 24) != targetAlpha) return false
+            }
+        }
+        return true
     }
 }
 

@@ -2169,11 +2169,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         if (brushIdentity?.strokeId == strokeId) brushSnapshotJob = null
                     }
                 } catch (cancelled: CancellationException) {
+                    val abandonedSnapshot = snapshot
+                    val abandonedMask = ownedMask
+                    snapshot = null
+                    ownedMask = null
+                    abandonedSnapshot?.recycleBitmaps()
+                    abandonedMask?.takeIf { !it.isRecycled }?.recycle()
                     withContext(Dispatchers.Main) {
                         if (brushIdentity?.strokeId == strokeId) settleBrushPreparationFailure(strokeId)
                     }
                     throw cancelled
                 } catch (_: Throwable) {
+                    val abandonedSnapshot = snapshot
+                    val abandonedMask = ownedMask
+                    snapshot = null
+                    ownedMask = null
+                    abandonedSnapshot?.recycleBitmaps()
+                    abandonedMask?.takeIf { !it.isRecycled }?.recycle()
                     withContext(Dispatchers.Main) {
                         if (brushIdentity?.strokeId == strokeId) settleBrushPreparationFailure(strokeId)
                     }
@@ -2221,7 +2233,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (effectiveStorage == HistorySnapshotStorage.Exact) state.selectionLayers.forEach { layer ->
             val reservation =
             selectionMaskOwnership.reserve(
-                owner = "history:${historyCoordinator.currentGeneration()}:${layer.id}",
+                owner = "history:${documentGeneration ?: historyCoordinator.currentGeneration()}:${layer.id}",
                 bytes = BitmapMemoryBudget.bytes(layer.bitmap),
                 documentLayerDelta = 0,
                 )

@@ -105,7 +105,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         }
     if (!useModel && manualMaskAtEntry == null) {
         startSnapshot.close()
-        updateUiState { it.copy(message = "?섎룞 留덉뒪??V2瑜??ъ슜?섎젮硫??좏깮 ?곸뿭??留뚮뱾嫄곕굹 ?쒖꽦?뷀빐 二쇱꽭??") }
+        updateUiState { it.copy(message = "수동 마스크 V2를 사용하려면 선택 영역을 만들거나 활성화해 주세요.") }
         return
     }
     val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
@@ -123,10 +123,6 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         )
     var pendingHistory: PendingHistorySnapshot? =
         prepareHistorySnapshot("maskAwareRemaster", startSnapshot)
-    var ownedBase: Bitmap? = null
-    var ownedManualMask: Bitmap? = null
-    var maskReservation: MaskReservation? = null
-
     val sourcePath = current.sourcePath
     val baseContentToken = current.baseContentToken
     val startRevision = current.revision
@@ -423,14 +419,6 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 "maskAwareRemaster",
                 {
                     startSnapshot.close()
-                    ownedBase?.takeIf { !it.isRecycled }?.recycle()
-                    ownedBase = null
-                    maskReservation?.close()
-                    maskReservation = null
-                },
-                {
-                    ownedManualMask?.takeIf { !it.isRecycled }?.recycle()
-                    ownedManualMask = null
                 },
                 {
                     pendingHistory?.close()

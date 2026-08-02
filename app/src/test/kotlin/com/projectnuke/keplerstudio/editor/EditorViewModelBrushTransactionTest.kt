@@ -102,4 +102,30 @@ class EditorViewModelBrushTransactionTest {
         assertTrue(vm.uiState.value.selectionLayers.isEmpty())
         assertEquals(0, vm.uiState.value.selectionLayers.size)
     }
+
+    @Test
+    fun `add stroke over a fully selected region is a true no-op`() {
+        val vm = viewModel()
+        vm.updateUiState { state ->
+            state.selectionLayers.single().bitmap.eraseColor(android.graphics.Color.WHITE)
+            state.copy(
+                selectionPaintSettings =
+                    state.selectionPaintSettings.copy(
+                        mode = SelectionPaintMode.Add,
+                        sizePx = 4f,
+                        strength = 1f,
+                        feather = 0f,
+                    )
+            )
+        }
+
+        awaitEditorReady(vm)
+        assertTrue(vm.beginBrushStroke())
+        vm.paintActiveSelectionAt(16f, 16f)
+        vm.finishBrushStroke()
+        settle(vm) { !vm.hasActiveBrushStroke() }
+
+        assertEquals(0, vm.uiState.value.revision)
+        assertTrue(!vm.uiState.value.canUndo)
+    }
 }
