@@ -227,15 +227,19 @@ class SelectionPreviewProductionTest {
             )
         }
         val preparedA = CompletableDeferred<Unit>()
+        val preparedB = CompletableDeferred<Unit>()
         val releaseA = CompletableDeferred<Unit>()
         val hookCalls = AtomicInteger()
         val rendererCalls = AtomicInteger()
         val rendered = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         rendered.eraseColor(0xff3366aa.toInt())
         SelectionPreviewPreparationGateway.installPreparedOwnerHookForTest {
-            if (hookCalls.incrementAndGet() == 1) {
+            when (hookCalls.incrementAndGet()) {
+                1 -> {
                 preparedA.complete(Unit)
                 releaseA.await()
+                }
+                2 -> preparedB.complete(Unit)
             }
         }
         EditorRenderer.installRendererOverrideForTest {
@@ -261,6 +265,7 @@ class SelectionPreviewProductionTest {
             settle { preparedA.isCompleted }
             vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.4f) }
             releaseA.complete(Unit)
+            settle { preparedB.isCompleted }
             val transaction = assertNotNull(vm.currentSelectionParamTransaction())
             var adopted = false
             repeat(400) {
