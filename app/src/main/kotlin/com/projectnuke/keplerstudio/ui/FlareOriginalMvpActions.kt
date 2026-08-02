@@ -11,6 +11,9 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
+import com.projectnuke.keplerstudio.editor.OwnedBitmap
+import com.projectnuke.keplerstudio.editor.OwnedHandoff
+import com.projectnuke.keplerstudio.editor.OwnedRenderSuccess
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.RenderFailedException
@@ -74,6 +77,8 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
 
     launchManagedEditWithPreparedResources(
         { operationToken ->
+            val baseSlot = OwnedHandoff<OwnedBitmap>()
+            val renderSlot = OwnedHandoff<OwnedRenderSuccess>()
             var pendingHistoryOwned: PendingHistorySnapshot? = pendingHistory
             pendingHistory = null
             var undoSnapshotOwned =
@@ -84,10 +89,12 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
             var ownedPreview: Bitmap? = null
             var previewSuccess: RenderResult.Success? = null
             try {
-                ownedBaseOwned =
-                    withContext(Dispatchers.Default) {
-                        baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-                    }
+                withContext(Dispatchers.Default) {
+                    baseSlot.publish(
+                        OwnedBitmap(baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true))
+                    )
+                }
+                ownedBaseOwned = checkNotNull(baseSlot.take()?.take())
                 withContext(Dispatchers.Default) {
                     val result =
                         NativePhotoCore.nativeApplyFlareGuardInPlace(
@@ -100,8 +107,8 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                         error("nativeApplyFlareGuardInPlace failed: $result")
                     }
                 }
-                previewSuccess =
-                    withContext(Dispatchers.Default) {
+                withContext(Dispatchers.Default) {
+                    val success =
                         EditorRenderer.render(
                             createRenderRequest(
                                 state = current,
@@ -110,11 +117,11 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                                 revision = nextRevision,
                                 params = params,
                             )
-                        ).successOrThrow().let { success ->
-                            success.copy(participation = RenderParticipation(rule = true))
-                        }
-                    }
-                ownedPreview = checkNotNull(previewSuccess).output
+                        ).successOrThrow().let { it.copy(participation = RenderParticipation(rule = true)) }
+                    renderSlot.publish(OwnedRenderSuccess(success))
+                }
+                previewSuccess = checkNotNull(renderSlot.take()?.result)
+                ownedPreview = previewSuccess?.output
                 adoptedFlare = checkNotNull(ownedBaseOwned)
                 val adoptedPreview = checkNotNull(ownedPreview)
                 if (
@@ -201,6 +208,8 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                 ownedPreview?.let { if (!it.isRecycled) it.recycle() }
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 pendingHistoryOwned?.close()
+                baseSlot.close()
+                renderSlot.close()
                 startSnapshot.close()
             }
         },

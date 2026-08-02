@@ -111,6 +111,19 @@ internal class OwnedRenderSuccess(val result: RenderResult.Success) : AutoClosea
     }
 }
 
+/** Owns a Bitmap until the caller explicitly takes it after a dispatcher hop. */
+internal class OwnedBitmap(private val bitmap: Bitmap) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+
+    fun take(): Bitmap? = if (closed.compareAndSet(false, true)) bitmap else null
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            bitmap.takeUnless(Bitmap::isRecycled)?.recycle()
+        }
+    }
+}
+
 /** Owns every source-side resource created by one prepared live-preview attempt. */
 internal class PreparedSelectionPreview(
     val identity: SelectionPreviewIdentity,
