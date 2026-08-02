@@ -23,7 +23,6 @@ import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.copyBitmapsOwned
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.successOrThrow
-import com.projectnuke.keplerstudio.editor.withFailedRender
 import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
