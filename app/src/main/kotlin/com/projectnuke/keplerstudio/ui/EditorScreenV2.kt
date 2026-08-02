@@ -741,6 +741,25 @@ private fun V2ZoomablePreview(
     val density = LocalDensity.current
     val paddingPx = with(density) { 8.dp.toPx() }
 
+    LaunchedEffect(containerSize, displayedBitmap.width, displayedBitmap.height, paddingPx) {
+        if (containerSize.width > 0 && containerSize.height > 0) {
+            val safeScale = scale.takeIf { it.isFinite() }?.coerceIn(1f, 8f) ?: 1f
+            val settled =
+                PreviewGeometry(
+                    container = containerSize,
+                    imageWidth = displayedBitmap.width,
+                    imageHeight = displayedBitmap.height,
+                    padding = paddingPx,
+                    zoom = safeScale,
+                    pan = offset,
+                ).clampedPan()
+            if (scale != safeScale || offset != settled) {
+                scale = safeScale
+                offset = settled
+            }
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()

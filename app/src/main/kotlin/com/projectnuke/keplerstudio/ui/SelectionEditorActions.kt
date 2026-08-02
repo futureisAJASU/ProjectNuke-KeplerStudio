@@ -837,10 +837,31 @@ internal class BrushRasterizer {
         val targetAlpha = if (mode == SelectionPaintMode.Add) 255 else 0
         for (y in top..bottom) {
             for (x in left..right) {
-                if ((bitmap.getPixel(x, y) ushr 24) != targetAlpha) return false
+                if (((bitmap.getPixel(x, y) ushr 16) and 0xff) != targetAlpha) return false
             }
         }
         return true
+    }
+}
+
+/**
+ * Selection masks use opaque grayscale RGB as their durable representation. Older brush
+ * transactions could leave white RGB with variable alpha; normalize that form once, off Main,
+ * before the copy becomes the writable working mask.
+ */
+internal fun normalizeBrushMaskStorage(bitmap: Bitmap) {
+    if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return
+    val row = IntArray(bitmap.width)
+    for (y in 0 until bitmap.height) {
+        bitmap.getPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
+        for (x in row.indices) {
+            val pixel = row[x]
+            val alpha = (pixel ushr 24) and 0xff
+            val red = (pixel ushr 16) and 0xff
+            val intensity = if (alpha == 255) red else if (red == 255) alpha else minOf(red, alpha)
+            row[x] = (0xff shl 24) or (intensity shl 16) or (intensity shl 8) or intensity
+        }
+        bitmap.setPixels(row, 0, bitmap.width, 0, y, bitmap.width, 1)
     }
 }
 

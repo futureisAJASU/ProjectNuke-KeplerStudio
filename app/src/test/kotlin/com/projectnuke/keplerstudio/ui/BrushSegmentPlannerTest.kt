@@ -1,8 +1,12 @@
 package com.projectnuke.keplerstudio.ui
 
+import android.graphics.Bitmap
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
  * Verifies that the brush segment raster produces continuous coverage between two sampled
@@ -12,6 +16,8 @@ import kotlin.test.assertTrue
  * the production code (EditorViewModel.applyPaintSegment) steps along the line by half the
  * brush radius so even fast pointer samples produce overlapping disks.
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [29])
 class BrushSegmentPlannerTest {
 
     @Test
@@ -60,6 +66,17 @@ class BrushSegmentPlannerTest {
             assertTrue(x in 0f..100f)
             assertTrue(y in 0f..100f)
         }
+    }
+
+    @Test
+    fun legacyAlphaBrushMaskIsNormalizedToOpaqueGrayscale() {
+        val bitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        bitmap.setPixel(0, 0, 0x80FFFFFF.toInt())
+
+        normalizeBrushMaskStorage(bitmap)
+
+        assertEquals(0xFF808080.toInt(), bitmap.getPixel(0, 0))
+        bitmap.recycle()
     }
 
     @Test

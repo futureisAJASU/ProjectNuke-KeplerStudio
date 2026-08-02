@@ -30,6 +30,7 @@ import com.projectnuke.keplerstudio.ui.applySunFlareOriginalMvp
 import com.projectnuke.keplerstudio.ui.autoStraightenCrop
 import com.projectnuke.keplerstudio.ui.createBackgroundSelectionFromActive
 import com.projectnuke.keplerstudio.ui.duplicateActiveSelectionLayer
+import com.projectnuke.keplerstudio.ui.normalizeBrushMaskStorage
 import com.projectnuke.keplerstudio.ui.paintActiveSelectionAt
 import java.io.File
 import java.io.FileOutputStream
@@ -442,6 +443,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var before: EditorHistorySnapshot? = null
             try {
                 mask = createBitmapOrThrow(base.width, base.height, Bitmap.Config.ARGB_8888)
+                mask?.eraseColor(0xFF000000.toInt())
                 before = captureHistorySnapshotForLeasedSnapshot(start)
                 withContext(Dispatchers.Main) {
                     val live = uiState.value
@@ -2113,6 +2115,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 var snapshot: EditorHistorySnapshot? = null
                 try {
                     ownedMask = layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
+                    normalizeBrushMaskStorage(checkNotNull(ownedMask))
                     snapshot =
                         captureHistorySnapshotFromRefs(
                             producerLease.state,

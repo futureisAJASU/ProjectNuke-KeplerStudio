@@ -31,6 +31,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -461,6 +462,15 @@ private fun ZoomablePreview(
         return ViewportState(safeScale, geometry.clampedPan(), viewportSize.width, viewportSize.height)
     }
 
+    LaunchedEffect(size, displayedBitmap.width, displayedBitmap.height) {
+        val settled = settledViewport(scale, offset, size)
+        if (scale != settled.scale || offset != settled.offset) {
+            scale = settled.scale
+            offset = settled.offset
+            onViewportChanged(settled)
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Image(
             bitmap = displayedBitmap.asImageBitmap(),
@@ -515,6 +525,18 @@ private fun ZoomablePreview(
                     translationY = offset.y
                 }
         )
+
+        if (showSelectionOverlay && activeMaskLayer != null) {
+            SelectionMaskOverlay(
+                layer = activeMaskLayer,
+                visible = true,
+                viewModel = viewModel,
+                scale = scale,
+                offset = offset,
+                paddingPx = 0f,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         if (showOriginal && originalBitmap != null) {
             Text(

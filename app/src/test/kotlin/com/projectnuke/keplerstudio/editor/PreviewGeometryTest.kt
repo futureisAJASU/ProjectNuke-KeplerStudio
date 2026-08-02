@@ -136,4 +136,38 @@ class PreviewGeometryTest {
         assertTrue(resized.imageRect.width > 0f)
         assertTrue(resized.imageRect.height > 0f)
     }
+
+    @Test
+    fun `v1 zero padding and v2 content padding stay aligned to their real nodes`() {
+        val v1 = PreviewGeometry(IntSize(800, 600), 400, 300, padding = 0f)
+        val v2 = PreviewGeometry(IntSize(800, 600), 400, 300, padding = 8f)
+        assertEquals(0f, v1.imageRect.left)
+        assertTrue(v2.imageRect.left > 8f)
+        assertEquals(584f * (400f / 300f), v2.imageRect.width, 0.001f)
+    }
+
+    @Test
+    fun `resize clamps a previously valid zoom pan`() {
+        val before =
+            PreviewGeometry(
+                IntSize(1200, 800),
+                1200,
+                800,
+                padding = 8f,
+                zoom = 3f,
+                pan = Offset(500f, -500f),
+            )
+        val after =
+            PreviewGeometry(
+                IntSize(400, 400),
+                1200,
+                800,
+                padding = 8f,
+                zoom = 3f,
+                pan = before.clampedPan(),
+            )
+        val settled = after.clampedPan()
+        assertTrue(settled.x in -after.imageRect.width..after.imageRect.width)
+        assertTrue(settled.y in -after.imageRect.height..after.imageRect.height)
+    }
 }
