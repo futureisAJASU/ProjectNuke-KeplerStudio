@@ -6654,6 +6654,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val candidateAdmission =
             if (metadataOnly) {
                 null
+            } else if (snapshot.candidateAdmission != null) {
+                snapshot.candidateAdmission.also { snapshot.candidateAdmission = null }
             } else {
                 reserveSelectionMaskCandidate(
                     owner = "history-adopt:${snapshot.coordinatorGeneration ?: "unknown"}",

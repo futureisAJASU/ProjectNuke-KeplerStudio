@@ -1216,8 +1216,14 @@ internal class EditorHistoryStorage(
             }
             val snapshot = parseSnapshot(json, bitmaps)
             snapshot.candidateAdmission = candidateAdmission
+            try {
+                register(snapshot)
+            } catch (failure: Throwable) {
+                snapshot.candidateAdmission?.close()
+                snapshot.candidateAdmission = null
+                throw failure
+            }
             candidateAdmission = null
-            register(snapshot)
             owned.clear()
             snapshot
         } catch (ce: CancellationException) {
