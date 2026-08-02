@@ -40,7 +40,7 @@ class SelectionMaskOwnershipLedgerTest {
 
         handle.close()
         assertTrue(ledger.tryRetire(b), "no owner now allows retirement")
-        assertTrue(b.isRecycled, "tryRetire should recycle atomically when allowed")
+        assertFalse(b.isRecycled, "semantic retirement must leave recycling to BitmapLeaseLedger")
     }
 
     @Test
@@ -56,7 +56,7 @@ class SelectionMaskOwnershipLedgerTest {
 
         h2.close()
         assertTrue(ledger.tryRetire(b))
-        assertTrue(b.isRecycled)
+        assertFalse(b.isRecycled)
     }
 
     @Test
@@ -80,7 +80,7 @@ class SelectionMaskOwnershipLedgerTest {
         // Release the last: bitmap can retire
         snapshot.close()
         assertTrue(ledger.tryRetire(b))
-        assertTrue(b.isRecycled)
+        assertFalse(b.isRecycled)
     }
 
     @Test
@@ -162,7 +162,7 @@ class SelectionMaskOwnershipLedgerTest {
         val first = ledger.acquire(b, MaskOwnerKind.BrushWorkingCopy)!!
         first.close()
         assertTrue(ledger.tryRetire(b))
-        assertTrue(b.isRecycled)
+        assertFalse(b.isRecycled)
     }
 
     @Test

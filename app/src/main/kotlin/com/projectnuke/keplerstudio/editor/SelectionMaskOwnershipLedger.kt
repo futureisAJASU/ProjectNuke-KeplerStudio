@@ -90,35 +90,38 @@ internal class SelectionMaskOwnershipLedger(
     }
 
     fun acquire(bitmap: Bitmap?, kind: MaskOwnerKind): MaskOwnerHandle? {
-        if (bitmap == null || bitmap.isRecycled) return null
-        return lock.withLock {
-            val pin = pinBitmap?.invoke(bitmap)
-            if (pinBitmap != null && pin == null) {
+        val value = bitmap ?: return null
+        if (value.isRecycled) return null
+
+        // Pin before taking the semantic-ledger lock. State settlement holds the
+        // bitmap-ledger lock while reconciling this ledger; reversing that order
+        // here would deadlock acquisition against publication/replacement.
+        val pin = pinBitmap?.invoke(value)
+        if (pinBitmap != null && pin == null) return null
+        val handle = lock.withLock {
+            if (value.isRecycled) {
                 null
             } else {
-                val slot = slots.getOrElse(bitmap) { Slot().also { slots[bitmap] = it } }
+                val slot = slots.getOrElse(value) { Slot().also { slots[value] = it } }
                 slot.owners[kind] = (slot.owners[kind] ?: 0) + 1
-                MaskOwnerHandle(this, bitmap, kind, pin)
+                MaskOwnerHandle(this, value, kind, pin)
             }
         }
+        if (handle == null) pin?.close()
+        return handle
     }
 
     /**
-     * Attempt to retire the bitmap. Succeeds (returns true and recycles) only when no
-     * named owner currently holds it. Returns false if the bitmap is already recycled or
-     * still has a live owner.
+     * Attempt to retire the semantic ledger entry. Succeeds only when no named owner
+     * currently holds it. Bitmap recycling is deliberately owned by [BitmapLeaseLedger],
+     * which also tracks document state and transient pins; this ledger never recycles.
      */
     fun tryRetire(bitmap: Bitmap): Boolean {
         if (bitmap.isRecycled) return false
-        val toRecycle: Bitmap?
         lock.withLock {
             val slot = slots[bitmap]
             if (slot != null && slot.isLive) return false
             slots.remove(bitmap)
-            toRecycle = bitmap
-        }
-        if (toRecycle != null && !toRecycle.isRecycled) {
-            try { toRecycle.recycle() } catch (_: Throwable) {}
         }
         return true
     }
@@ -235,13 +238,13 @@ internal class MaskOwnerHandle internal constructor(
     private val kind: MaskOwnerKind,
     private val bitmapPin: BitmapLease.BitmapPin?,
 ) : AutoCloseable {
-    @Volatile private var closed = false
+    private val closed = AtomicBoolean(false)
     val ownerKind: MaskOwnerKind get() = kind
 
     override fun close() {
-        if (closed) return
-        closed = true
-        ledger.release(bitmap, kind)
-        bitmapPin?.close()
+        if (closed.compareAndSet(false, true)) {
+            ledger.release(bitmap, kind)
+            bitmapPin?.close()
+        }
     }
 }
