@@ -68,6 +68,7 @@ fun SelectionMaskOverlay(
     viewModel: EditorViewModel? = null,
     scale: Float,
     offset: Offset,
+    paddingPx: Float = 0f,
     modifier: Modifier = Modifier,
     tint: Color = DefaultMaskTint,
 ) {
@@ -106,9 +107,6 @@ fun SelectionMaskOverlay(
             )
         }
     }
-
-    val density = LocalDensity.current
-    val paddingPx = with(density) { 8.dp.toPx() }
 
     Box(modifier = modifier.fillMaxSize()) {
         Canvas(

@@ -518,6 +518,7 @@ private fun ZoomablePreview(
                 viewModel = viewModel,
                 scale = scale,
                 offset = offset,
+                paddingPx = 0f,
                 modifier = Modifier.fillMaxSize(),
             )
         }

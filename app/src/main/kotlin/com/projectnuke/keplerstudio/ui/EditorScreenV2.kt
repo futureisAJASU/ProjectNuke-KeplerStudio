@@ -865,6 +865,7 @@ private fun V2ZoomablePreview(
                 viewModel = viewModel,
                 scale = scale,
                 offset = offset,
+                paddingPx = paddingPx,
                 modifier = Modifier.fillMaxSize(),
             )
         }

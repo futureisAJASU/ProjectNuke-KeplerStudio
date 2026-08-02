@@ -427,6 +427,13 @@ fun EditorViewModel.deleteActiveSelectionLayer() {
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: return
+    applyAsyncSelectionLayerEdit(
+        layerId = activeId,
+        tag = "deleteSelectionLayer",
+        message = "선택 마스크를 삭제했습니다.",
+        delete = true,
+    )
+    return
     if (
         !applySynchronousEditWithHistory { current ->
             val nextLayers = current.selectionLayers.filterNot { it.id == activeId }
@@ -451,6 +458,13 @@ fun EditorViewModel.invertActiveSelectionLayer() {
                 updateUiState { it.copy(message = "먼저 마스크를 선택해 주세요.") }
                 return
             }
+    applyAsyncSelectionLayerEdit(
+        layerId = activeId,
+        tag = "invertSelectionLayer",
+        message = "마스크를 반전했습니다.",
+        invert = true,
+    )
+    return
     if (
         !applySynchronousEditWithHistory { current ->
             current.copy(
@@ -481,6 +495,13 @@ fun EditorViewModel.clearActiveSelectionLayer() {
                 }
                 return
             }
+    applyAsyncSelectionLayerEdit(
+        layerId = activeId,
+        tag = "clearSelectionLayer",
+        message = "마스크를 비웠습니다.",
+        clear = true,
+    )
+    return
     if (
         !applySynchronousEditWithHistory { current ->
             var changed = false
