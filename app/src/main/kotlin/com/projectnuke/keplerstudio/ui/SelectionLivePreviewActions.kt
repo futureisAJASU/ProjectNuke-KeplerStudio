@@ -10,13 +10,12 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import com.projectnuke.keplerstudio.editor.RenderFailedException
 import com.projectnuke.keplerstudio.editor.RenderOperation
-import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionParamTransaction
-import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
 import com.projectnuke.keplerstudio.editor.SelectionPreviewFailureKind
 import com.projectnuke.keplerstudio.editor.SelectionPreviewIdentity
 import com.projectnuke.keplerstudio.editor.SelectionPreviewPreparationOutcome
-import com.projectnuke.keplerstudio.editor.MaskReservationBatch
+import com.projectnuke.keplerstudio.editor.PreparedSelectionPreview
+import com.projectnuke.keplerstudio.editor.PreparedSelectionPreviewSlot
 import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopies
 import com.projectnuke.keplerstudio.editor.SelectionPreviewPreparationGateway
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
@@ -120,12 +119,9 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
     previewToken: Long,
     activeId: String,
 ) {
-    var leasedSnapshot: LeasedEditorSnapshot? = null
-    var ownedBase: Bitmap? = null
-    var ownedLayers: List<SelectionLayer>? = null
+    val preparedSlot = PreparedSelectionPreviewSlot()
+    var preparedOwner: PreparedSelectionPreview? = null
     var previewResult: Bitmap? = null
-    var maskReservations: MaskReservationBatch? = null
-    var previewTracker: MemoryTrackerScope? = null
     var observedRevision: Int = 0
     try {
         val expectedRevision = transaction.previewRevision ?: transaction.startRevision
@@ -175,76 +171,49 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
             }
             val observed = stateForCopy.revision
             SelectionPreviewPreparationGateway.noteCopy()
-            previewTracker =
-                beginMemoryTracking(
-                    "selectionLivePreview",
-                    snapshotState = "rendering",
-                    transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
-                )
-            val ownedBaseLocal =
-                try {
-                    liveBase.copyOrThrow()
-                } catch (failure: Throwable) {
-                    acquiredSnapshot.close()
-                    previewTracker?.end()
-                    previewTracker = null
-                    return@withContext SelectionPreviewPreparationOutcome.Rejected(
-                        previewIdentity,
-                        if (failure is BitmapAllocationRejectedException) {
-                            SelectionPreviewFailureKind.AllocationFailure
-                        } else {
-                            SelectionPreviewFailureKind.InvariantFailure
-                        },
-                        "selection preview source preparation failed",
-                        failure,
+            val owner = PreparedSelectionPreview(previewIdentity, acquiredSnapshot)
+            try {
+                owner.attachBase(liveBase.copyOrThrow())
+                val tracker =
+                    beginMemoryTracking(
+                        "selectionLivePreview",
+                        snapshotState = "rendering",
+                        transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
                     )
-                }
-            previewTracker?.track(ownedBaseLocal, "selectionPreview:base")
-            val reservations =
-                try {
+                if (tracker != null) owner.attachTracker(tracker)
+                tracker?.track(owner.requireBase(), "selectionPreview:base")
+                val reservations =
                     reserveSelectionMaskCopies(
                         owner = "selectionPreview:${transaction.gestureId}:$previewToken",
                         layers = stateForCopy.selectionLayers,
                     ) ?: throw BitmapAllocationRejectedException(
                         stateForCopy.selectionLayers.sumOf { BitmapMemoryBudget.bytes(it.bitmap) }
                     )
-                } catch (failure: Throwable) {
-                    ownedBaseLocal.recycle()
-                    acquiredSnapshot.close()
-                    previewTracker?.end()
-                    previewTracker = null
-                    return@withContext SelectionPreviewPreparationOutcome.Rejected(
-                        previewIdentity,
-                        SelectionPreviewFailureKind.AllocationFailure,
-                        "selection preview mask allocation was rejected",
-                        failure,
-                    )
+                owner.attachReservations(reservations)
+                owner.attachLayers(stateForCopy.selectionLayers.copyBitmapsOwned())
+                owner.requireLayers().forEach {
+                    tracker?.track(it.bitmap, "selectionPreview:layer:${it.id}")
                 }
-            val ownedLayersLocal =
-                try {
-                    stateForCopy.selectionLayers.copyBitmapsOwned()
-                } catch (failure: Throwable) {
-                    reservations.close()
-                    ownedBaseLocal.recycle()
-                    acquiredSnapshot.close()
-                    previewTracker?.end()
-                    previewTracker = null
-                    return@withContext SelectionPreviewPreparationOutcome.Rejected(
-                        previewIdentity,
-                        SelectionPreviewFailureKind.AllocationFailure,
-                        "selection preview mask preparation failed",
-                        failure,
-                    )
-                }
-            ownedLayersLocal.forEach {
-                previewTracker?.track(it.bitmap, "selectionPreview:layer:${it.id}")
+                preparedSlot.publish(owner)
+                SelectionPreviewPreparationGateway.awaitPreparedOwnerHookForTest()
+            } catch (cancelled: CancellationException) {
+                owner.close()
+                throw cancelled
+            } catch (failure: Throwable) {
+                owner.close()
+                return@withContext SelectionPreviewPreparationOutcome.Rejected(
+                    previewIdentity,
+                    if (failure is BitmapAllocationRejectedException) {
+                        SelectionPreviewFailureKind.AllocationFailure
+                    } else {
+                        SelectionPreviewFailureKind.InvariantFailure
+                    },
+                    "selection preview preparation failed",
+                    failure,
+                )
             }
             SelectionPreviewPreparationOutcome.Prepared(
                 identity = previewIdentity,
-                snapshot = acquiredSnapshot,
-                base = ownedBaseLocal,
-                layers = ownedLayersLocal,
-                reservations = reservations,
                 observedRevision = observed,
             )
         }
@@ -262,16 +231,11 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
             return
         }
         val ready = prepared as SelectionPreviewPreparationOutcome.Prepared
-        leasedSnapshot = ready.snapshot
-        ownedBase = ready.base
-        ownedLayers = ready.layers
-        maskReservations = ready.reservations
+        preparedOwner = preparedSlot.take()
+        checkNotNull(preparedOwner)
         observedRevision = ready.observedRevision
-        ownedBase = ready.base
-        ownedLayers = ready.layers
-        checkNotNull(ownedBase)
         val stateForRender =
-            checkNotNull(leasedSnapshot?.state?.takeIf {
+            checkNotNull(preparedOwner?.snapshot?.state?.takeIf {
                 it.baseContentToken == transaction.baseContentToken &&
                     it.activeSelectionLayerId == activeId &&
                     it.revision == observedRevision
@@ -283,16 +247,16 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                     createRenderRequest(
                         state = stateForRender,
                         operation = RenderOperation.SelectionLivePreview,
-                        basePreview = checkNotNull(ownedBase),
+                        basePreview = checkNotNull(preparedOwner).requireBase(),
                         revision = stateForRender.revision,
-                        diagnostics = previewTracker,
-                        selectionLayers = checkNotNull(ownedLayers),
-                        documentGeneration = checkNotNull(leasedSnapshot).identity.generation,
+                        diagnostics = preparedOwner?.tracker(),
+                        selectionLayers = checkNotNull(preparedOwner).requireLayers(),
+                        documentGeneration = checkNotNull(preparedOwner).snapshot.identity.generation,
                     )
                 ).successOrThrow()
-            }
+        }
         previewResult = success.output
-        previewTracker?.track(previewResult, "selectionPreview:result")
+        preparedOwner?.tracker()?.track(previewResult, "selectionPreview:result")
 
         val producedPreview = previewResult ?: error("missing selection live preview")
         var adoptedByCurrentTransaction = false
@@ -359,8 +323,6 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
         previewResult?.recycle()
         previewResult = null
     } finally {
-        ownedBase?.takeUnless { it.isRecycled }?.recycle()
-        ownedLayers?.forEach { layer -> layer.bitmap.takeUnless { it.isRecycled }?.recycle() }
         previewResult?.takeUnless { it.isRecycled }?.recycle()
         settleSelectionPreviewBusyIfOwned(
             transaction = transaction,
@@ -369,9 +331,8 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
             baseToken = transaction.baseContentToken,
             activeId = activeId,
         )
-        leasedSnapshot?.close()
-        maskReservations?.close()
-        previewTracker?.end()
+        preparedOwner?.close()
+        preparedSlot.close()
     }
 }
 

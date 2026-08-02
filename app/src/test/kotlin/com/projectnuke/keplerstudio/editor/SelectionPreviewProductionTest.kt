@@ -11,6 +11,7 @@ import kotlin.test.assertTrue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -211,6 +212,85 @@ class SelectionPreviewProductionTest {
             assertTrue(!vm.uiState.value.canUndo)
         } finally {
             EditorRenderer.clearRendererOverrideForTest()
+        }
+    }
+
+    @Test
+    fun supersededPreparedPreviewClosesOwnerBeforeNextPreviewAdopts() {
+        val vm = viewModel()
+        val secondMask = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        vm.updateUiState { state ->
+            state.copy(
+                selectionLayers =
+                    state.selectionLayers +
+                        SelectionLayer("mask-2", "mask-2", SelectionLayerKind.Brush, secondMask)
+            )
+        }
+        val preparedA = CompletableDeferred<Unit>()
+        val releaseA = CompletableDeferred<Unit>()
+        val hookCalls = AtomicInteger()
+        val rendererCalls = AtomicInteger()
+        val rendered = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        rendered.eraseColor(0xff3366aa.toInt())
+        SelectionPreviewPreparationGateway.installPreparedOwnerHookForTest {
+            if (hookCalls.incrementAndGet() == 1) {
+                preparedA.complete(Unit)
+                releaseA.await()
+            }
+        }
+        EditorRenderer.installRendererOverrideForTest {
+            rendererCalls.incrementAndGet()
+            RenderResult.Success(
+                operation = RenderOperation.SelectionLivePreview,
+                requestedRoute = NativeRenderRoute.V1,
+                output = rendered,
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
+        try {
+            settle { vm.canEnterEditorAction() }
+            assertTrue(vm.beginSelectionParamGesture())
+            val baselineReservations = vm.selectionMaskOwnership.reservedBytes()
+            vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.2f) }
+            settle { preparedA.isCompleted }
+            vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.4f) }
+            releaseA.complete(Unit)
+            val transaction = assertNotNull(vm.currentSelectionParamTransaction())
+            var adopted = false
+            repeat(400) {
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+                if (
+                        transaction.succeeded &&
+                        vm.uiState.value.previewBitmap === rendered &&
+                        vm.selectionMaskOwnership.reservedBytes() == baselineReservations
+                ) {
+                    adopted = true
+                    return@repeat
+                }
+                Thread.sleep(10)
+            }
+            assertTrue(
+                adopted,
+                "calls=${hookCalls.get()} renders=${rendererCalls.get()} reserved=${vm.selectionMaskOwnership.reservedBytes()} busy=${vm.uiState.value.isBusy} message=${vm.uiState.value.message}",
+            )
+
+            assertEquals(1, rendererCalls.get())
+            assertEquals(baselineReservations, vm.selectionMaskOwnership.reservedBytes())
+            assertEquals(0xff3366aa.toInt(), vm.uiState.value.previewBitmap?.getPixel(3, 3))
+            vm.finishSelectionParamGesture()
+            settle { vm.currentSelectionParamTransaction() == null && vm.uiState.value.canUndo }
+            assertTrue(vm.uiState.value.canUndo)
+            assertEquals(baselineReservations, vm.selectionMaskOwnership.reservedBytes())
+        } finally {
+            releaseA.complete(Unit)
+            EditorRenderer.clearRendererOverrideForTest()
+            SelectionPreviewPreparationGateway.resetForTest()
         }
     }
 }

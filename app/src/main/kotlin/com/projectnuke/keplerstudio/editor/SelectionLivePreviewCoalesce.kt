@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong
 internal object SelectionPreviewPreparationGateway {
     private val prepareCountAtomic = AtomicLong(0L)
     private val copyCountAtomic = AtomicLong(0L)
+    @Volatile private var preparedOwnerHookForTest: (suspend () -> Unit)? = null
 
     val prepareCount: Long get() = prepareCountAtomic.get()
     val copyCount: Long get() = copyCountAtomic.get()
@@ -33,6 +34,16 @@ internal object SelectionPreviewPreparationGateway {
     fun resetForTest() {
         prepareCountAtomic.set(0L)
         copyCountAtomic.set(0L)
+        preparedOwnerHookForTest = null
+    }
+
+    internal fun installPreparedOwnerHookForTest(hook: suspend () -> Unit) {
+        check(preparedOwnerHookForTest == null) { "prepared owner hook already installed" }
+        preparedOwnerHookForTest = hook
+    }
+
+    internal suspend fun awaitPreparedOwnerHookForTest() {
+        preparedOwnerHookForTest?.invoke()
     }
 }
 
