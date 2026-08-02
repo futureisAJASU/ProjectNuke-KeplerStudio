@@ -63,6 +63,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val sourcePath = state.sourcePath
     val sourceRevision = state.revision
+    val documentGeneration = startSnapshot.identity.generation
     val documentEngine = state.correctionEngineState.documentEngine
     val subjectOverride = ExperimentalLabController.debugOverrides().subjectSelection
     val modelCapability =
@@ -152,11 +153,12 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 val modelOperation =
                     ModelOperationContext(
                         operationToken = operationToken,
-                        documentGeneration = currentDocumentGeneration(),
+                        documentGeneration = documentGeneration,
                         documentIdentity = sourcePath,
                         isCurrent = { token, generation ->
                             val live = uiState.value
                             isManagedEditTokenCurrent(token) &&
+                                generation == documentGeneration &&
                                 generation == currentDocumentGeneration() &&
                                 live.sourcePath == sourcePath &&
                                 live.baseContentToken == state.baseContentToken &&

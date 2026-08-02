@@ -474,13 +474,24 @@ class FlareGuardModelRunner private constructor(
                 else -> ModelFailureReason.InferenceFailed
             }
         fun create(context: Context): ModelLoadResult<FlareGuardModelRunner> {
+            val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.FlareGuard)
+            val validationToken = (validation as? ModelLoadResult.Ready)?.runner
+                ?: return validation.retypeFailure()
+            return create(context, validationToken)
+        }
+
+        internal fun create(
+            context: Context,
+            validationToken: ValidatedModelCapabilityToken,
+        ): ModelLoadResult<FlareGuardModelRunner> {
             val manifest =
-                ModelAssetManifest.byId("flare_masker")
-                    ?: return ModelLoadResult.AssetMissing("manifest has no flare_masker entry")
+                ModelAssetManifest.byId(validationToken.modelId)
+                    ?: return ModelLoadResult.AssetMissing("manifest has no ${validationToken.modelId} entry")
             return create(
-                factory = defaultFactory(context, manifest.asset.assetPath),
+                factory = defaultFactory(context, validationToken.approvedAssetPath),
                 assetOpen = { path -> runCatching { context.assets.open(path) }.getOrNull() },
                 manifestProvider = { manifest },
+                validationToken = validationToken,
             )
         }
 
@@ -492,6 +503,7 @@ class FlareGuardModelRunner private constructor(
             factory: FlareGuardLoaderFactory,
             assetOpen: (String) -> java.io.InputStream?,
             manifestProvider: () -> ModelAssetManifestEntry? = { ModelAssetManifest.byId("flare_masker") },
+            validationToken: ValidatedModelCapabilityToken? = null,
         ): ModelLoadResult<FlareGuardModelRunner> {
             val diagnosticId = GlobalModelDiagnostics.newContributorId(DIAGNOSTIC_CATEGORY)
             GlobalModelDiagnostics.publish(diagnosticId, DIAGNOSTIC_CATEGORY, "loading")
@@ -501,6 +513,16 @@ class FlareGuardModelRunner private constructor(
                 val manifest =
                     manifestProvider()
                         ?: return ModelLoadResult.AssetMissing("manifest has no flare_masker entry")
+                if (validationToken != null &&
+                    (!ModelAvailabilityRegistry.isCurrent(validationToken) ||
+                        validationToken.modelId != manifest.id ||
+                        validationToken.approvedAssetPath != manifest.asset.assetPath ||
+                        validationToken.semanticVersion != manifest.asset.semanticModelVersion ||
+                        validationToken.contractSchema != manifest.asset.requiredContractSchemaVersion ||
+                        validationToken.runtimeType != manifest.asset.runtimeType)
+                ) {
+                    return ModelLoadResult.RuntimeUnavailable("model validation became stale before load")
+                }
                 val validation =
                     ModelAssetValidator.validate(manifest, assetOpen)
                 when (validation) {
@@ -604,6 +626,10 @@ class FlareGuardModelRunner private constructor(
         private const val DIAGNOSTIC_CATEGORY = "FlareGuardModelRunner"
         private const val MASK_ACTIVE_THRESHOLD = 0.5f
         private const val MIN_CONFIDENT_AREA_RATIO = 0.01f
+
+        @Suppress("UNCHECKED_CAST")
+        private fun <T> ModelLoadResult<*>.retypeFailure(): ModelLoadResult<T> =
+            this as ModelLoadResult<T>
 
         private fun loadMappedAsset(context: Context, assetPath: String): MappedByteBuffer {
             try {

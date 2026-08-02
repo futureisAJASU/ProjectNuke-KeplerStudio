@@ -16,6 +16,7 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.MaskReservation
 import com.projectnuke.keplerstudio.editor.FeatureExecutionOutcome
 import com.projectnuke.keplerstudio.editor.FeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.ModelFeature
@@ -41,6 +42,7 @@ import com.projectnuke.keplerstudio.editor.withFailedRender
 import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import com.projectnuke.keplerstudio.editor.withBakedFeatureProvenance
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
+import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopy
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -92,6 +94,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     prepareForExternalEdit()
     val startSnapshot = acquireEditorSnapshot("maskAwareRemaster") ?: return
     val current = startSnapshot.state
+    val documentGeneration = startSnapshot.identity.generation
     val manualMaskAtEntry =
         if (!useModel) {
             current.selectionLayers
@@ -122,9 +125,17 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         prepareHistorySnapshot("maskAwareRemaster", startSnapshot)
     var ownedBase: Bitmap? = null
     var ownedManualMask: Bitmap? = null
+    var maskReservation: MaskReservation? = null
     try {
         ownedBase = basePreview.copyOrThrow()
         remasterPrepareTracker?.track(checkNotNull(ownedBase), "remaster:ownedBase")
+        maskReservation = reserveSelectionMaskCopy(
+            owner = "maskAwareRemaster:${startSnapshot.identity.generation}:${current.revision}",
+            source = if (manualMaskAtEntry != null) manualMaskAtEntry else basePreview,
+            config = Bitmap.Config.ARGB_8888,
+        ) ?: throw BitmapAllocationRejectedException(
+            BitmapMemoryBudget.bytes(basePreview.width, basePreview.height, Bitmap.Config.ARGB_8888)
+        )
         manualMaskAtEntry?.let {
             ownedManualMask = it.copyOrThrow()
             remasterPrepareTracker?.track(checkNotNull(ownedManualMask), "remaster:manualMask")
@@ -134,6 +145,8 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         ownedBase = null
         ownedManualMask?.takeUnless(Bitmap::isRecycled)?.recycle()
         ownedManualMask = null
+        maskReservation?.close()
+        maskReservation = null
         pendingHistory?.close()
         pendingHistory = null
         startSnapshot.close()
@@ -176,16 +189,19 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             remasterPrepareTracker?.end()
             ownedBase = null
             ownedManualMask = null
+            val maskReservationOwned = maskReservation
+            maskReservation = null
             try {
                 val inferenceJob = currentCoroutineContext()[Job]
                 val modelOperation =
                     ModelOperationContext(
                         operationToken = operationToken,
-                        documentGeneration = currentDocumentGeneration(),
+                        documentGeneration = documentGeneration,
                         documentIdentity = sourcePath,
                         isCurrent = { token, generation ->
                             val live = uiState.value
                             isManagedEditTokenCurrent(token) &&
+                                generation == documentGeneration &&
                                 generation == currentDocumentGeneration() &&
                                 live.sourcePath == sourcePath &&
                                 live.baseContentToken == baseContentToken &&
@@ -412,6 +428,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 remasteredOriginal?.takeIf { !it.isRecycled }?.recycle()
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
                 ownedManualMaskOwned?.takeIf { !it.isRecycled }?.recycle()
+                maskReservationOwned?.close()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 pendingHistoryOwned?.close()
                 remasterTracker?.end()
@@ -425,6 +442,8 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     startSnapshot.close()
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null
+                    maskReservation?.close()
+                    maskReservation = null
                 },
                 {
                     ownedManualMask?.takeIf { !it.isRecycled }?.recycle()

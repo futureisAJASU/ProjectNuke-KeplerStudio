@@ -103,6 +103,11 @@ internal data class ModelCapabilityObservation(
 /** Immutable authorization issued only from validated registry facts. */
 class ValidatedModelCapabilityToken internal constructor(
     val feature: ModelFeature,
+    val modelId: String,
+    val approvedAssetPath: String,
+    val semanticVersion: String,
+    val contractSchema: Int,
+    val runtimeType: ModelRuntimeType,
     val validationSequence: Long,
     val validationGeneration: Long,
 )
@@ -273,9 +278,23 @@ object ModelAvailabilityRegistry {
         @Suppress("UNCHECKED_CAST")
         val rejection = loaderRejection(feature) as ModelLoadResult<ValidatedModelCapabilityToken>?
         rejection?.let { return it }
+        val modelId =
+            when (feature) {
+                ModelFeature.FlareGuard -> "flare_masker"
+                ModelFeature.Remaster,
+                ModelFeature.SubjectSelection -> "edge_masker"
+            }
+        val manifest =
+            ModelAssetManifest.byId(modelId)
+                ?: return ModelLoadResult.UnsupportedContract("model manifest is not registered")
         return ModelLoadResult.Ready(
             ValidatedModelCapabilityToken(
                 feature = feature,
+                modelId = manifest.id,
+                approvedAssetPath = manifest.asset.assetPath,
+                semanticVersion = manifest.asset.semanticModelVersion,
+                contractSchema = manifest.asset.requiredContractSchemaVersion,
+                runtimeType = manifest.asset.runtimeType,
                 validationSequence = capability.observationSequence,
                 validationGeneration = maxOf(
                     capability.probeGeneration,

@@ -139,7 +139,10 @@ object RemasterModelSession : ModelRunnerContract {
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 activeModel = candidate
-                if (!isSupportedModelContract(candidate)) {
+                if (!isSupportedModelContract(candidate) ||
+                    candidate.id != validationToken.modelId ||
+                    candidate.assetPath != validationToken.approvedAssetPath
+                ) {
                     isModelLoading = false
                     lifecycle = ModelRunnerLifecycle.Failed
                     GlobalModelDiagnostics.publish("RemasterModelSession", "failed")
@@ -164,7 +167,7 @@ object RemasterModelSession : ModelRunnerContract {
                 runCatching {
                         val created =
                             when (candidate.id) {
-                                "edge_masker" -> createImageSegmenter(context, candidate.assetPath)
+                                "edge_masker" -> createImageSegmenter(context, validationToken.approvedAssetPath)
                                 else -> null
                             }
                         if (generation != commandGeneration.get()) {
@@ -259,7 +262,7 @@ object RemasterModelSession : ModelRunnerContract {
                 }
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
-                closeableModel = createImageSegmenter(context, candidate.assetPath)
+                closeableModel = createImageSegmenter(context, validationToken.approvedAssetPath)
                 isModelLoaded = true
                 isModelLoading = false
                 lifecycle = ModelRunnerLifecycle.Loaded
