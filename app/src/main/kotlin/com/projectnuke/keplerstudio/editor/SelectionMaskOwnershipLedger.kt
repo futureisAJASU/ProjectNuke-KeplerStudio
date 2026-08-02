@@ -50,12 +50,37 @@ internal class SelectionMaskOwnershipLedger(
 
     private val slots = IdentityHashMap<Bitmap, Slot>()
 
-    fun reserve(owner: String, bytes: Long, documentLayerDelta: Int = 0): MaskReservation? {
-        if (owner.isBlank() || bytes <= 0L || documentLayerDelta < 0) return null
+    fun reserve(owner: String, bytes: Long, documentLayerDelta: Int = 0): MaskReservation? =
+        reserveInternal(owner, bytes, documentLayerDelta, replacingDocument = false)
+
+    /**
+     * Admits a complete replacement document candidate. Its layer count replaces the current
+     * document count, while its bytes are additive until publication and retirement settle.
+     */
+    fun reserveDocumentCandidate(
+        owner: String,
+        bytes: Long,
+        documentLayerCount: Int,
+    ): MaskReservation? =
+        reserveInternal(owner, bytes, documentLayerCount, replacingDocument = true)
+
+    private fun reserveInternal(
+        owner: String,
+        bytes: Long,
+        documentLayerDelta: Int,
+        replacingDocument: Boolean,
+    ): MaskReservation? {
+        if (owner.isBlank() || bytes < 0L || documentLayerDelta < 0 || (bytes == 0L && documentLayerDelta == 0)) return null
         return lock.withLock {
             val limit = byteBudget().coerceAtLeast(0L)
             if (bytes > limit - activeBytes - reservedBytes) return null
-            if (documentLayerDelta > layerBudget().coerceAtLeast(0) - activeLayers - reservedLayers) return null
+            val availableLayers =
+                if (replacingDocument) {
+                    layerBudget().coerceAtLeast(0) - reservedLayers
+                } else {
+                    layerBudget().coerceAtLeast(0) - activeLayers - reservedLayers
+                }
+            if (documentLayerDelta > availableLayers) return null
             val id = reservationIds.getAndIncrement()
             reservations[id] = ReservationEntry(owner, bytes, documentLayerDelta)
             reservedBytes += bytes

@@ -58,6 +58,7 @@ object RemasterModelSession : ModelRunnerContract {
         private set
 
     private var closeableModel: AutoCloseable? = null
+    private var sessionValidationIdentity: ModelSessionValidationIdentity? = null
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
     private val commandGeneration = AtomicLong()
@@ -147,6 +148,7 @@ object RemasterModelSession : ModelRunnerContract {
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
+                sessionValidationIdentity = null
                 activeModel = candidate
                 if (!isSupportedModelContract(candidate) ||
                     candidate.id != validationToken.modelId ||
@@ -190,8 +192,26 @@ object RemasterModelSession : ModelRunnerContract {
                         closeableModel = created
                     }
                     .onSuccess {
+                        if (generation != commandGeneration.get() ||
+                            !ModelAvailabilityRegistry.isCurrent(validationToken)
+                        ) {
+                            runCatching { closeableModel?.close() }
+                            closeableModel = null
+                            sessionValidationIdentity = null
+                            isModelLoaded = false
+                            isModelLoading = false
+                            lifecycle = ModelRunnerLifecycle.Failed
+                            ModelAvailabilityRegistry.reportEdgeLoad(
+                                ModelLoadResult.RuntimeUnavailable("model validation became stale after load"),
+                                registryLoadGeneration,
+                            )
+                            GlobalModelDiagnostics.publish("RemasterModelSession", "failed")
+                            statusText = "${candidate.title}: model validation became stale"
+                            return@onSuccess
+                        }
                         isModelLoaded = closeableModel != null
                         if (isModelLoaded) {
+                            sessionValidationIdentity = validationToken.sessionIdentity()
                             ModelAvailabilityRegistry.reportEdgeLoad(
                                 ModelLoadResult.Ready(Unit),
                                 registryLoadGeneration,
@@ -248,7 +268,15 @@ object RemasterModelSession : ModelRunnerContract {
                 (validation as? ModelLoadResult.Ready)?.runner
                     ?: return@withLock validation.asUnitFailure()
             if (activeModel?.id == "edge_masker" && isModelLoaded && closeableModel != null) {
-                return@withLock ModelLoadResult.Ready(Unit)
+                if (sessionValidationIdentity == validationToken.sessionIdentity()) {
+                    return@withLock ModelLoadResult.Ready(Unit)
+                }
+                publishSessionClosed()
+                runCatching { closeableModel?.close() }
+                closeableModel = null
+                sessionValidationIdentity = null
+                activeModel = null
+                isModelLoaded = false
             }
             val candidate =
                 OnDeviceRemasterModels.firstOrNull { it.id == "edge_masker" }
@@ -282,8 +310,20 @@ object RemasterModelSession : ModelRunnerContract {
                 }
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
+                sessionValidationIdentity = null
                 closeableModel = createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
+                if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
+                    runCatching { closeableModel?.close() }
+                    closeableModel = null
+                    isModelLoaded = false
+                    isModelLoading = false
+                    lifecycle = ModelRunnerLifecycle.Failed
+                    val stale = ModelLoadResult.RuntimeUnavailable("model validation became stale after load")
+                    ModelAvailabilityRegistry.reportEdgeLoad(stale, loadGeneration)
+                    return@withLock stale
+                }
                 isModelLoaded = true
+                sessionValidationIdentity = validationToken.sessionIdentity()
                 isModelLoading = false
                 lifecycle = ModelRunnerLifecycle.Loaded
                 ModelLoadResult.Ready(Unit).also {
@@ -342,6 +382,21 @@ object RemasterModelSession : ModelRunnerContract {
             if (activeModel?.id != "edge_masker" || !isModelLoaded) {
                 return@withLock ModelRunResult.Failure(
                     ModelFailure(ModelFailureReason.Closed),
+                    DeterministicModelFallback.NoResult,
+                )
+            }
+            val currentToken =
+                (ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
+                    as? ModelLoadResult.Ready)?.runner
+                    ?: return@withLock ModelRunResult.Failure(
+                        ModelFailure(ModelFailureReason.CapabilityUnknown),
+                        DeterministicModelFallback.NoResult,
+                    )
+            if (sessionValidationIdentity != currentToken.sessionIdentity() ||
+                !ModelAvailabilityRegistry.isCurrent(currentToken)
+            ) {
+                return@withLock ModelRunResult.Failure(
+                    ModelFailure(ModelFailureReason.RuntimeUnavailable, "model validation epoch is stale"),
                     DeterministicModelFallback.NoResult,
                 )
             }
@@ -408,6 +463,7 @@ object RemasterModelSession : ModelRunnerContract {
                 val sessionClosePublished = publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
+                sessionValidationIdentity = null
                 activeModel = null
                 isModelLoaded = false
                 isModelLoading = false
@@ -428,6 +484,7 @@ object RemasterModelSession : ModelRunnerContract {
             val sessionClosePublished = publishSessionClosed()
             runCatching { closeableModel?.close() }
             closeableModel = null
+            sessionValidationIdentity = null
             activeModel = null
             isModelLoaded = false
             isModelLoading = false
@@ -693,6 +750,30 @@ object RemasterModelSession : ModelRunnerContract {
         }
     }
 }
+
+/** Immutable validation facts bound to a loaded native/model session. */
+internal data class ModelSessionValidationIdentity(
+    val modelId: String,
+    val validationEpoch: Long,
+    val approvedAssetPath: String,
+    val approvedAssetSha256: String?,
+    val packagingVersion: String,
+    val semanticVersion: String,
+    val contractSchema: Int,
+    val runtimeType: com.projectnuke.keplerstudio.editor.ModelRuntimeType,
+)
+
+internal fun com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken.sessionIdentity(): ModelSessionValidationIdentity =
+    ModelSessionValidationIdentity(
+        modelId = modelId,
+        validationEpoch = validationGeneration,
+        approvedAssetPath = approvedAssetPath,
+        approvedAssetSha256 = approvedAssetSha256,
+        packagingVersion = packagingVersion,
+        semanticVersion = semanticVersion,
+        contractSchema = contractSchema,
+        runtimeType = runtimeType,
+    )
 
 private fun ModelLoadResult<*>.asUnitFailure(): ModelLoadResult<Unit> =
     when (this) {

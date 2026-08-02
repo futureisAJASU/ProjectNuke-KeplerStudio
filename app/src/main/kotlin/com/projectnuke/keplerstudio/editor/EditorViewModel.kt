@@ -221,6 +221,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal var selectionParamTransaction: SelectionParamTransaction? = null
     private var selectionGestureCounter: Long = 0L
     private var selectionPreviewCounter: Long = 0L
+    private var asyncBusyCounter: Long = 0L
+    private data class AsyncBusyOwner(
+        val token: Long,
+        val operationType: String,
+        val documentGeneration: String,
+        val sourcePath: String?,
+        val baseContentToken: String,
+        val startRevision: Int,
+    )
+    private var asyncBusyOwner: AsyncBusyOwner? = null
     private var transactionFinishJob: Job? = null
     private val selectionTransactionGate = Any()
     private var brushingSnapshot: EditorHistorySnapshot? = null
@@ -1559,6 +1569,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
         if (shuttingDown) return false
+        // An editor action is an intent to capture a new start state. Settle interactive
+        // owners before answering so the caller's first click cannot capture working pixels
+        // or observe a still-live optimistic selection transaction.
+        if (brushTransactionState == BrushTransactionState.Finishing ||
+            brushTransactionState == BrushTransactionState.Cancelling
+        ) {
+            updateUiState { it.copy(message = "브러시 작업이 마무리되는 중입니다. 잠시 후 다시 시도해 주세요.") }
+            return false
+        }
+        if (brushTransactionState != BrushTransactionState.Idle) cancelBrushStroke()
+        if (selectionParamTransaction != null) settleSelectionParamTransactionForSupersession()
         if (brushTransactionState != BrushTransactionState.Idle) return false
         if (selectionParamTransaction != null) return false
         if (historyCoordinator.flags().busy) return false
@@ -2204,18 +2225,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return null
         }
         val reservations = ArrayList<MaskReservation>(state.selectionLayers.size)
-        if (effectiveStorage == HistorySnapshotStorage.Exact) state.selectionLayers.forEach { layer ->
-            val reservation =
-            selectionMaskOwnership.reserve(
-                owner = "history:${documentGeneration ?: historyCoordinator.currentGeneration()}:${layer.id}",
-                bytes = BitmapMemoryBudget.bytes(layer.bitmap),
-                documentLayerDelta = 0,
-                )
-            if (reservation == null) {
-                reservations.forEach(MaskReservation::close)
-                return null
+        if (effectiveStorage == HistorySnapshotStorage.Exact) {
+            val reservedBitmaps = identityBitmapSet()
+            for (layer in state.selectionLayers) {
+                if (!reservedBitmaps.add(layer.bitmap)) continue
+                val reservation =
+                    selectionMaskOwnership.reserve(
+                        owner = "history:${documentGeneration ?: historyCoordinator.currentGeneration()}:${layer.id}",
+                        bytes = BitmapMemoryBudget.bytes(layer.bitmap),
+                        documentLayerDelta = 0,
+                    )
+                if (reservation == null) {
+                    reservations.forEach(MaskReservation::close)
+                    return null
+                }
+                reservations += reservation
             }
-            reservations += reservation
         }
         val snapshot =
             try {
@@ -2370,7 +2395,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun cancelBrushStroke() {
         if (brushTransactionState == BrushTransactionState.Idle ||
-            brushTransactionState == BrushTransactionState.Finishing ||
             brushTransactionState == BrushTransactionState.Cancelling
         ) return
         val strokeId = brushIdentity?.strokeId ?: return
@@ -2575,6 +2599,35 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return state.selectionLayers.any { it.bitmap === bitmap }
     }
 
+    private fun claimAsyncBusyOwner(
+        operationType: String,
+        identity: DocumentIdentity,
+    ): AsyncBusyOwner? {
+        synchronized(this) {
+            if (asyncBusyOwner != null || shuttingDown) return null
+            val owner =
+                AsyncBusyOwner(
+                    token = ++asyncBusyCounter,
+                    operationType = operationType,
+                    documentGeneration = identity.generation,
+                    sourcePath = identity.sourcePath,
+                    baseContentToken = identity.baseContentToken,
+                    startRevision = identity.revision,
+                )
+            asyncBusyOwner = owner
+            updateUiState { it.copy(isBusy = true) }
+            return owner
+        }
+    }
+
+    private fun releaseAsyncBusyOwner(owner: AsyncBusyOwner) {
+        synchronized(this) {
+            if (asyncBusyOwner !== owner) return
+            asyncBusyOwner = null
+            if (!shuttingDown) updateUiState { it.copy(isBusy = false) }
+        }
+    }
+
     /** Applies a selection-layer edit from one leased start state. */
     internal fun applyAsyncSelectionLayerEdit(
         layerId: String,
@@ -2590,11 +2643,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             leased.close()
             return false
         }
+        val busyOwner = claimAsyncBusyOwner(tag, leased.identity)
+        if (busyOwner == null) {
+            leased.close()
+            return false
+        }
         invalidateComparison()
         // Publish the action slot before the worker starts.  Otherwise a
         // second edit can capture state while this exact before-snapshot is
         // still being prepared.
-        updateUiState { it.copy(isBusy = true) }
         viewModelScope.launch(Dispatchers.Default) {
             var before: EditorHistorySnapshot? = null
             var replacement: Bitmap? = null
@@ -2639,7 +2696,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                         nextLayers.lastOrNull()?.id
                                     } else it.activeSelectionLayerId,
                                 revision = it.revision + 1,
-                                isBusy = false,
                                 message = message,
                             )
                         }
@@ -2658,15 +2714,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 replacement?.takeIf { !it.isRecycled }?.recycle()
                 before?.let(::recycleHistorySnapshot)
                 withContext(NonCancellable + Dispatchers.Main) {
-                    val current = _uiState.value
-                    if (
-                        current.sourcePath == leased.identity.sourcePath &&
-                            current.baseContentToken == leased.identity.baseContentToken &&
-                            historyCoordinator.currentGeneration() == leased.identity.generation &&
-                            current.isBusy
-                    ) {
-                        updateUiState { it.copy(isBusy = false) }
-                    }
+                    releaseAsyncBusyOwner(busyOwner)
                 }
                 leased.close()
             }
@@ -2679,7 +2727,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         transform: (EditorUiState) -> EditorUiState,
     ): Boolean {
         val leased = acquireEditorSnapshot(tag) ?: return false
-        updateUiState { it.copy(isBusy = true) }
+        val busyOwner = claimAsyncBusyOwner(tag, leased.identity)
+        if (busyOwner == null) {
+            leased.close()
+            return false
+        }
         val startIdentity = leased.identity
         val pending = prepareHistorySnapshot(tag, leased)
         viewModelScope.launch(Dispatchers.Default) {
@@ -2695,7 +2747,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             historyCoordinator.currentGeneration() == startIdentity.generation
                     if (snapshot != null && currentIdentity) {
                         updateUiStateAndRecycleReplaced { state ->
-                            transform(state).copy(revision = state.revision + 1, isBusy = false)
+                            transform(state).copy(revision = state.revision + 1)
                         }
                         settleAdoptedEditHistory(snapshot)
                         snapshot = null
@@ -2708,15 +2760,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 snapshot?.let(::recycleHistorySnapshot)
                 pending.close()
                 withContext(NonCancellable + Dispatchers.Main) {
-                    val current = _uiState.value
-                    if (
-                        current.sourcePath == startIdentity.sourcePath &&
-                            current.baseContentToken == startIdentity.baseContentToken &&
-                            historyCoordinator.currentGeneration() == startIdentity.generation &&
-                            current.isBusy
-                    ) {
-                        updateUiState { it.copy(isBusy = false) }
-                    }
+                    releaseAsyncBusyOwner(busyOwner)
                 }
                 leased.close()
             }
@@ -2759,7 +2803,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         ownerPrefix: String,
     ): Boolean {
         val reservations = ArrayList<MaskReservation>(snapshot.selectionLayers.size)
+        val reservedBitmaps = identityBitmapSet()
         snapshot.selectionLayers.forEach { layer ->
+            if (!reservedBitmaps.add(layer.bitmap)) return@forEach
             val reservation =
                 selectionMaskOwnership.reserve(
                     owner = "$ownerPrefix:${snapshot.coordinatorGeneration ?: "unknown"}:${layer.id}",
@@ -5768,6 +5814,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         var restorePreviousBaseline: String? = null
         var restoreBaselineChanged = false
         var restoreStateAdopted = false
+        var restoreMaskAdmission: MaskReservation? = null
         val restoreTracker =
             beginMemoryTracking(
                 "restoreCurrentDraftGeneration",
@@ -5813,6 +5860,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         localParams = entry.localParams,
                     )
                 }
+            restoreMaskAdmission =
+                reserveSelectionMaskCandidate(
+                    owner = "draft-restore:$pointer",
+                    layers = layers,
+                ) ?: throw BitmapAllocationRejectedException(selectionMaskCandidateBytes(layers))
             withContext(Dispatchers.Default) {
                 val draftDocumentEngine =
                     runCatching { CorrectionEngine.valueOf(manifest.correctionEngine) }
@@ -6058,6 +6110,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             ownedWorkingSource?.delete()
             releaseNativeSessionHandle(createdSession)
             restoreTracker?.end()
+            restoreMaskAdmission?.close()
         }
     }
 
@@ -6458,6 +6511,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     snapshot.previewBitmap == null)
         )
             return false
+        val candidateAdmission =
+            if (metadataOnly) {
+                null
+            } else {
+                reserveSelectionMaskCandidate(
+                    owner = "history-adopt:${snapshot.coordinatorGeneration ?: "unknown"}",
+                    layers = snapshot.selectionLayers,
+                    bytesAlreadyReserved = snapshot.maskReservations.isNotEmpty(),
+                ) ?: return false
+            }
         return try {
             invalidateSelectionPreview()
             lastSuccessfullyRenderedParams = snapshot.params
@@ -6518,6 +6581,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             true
         } catch (_: Throwable) {
             false
+        } finally {
+            candidateAdmission?.close()
         }
     }
 
@@ -7411,6 +7476,23 @@ internal fun EditorViewModel.reserveSelectionMaskCopy(
         owner = owner,
         bytes = BitmapMemoryBudget.bytes(source.width, source.height, config),
         documentLayerDelta = documentLayerDelta,
+    )
+
+internal fun selectionMaskCandidateBytes(layers: List<SelectionLayer>): Long {
+    val unique = identityBitmapSet()
+    layers.forEach { unique.add(it.bitmap) }
+    return unique.sumOf { BitmapMemoryBudget.bytes(it) }
+}
+
+internal fun EditorViewModel.reserveSelectionMaskCandidate(
+    owner: String,
+    layers: List<SelectionLayer>,
+    bytesAlreadyReserved: Boolean = false,
+): MaskReservation? =
+    selectionMaskOwnership.reserveDocumentCandidate(
+        owner = owner,
+        bytes = if (bytesAlreadyReserved) 0L else selectionMaskCandidateBytes(layers),
+        documentLayerCount = layers.size,
     )
 
 private fun identityBitmapSet(): MutableSet<Bitmap> =

@@ -225,4 +225,49 @@ class SelectionMaskOwnershipLedgerTest {
         ledger.reconcileActiveState(emptyList())
         bitmap.recycle()
     }
+
+    @Test
+    fun `replacement candidate uses replacement layer count at active layer limit`() {
+        val ledger = SelectionMaskOwnershipLedger(byteBudget = { 256L }, layerBudget = { 1 })
+        val active = bitmap(4, 4)
+        ledger.reconcileActiveState(
+            listOf(SelectionLayer("active", "active", SelectionLayerKind.Brush, active))
+        )
+
+        val candidate = ledger.reserveDocumentCandidate("restore", 64L, documentLayerCount = 1)
+        assertNotNull(candidate)
+        assertEquals(64L, ledger.reservedBytes())
+        assertEquals(1, ledger.reservedLayers())
+        candidate!!.close()
+        assertEquals(0L, ledger.reservedBytes())
+        assertEquals(0, ledger.reservedLayers())
+        active.recycle()
+    }
+
+    @Test
+    fun `candidate with pre-reserved bytes admits layer slots without double counting`() {
+        val ledger = SelectionMaskOwnershipLedger(byteBudget = { 256L }, layerBudget = { 1 })
+        val active = bitmap(4, 4)
+        ledger.reconcileActiveState(
+            listOf(SelectionLayer("active", "active", SelectionLayerKind.Brush, active))
+        )
+
+        val historyCopy = ledger.reserve("history-copy", 64L)!!
+        val candidate = ledger.reserveDocumentCandidate("history-adopt", 0L, documentLayerCount = 1)
+        assertNotNull(candidate)
+        assertEquals(64L, ledger.reservedBytes())
+        assertEquals(1, ledger.reservedLayers())
+        candidate!!.close()
+        historyCopy.close()
+        active.recycle()
+    }
+
+    @Test
+    fun `replacement candidate rejects over-budget layer count before allocation`() {
+        val ledger = SelectionMaskOwnershipLedger(byteBudget = { 256L }, layerBudget = { 1 })
+        val candidate = ledger.reserveDocumentCandidate("restore", 64L, documentLayerCount = 2)
+        assertNull(candidate)
+        assertEquals(0L, ledger.reservedBytes())
+        assertEquals(0, ledger.reservedLayers())
+    }
 }

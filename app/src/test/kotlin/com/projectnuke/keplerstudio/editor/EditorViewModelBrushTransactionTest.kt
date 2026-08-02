@@ -131,15 +131,14 @@ class EditorViewModelBrushTransactionTest {
     }
 
     @Test
-    fun `selection parameter settlement blocks a concurrent edit snapshot`() {
+    fun `selection parameter settlement completes before a concurrent edit snapshot`() {
         val vm = viewModel()
         awaitEditorReady(vm)
 
         assertTrue(vm.beginSelectionParamGesture())
-        assertFalse(vm.canEnterEditorAction())
-        assertTrue(vm.acquireEditorSnapshot("blocked") == null)
+        assertTrue(vm.canEnterEditorAction())
+        vm.acquireEditorSnapshot("settled")?.close()
 
-        vm.finishSelectionParamGesture()
         settle(vm) { vm.currentSelectionParamTransaction() == null }
         assertTrue(vm.canEnterEditorAction())
     }
