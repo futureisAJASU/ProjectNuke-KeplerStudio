@@ -60,6 +60,7 @@ object RemasterModelSession : ModelRunnerContract {
     private var closeableModel: AutoCloseable? = null
     private var sessionValidationIdentity: ModelSessionValidationIdentity? = null
     private var runnerFactoryOverride: ((Context, String) -> AutoCloseable?)? = null
+    private var runnerPostCreateHookForTest: (() -> Unit)? = null
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
     private val commandGeneration = AtomicLong()
@@ -186,11 +187,17 @@ object RemasterModelSession : ModelRunnerContract {
                                 "edge_masker" -> createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
                                 else -> null
                             }
-                        if (generation != commandGeneration.get()) {
+                        try {
+                            runnerPostCreateHookForTest?.invoke()
+                            if (generation != commandGeneration.get()) {
+                                runCatching { createdRunner?.close() }
+                                isModelLoading = false
+                                lifecycle = ModelRunnerLifecycle.Failed
+                                return@withLock
+                            }
+                        } catch (failure: Throwable) {
                             runCatching { createdRunner?.close() }
-                            isModelLoading = false
-                            lifecycle = ModelRunnerLifecycle.Failed
-                            return@withLock
+                            throw failure
                         }
                         closeableModel = createdRunner
                     }
@@ -245,7 +252,9 @@ object RemasterModelSession : ModelRunnerContract {
                             else "${candidate.title}: 실행 경로를 준비하는 중입니다."
                     }
                     .onFailure {
+                        runCatching { closeableModel?.close() }
                         closeableModel = null
+                        sessionValidationIdentity = null
                         isModelLoaded = false
                         ModelAvailabilityRegistry.reportEdgeLoad(
                             ModelLoadResult.LoadFailed(
@@ -299,6 +308,7 @@ object RemasterModelSession : ModelRunnerContract {
                     ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
                 }
             }
+            var locallyOwnedRunner: AutoCloseable? = null
             return@withLock try {
                 if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
                     isModelLoading = false
@@ -314,10 +324,12 @@ object RemasterModelSession : ModelRunnerContract {
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 sessionValidationIdentity = null
-                val createdRunner =
+                locallyOwnedRunner =
                     createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
+                runnerPostCreateHookForTest?.invoke()
                 if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
-                    runCatching { createdRunner.close() }
+                    runCatching { locallyOwnedRunner?.close() }
+                    locallyOwnedRunner = null
                     isModelLoaded = false
                     isModelLoading = false
                     lifecycle = ModelRunnerLifecycle.Failed
@@ -325,7 +337,8 @@ object RemasterModelSession : ModelRunnerContract {
                     ModelAvailabilityRegistry.reportEdgeLoad(stale, loadGeneration)
                     return@withLock stale
                 }
-                closeableModel = createdRunner
+                closeableModel = checkNotNull(locallyOwnedRunner)
+                locallyOwnedRunner = null
                 isModelLoaded = true
                 sessionValidationIdentity = validationToken.sessionIdentity()
                 isModelLoading = false
@@ -338,6 +351,9 @@ object RemasterModelSession : ModelRunnerContract {
                         )
                 }
             } catch (failure: Throwable) {
+                runCatching { locallyOwnedRunner?.close() }
+                locallyOwnedRunner = null
+                runCatching { closeableModel?.close() }
                 closeableModel = null
                 isModelLoaded = false
                 isModelLoading = false
@@ -762,6 +778,11 @@ object RemasterModelSession : ModelRunnerContract {
 
     internal fun clearRunnerFactoryForTest() {
         runnerFactoryOverride = null
+        runnerPostCreateHookForTest = null
+    }
+
+    internal fun installRunnerPostCreateFailureForTest(failure: () -> Unit) {
+        runnerPostCreateHookForTest = failure
     }
 }
 

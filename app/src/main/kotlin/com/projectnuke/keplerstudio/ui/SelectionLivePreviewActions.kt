@@ -14,6 +14,8 @@ import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionParamTransaction
 import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
 import com.projectnuke.keplerstudio.editor.SelectionPreviewFailureKind
+import com.projectnuke.keplerstudio.editor.SelectionPreviewIdentity
+import com.projectnuke.keplerstudio.editor.SelectionPreviewPreparationOutcome
 import com.projectnuke.keplerstudio.editor.MaskReservationBatch
 import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopies
 import com.projectnuke.keplerstudio.editor.SelectionPreviewPreparationGateway
@@ -127,24 +129,51 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
     var previewTracker: MemoryTrackerScope? = null
     var observedRevision: Int = 0
     try {
+        val expectedRevision = transaction.previewRevision ?: transaction.startRevision
+        val previewIdentity =
+            SelectionPreviewIdentity(
+                gestureId = transaction.gestureId,
+                previewToken = previewToken,
+                revision = expectedRevision,
+                documentGeneration = transaction.documentGeneration,
+                baseContentToken = transaction.baseContentToken,
+                activeSelectionLayerId = activeId,
+            )
         val prepared = withContext(Dispatchers.Default) {
             ensureActive()
-            val expectedRevision = transaction.previewRevision ?: return@withContext null
-            leasedSnapshot =
+            val acquiredSnapshot =
                 acquireSelectionPreviewSnapshot(
                     transaction = transaction,
                     previewToken = previewToken,
                     expectedRevision = expectedRevision,
                     activeLayerId = activeId,
-                ) ?: return@withContext null
-            val stateForCopy = leasedSnapshot!!.state
-            if (stateForCopy.baseContentToken != transaction.baseContentToken) return@withContext null
-            if (stateForCopy.activeSelectionLayerId != activeId) return@withContext null
-            if (stateForCopy.selectionLayers.none { it.id == activeId }) return@withContext null
-            val liveBase =
-                stateForCopy.originalPreviewBitmap ?: stateForCopy.previewBitmap
-                    ?: return@withContext null
-            observedRevision = stateForCopy.revision
+                ) ?: return@withContext SelectionPreviewPreparationOutcome.Rejected(
+                    previewIdentity,
+                    SelectionPreviewFailureKind.StaleOrSuperseded,
+                    "selection preview superseded",
+                )
+            val stateForCopy = acquiredSnapshot.state
+            if (stateForCopy.baseContentToken != transaction.baseContentToken ||
+                stateForCopy.activeSelectionLayerId != activeId ||
+                stateForCopy.selectionLayers.none { it.id == activeId }
+            ) {
+                acquiredSnapshot.close()
+                return@withContext SelectionPreviewPreparationOutcome.Rejected(
+                    previewIdentity,
+                    SelectionPreviewFailureKind.StaleOrSuperseded,
+                    "selection preview state is stale",
+                )
+            }
+            val liveBase = stateForCopy.originalPreviewBitmap ?: stateForCopy.previewBitmap
+            if (liveBase == null) {
+                acquiredSnapshot.close()
+                return@withContext SelectionPreviewPreparationOutcome.Rejected(
+                    previewIdentity,
+                    SelectionPreviewFailureKind.MissingSource,
+                    "selection preview source is missing",
+                )
+            }
+            val observed = stateForCopy.revision
             SelectionPreviewPreparationGateway.noteCopy()
             previewTracker =
                 beginMemoryTracking(
@@ -153,48 +182,93 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                     transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
                 )
             val ownedBaseLocal =
-                runCatching { liveBase.copyOrThrow() }.getOrElse { failure ->
+                try {
+                    liveBase.copyOrThrow()
+                } catch (failure: Throwable) {
+                    acquiredSnapshot.close()
                     previewTracker?.end()
                     previewTracker = null
-                    throw failure
+                    return@withContext SelectionPreviewPreparationOutcome.Rejected(
+                        previewIdentity,
+                        if (failure is BitmapAllocationRejectedException) {
+                            SelectionPreviewFailureKind.AllocationFailure
+                        } else {
+                            SelectionPreviewFailureKind.InvariantFailure
+                        },
+                        "selection preview source preparation failed",
+                        failure,
+                    )
                 }
             previewTracker?.track(ownedBaseLocal, "selectionPreview:base")
-            val ownedLayersLocal =
+            val reservations =
                 try {
-                    maskReservations =
-                        reserveSelectionMaskCopies(
-                            owner = "selectionPreview:${transaction.gestureId}:$previewToken",
-                            layers = stateForCopy.selectionLayers,
-                        ) ?: throw BitmapAllocationRejectedException(
-                            stateForCopy.selectionLayers.sumOf { BitmapMemoryBudget.bytes(it.bitmap) }
-                        )
-                    stateForCopy.selectionLayers.copyBitmapsOwned()
+                    reserveSelectionMaskCopies(
+                        owner = "selectionPreview:${transaction.gestureId}:$previewToken",
+                        layers = stateForCopy.selectionLayers,
+                    ) ?: throw BitmapAllocationRejectedException(
+                        stateForCopy.selectionLayers.sumOf { BitmapMemoryBudget.bytes(it.bitmap) }
+                    )
                 } catch (failure: Throwable) {
                     ownedBaseLocal.recycle()
+                    acquiredSnapshot.close()
                     previewTracker?.end()
                     previewTracker = null
-                    throw failure
+                    return@withContext SelectionPreviewPreparationOutcome.Rejected(
+                        previewIdentity,
+                        SelectionPreviewFailureKind.AllocationFailure,
+                        "selection preview mask allocation was rejected",
+                        failure,
+                    )
+                }
+            val ownedLayersLocal =
+                try {
+                    stateForCopy.selectionLayers.copyBitmapsOwned()
+                } catch (failure: Throwable) {
+                    reservations.close()
+                    ownedBaseLocal.recycle()
+                    acquiredSnapshot.close()
+                    previewTracker?.end()
+                    previewTracker = null
+                    return@withContext SelectionPreviewPreparationOutcome.Rejected(
+                        previewIdentity,
+                        SelectionPreviewFailureKind.AllocationFailure,
+                        "selection preview mask preparation failed",
+                        failure,
+                    )
                 }
             ownedLayersLocal.forEach {
                 previewTracker?.track(it.bitmap, "selectionPreview:layer:${it.id}")
             }
-            Pair(ownedBaseLocal, ownedLayersLocal)
-        } ?: run {
+            SelectionPreviewPreparationOutcome.Prepared(
+                identity = previewIdentity,
+                snapshot = acquiredSnapshot,
+                base = ownedBaseLocal,
+                layers = ownedLayersLocal,
+                reservations = reservations,
+                observedRevision = observed,
+            )
+        }
+        if (prepared is SelectionPreviewPreparationOutcome.Rejected) {
             recordSelectionPreviewFailure(
                 transaction,
-                previewToken,
-                transaction.previewRevision ?: transaction.startRevision,
-                transaction.baseContentToken,
-                activeId,
-                SelectionPreviewFailureKind.AllocationFailure,
-                "selection preview preparation failed",
-                null,
+                prepared.identity.previewToken,
+                prepared.identity.revision,
+                prepared.identity.baseContentToken,
+                prepared.identity.activeSelectionLayerId ?: activeId,
+                prepared.kind,
+                prepared.message,
+                prepared.failure,
             )
-            recordPreviewPrepareFailure("선택 마스크 미리보기를 준비하지 못했습니다.", failure = null)
             return
         }
-        ownedBase = prepared.first
-        ownedLayers = prepared.second
+        val ready = prepared as SelectionPreviewPreparationOutcome.Prepared
+        leasedSnapshot = ready.snapshot
+        ownedBase = ready.base
+        ownedLayers = ready.layers
+        maskReservations = ready.reservations
+        observedRevision = ready.observedRevision
+        ownedBase = ready.base
+        ownedLayers = ready.layers
         checkNotNull(ownedBase)
         val stateForRender =
             checkNotNull(leasedSnapshot?.state?.takeIf {
@@ -251,50 +325,39 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
         }
         if (adoptedByCurrentTransaction) previewResult = null
         if (adoptedByCurrentTransaction) return
-        if (false && isSelectionPreviewCurrent(transaction, previewToken, stateForRender.revision, transaction.baseContentToken, activeId)) {
-            val adopted = previewResult ?: error("missing selection live preview")
-            updateUiState {
-                it.copy(
-                    previewBitmap = adopted,
-                    isBusy = false,
-                    correctionEngineState =
-                        it.correctionEngineState.withSuccessfulRender(
-                            stateForRender.correctionEngineState.documentEngine,
-                            success.copy(output = adopted),
-                        ),
-                    message = "선택 마스크 미리보기가 적용되었습니다.",
-                )
-            }
-            previewResult = null
-            markSelectionPreviewSucceeded(transaction, previewToken, stateForRender.revision, transaction.baseContentToken, activeId)
-        } else {
-            previewResult?.recycle()
-            previewResult = null
-        }
+        previewResult?.recycle()
+        previewResult = null
     } catch (ce: CancellationException) {
         previewResult?.recycle()
         previewResult = null
         throw ce
     } catch (t: Throwable) {
-        recordSelectionPreviewFailure(
-            transaction,
-            previewToken,
-            observedRevision.takeIf { it != 0 } ?: (transaction.previewRevision ?: transaction.startRevision),
-            transaction.baseContentToken,
-            activeId,
+        val failureKind =
             if (t is BitmapAllocationRejectedException) {
                 SelectionPreviewFailureKind.AllocationFailure
             } else if (t is RenderFailedException) {
                 SelectionPreviewFailureKind.RenderFailure
             } else {
                 SelectionPreviewFailureKind.InvariantFailure
+            }
+        recordSelectionPreviewFailure(
+            transaction,
+            previewToken,
+            observedRevision.takeIf { it != 0 } ?: (transaction.previewRevision ?: transaction.startRevision),
+            transaction.baseContentToken,
+            activeId,
+            failureKind,
+            when (failureKind) {
+                SelectionPreviewFailureKind.AllocationFailure ->
+                    "메모리가 부족하여 선택 마스크 미리보기를 준비하지 못했습니다."
+                SelectionPreviewFailureKind.RenderFailure ->
+                    "선택 마스크 미리보기 렌더링에 실패했습니다."
+                else -> "선택 마스크 미리보기를 적용하지 못했습니다."
             },
-            "selection preview application failed: ${t.message}",
             t,
         )
         previewResult?.recycle()
         previewResult = null
-        recordPreviewPrepareFailure("선택 마스크 미리보기를 적용하지 못했습니다: ${t.message}", t)
     } finally {
         ownedBase?.takeUnless { it.isRecycled }?.recycle()
         ownedLayers?.forEach { layer -> layer.bitmap.takeUnless { it.isRecycled }?.recycle() }
@@ -302,7 +365,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
         settleSelectionPreviewBusyIfOwned(
             transaction = transaction,
             token = previewToken,
-            revision = uiState.value.revision,
+            revision = observedRevision,
             baseToken = transaction.baseContentToken,
             activeId = activeId,
         )
@@ -310,35 +373,6 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
         maskReservations?.close()
         previewTracker?.end()
     }
-}
-
-/**
- * Reports a preparation or render failure on the Main dispatcher only when the transaction is
- * still the authoritative one. Allocation-rejected failures reuse the existing
- * [requestAllocationRecovery] path so the user can retry via the memory-recovery dialog.
- */
-private fun EditorViewModel.recordPreviewPrepareFailure(message: String, failure: Throwable?) {
-    return
-    val state = uiState.value
-    invalidateSelectionPreview()
-    updateUiStateAndRecycleReplaced {
-        it.copy(
-            isBusy = false,
-            correctionEngineState =
-                (failure as? RenderFailedException)?.failure?.let { renderFailure ->
-                    it.correctionEngineState.withFailedRender(
-                        state.correctionEngineState.documentEngine,
-                        renderFailure,
-                    )
-                } ?: it.correctionEngineState,
-            message = message,
-        )
-    }
-    // Selection live preview is a transient mask-only preview on the preview bitmap; an
-    // allocation failure leaves the prior document unchanged and stays inspectable in the
-    // message. It does not trigger the persistent memory-recovery dialog because the user
-    // can simply retune the slider or run a heavier operation via the documented recovery
-    // path for those actions. We intentionally avoid a [MemoryRetryAction] entry here.
 }
 
 fun EditorViewModel.finishActiveSelectionParamsGesture() {

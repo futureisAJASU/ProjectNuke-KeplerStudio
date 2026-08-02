@@ -133,7 +133,18 @@ internal fun RenderResult.successOrThrow(): RenderResult.Success =
  * executes selection layers through the same route, and reports the actual route.
  */
 internal object EditorRenderer {
+    @Volatile private var rendererOverrideForTest: (suspend (RenderRequest) -> RenderResult)? = null
+
+    internal fun installRendererOverrideForTest(renderer: suspend (RenderRequest) -> RenderResult) {
+        rendererOverrideForTest = renderer
+    }
+
+    internal fun clearRendererOverrideForTest() {
+        rendererOverrideForTest = null
+    }
+
     suspend fun render(request: RenderRequest): RenderResult {
+        rendererOverrideForTest?.let { return it(request) }
         val route =
             RouteResolver.resolveNativeRoute(
                 RouteRequest(

@@ -38,6 +38,15 @@ internal data class ColdHistoryPayload(
     val generation: String
 )
 
+internal data class HistorySelectionMaskPreflight(
+    val uniqueMaskBytes: Long,
+    val layerCount: Int,
+)
+
+internal object NoSelectionMaskAdmission : AutoCloseable {
+    override fun close() = Unit
+}
+
 /** Result of a batch cold-payload deletion attempt. */
 internal data class DeletionResult(
     val allConfirmedAbsent: Boolean,
@@ -93,6 +102,12 @@ internal interface HistoryStorageBackend {
         expectedGeneration: String,
         register: (EditorHistorySnapshot) -> Unit,
     ): EditorHistorySnapshot?
+    suspend fun loadWithSelectionMaskPreflight(
+        entry: EditorHistoryEntry,
+        expectedGeneration: String,
+        preflight: suspend (HistorySelectionMaskPreflight) -> AutoCloseable?,
+        register: (EditorHistorySnapshot) -> Unit,
+    ): EditorHistorySnapshot? = load(entry, expectedGeneration, register)
     suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long?
     suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): DeletionResult
     suspend fun delete(entry: EditorHistoryEntry): Boolean
@@ -348,6 +363,9 @@ internal class EditorHistoryCoordinator(
         currentCaptureBytes: Long,
         captureCurrent: suspend (HistorySnapshotStorage, String) -> EditorHistorySnapshot?,
         materialize: suspend (EditorHistorySnapshot, (EditorHistorySnapshot) -> Unit) -> EditorHistorySnapshot?,
+        preflightSelectionMasks: suspend (HistorySelectionMaskPreflight) -> AutoCloseable? = {
+            NoSelectionMaskAdmission
+        },
         adopt: (EditorHistorySnapshot) -> Boolean
     ): HistoryNavigationResult {
         checkMainOwner()
@@ -382,7 +400,7 @@ internal class EditorHistoryCoordinator(
                 }
             }
             loaded = if (loadedFromDisk) {
-                storage.load(target, generation) { decoded ->
+                storage.loadWithSelectionMaskPreflight(target, generation, preflightSelectionMasks) { decoded ->
                     loaded = decoded
                     if (isOperationCurrent(token, generation)) {
                         activeColdLoadDecodedBytes = decoded.bitmapBytes()
@@ -1121,11 +1139,25 @@ internal class EditorHistoryStorage(
         entry: EditorHistoryEntry,
         expectedGeneration: String,
         register: (EditorHistorySnapshot) -> Unit
+    ): EditorHistorySnapshot? =
+        loadWithSelectionMaskPreflight(
+            entry,
+            expectedGeneration,
+            { NoSelectionMaskAdmission },
+            register,
+        )
+
+    override suspend fun loadWithSelectionMaskPreflight(
+        entry: EditorHistoryEntry,
+        expectedGeneration: String,
+        preflight: suspend (HistorySelectionMaskPreflight) -> AutoCloseable?,
+        register: (EditorHistorySnapshot) -> Unit,
     ): EditorHistorySnapshot? = withContext(ioDispatcher) {
         val payload = entry.coldPayload ?: return@withContext null
         val directory = payload.directory
         if (entry.documentGeneration != expectedGeneration || !isOwnedEntryDirectory(directory, expectedGeneration, entry.id) || !directory.isCompleteHistoryDirectory()) return@withContext null
         val owned = ArrayList<Bitmap>()
+        var candidateAdmission: AutoCloseable? = null
         var requiredBytes = 0L
         try {
             val manifestFile = File(directory, MANIFEST)
@@ -1152,6 +1184,27 @@ internal class EditorHistoryStorage(
                 check(file.isFile && file.canonicalFile.parentFile == directory.canonicalFile)
                 requiredBytes = BitmapMemoryBudget.saturatingAdd(requiredBytes, BitmapMemoryBudget.bytes(width, height))
             }
+            val metadata = json.getJSONObject("metadata")
+            val layerSpecs = metadata.getJSONArray("layers")
+            val maskKeys = HashSet<String>()
+            for (index in 0 until layerSpecs.length()) {
+                maskKeys += layerSpecs.getJSONObject(index).getString("bitmapKey")
+            }
+            val maskBytes = maskKeys.sumOf { key ->
+                val spec = (0 until bitmapSpecs.length())
+                    .asSequence()
+                    .map { bitmapSpecs.getJSONObject(it) }
+                    .firstOrNull { it.getString("key") == key }
+                    ?: error("missing selection mask payload")
+                BitmapMemoryBudget.bytes(spec.getInt("width"), spec.getInt("height"))
+            }
+            candidateAdmission =
+                preflight(
+                    HistorySelectionMaskPreflight(
+                        uniqueMaskBytes = maskBytes,
+                        layerCount = layerSpecs.length(),
+                    )
+                ) ?: throw BitmapAllocationRejectedException(maskBytes)
             if (!BitmapMemoryBudget.canAllocate(requiredBytes)) throw BitmapAllocationRejectedException(requiredBytes)
             val bitmaps = HashMap<String, Bitmap>()
             for (i in 0 until bitmapSpecs.length()) {
@@ -1162,19 +1215,25 @@ internal class EditorHistoryStorage(
                 check(bitmaps.put(spec.getString("key"), bitmap) == null)
             }
             val snapshot = parseSnapshot(json, bitmaps)
+            snapshot.candidateAdmission = candidateAdmission
+            candidateAdmission = null
             register(snapshot)
             owned.clear()
             snapshot
         } catch (ce: CancellationException) {
+            candidateAdmission?.close()
             owned.forEach { if (!it.isRecycled) it.recycle() }
             throw ce
         } catch (failure: BitmapAllocationRejectedException) {
+            candidateAdmission?.close()
             owned.forEach { if (!it.isRecycled) it.recycle() }
             throw failure
         } catch (_: OutOfMemoryError) {
+            candidateAdmission?.close()
             owned.forEach { if (!it.isRecycled) it.recycle() }
             throw BitmapAllocationRejectedException(requiredBytes)
         } catch (_: Throwable) {
+            candidateAdmission?.close()
             owned.forEach { if (!it.isRecycled) it.recycle() }
             null
         }

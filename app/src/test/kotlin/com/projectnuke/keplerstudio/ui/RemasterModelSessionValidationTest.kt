@@ -86,6 +86,22 @@ class RemasterModelSessionValidationTest {
         assertEquals(0, second.closeCount)
     }
 
+    @Test
+    fun `post-create publication failure closes the locally owned runner`() = runBlocking {
+        val runner = FakeRunner()
+        RemasterModelSession.installRunnerFactoryForTest { _, _ -> runner }
+        RemasterModelSession.installRunnerPostCreateFailureForTest {
+            error("test publication failure")
+        }
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+
+        val result = RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication())
+
+        assertTrue(result is ModelLoadResult.LoadFailed)
+        assertEquals(1, runner.closeCount)
+        assertFalse(RemasterModelSession.isModelLoaded)
+    }
+
     private class FakeRunner : AutoCloseable {
         var closeCount = 0
         override fun close() {

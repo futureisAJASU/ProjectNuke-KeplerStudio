@@ -5116,6 +5116,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             materialize = { snapshot, register ->
                                 materializeHistorySnapshot(snapshot, register, navTracker)
                             },
+                            preflightSelectionMasks = { preflight ->
+                                reserveSelectionMaskCandidateBytes(
+                                    owner = "history-cold-materialize",
+                                    bytes = preflight.uniqueMaskBytes,
+                                    documentLayerCount = preflight.layerCount,
+                                ).takeUnless {
+                                    it is SelectionMaskOwnershipLedger.MaskAdmission.Rejected
+                                }
+                            },
                             adopt = { snapshot ->
                                 val prefix = if (undo) "이전 편집 상태를 적용했습니다" else "다음 편집 상태를 적용했습니다"
                                 applyHistorySnapshot(
@@ -6649,7 +6658,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 reserveSelectionMaskCandidate(
                     owner = "history-adopt:${snapshot.coordinatorGeneration ?: "unknown"}",
                     layers = snapshot.selectionLayers,
-                    bytesAlreadyReserved = snapshot.maskReservations.isNotEmpty(),
+                    bytesAlreadyReserved =
+                        snapshot.maskReservations.isNotEmpty() || snapshot.candidateAdmission != null,
                 ).takeUnless {
                     it is SelectionMaskOwnershipLedger.MaskAdmission.Rejected
                 }
@@ -7123,6 +7133,9 @@ internal data class EditorHistorySnapshot(
 ) {
     @Transient
     internal var maskReservations: MutableList<MaskReservation> = mutableListOf()
+
+    @Transient
+    internal var candidateAdmission: AutoCloseable? = null
 
     internal fun claimCoordinatorOwnership() {
         admissionOwner = HistorySnapshotAdmissionOwner.Coordinator
@@ -7650,6 +7663,12 @@ internal fun EditorViewModel.reserveSelectionMaskCopy(
         documentLayerDelta = documentLayerDelta,
     )
 
+internal fun EditorViewModel.reserveSelectionMaskOutput(
+    owner: String,
+    bytes: Long,
+): MaskReservation? =
+    if (bytes <= 0L) null else selectionMaskOwnership.reserve(owner = owner, bytes = bytes, documentLayerDelta = 0)
+
 internal fun selectionMaskCandidateBytes(layers: List<SelectionLayer>): Long {
     val unique = identityBitmapSet()
     layers.forEach { unique.add(it.bitmap) }
@@ -7754,6 +7773,8 @@ internal fun EditorHistorySnapshot.recycleBitmaps() {
     releaseLocalDiagnostics()
     maskReservations.forEach(MaskReservation::close)
     maskReservations.clear()
+    candidateAdmission?.close()
+    candidateAdmission = null
     resourcesReleased = true
     val bitmaps = identityBitmapSet()
     previewBitmap?.let(bitmaps::add)
@@ -7770,6 +7791,8 @@ internal fun EditorHistorySnapshot.releaseBitmapOwnership() {
     releaseLocalDiagnostics()
     maskReservations.forEach(MaskReservation::close)
     maskReservations.clear()
+    candidateAdmission?.close()
+    candidateAdmission = null
     resourcesReleased = true
     previewBitmap = null
     originalPreviewBitmap = null

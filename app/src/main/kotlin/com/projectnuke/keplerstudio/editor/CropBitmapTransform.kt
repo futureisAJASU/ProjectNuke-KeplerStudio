@@ -8,12 +8,23 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+internal fun cropTransformedDimensions(sourceWidth: Int, sourceHeight: Int, cropState: CropState): Pair<Int, Int> {
+    val state = cropState.normalized()
+    val rotation = state.rotationDegrees + state.straightenDegrees
+    val size = rotatedCanvasSize(sourceWidth, sourceHeight, rotation)
+    return (
+        (state.cropRight - state.cropLeft).coerceIn(0.01f, 1f) * size.first
+    ).roundToInt().coerceAtLeast(1) to (
+        (state.cropBottom - state.cropTop).coerceIn(0.01f, 1f) * size.second
+    ).roundToInt().coerceAtLeast(1)
+}
+
 suspend fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap {
     val state = cropState.normalized()
     val rotation = state.rotationDegrees + state.straightenDegrees
-    val size = rotatedCanvasSize(source.width, source.height, rotation)
-    val outWidth = ((state.cropRight - state.cropLeft).coerceIn(0.01f, 1f) * size.first).roundToInt().coerceAtLeast(1)
-    val outHeight = ((state.cropBottom - state.cropTop).coerceIn(0.01f, 1f) * size.second).roundToInt().coerceAtLeast(1)
+    val dimensions = cropTransformedDimensions(source.width, source.height, state)
+    val outWidth = dimensions.first
+    val outHeight = dimensions.second
     val output = createBitmapOrThrow(outWidth, outHeight, Bitmap.Config.ARGB_8888)
     try {
         val result = NativePhotoCore.nativeRenderCropTransform(

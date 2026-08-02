@@ -9,6 +9,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
 import org.junit.Test
@@ -136,5 +137,80 @@ class SelectionPreviewProductionTest {
         assertTrue(vm.uiState.value.isBusy)
         assertEquals("replacement message", vm.uiState.value.message)
         vm.finishSelectionParamGesture()
+    }
+
+    @Test
+    fun livePreviewRendererAdoptsPixelsAndCommitsOneUndo() {
+        val vm = viewModel()
+        val rendererCalls = AtomicInteger(0)
+        val rendered = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        rendered.eraseColor(0xff22aa44.toInt())
+        EditorRenderer.installRendererOverrideForTest { request ->
+            assertEquals(RenderOperation.SelectionLivePreview, request.operation)
+            rendererCalls.incrementAndGet()
+            RenderResult.Success(
+                operation = request.operation,
+                requestedRoute = NativeRenderRoute.V1,
+                output = rendered,
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
+        try {
+            settle { vm.canEnterEditorAction() }
+            assertTrue(vm.beginSelectionParamGesture())
+            vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.25f) }
+            val transaction = assertNotNull(vm.currentSelectionParamTransaction())
+
+            settle {
+                transaction.succeeded && vm.uiState.value.previewBitmap === rendered
+            }
+            assertEquals(1, rendererCalls.get())
+            assertEquals(0xff22aa44.toInt(), vm.uiState.value.previewBitmap?.getPixel(4, 4))
+            assertEquals(0.25f, vm.uiState.value.selectionLayers.single().localParams.exposure)
+
+            vm.finishSelectionParamGesture()
+            settle { vm.currentSelectionParamTransaction() == null && vm.uiState.value.canUndo }
+            vm.undoEdit()
+            settle { vm.uiState.value.canRedo && !vm.uiState.value.isBusy }
+            assertEquals(0, vm.uiState.value.previewBitmap?.getPixel(4, 4))
+            assertEquals(0f, vm.uiState.value.selectionLayers.single().localParams.exposure)
+            vm.redoEdit()
+            settle { !vm.uiState.value.canRedo && !vm.uiState.value.isBusy }
+            assertEquals(0.25f, vm.uiState.value.selectionLayers.single().localParams.exposure)
+        } finally {
+            EditorRenderer.clearRendererOverrideForTest()
+        }
+    }
+
+    @Test
+    fun currentRenderFailureRollsBackTheOptimisticSelectionEdit() {
+        val vm = viewModel()
+        EditorRenderer.installRendererOverrideForTest { request ->
+            RenderResult.Failure(
+                operation = request.operation,
+                requestedRoute = NativeRenderRoute.V1,
+                attemptedRoute = NativeRenderRoute.V1,
+                kind = RenderFailureKind.Unexpected,
+                message = "deterministic test failure",
+            )
+        }
+        try {
+            settle { vm.canEnterEditorAction() }
+            assertTrue(vm.beginSelectionParamGesture())
+            vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.5f) }
+            settle { vm.currentSelectionParamTransaction() == null && !vm.uiState.value.isBusy }
+
+            assertEquals(0f, vm.uiState.value.selectionLayers.single().localParams.exposure)
+            assertEquals(0, vm.uiState.value.previewBitmap?.getPixel(4, 4))
+            assertTrue(!vm.uiState.value.canUndo)
+        } finally {
+            EditorRenderer.clearRendererOverrideForTest()
+        }
     }
 }

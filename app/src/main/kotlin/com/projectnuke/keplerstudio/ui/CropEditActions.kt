@@ -21,8 +21,11 @@ import com.projectnuke.keplerstudio.editor.normalized
 import com.projectnuke.keplerstudio.editor.renderCropTransform
 import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
 import com.projectnuke.keplerstudio.editor.MaskReservationBatch
+import com.projectnuke.keplerstudio.editor.MaskReservation
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopies
+import com.projectnuke.keplerstudio.editor.reserveSelectionMaskOutput
+import com.projectnuke.keplerstudio.editor.cropTransformedDimensions
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.Locale
@@ -286,6 +289,7 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
     var originalInput: Bitmap? = null
     val maskInputs = ArrayList<SelectionLayer>(capturedSelectionLayers.size)
     var maskReservations: MaskReservationBatch? = null
+    var outputMaskReservation: MaskReservation? = null
     var transformedOriginal: Bitmap? = null
     var transformedPreview: Bitmap? = null
     var transformedMasks: List<SelectionLayer>? = null
@@ -378,6 +382,22 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
         }
 
         cropPrepareTracker?.end()
+
+        if (maskInputs.isNotEmpty()) {
+            val dimensions =
+                cropTransformedDimensions(maskInputs.first().bitmap.width, maskInputs.first().bitmap.height, crop)
+            var outputBytes = 0L
+            maskInputs.forEach {
+                outputBytes =
+                    BitmapMemoryBudget.saturatingAdd(
+                        outputBytes,
+                        BitmapMemoryBudget.bytes(dimensions.first, dimensions.second),
+                    )
+            }
+            outputMaskReservation =
+                reserveSelectionMaskOutput("crop-output:$operationToken", outputBytes)
+                    ?: throw BitmapAllocationRejectedException(outputBytes)
+        }
 
         withContext(Dispatchers.Default) {
             val o = originalInput?.let { renderCropTransform(it, crop) }
@@ -501,6 +521,7 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
         }
         releasePreparedInputs()
         maskReservations?.close()
+        outputMaskReservation?.close()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
         leasedSnapshot?.close()
