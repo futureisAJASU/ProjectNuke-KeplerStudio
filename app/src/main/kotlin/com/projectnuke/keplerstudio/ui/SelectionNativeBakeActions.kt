@@ -7,6 +7,8 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
+import com.projectnuke.keplerstudio.editor.OwnedHandoff
+import com.projectnuke.keplerstudio.editor.OwnedRenderSuccess
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FallbackPolicy
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
@@ -148,6 +150,8 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     var renderedPreview: Bitmap? = null
     var bakeSuccess: RenderResult.Success? = null
     var previewSuccess: RenderResult.Success? = null
+    val bakeRenderSlot = OwnedHandoff<OwnedRenderSuccess>()
+    val previewRenderSlot = OwnedHandoff<OwnedRenderSuccess>()
     var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
     consumeHistory()
     var undoSnapshotOwned: EditorHistorySnapshot? =
@@ -210,41 +214,51 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
         withContext(Dispatchers.Default) {
             val localOnlyState =
                 capturedCurrent.copy(params = EditParams(), activeQuickEffects = emptyList())
-            bakeSuccess =
-                EditorRenderer.render(
-                    createRenderRequest(
-                        state = localOnlyState,
-                        operation = RenderOperation.SelectionNativeBake,
-                        basePreview = checkNotNull(ownedBase),
-                        revision = nextRevision,
-                        params = EditParams(),
-                        quickEffects = emptyList(),
-                        selectionLayers = ownedLayers,
-                        diagnostics = bakeTracker,
-                    )
-                ).successOrThrow()
-            bakedOriginal = checkNotNull(bakeSuccess).output
+            bakeRenderSlot.publish(
+                OwnedRenderSuccess(
+                    EditorRenderer.render(
+                        createRenderRequest(
+                            state = localOnlyState,
+                            operation = RenderOperation.SelectionNativeBake,
+                            basePreview = checkNotNull(ownedBase),
+                            revision = nextRevision,
+                            params = EditParams(),
+                            quickEffects = emptyList(),
+                            selectionLayers = ownedLayers,
+                            diagnostics = bakeTracker,
+                        )
+                    ).successOrThrow()
+                )
+            )
+            val bakeOwner = checkNotNull(bakeRenderSlot.take())
+            bakeSuccess = bakeOwner.result
+            bakedOriginal = checkNotNull(bakeOwner.takeOutput())
             bakeTracker?.track(checkNotNull(bakedOriginal), "selectionBake:original")
         }
         withContext(Dispatchers.Default) {
-            previewSuccess =
-                EditorRenderer.render(
-                    createRenderRequest(
-                        state = capturedCurrent,
-                        operation = RenderOperation.SelectionNativeBake,
-                        basePreview = checkNotNull(bakedOriginal),
-                        revision = nextRevision,
-                        params = params,
-                        engines = engines,
-                        look = presetLook,
-                        quickEffects = quickEffects,
-                        selectionLayers = emptyList(),
-                        exactRoute = checkNotNull(bakeSuccess).actualRoute,
-                        fallbackPolicy = FallbackPolicy.NoFallback,
-                        diagnostics = bakeTracker,
-                    )
-                ).successOrThrow()
-            renderedPreview = checkNotNull(previewSuccess).output
+            previewRenderSlot.publish(
+                OwnedRenderSuccess(
+                    EditorRenderer.render(
+                        createRenderRequest(
+                            state = capturedCurrent,
+                            operation = RenderOperation.SelectionNativeBake,
+                            basePreview = checkNotNull(bakedOriginal),
+                            revision = nextRevision,
+                            params = params,
+                            engines = engines,
+                            look = presetLook,
+                            quickEffects = quickEffects,
+                            selectionLayers = emptyList(),
+                            exactRoute = checkNotNull(bakeSuccess).actualRoute,
+                            fallbackPolicy = FallbackPolicy.NoFallback,
+                            diagnostics = bakeTracker,
+                        )
+                    ).successOrThrow()
+                )
+            )
+            val previewOwner = checkNotNull(previewRenderSlot.take())
+            previewSuccess = previewOwner.result
+            renderedPreview = checkNotNull(previewOwner.takeOutput())
             bakeTracker?.track(checkNotNull(renderedPreview), "selectionBake:preview")
         }
         val adoptedOriginal = bakedOriginal ?: error("missing baked original")
@@ -314,6 +328,8 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
             updateUiState { it.copy(isBusy = false) }
         }
     } finally {
+        bakeRenderSlot.close()
+        previewRenderSlot.close()
         releaseTransients()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
