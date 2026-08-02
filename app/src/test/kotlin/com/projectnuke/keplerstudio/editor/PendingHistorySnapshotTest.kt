@@ -2,7 +2,11 @@ package com.projectnuke.keplerstudio.editor
 
 import android.graphics.Bitmap
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -73,5 +77,33 @@ class PendingHistorySnapshotTest {
 
         assertNull(pending.await())
         assertTrue(bitmap.isRecycled)
+    }
+
+    @Test
+    fun `close cancels the attached producer and late completion is recycled`() = runBlocking {
+        val pending = PendingHistorySnapshot(CompletableDeferred())
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val producer: Job =
+            launch(Dispatchers.Default) {
+                started.complete(Unit)
+                try {
+                    release.await()
+                    val bitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+                    pending.complete(snapshot(bitmap))
+                } finally {
+                    release.complete(Unit)
+                }
+            }
+        pending.attachProducer(producer)
+        withTimeout(1_000) { started.await() }
+
+        pending.close()
+        assertTrue(producer.isCancelled)
+        producer.join()
+
+        val lateBitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        pending.complete(snapshot(lateBitmap))
+        assertTrue(lateBitmap.isRecycled)
     }
 }

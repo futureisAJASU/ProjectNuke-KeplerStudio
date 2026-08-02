@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import com.projectnuke.keplerstudio.ui.paintActiveSelectionAt
+import com.projectnuke.keplerstudio.ui.deleteActiveSelectionLayer
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RuntimeEnvironment
@@ -85,5 +86,20 @@ class EditorViewModelBrushTransactionTest {
 
         assertEquals(1, vm.uiState.value.revision)
         settle(vm) { vm.uiState.value.canUndo }
+    }
+
+    @Test
+    fun `cancel settles before immediate delete captures the next edit`() {
+        val vm = viewModel()
+        awaitEditorReady(vm)
+
+        assertTrue(vm.beginBrushStroke())
+        vm.paintActiveSelectionAt(16f, 16f)
+        vm.cancelBrushStroke()
+        vm.deleteActiveSelectionLayer()
+        settle(vm) { !vm.uiState.value.isBusy && !vm.hasActiveBrushStroke() }
+
+        assertTrue(vm.uiState.value.selectionLayers.isEmpty())
+        assertEquals(0, vm.uiState.value.selectionLayers.size)
     }
 }

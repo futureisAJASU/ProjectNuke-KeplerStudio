@@ -258,4 +258,20 @@ class BitmapLeaseTest {
         snapshot.close()
         assertTrue(bitmap.isRecycled)
     }
+
+    @Test
+    fun `retained worker snapshot survives caller close and retires once`() {
+        val bitmap = createTestBitmap()
+        val state = EditorUiState(previewBitmap = bitmap)
+        ledger.replaceState(EditorUiState(), state).forEach { it.recycle() }
+        val caller = ledger.capture("caller", state, "document-1")!!
+        val worker = caller.retain("worker")!!
+
+        caller.close()
+        ledger.replaceState(state, EditorUiState()).forEach { it.recycle() }
+        assertFalse(bitmap.isRecycled)
+
+        worker.close()
+        assertTrue(bitmap.isRecycled)
+    }
 }

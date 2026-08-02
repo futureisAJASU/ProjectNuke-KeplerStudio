@@ -29,6 +29,8 @@ internal class LeasedEditorSnapshot internal constructor(
     private val lease: BitmapLease,
 ) : AutoCloseable {
     val leaseId: Long get() = lease.leaseId
+    /** Retain the exact captured references for an independent worker owner. */
+    internal fun retain(tag: String): LeasedEditorSnapshot? = lease.retain(tag, this)
     override fun close() = lease.close()
 }
 
@@ -65,6 +67,11 @@ internal class BitmapLease internal constructor(
 
     override fun close() {
         if (closed.compareAndSet(false, true)) ledger.release(leaseId)
+    }
+
+    internal fun retain(tag: String, snapshot: LeasedEditorSnapshot): LeasedEditorSnapshot? {
+        if (closed.get()) return null
+        return ledger.retain(tag, snapshot)
     }
 
     companion object {
@@ -134,6 +141,30 @@ internal class BitmapLeaseLedger {
             lease = BitmapLease(tag, identity, this, entry.bitmaps, leaseId),
         )
     }
+
+    internal fun retain(tag: String, snapshot: LeasedEditorSnapshot): LeasedEditorSnapshot? =
+        lock.withLock {
+            val captured = BitmapLease.identityBitmapSet()
+            snapshot.previewBitmap?.let(captured::add)
+            snapshot.originalPreviewBitmap?.let(captured::add)
+            snapshot.selectionLayers.forEach { captured.add(it.bitmap) }
+            if (captured.isEmpty() || captured.any { it.isRecycled }) return@withLock null
+            val leaseId = leaseIdCounter.getAndIncrement()
+            val entry = LeaseEntry(BitmapLease.identityBitmapSet())
+            captured.forEach { bitmap ->
+                entry.bitmaps.add(bitmap)
+                slots.getOrPut(bitmap) { Slot() }.leaseRefs++
+            }
+            leases[leaseId] = entry
+            LeasedEditorSnapshot(
+                state = snapshot.state,
+                identity = snapshot.identity,
+                previewBitmap = snapshot.previewBitmap,
+                originalPreviewBitmap = snapshot.originalPreviewBitmap,
+                selectionLayers = snapshot.selectionLayers,
+                lease = BitmapLease(tag, snapshot.identity, this, entry.bitmaps, leaseId),
+            )
+        }
 
     internal fun legacyAcquire(tag: String, state: EditorUiState): BitmapLease? = lock.withLock {
         val captured = BitmapLease.identityBitmapSet()

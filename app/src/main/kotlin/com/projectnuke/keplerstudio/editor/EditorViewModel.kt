@@ -69,17 +69,38 @@ import org.json.JSONObject
 internal class PendingHistorySnapshot(
     private val deferred: CompletableDeferred<EditorHistorySnapshot?>,
 ) : AutoCloseable {
-    private val closed = AtomicBoolean(false)
-    private var taking = false
-    private var taken = false
+    private enum class Terminal {
+        Pending,
+        CompletedUnclaimed,
+        Transferred,
+        Discarded,
+        Failed,
+        Cancelled,
+    }
+
+    private var terminal = Terminal.Pending
+    private var producerJob: Job? = null
     private var completedResult: EditorHistorySnapshot? = null
+
+    internal fun attachProducer(job: Job) {
+        val cancel = synchronized(this) {
+            if (terminal == Terminal.Pending) {
+                producerJob = job
+                false
+            } else {
+                true
+            }
+        }
+        if (cancel) job.cancel()
+    }
 
     internal fun complete(value: EditorHistorySnapshot?) {
         val recycleNow = synchronized(this) {
-            if (closed.get() || taken) {
+            if (terminal != Terminal.Pending) {
                 value
             } else {
                 completedResult = value
+                terminal = Terminal.CompletedUnclaimed
                 deferred.complete(value)
                 null
             }
@@ -87,47 +108,66 @@ internal class PendingHistorySnapshot(
         recycleNow?.recycleBitmaps()
     }
 
+    internal fun fail(error: Throwable) {
+        val publish = synchronized(this) {
+            if (terminal != Terminal.Pending) false
+            else {
+                terminal = Terminal.Failed
+                true
+            }
+        }
+        if (publish) deferred.completeExceptionally(error)
+    }
+
+    internal fun producerCancelled() {
+        val publish = synchronized(this) {
+            if (terminal != Terminal.Pending) false
+            else {
+                terminal = Terminal.Cancelled
+                true
+            }
+        }
+        if (publish) deferred.cancel()
+    }
+
     suspend fun await(): EditorHistorySnapshot? {
         synchronized(this) {
-            if (closed.get() || taken) return null
-            taking = true
+            if (terminal != Terminal.Pending && terminal != Terminal.CompletedUnclaimed) return null
         }
         val value =
             try {
                 deferred.await()
             } catch (cancelled: CancellationException) {
-                val recycleNow = synchronized(this) {
-                    taking = false
-                    val result = completedResult
-                    completedResult = null
-                    result
-                }
-                recycleNow?.recycleBitmaps()
                 close()
                 throw cancelled
             }
-        val recycleNow = synchronized(this) {
-            taking = false
-            if (closed.get() || taken) {
-                if (completedResult === value) completedResult = null
-                value
-            } else {
-                taken = true
+        val transferred = synchronized(this) {
+            if (terminal == Terminal.CompletedUnclaimed) {
+                terminal = Terminal.Transferred
                 completedResult = null
-                null
-            }
+                true
+            } else false
         }
-        recycleNow?.recycleBitmaps()
-        return if (recycleNow == null && !closed.get()) value else null
+        return if (transferred) value else null
     }
 
     override fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        val recycleNow = synchronized(this) {
-            if (taking) null else completedResult.also { completedResult = null }
+        val decision = synchronized(this) {
+            when (terminal) {
+                Terminal.Pending -> {
+                    terminal = Terminal.Cancelled
+                    producerJob to null
+                }
+                Terminal.CompletedUnclaimed -> {
+                    terminal = Terminal.Discarded
+                    null to completedResult.also { completedResult = null }
+                }
+                else -> null to null
+            }
         }
-        deferred.cancel()
-        recycleNow?.recycleBitmaps()
+        decision.first?.cancel()
+        decision.second?.recycleBitmaps()
+        if (decision.first != null) deferred.cancel()
     }
 }
 
@@ -938,6 +978,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun applyCorrectionEngineToCurrentDocument(engine: CorrectionEngine) {
         if (shuttingDown) return
         prepareForMaskInteraction()
+        if (brushTransactionState != BrushTransactionState.Idle || brushSettlementJob?.isActive == true) {
+            updateUiState { it.copy(message = "브러시 작업이 끝난 뒤 다시 시도해 주세요.") }
+            return
+        }
         invalidateSelectionPreview()
         invalidateCropOperation()
         correctionEngineEpoch += 1L
@@ -2003,9 +2047,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 leased.close()
                 return false
             }
+        val strokeId = ++brushStrokeCounter
+        val producerLease = leased.retain("brush-preparation:$strokeId")
+        if (producerLease == null) {
+            reservation.close()
+            leased.close()
+            updateUiState { it.copy(message = "브러시 준비에 실패했습니다.") }
+            return false
+        }
         brushStartSnapshot = leased
         brushMaskReservation = reservation
-        val ownedMask: Bitmap? = null
         /*
             runCatching { layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
                 .getOrElse { failure ->
@@ -2033,7 +2084,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val capturedRevision = state.revision
         val transactionIdentity =
             BrushTransactionIdentity(
-                strokeId = ++brushStrokeCounter,
+                strokeId = strokeId,
                 documentGeneration = historyCoordinator.currentGeneration(),
                 sourcePath = state.sourcePath,
                 baseContentToken = capturedBaseContentToken,
@@ -2056,73 +2107,76 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         brushSnapshotJob =
             viewModelScope.launch(Dispatchers.Default) {
                 var ownedMask: Bitmap? = null
-                val snapshot = runCatching {
+                var snapshot: EditorHistorySnapshot? = null
+                try {
                     ownedMask = layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-                    captureHistorySnapshotFromRefs(
-                        leased.state,
-                        leased.previewBitmap,
-                        leased.originalPreviewBitmap,
-                        leased.selectionLayers.map { it.id to it.bitmap },
-                    )
-                }.getOrElse { null }
-                withContext(Dispatchers.Main) {
-                    if (
-                        snapshot != null &&
-                        ownedMask != null &&
-                        brushTransactionState in
-                            setOf(BrushTransactionState.Preparing, BrushTransactionState.Finishing) &&
-                        brushLayerId == layerId &&
-                        brushBaseToken == capturedBaseContentToken &&
-                        brushRevision == capturedRevision &&
-                        _uiState.value.revision == capturedRevision &&
-                        _uiState.value.baseContentToken == capturedBaseContentToken
-                    ) {
-                        brushOwnedMaskHandle = acquireMaskOwner(ownedMask, MaskOwnerKind.BrushWorkingCopy)
-                        updateUiState { current ->
-                            current.copy(
-                                selectionLayers = current.selectionLayers.map { item ->
-                                    if (item.id == layerId) item.copy(bitmap = ownedMask!!) else item
+                    snapshot =
+                        captureHistorySnapshotFromRefs(
+                            producerLease.state,
+                            producerLease.previewBitmap,
+                            producerLease.originalPreviewBitmap,
+                            producerLease.selectionLayers.map { it.id to it.bitmap },
+                            documentGeneration = producerLease.identity.generation,
+                        )
+                    withContext(Dispatchers.Main) {
+                        val currentIdentity = brushIdentity?.strokeId == strokeId
+                        val canAdopt =
+                            currentIdentity &&
+                                snapshot != null &&
+                                brushTransactionState in
+                                    setOf(BrushTransactionState.Preparing, BrushTransactionState.Finishing) &&
+                                brushLayerId == layerId &&
+                                brushBaseToken == capturedBaseContentToken &&
+                                brushRevision == capturedRevision &&
+                                _uiState.value.revision == capturedRevision &&
+                                _uiState.value.baseContentToken == capturedBaseContentToken
+                        if (canAdopt) {
+                            brushOwnedMaskHandle = acquireMaskOwner(ownedMask, MaskOwnerKind.BrushWorkingCopy)
+                            if (brushOwnedMaskHandle == null) {
+                                snapshot?.recycleBitmaps()
+                                snapshot = null
+                                ownedMask?.takeIf { !it.isRecycled }?.recycle()
+                                ownedMask = null
+                            } else {
+                                val adoptedMask = ownedMask!!
+                                updateUiState { current ->
+                                    current.copy(
+                                        selectionLayers = current.selectionLayers.map { item ->
+                                            if (item.id == layerId) item.copy(bitmap = adoptedMask) else item
+                                        }
+                                    )
                                 }
-                            )
+                                brushWorkingMask = adoptedMask
+                                ownedMask = null
+                                brushIdentity = transactionIdentity.copy(workingMask = adoptedMask)
+                                brushingSnapshot = snapshot
+                                snapshot = null
+                                if (brushTransactionState == BrushTransactionState.Preparing) {
+                                    brushTransactionState = BrushTransactionState.Active
+                                }
+                                val queued = pendingBrushPoints.toList()
+                                pendingBrushPoints.clear()
+                                queued.forEach { (x, y) -> paintActiveSelectionAt(x, y) }
+                                brushStartSnapshot?.close()
+                                brushStartSnapshot = null
+                            }
                         }
-                        brushWorkingMask = ownedMask
-                        brushIdentity = transactionIdentity.copy(workingMask = ownedMask)
-                        brushingSnapshot = snapshot
-                        if (brushTransactionState == BrushTransactionState.Preparing) {
-                            brushTransactionState = BrushTransactionState.Active
-                        }
-                        val queued = pendingBrushPoints.toList()
-                        pendingBrushPoints.clear()
-                        queued.forEach { (x, y) -> paintActiveSelectionAt(x, y) }
-                        brushStartSnapshot?.close()
-                        brushStartSnapshot = null
-                    } else {
                         snapshot?.recycleBitmaps()
                         ownedMask?.takeIf { !it.isRecycled }?.recycle()
+                        if (currentIdentity && !canAdopt) settleBrushPreparationFailure(strokeId)
+                        if (brushIdentity?.strokeId == strokeId) brushSnapshotJob = null
                     }
-                    if (
-                        snapshot == null ||
-                            brushTransactionState !in
-                                setOf(BrushTransactionState.Active, BrushTransactionState.Finishing)
-                    ) {
-                        brushOwnedMaskHandle?.close()
-                        brushOwnedMaskHandle = null
-                        brushMaskReservation?.close()
-                        brushMaskReservation = null
-                        brushStartSnapshot?.close()
-                        brushStartSnapshot = null
-                        brushingSnapshot = null
-                        brushIdentity = null
-                        brushWorkingMask = null
-                        pendingBrushPoints.clear()
-                        brushTransactionState = BrushTransactionState.Idle
-                        brushLayerId = null
-                        brushBaseToken = null
-                        brushChanged = false
-                        brushLastX = Float.NaN
-                        brushLastY = Float.NaN
+                } catch (cancelled: CancellationException) {
+                    withContext(Dispatchers.Main) {
+                        if (brushIdentity?.strokeId == strokeId) settleBrushPreparationFailure(strokeId)
                     }
-                    brushSnapshotJob = null
+                    throw cancelled
+                } catch (_: Throwable) {
+                    withContext(Dispatchers.Main) {
+                        if (brushIdentity?.strokeId == strokeId) settleBrushPreparationFailure(strokeId)
+                    }
+                } finally {
+                    producerLease.close()
                 }
             }
         return true
@@ -2139,6 +2193,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         originalRef: Bitmap?,
         layerRefs: List<Pair<String, Bitmap>>,
         storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
+        documentGeneration: String? = null,
     ): EditorHistorySnapshot? {
         val effectiveStorage =
             if (storage == HistorySnapshotStorage.MetadataOnly && state.supportsMetadataOnlyHistory()) {
@@ -2174,18 +2229,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             reservations += reservation
         }
         val snapshot =
-            runCatching {
+            try {
                 state.toHistorySnapshotFromRefs(
                     effectiveStorage,
                     previewRef,
                     originalRef,
                     layerRefs,
                 ).also {
-                    val generation = historyCoordinator.currentGeneration()
+                    val generation = documentGeneration ?: historyCoordinator.currentGeneration()
                     it.coordinatorGeneration = generation
                     it.attachLocalDiagnostics(trackerSession, generation)
                 }
-            }.getOrElse {
+            } catch (cancelled: CancellationException) {
+                reservations.forEach(MaskReservation::close)
+                throw cancelled
+            } catch (_: Throwable) {
                 reservations.forEach(MaskReservation::close)
                 return null
             }
@@ -2202,25 +2260,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
     ): PendingHistorySnapshot? {
         val leased = acquireEditorSnapshot(tag) ?: return null
-        val pending = PendingHistorySnapshot(CompletableDeferred())
-        viewModelScope.launch(Dispatchers.Default) {
-            try {
-                pending.complete(
-                    captureHistorySnapshotFromRefs(
-                        leased.state,
-                        leased.previewBitmap,
-                        leased.originalPreviewBitmap,
-                        leased.selectionLayers.map { it.id to it.bitmap },
-                        storage,
-                    )
-                )
-            } catch (cancelled: CancellationException) {
-                pending.close()
-                throw cancelled
-            } finally {
-                leased.close()
-            }
-        }
+        val pending = prepareHistorySnapshot(tag, leased, storage)
+        leased.close()
         return pending
     }
 
@@ -2230,16 +2271,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
     ): PendingHistorySnapshot {
         val pending = PendingHistorySnapshot(CompletableDeferred())
-        viewModelScope.launch(Dispatchers.Default) {
+        val producerLease = leased.retain("history-producer:$tag")
+        if (producerLease == null) {
+            pending.complete(null)
+            return pending
+        }
+        val producer = viewModelScope.launch(Dispatchers.Default) {
             try {
                 pending.complete(
-                    captureHistorySnapshotForLeasedSnapshot(leased, storage)
+                    captureHistorySnapshotForLeasedSnapshot(producerLease, storage)
                 )
             } catch (cancelled: CancellationException) {
-                pending.close()
+                pending.producerCancelled()
                 throw cancelled
+            } catch (failure: Throwable) {
+                pending.fail(failure)
+                throw failure
+            } finally {
+                producerLease.close()
             }
         }
+        pending.attachProducer(producer)
         return pending
     }
 
@@ -2253,6 +2305,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             leased.originalPreviewBitmap,
             leased.selectionLayers.map { it.id to it.bitmap },
             storage,
+            leased.identity.generation,
         )
 
     internal fun markBrushChanged(changed: Boolean) {
@@ -2289,69 +2342,123 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return epoch
     }
 
+    private fun clearBrushTransaction(strokeId: Long) {
+        if (brushIdentity?.strokeId != strokeId) return
+        brushOwnedMaskHandle?.close()
+        brushOwnedMaskHandle = null
+        brushMaskReservation?.close()
+        brushMaskReservation = null
+        brushStartSnapshot?.close()
+        brushStartSnapshot = null
+        brushingSnapshot = null
+        brushLayerId = null
+        brushBaseToken = null
+        brushChanged = false
+        brushLastX = Float.NaN
+        brushLastY = Float.NaN
+        pendingBrushPoints.clear()
+        brushIdentity = null
+        brushWorkingMask = null
+        brushSnapshotJob = null
+        brushTransactionState = BrushTransactionState.Idle
+    }
+
+    private fun settleBrushPreparationFailure(strokeId: Long) {
+        if (brushIdentity?.strokeId != strokeId) return
+        clearBrushTransaction(strokeId)
+        if (!shuttingDown) updateUiState { it.copy(message = "브러시 준비에 실패했습니다.") }
+    }
+
     internal fun finishBrushStroke() {
-        if (brushTransactionState == BrushTransactionState.Idle) return
+        if (brushTransactionState == BrushTransactionState.Idle ||
+            brushTransactionState == BrushTransactionState.Finishing ||
+            brushTransactionState == BrushTransactionState.Cancelling
+        ) return
+        val strokeId = brushIdentity?.strokeId ?: return
         brushTransactionState = BrushTransactionState.Finishing
-        settleBrushStroke(false)
+        settleBrushStroke(strokeId)
     }
 
     internal fun cancelBrushStroke() {
-        if (brushTransactionState == BrushTransactionState.Idle) return
+        if (brushTransactionState == BrushTransactionState.Idle ||
+            brushTransactionState == BrushTransactionState.Finishing ||
+            brushTransactionState == BrushTransactionState.Cancelling
+        ) return
+        val strokeId = brushIdentity?.strokeId ?: return
         brushTransactionState = BrushTransactionState.Cancelling
-        settleBrushStroke(true)
+        brushSnapshotJob?.cancel()
+        brushSnapshotJob = null
+        brushSettlementJob?.cancel()
+        brushSettlementJob = null
+        val snapshot = brushingSnapshot
+        val identity = brushIdentity
+        val transactionCurrent =
+            identity != null &&
+                brushWorkingMask != null &&
+                isBrushStrokeCurrent(identity.activeLayerId)
+        if (snapshot != null && transactionCurrent) {
+            restoreSnapshotWithoutHistory(snapshot, preserveRevision = identity?.startRevision)
+            brushingSnapshot = null
+        } else if (snapshot != null) {
+            recycleHistorySnapshot(snapshot)
+            brushingSnapshot = null
+        }
+        clearBrushTransaction(strokeId)
     }
 
-    private fun settleBrushStroke(cancel: Boolean) {
+    private fun settleBrushStroke(strokeId: Long) {
         brushSettlementJob?.cancel()
         val preparation = brushSnapshotJob
         brushSettlementJob = viewModelScope.launch {
-            preparation?.join()
-            withContext(Dispatchers.Main) {
-                val snapshot = brushingSnapshot
-                val identity = brushIdentity
-                val workingMask = brushWorkingMask
-                val transactionCurrent =
-                    identity != null &&
-                        workingMask != null &&
-                        isBrushStrokeCurrent(identity.activeLayerId)
-                val changed = brushChanged
-                val restoreState = transactionCurrent && (cancel || !changed)
-                var snapshotConsumed = false
-
-                if (snapshot != null && restoreState) {
-                    restoreSnapshotWithoutHistory(snapshot, preserveRevision = identity?.startRevision)
-                    snapshotConsumed = true
-                }
-                brushOwnedMaskHandle?.close()
-                brushOwnedMaskHandle = null
-                brushMaskReservation?.close()
-                brushMaskReservation = null
-                brushStartSnapshot?.close()
-                brushStartSnapshot = null
-                brushingSnapshot = null
-                brushLayerId = null
-                brushBaseToken = null
-                brushChanged = false
-                brushLastX = Float.NaN
-                brushLastY = Float.NaN
-                pendingBrushPoints.clear()
-                brushIdentity = null
-                brushWorkingMask = null
-                brushTransactionState = BrushTransactionState.Idle
-                if (snapshot == null) return@withContext
-                if (snapshotConsumed) {
-                    Unit
-                } else if (!transactionCurrent) {
-                    recycleHistorySnapshot(snapshot)
-                } else if (changed) {
+            try {
+                preparation?.join()
+                withContext(Dispatchers.Main) {
+                    if (brushIdentity?.strokeId != strokeId) return@withContext
+                    val snapshot = brushingSnapshot
+                    val identity = brushIdentity
+                    val transactionCurrent =
+                        identity != null &&
+                            brushWorkingMask != null &&
+                            isBrushStrokeCurrent(identity.activeLayerId)
+                    val changed = brushChanged
+                    if (snapshot == null) {
+                        clearBrushTransaction(strokeId)
+                        return@withContext
+                    }
+                    if (!transactionCurrent) {
+                        recycleHistorySnapshot(snapshot)
+                        brushingSnapshot = null
+                        clearBrushTransaction(strokeId)
+                        return@withContext
+                    }
+                    if (!changed) {
+                        restoreSnapshotWithoutHistory(
+                            snapshot,
+                            preserveRevision = identity?.startRevision,
+                        )
+                        brushingSnapshot = null
+                        clearBrushTransaction(strokeId)
+                        return@withContext
+                    }
                     updateUiState {
                         it.copy(
                             revision = (identity?.startRevision ?: it.revision) + 1,
                             isBusy = false,
                         )
                     }
-                    commitUndoSnapshot(snapshot, clearRedo = true)
-                    forceDraftSaveAsync()
+                    if (commitUndoSnapshot(snapshot, clearRedo = true)) {
+                        brushingSnapshot = null
+                        historyIoJob?.join()
+                        forceDraftSaveAsync()
+                    } else {
+                        recycleHistorySnapshot(snapshot)
+                        brushingSnapshot = null
+                    }
+                    clearBrushTransaction(strokeId)
+                }
+            } finally {
+                if (brushIdentity?.strokeId == strokeId) {
+                    withContext(NonCancellable + Dispatchers.Main) { clearBrushTransaction(strokeId) }
                 }
             }
         }
@@ -7354,7 +7461,8 @@ private fun historySignedValue(value: Float): String =
     if (historyIsZero(value)) "0.00" else String.format(Locale.US, "%+.2f", value)
 
 internal fun EditorViewModel.acquireEditorSnapshot(tag: String): LeasedEditorSnapshot? =
-    bitmapLeaseLedger.withStateTransition {
+    if (hasActiveBrushStroke()) null
+    else bitmapLeaseLedger.withStateTransition {
         bitmapLeaseLedger.capture(tag, uiState.value, historyCoordinator.currentGeneration())
     }
 
