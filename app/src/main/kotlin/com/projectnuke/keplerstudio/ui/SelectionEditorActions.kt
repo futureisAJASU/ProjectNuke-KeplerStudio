@@ -507,31 +507,6 @@ fun EditorViewModel.clearActiveSelectionLayer() {
         message = "마스크를 비웠습니다.",
         clear = true,
     )
-    return
-    /*
-    if (
-        !applySynchronousEditWithHistory { current ->
-            var changed = false
-            current.copy(
-                selectionLayers =
-                    current.selectionLayers.map { layer ->
-                        if (layer.id == activeId) {
-                            // The legacy synchronous branch is unreachable; clear uses the
-                            // copy-on-write worker path above.
-                            changed = true
-                            layer
-                        } else {
-                            layer
-                        }
-                    },
-                revision = current.revision + if (changed) 1 else 0,
-                message = "\uB9C8\uC2A4\uD06C\uB97C \uBE44\uC6E0\uC2B5\uB2C8\uB2E4.",
-            )
-        }
-    )
-        return
-    persistDraftSnapshot()
-    */
 }
 
 fun EditorViewModel.updateSelectionPaintSettings(

@@ -318,95 +318,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun createBrushSelectionInternal(allowRecovery: Boolean = true) {
         if (!canEnterEditorAction(allowMaskSupersession = true)) return
         createBrushSelectionAsyncInternal(allowRecovery)
-        return
-        val state = uiState.value
-        val base =
-            state.originalPreviewBitmap
-                ?: state.previewBitmap
-                ?: run {
-                    updateUiState { it.copy(message = "브러시 마스크를 만들 이미지가 없습니다.") }
-                    return
-                }
-        val brushTracker = beginMemoryTracking("createBrushSelection", snapshotState = "allocating")
-        if (!tryAdmitSelectionMaskLayer(base.width, base.height)) {
-            brushTracker?.end()
-            if (allowRecovery) {
-                val requiredBytes = BitmapMemoryBudget.bytes(base.width, base.height)
-                requestAllocationRecovery(
-                    MemoryRetryAction.CreateBrushSelection,
-                    requiredBytes,
-                )
-            } else {
-                updateUiStateAndRecycleReplaced {
-                    it.copy(message = "선택 마스크를 더 만들 수 없습니다. 먼저 불필요한 마스크를 삭제해 주세요.")
-                }
-        }
-        return
-    }
-        val maskReservation =
-            selectionMaskOwnership.reserve(
-                owner = "brushSelection:${state.revision}",
-                bytes = BitmapMemoryBudget.bytes(base.width, base.height, Bitmap.Config.ARGB_8888),
-                documentLayerDelta = 1,
-            ) ?: run {
-                brushTracker?.end()
-                updateUiStateAndRecycleReplaced {
-                    it.copy(message = "선택 마스크 메모리 한도를 초과했습니다.")
-                }
-                return
-            }
-        val mask =
-            try {
-                createBitmapOrThrow(base.width, base.height, Bitmap.Config.ARGB_8888)
-            } catch (t: Throwable) {
-                maskReservation.close()
-                brushTracker?.end()
-                if (allowRecovery && t is BitmapAllocationRejectedException) {
-                    requestAllocationRecovery(
-                        MemoryRetryAction.CreateBrushSelection,
-                        t.requiredBytes,
-                    )
-                } else {
-                    updateUiStateAndRecycleReplaced {
-                        it.copy(message = "메모리가 부족하여 브러시 마스크를 만들 수 없습니다.")
-                    }
-                }
-                return
-            }
-        brushTracker?.track(mask, "createBrushSelection:mask")
-        val prepared = prepareForExternalEdit()
-        val preparedBase = prepared.originalPreviewBitmap ?: prepared.previewBitmap
-        if (preparedBase !== base || base.isRecycled) {
-            mask.recycle()
-            maskReservation.close()
-            brushTracker?.end()
-            return
-        }
-        val layer =
-            SelectionLayer(
-                id = "sel_" + UUID.randomUUID().toString().take(8),
-                name =
-                    "브러시 마스크 ${prepared.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
-                kind = SelectionLayerKind.Brush,
-                bitmap = mask,
-            )
-        val adopted = applySynchronousEditWithHistory {
-            it.copy(
-                selectionLayers = it.selectionLayers + layer,
-                activeSelectionLayerId = layer.id,
-                message = "브러시 마스크를 만들었습니다.",
-            )
-        }
-        if (!adopted) {
-            if (!mask.isRecycled) mask.recycle()
-            maskReservation.close()
-            brushTracker?.end()
-            return
-        }
-        maskReservation.close()
-        brushTracker?.end()
-        markMemoryRetrySucceeded(MemoryRetryAction.CreateBrushSelection)
-        persistDraftSnapshot()
     }
 
     private fun createBrushSelectionAsyncInternal(allowRecovery: Boolean) {
@@ -2603,25 +2514,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (state.previewBitmap === bitmap) return true
         if (state.originalPreviewBitmap === bitmap) return true
         return state.selectionLayers.any { it.bitmap === bitmap }
-    }
-
-    internal fun applySynchronousEditWithHistory(
-        transform: (EditorUiState) -> EditorUiState
-    ): Boolean {
-        invalidateComparison()
-        var snapshot = captureCurrentHistorySnapshot()
-        return try {
-            updateUiState(transform)
-            settleAdoptedEditHistory(snapshot)
-            snapshot = null
-            true
-        } catch (_: Throwable) {
-            snapshot?.let(::recycleHistorySnapshot)
-            updateUiStateAndRecycleReplaced {
-                it.copy(message = "편집을 적용하지 못했습니다. 현재 이미지와 편집 기록은 유지됩니다.")
-            }
-            false
-        }
     }
 
     /** Applies a selection-layer edit from one leased start state. */
