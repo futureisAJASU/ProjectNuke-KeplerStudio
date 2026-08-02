@@ -130,6 +130,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
     var observedRevision: Int = 0
     try {
         val expectedRevision = transaction.previewRevision ?: transaction.startRevision
+        observedRevision = expectedRevision
         val previewIdentity =
             SelectionPreviewIdentity(
                 gestureId = transaction.gestureId,

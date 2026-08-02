@@ -2071,7 +2071,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     current.copy(
                         isBusy = false,
                         correctionEngineState = failedRender ?: current.correctionEngineState,
-                        message = message,
+                        message =
+                            when (kind) {
+                                SelectionPreviewFailureKind.AllocationFailure ->
+                                    "\uBA54\uBAA8\uB9AC\uAC00 \uBD80\uC871\uD558\uC5EC \uC120\uD0DD \uB9C8\uC2A4\uD06C \uBBF8\uB9AC\uBCF4\uAE30\uB97C \uC900\uBE44\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
+                                SelectionPreviewFailureKind.RenderFailure ->
+                                    "\uC120\uD0DD \uB9C8\uC2A4\uD06C \uBBF8\uB9AC\uBCF4\uAE30 \uB80C\uB354\uB9C1\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4."
+                                else ->
+                                    "\uC120\uD0DD \uB9C8\uC2A4\uD06C \uBBF8\uB9AC\uBCF4\uAE30\uB97C \uC801\uC6A9\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4."
+                            },
                     )
                 }
             }
