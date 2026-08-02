@@ -233,6 +233,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal val selectionMaskOwnership =
         SelectionMaskOwnershipLedger(
             byteBudget = { BitmapMemoryBudget.selectionMaskBudgetBytes() },
+            layerBudget = { BitmapMemoryBudget.maxSelectionMaskLayers() },
             pinBitmap = { bitmap -> bitmapLeaseLedger.pinBitmap(bitmap) },
         )
     private var historyIoJob: Job? = null
@@ -682,6 +683,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val prev = previousState
             val next = nextState
             if (prev != null && next != null) {
+                selectionMaskOwnership.reconcileActiveState(next.selectionLayers)
                 uiStateOwnership?.reconcile(prev, next, historyCoordinator.currentGeneration())
                 recycleBitmaps(bitmapLeaseLedger.replaceState(prev, next))
             }
@@ -710,6 +712,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     historyCoordinator.currentGeneration()
                 }
             uiStateOwnership?.reconcile(expected, settled, generation)
+            selectionMaskOwnership.reconcileActiveState(settled.selectionLayers)
             if (adoptedNativeSession != 0L)
                 tracker.rebindNativeSessionGeneration(adoptedNativeSession, generation)
             recycleBitmaps(bitmapLeaseLedger.replaceState(expected, settled))

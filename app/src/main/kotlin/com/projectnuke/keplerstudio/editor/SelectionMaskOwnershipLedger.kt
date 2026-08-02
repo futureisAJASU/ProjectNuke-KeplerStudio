@@ -29,6 +29,7 @@ import kotlin.concurrent.withLock
  */
 internal class SelectionMaskOwnershipLedger(
     private val pinBitmap: ((Bitmap) -> BitmapLease.BitmapPin?)? = null,
+    private val layerBudget: () -> Int = { Int.MAX_VALUE },
     private val byteBudget: () -> Long = { Long.MAX_VALUE },
 ) {
     private val lock = ReentrantLock()
@@ -37,6 +38,8 @@ internal class SelectionMaskOwnershipLedger(
     private val reservations = LinkedHashMap<Long, ReservationEntry>()
     private var reservedBytes: Long = 0L
     private var reservedLayers: Int = 0
+    private var activeBytes: Long = 0L
+    private var activeLayers: Int = 0
 
     private data class Slot(
         val owners: EnumMap<MaskOwnerKind, Int> = EnumMap(MaskOwnerKind::class.java),
@@ -51,7 +54,8 @@ internal class SelectionMaskOwnershipLedger(
         if (owner.isBlank() || bytes <= 0L || layers <= 0) return null
         return lock.withLock {
             val limit = byteBudget().coerceAtLeast(0L)
-            if (bytes > limit - reservedBytes) return null
+            if (bytes > limit - activeBytes - reservedBytes) return null
+            if (layers > layerBudget().coerceAtLeast(0) - activeLayers - reservedLayers) return null
             val id = reservationIds.getAndIncrement()
             reservations[id] = ReservationEntry(owner, bytes, layers)
             reservedBytes += bytes
@@ -62,6 +66,18 @@ internal class SelectionMaskOwnershipLedger(
 
     fun reservedBytes(): Long = lock.withLock { reservedBytes }
     fun reservedLayers(): Int = lock.withLock { reservedLayers }
+    fun activeBytes(): Long = lock.withLock { activeBytes }
+    fun activeLayers(): Int = lock.withLock { activeLayers }
+
+    /** Reconciles the committed document mask ownership with the same admission ledger. */
+    fun reconcileActiveState(layers: List<SelectionLayer>) {
+        lock.withLock {
+            val unique = java.util.Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
+            layers.forEach { unique.add(it.bitmap) }
+            activeBytes = unique.sumOf { BitmapMemoryBudget.bytes(it) }
+            activeLayers = layers.size
+        }
+    }
 
     internal fun releaseReservation(id: Long, owner: String, bytes: Long, layers: Int) {
         lock.withLock {
@@ -133,6 +149,8 @@ internal class SelectionMaskOwnershipLedger(
             reservations.clear()
             reservedBytes = 0L
             reservedLayers = 0
+            activeBytes = 0L
+            activeLayers = 0
             reservationIds.set(1L)
         }
     }
