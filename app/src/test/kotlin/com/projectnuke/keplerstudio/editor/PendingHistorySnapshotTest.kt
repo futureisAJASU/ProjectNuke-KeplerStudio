@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -105,5 +106,23 @@ class PendingHistorySnapshotTest {
         val lateBitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
         pending.complete(snapshot(lateBitmap))
         assertTrue(lateBitmap.isRecycled)
+    }
+
+    @Test
+    fun `producer failure is delivered without escaping its launch scope`() = runBlocking {
+        val pending = PendingHistorySnapshot(CompletableDeferred())
+        val failure = IllegalStateException("copy failed")
+        val producer =
+            launch(Dispatchers.Default) {
+                try {
+                    pending.fail(failure)
+                } finally {
+                    pending.producerFinished()
+                }
+            }
+        producer.join()
+
+        assertFailsWith<IllegalStateException> { pending.await() }
+        pending.close()
     }
 }

@@ -82,6 +82,7 @@ internal class PendingHistorySnapshot(
     private var terminal = Terminal.Pending
     private var producerJob: Job? = null
     private var completedResult: EditorHistorySnapshot? = null
+    private var producerFailure: Throwable? = null
 
     internal fun attachProducer(job: Job) {
         val cancel = synchronized(this) {
@@ -93,6 +94,10 @@ internal class PendingHistorySnapshot(
             }
         }
         if (cancel) job.cancel()
+    }
+
+    internal fun producerFinished() {
+        synchronized(this) { producerJob = null }
     }
 
     internal fun complete(value: EditorHistorySnapshot?) {
@@ -113,6 +118,7 @@ internal class PendingHistorySnapshot(
         val publish = synchronized(this) {
             if (terminal != Terminal.Pending) false
             else {
+                producerFailure = error
                 terminal = Terminal.Failed
                 true
             }
@@ -133,7 +139,12 @@ internal class PendingHistorySnapshot(
 
     suspend fun await(): EditorHistorySnapshot? {
         synchronized(this) {
-            if (terminal != Terminal.Pending && terminal != Terminal.CompletedUnclaimed) return null
+            when (terminal) {
+                Terminal.Pending,
+                Terminal.CompletedUnclaimed -> Unit
+                Terminal.Failed -> throw (producerFailure ?: IllegalStateException("history preparation failed"))
+                else -> return null
+            }
         }
         val value =
             try {
@@ -2264,8 +2275,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 throw cancelled
             } catch (failure: Throwable) {
                 pending.fail(failure)
-                throw failure
             } finally {
+                pending.producerFinished()
                 producerLease.close()
             }
         }
