@@ -1659,6 +1659,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
         if (shuttingDown) return false
         if (brushTransactionState != BrushTransactionState.Idle) return false
+        if (selectionParamTransaction != null) return false
         if (historyCoordinator.flags().busy) return false
         val state = _uiState.value
         return !state.isBusy || allowMaskSupersession && isBusyOwnedByMaskSupersedable()
@@ -1793,7 +1794,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun beginSelectionParamGesture(): Boolean {
-        if (selectionParamTransaction != null) return true
+        if (selectionParamTransaction != null) return false
         val leased = acquireEditorSnapshot("selectionParamGesture") ?: return false
         val state = leased.state
         // Defer the full Exact snapshot capture to a worker. The transaction holds a
@@ -7477,7 +7478,7 @@ private fun historySignedValue(value: Float): String =
     if (historyIsZero(value)) "0.00" else String.format(Locale.US, "%+.2f", value)
 
 internal fun EditorViewModel.acquireEditorSnapshot(tag: String): LeasedEditorSnapshot? =
-    if (hasActiveBrushStroke()) null
+    if (hasActiveBrushStroke() || selectionParamTransaction != null) null
     else bitmapLeaseLedger.withStateTransition {
         bitmapLeaseLedger.capture(tag, uiState.value, historyCoordinator.currentGeneration())
     }

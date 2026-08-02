@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import android.app.Application
 import android.graphics.Bitmap
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import com.projectnuke.keplerstudio.ui.paintActiveSelectionAt
 import com.projectnuke.keplerstudio.ui.deleteActiveSelectionLayer
@@ -127,5 +128,19 @@ class EditorViewModelBrushTransactionTest {
 
         assertEquals(0, vm.uiState.value.revision)
         assertTrue(!vm.uiState.value.canUndo)
+    }
+
+    @Test
+    fun `selection parameter settlement blocks a concurrent edit snapshot`() {
+        val vm = viewModel()
+        awaitEditorReady(vm)
+
+        assertTrue(vm.beginSelectionParamGesture())
+        assertFalse(vm.canEnterEditorAction())
+        assertTrue(vm.acquireEditorSnapshot("blocked") == null)
+
+        vm.finishSelectionParamGesture()
+        settle(vm) { vm.currentSelectionParamTransaction() == null }
+        assertTrue(vm.canEnterEditorAction())
     }
 }
