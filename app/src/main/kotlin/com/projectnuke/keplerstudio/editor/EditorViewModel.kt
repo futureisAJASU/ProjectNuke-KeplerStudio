@@ -16,6 +16,7 @@ import android.util.Log
 import androidx.heifwriter.HeifWriter
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.ui.unit.IntSize
 import com.projectnuke.keplerstudio.BuildConfig
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.bridge.NativeCorrectionV2Params
@@ -4792,7 +4793,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateViewport(viewport: ViewportState) {
-        updateUiStateAndRecycleReplaced { it.copy(viewport = viewport) }
+        val current = _uiState.value
+        val image = current.previewBitmap ?: current.originalPreviewBitmap
+        val safeScale = viewport.scale.takeIf { it.isFinite() && it >= 1f } ?: 1f
+        val geometry =
+            if (image != null) {
+                PreviewGeometry(
+                    container = IntSize(viewport.viewportWidth, viewport.viewportHeight),
+                    imageWidth = image.width,
+                    imageHeight = image.height,
+                    zoom = safeScale,
+                    pan = viewport.offset,
+                )
+            } else null
+        val settled =
+            viewport.copy(
+                scale = safeScale,
+                offset = geometry?.clampedPan() ?: androidx.compose.ui.geometry.Offset.Zero,
+                viewportWidth = viewport.viewportWidth.coerceAtLeast(0),
+                viewportHeight = viewport.viewportHeight.coerceAtLeast(0),
+            )
+        updateUiStateAndRecycleReplaced { it.copy(viewport = settled) }
         // TODO v0.2: viewport가 scale 임계값 이상이면 ROI 타일 렌더 Job 발행.
     }
 

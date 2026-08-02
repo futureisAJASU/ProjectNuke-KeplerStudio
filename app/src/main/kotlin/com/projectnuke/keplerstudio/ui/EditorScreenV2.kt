@@ -802,7 +802,10 @@ private fun V2ZoomablePreview(
                             offset = if (nextScale <= 1.01f) {
                                 Offset.Zero
                             } else {
-                                val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
+                                val center = Offset(
+                                    (containerSize.width - paddingPx * 2f) / 2f,
+                                    (containerSize.height - paddingPx * 2f) / 2f,
+                                )
                                 val newOffset = ((offset + centroid - center) * (nextScale / oldScale)) - (centroid - center) + pan
                                 clampZoomOffset(newOffset, nextScale, bitmap.width, bitmap.height, containerSize, paddingPx)
                             }
@@ -821,8 +824,18 @@ private fun V2ZoomablePreview(
                                     offset = Offset.Zero
                                 } else {
                                     val targetScale = 2.5f
-                                    val center = Offset(containerSize.width / 2f, containerSize.height / 2f)
-                                    offset = (center - tap) * (targetScale - 1f)
+                                    val innerCenter = Offset(
+                                        (containerSize.width - paddingPx * 2f) / 2f,
+                                        (containerSize.height - paddingPx * 2f) / 2f,
+                                    )
+                                    offset = clampZoomOffset(
+                                        (innerCenter - tap) * (targetScale - 1f),
+                                        targetScale,
+                                        bitmap.width,
+                                        bitmap.height,
+                                        containerSize,
+                                        paddingPx,
+                                    )
                                     scale = targetScale
                                 }
                                 showOriginal = false
