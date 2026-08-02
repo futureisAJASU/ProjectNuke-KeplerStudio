@@ -2508,6 +2508,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return false
         }
         invalidateComparison()
+        // Publish the action slot before the worker starts.  Otherwise a
+        // second edit can capture state while this exact before-snapshot is
+        // still being prepared.
+        updateUiState { it.copy(isBusy = true) }
         viewModelScope.launch(Dispatchers.Default) {
             var before: EditorHistorySnapshot? = null
             var replacement: Bitmap? = null
@@ -2552,6 +2556,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                         nextLayers.lastOrNull()?.id
                                     } else it.activeSelectionLayerId,
                                 revision = it.revision + 1,
+                                isBusy = false,
                                 message = message,
                             )
                         }
@@ -2569,6 +2574,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 replacement?.takeIf { !it.isRecycled }?.recycle()
                 before?.let(::recycleHistorySnapshot)
+                withContext(NonCancellable + Dispatchers.Main) {
+                    val current = _uiState.value
+                    if (
+                        current.sourcePath == leased.identity.sourcePath &&
+                            current.baseContentToken == leased.identity.baseContentToken &&
+                            historyCoordinator.currentGeneration() == leased.identity.generation &&
+                            current.isBusy
+                    ) {
+                        updateUiState { it.copy(isBusy = false) }
+                    }
+                }
                 leased.close()
             }
         }
@@ -2580,6 +2596,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         transform: (EditorUiState) -> EditorUiState,
     ): Boolean {
         val leased = acquireEditorSnapshot(tag) ?: return false
+        updateUiState { it.copy(isBusy = true) }
         val startIdentity = leased.identity
         val pending = prepareHistorySnapshot(tag, leased)
         viewModelScope.launch(Dispatchers.Default) {
@@ -2595,7 +2612,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             historyCoordinator.currentGeneration() == startIdentity.generation
                     if (snapshot != null && currentIdentity) {
                         updateUiStateAndRecycleReplaced { state ->
-                            transform(state).copy(revision = state.revision + 1)
+                            transform(state).copy(revision = state.revision + 1, isBusy = false)
                         }
                         settleAdoptedEditHistory(snapshot)
                         snapshot = null
@@ -2607,6 +2624,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 snapshot?.let(::recycleHistorySnapshot)
                 pending.close()
+                withContext(NonCancellable + Dispatchers.Main) {
+                    val current = _uiState.value
+                    if (
+                        current.sourcePath == startIdentity.sourcePath &&
+                            current.baseContentToken == startIdentity.baseContentToken &&
+                            historyCoordinator.currentGeneration() == startIdentity.generation &&
+                            current.isBusy
+                    ) {
+                        updateUiState { it.copy(isBusy = false) }
+                    }
+                }
                 leased.close()
             }
         }
