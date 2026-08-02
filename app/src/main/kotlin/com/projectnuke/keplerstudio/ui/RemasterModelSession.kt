@@ -181,6 +181,7 @@ object RemasterModelSession : ModelRunnerContract {
                     statusText = "${candidate.title}: 모델 파일 없음"
                     return@withLock
                 }
+                try {
                 runCatching {
                         val createdRunner =
                             when (candidate.id) {
@@ -267,8 +268,20 @@ object RemasterModelSession : ModelRunnerContract {
                         GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                         statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
                     }
+            } catch (failure: Throwable) {
+                runCatching { closeableModel?.close() }
+                closeableModel = null
+                sessionValidationIdentity = null
+                isModelLoaded = false
+                isModelLoading = false
+                lifecycle = ModelRunnerLifecycle.Failed
+                ModelAvailabilityRegistry.reportEdgeLoad(
+                    ModelLoadResult.LoadFailed(failure.message ?: "Edge Masker publication failed"),
+                    registryLoadGeneration,
+                )
             }
         }
+    }
     }
 
     internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> =
