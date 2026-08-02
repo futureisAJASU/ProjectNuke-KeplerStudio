@@ -277,7 +277,7 @@ class SelectionPreviewProductionTest {
             }
             assertTrue(
                 adopted,
-                "calls=${hookCalls.get()} renders=${rendererCalls.get()} reserved=${vm.selectionMaskOwnership.reservedBytes()} busy=${vm.uiState.value.isBusy} message=${vm.uiState.value.message}",
+                "calls=${hookCalls.get()} renders=${rendererCalls.get()} reserved=${vm.selectionMaskOwnership.reservedBytes()} busy=${vm.uiState.value.isBusy} message=${vm.uiState.value.message} token=${transaction.latestPreviewToken} revision=${vm.uiState.value.revision} current=${vm.isSelectionPreviewCurrent(transaction, transaction.latestPreviewToken ?: -1L, vm.uiState.value.revision, transaction.baseContentToken, vm.uiState.value.activeSelectionLayerId)}",
             )
 
             assertEquals(1, rendererCalls.get())
