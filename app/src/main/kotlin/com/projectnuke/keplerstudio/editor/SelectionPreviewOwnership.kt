@@ -111,6 +111,19 @@ internal class OwnedRenderSuccess(val result: RenderResult.Success) : AutoClosea
     }
 }
 
+internal class OwnedRenderResult(val result: RenderResult) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+
+    fun takeOutput(): Bitmap? =
+        (result as? RenderResult.Success)?.output?.takeIf { closed.compareAndSet(false, true) }
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            (result as? RenderResult.Success)?.output?.takeUnless(Bitmap::isRecycled)?.recycle()
+        }
+    }
+}
+
 /** Owns a Bitmap until the caller explicitly takes it after a dispatcher hop. */
 internal class OwnedBitmap(private val bitmap: Bitmap) : AutoCloseable {
     private val closed = AtomicBoolean(false)

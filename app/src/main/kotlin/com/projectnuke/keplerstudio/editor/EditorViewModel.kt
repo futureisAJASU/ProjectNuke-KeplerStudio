@@ -968,6 +968,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     return
                 }
         launchManagedRenderWithPreparedResources({ operationToken ->
+            val renderSlot = OwnedHandoff<OwnedRenderResult>()
             var renderedOwner: Bitmap? = null
             try {
                 val switchState =
@@ -975,8 +976,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         correctionEngineState =
                             before.correctionEngineState.copy(documentEngine = engine)
                     )
-                val renderResult =
-                    withContext(Dispatchers.Default) {
+                withContext(Dispatchers.Default) {
+                    val result =
                         EditorRenderer.render(
                             createRenderRequest(
                                 state = switchState,
@@ -986,7 +987,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 assignedEngine = engine,
                             )
                         )
-                    }
+                    renderSlot.publish(OwnedRenderResult(result))
+                }
+                val renderOwner = checkNotNull(renderSlot.take())
+                val renderResult = renderOwner.result
+                if (renderResult is RenderResult.Success) renderedOwner = renderOwner.takeOutput()
                 val current = _uiState.value
                 val canAdopt =
                     isManagedEditCurrent(operationToken, nextRevision) &&
@@ -1077,6 +1082,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 throw ce
             } finally {
+                renderSlot.close()
                 renderedOwner?.takeUnless(Bitmap::isRecycled)?.recycle()
                 ownedBase.takeUnless(Bitmap::isRecycled)?.recycle()
                 engineUndoSnapshot?.let(::recycleHistorySnapshot)
