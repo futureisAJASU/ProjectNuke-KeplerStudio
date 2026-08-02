@@ -33,9 +33,12 @@ import kotlinx.coroutines.withContext
 fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-    val current = prepareForExternalEdit()
+    prepareForExternalEdit()
+    val startSnapshot = acquireEditorSnapshot("selectionNativeBake") ?: return
+    val current = startSnapshot.state
     val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
     if (baseOriginal == null) {
+        startSnapshot.close()
         updateUiState { it.copy(message = "적용할 이미지가 없습니다.") }
         return
     }
@@ -43,6 +46,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     val capturedActiveSelectionLayerId = current.activeSelectionLayerId
     val enabledLayers = capturedSelectionLayers.filter { it.enabled }
     if (enabledLayers.isEmpty()) {
+        startSnapshot.close()
         updateUiState { it.copy(message = "적용할 선택 마스크가 없습니다.") }
         return
     }
@@ -53,7 +57,8 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     val sourcePath = current.sourcePath
     val baseContentToken = current.baseContentToken
 
-    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("selectionNativeBake")
+    var pendingHistory: PendingHistorySnapshot? =
+        prepareHistorySnapshot("selectionNativeBake", startSnapshot)
     val prepareTracker =
         beginMemoryTracking(
             "selectionNativeBake:prepare",
@@ -80,6 +85,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
                 capturedSelectionLayers = capturedSelectionLayers,
                 capturedActiveSelectionLayerId = capturedActiveSelectionLayerId,
                 nextRevision = nextRevision,
+                startSnapshot = startSnapshot,
                 originalHistoryRef = { pendingHistory },
                 consumeHistory = { pendingHistory = null },
                 releaseHistory = { pendingHistory?.close(); pendingHistory = null },
@@ -90,6 +96,7 @@ fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
             PreparedResourceHandoff.create(
                 "nativeSelectionBake",
                 {
+                    startSnapshot.close()
                     pendingHistory?.close()
                     pendingHistory = null
                 },
@@ -125,12 +132,13 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     capturedSelectionLayers: List<SelectionLayer>,
     capturedActiveSelectionLayerId: String?,
     nextRevision: Int,
+    startSnapshot: LeasedEditorSnapshot,
     originalHistoryRef: () -> PendingHistorySnapshot?,
     consumeHistory: () -> Unit,
     releaseHistory: () -> Unit,
     prepareTracker: com.projectnuke.keplerstudio.editor.MemoryTrackerScope?,
 ) {
-    var leasedSnapshot: LeasedEditorSnapshot? = null
+    val leasedSnapshot = startSnapshot
     var ownedBase: Bitmap? = null
     var ownedLayers: List<SelectionLayer> = emptyList()
     var bakedOriginal: Bitmap? = null
@@ -159,8 +167,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
     try {
         val prepared = withContext(Dispatchers.Default) {
             if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
-            leasedSnapshot = acquireEditorSnapshot("selectionNativeBake") ?: return@withContext null
-            val workerState = leasedSnapshot!!.state
+            val workerState = leasedSnapshot.state
             if (workerState.sourcePath != sourcePath) return@withContext null
             if (workerState.baseContentToken != baseContentToken) return@withContext null
             if (workerState.selectionLayers != capturedSelectionLayers) return@withContext null
@@ -304,7 +311,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
         releaseHistory()
         bakedOriginal?.takeIf { !it.isRecycled }?.recycle()
         renderedPreview?.takeIf { !it.isRecycled }?.recycle()
-        leasedSnapshot?.close()
+        leasedSnapshot.close()
         bakeTracker?.end()
     }
 }

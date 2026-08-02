@@ -55,7 +55,9 @@ import kotlinx.coroutines.withContext
 fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
-    val state = prepareForExternalEdit()
+    prepareForExternalEdit()
+    val startSnapshot = acquireEditorSnapshot("subjectSelection") ?: return
+    val state = startSnapshot.state
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val sourcePath = state.sourcePath
     val sourceRevision = state.revision
@@ -88,6 +90,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val busyMessage =
         "\uD53C\uC0AC\uCCB4 \uB9C8\uC2A4\uD06C\uB97C \uC0DD\uC131\uD558\uB294 \uC911\uC785\uB2C8\uB2E4."
     if (base == null) {
+        startSnapshot.close()
         updateUiState {
             it.copy(
                 message =
@@ -97,6 +100,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         return
     }
     if (useModel && modelCapability?.executable != true) {
+        startSnapshot.close()
         updateUiState {
             it.copy(
                 message =
@@ -106,6 +110,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         return
     }
     if (!useModel && manualMaskAtEntry == null) {
+        startSnapshot.close()
         updateUiState {
             it.copy(
                 message =
@@ -121,7 +126,8 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             snapshotState = "inferring",
             transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
         )
-    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("subjectSelection")
+    var pendingHistory: PendingHistorySnapshot? =
+        prepareHistorySnapshot("subjectSelection", startSnapshot)
     val baseBaseConfig = base.config ?: Bitmap.Config.ARGB_8888
     val manualMaskConfig = manualMaskAtEntry?.config ?: Bitmap.Config.ARGB_8888
     val originalBaseRef = base
@@ -158,7 +164,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 val layer =
                     withContext(Dispatchers.Default) {
                         if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
-                        val workerState = uiState.value
+                        val workerState = startSnapshot.state
                         if (workerState.sourcePath != sourcePath) return@withContext null
                         if (workerState.revision != sourceRevision) return@withContext null
                         val workerBase = workerState.originalPreviewBitmap ?: workerState.previewBitmap
@@ -390,12 +396,14 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 pendingHistoryOwned?.close()
                 selectionTracker?.end()
+                startSnapshot.close()
             }
         },
         handoff =
             PreparedResourceHandoff.create(
                 "subjectSelection",
                 {
+                    startSnapshot.close()
                     pendingHistory?.close()
                     pendingHistory = null
                 },
@@ -619,15 +627,18 @@ fun EditorViewModel.applyActiveSelectionLocalEdit() {
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
     invalidateSelectionPreview()
-    val state = prepareForExternalEdit()
+    prepareForExternalEdit()
+    val sourceSnapshot = acquireEditorSnapshot("activeSelectionLocalEdit") ?: return
+    val state = sourceSnapshot.state
     val base = state.originalPreviewBitmap ?: state.previewBitmap
     val layer = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId }
     if (base == null || layer == null) {
+        sourceSnapshot.close()
         updateUiState { it.copy(message = "적용할 마스크 또는 이미지가 없습니다.") }
         return
     }
-    val sourceSnapshot = acquireEditorSnapshot("activeSelectionLocalEdit") ?: return
-    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("activeSelectionLocalEdit")
+    var pendingHistory: PendingHistorySnapshot? =
+        prepareHistorySnapshot("activeSelectionLocalEdit", sourceSnapshot)
     val nextRevision = state.revision + 1
     updateUiState {
         it.copy(isBusy = true, revision = nextRevision, message = "마스크 보정을 적용하는 중입니다.")

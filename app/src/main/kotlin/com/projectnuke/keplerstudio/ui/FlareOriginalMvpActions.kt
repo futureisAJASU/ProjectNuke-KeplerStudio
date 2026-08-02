@@ -24,6 +24,7 @@ import com.projectnuke.keplerstudio.editor.successOrThrow
 import com.projectnuke.keplerstudio.editor.withFailedRender
 import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import com.projectnuke.keplerstudio.editor.withBakedFeatureProvenance
+import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -44,18 +45,23 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
     if (isShuttingDown()) return
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
 
-    val current = prepareForExternalEdit()
+    prepareForExternalEdit()
+    val startSnapshot = acquireEditorSnapshot("ruleFlare") ?: return
+    val current = startSnapshot.state
     val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
     if (baseOriginal == null) {
+        startSnapshot.close()
         updateUiState { it.copy(message = "$title 적용할 이미지가 없습니다.") }
         return
     }
 
-    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("ruleFlare")
+    var pendingHistory: PendingHistorySnapshot? =
+        prepareHistorySnapshot("ruleFlare", startSnapshot)
     var ownedBase: Bitmap? =
         runCatching { baseOriginal.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
             .getOrElse { failure ->
                 pendingHistory?.close()
+                startSnapshot.close()
                 updateUiState { it.copy(message = "이미지를 준비하지 못했습니다.") }
                 if (failure is BitmapAllocationRejectedException) {
                     requestAllocationRecovery(
@@ -207,12 +213,14 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                 ownedPreview?.let { if (!it.isRecycled) it.recycle() }
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 pendingHistoryOwned?.close()
+                startSnapshot.close()
             }
         },
         handoff =
             PreparedResourceHandoff.create(
                 "ruleFlare",
                 {
+                    startSnapshot.close()
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null
                 },

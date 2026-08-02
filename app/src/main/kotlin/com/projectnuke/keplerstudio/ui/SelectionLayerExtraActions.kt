@@ -29,8 +29,11 @@ fun EditorViewModel.toggleSelectionOverlay() {
 fun EditorViewModel.duplicateActiveSelectionLayer() {
     if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
-    val state = prepareForExternalEdit()
+    prepareForExternalEdit()
+    val startSnapshot = acquireEditorSnapshot("duplicateSelection") ?: return
+    val state = startSnapshot.state
     val active = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId } ?: run {
+        startSnapshot.close()
         updateUiState { it.copy(message = "복제할 마스크를 선택해 주세요") }
         return
     }
@@ -42,7 +45,8 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
     val activeBitmap = active.bitmap
     val sourceActiveConfig = activeBitmap.config ?: Bitmap.Config.ARGB_8888
     val nextRevision = state.revision + 1
-    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("duplicateSelection")
+    var pendingHistory: PendingHistorySnapshot? =
+        prepareHistorySnapshot("duplicateSelection", startSnapshot)
 
     updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "마스크를 복제하는 중입니다.") }
 
@@ -58,6 +62,7 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
                 activeKind = activeKind,
                 sourceBitmap = activeBitmap,
                 sourceConfig = sourceActiveConfig,
+                startSnapshot = startSnapshot,
                 originalHistoryRef = { pendingHistory },
                 consumeHistory = { pendingHistory = null },
                 releaseHistory = { pendingHistory?.close(); pendingHistory = null },
@@ -67,6 +72,7 @@ fun EditorViewModel.duplicateActiveSelectionLayer() {
             PreparedResourceHandoff.create(
                 "duplicateSelection",
                 {
+                    startSnapshot.close()
                     pendingHistory?.close()
                     pendingHistory = null
                 },
@@ -91,11 +97,12 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
     activeKind: SelectionLayerKind,
     sourceBitmap: Bitmap,
     sourceConfig: Bitmap.Config,
+    startSnapshot: LeasedEditorSnapshot,
     originalHistoryRef: () -> PendingHistorySnapshot?,
     consumeHistory: () -> Unit,
     releaseHistory: () -> Unit,
 ) {
-    var leasedSnapshot: LeasedEditorSnapshot? = null
+    val leasedSnapshot = startSnapshot
     var ownedCopy: Bitmap? = null
     var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
     consumeHistory()
@@ -105,8 +112,7 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
     try {
         val prepared = withContext(Dispatchers.Default) {
             if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
-            leasedSnapshot = acquireEditorSnapshot("duplicateSelection") ?: return@withContext null
-            val workerState = leasedSnapshot!!.state
+            val workerState = leasedSnapshot.state
             if (workerState.sourcePath != sourcePath) return@withContext null
             if (workerState.baseContentToken != baseContentToken) return@withContext null
             val workerActive = workerState.selectionLayers.firstOrNull { it.id == activeId }
@@ -172,7 +178,7 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
                 requestAllocationRecovery(MemoryRetryAction.DuplicateSelection, t.requiredBytes)
         }
     } finally {
-        leasedSnapshot?.close()
+        leasedSnapshot.close()
         ownedCopy?.takeIf { !it.isRecycled }?.recycle()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
@@ -184,8 +190,11 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
 fun EditorViewModel.createBackgroundSelectionFromActive() {
     if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
-    val state = prepareForExternalEdit()
+    prepareForExternalEdit()
+    val startSnapshot = acquireEditorSnapshot("createBackgroundSelection") ?: return
+    val state = startSnapshot.state
     val active = state.selectionLayers.firstOrNull { it.id == state.activeSelectionLayerId } ?: run {
+        startSnapshot.close()
         updateUiState { it.copy(message = "배경으로 변환할 마스크를 선택해 주세요") }
         return
     }
@@ -199,7 +208,8 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
     val activeBitmap = active.bitmap
     val sourceActiveConfig = activeBitmap.config ?: Bitmap.Config.ARGB_8888
     val nextRevision = state.revision + 1
-    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("backgroundSelection")
+    var pendingHistory: PendingHistorySnapshot? =
+        prepareHistorySnapshot("backgroundSelection", startSnapshot)
 
     updateUiState { it.copy(isBusy = true, revision = nextRevision, message = "배경 마스크를 만드는 중입니다.") }
 
@@ -217,6 +227,7 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
                 activeLocalParams = activeLocalParams,
                 sourceBitmap = activeBitmap,
                 sourceConfig = sourceActiveConfig,
+                startSnapshot = startSnapshot,
                 originalHistoryRef = { pendingHistory },
                 consumeHistory = { pendingHistory = null },
                 releaseHistory = { pendingHistory?.close(); pendingHistory = null },
@@ -226,6 +237,7 @@ fun EditorViewModel.createBackgroundSelectionFromActive() {
             PreparedResourceHandoff.create(
                 "backgroundSelection",
                 {
+                    startSnapshot.close()
                     pendingHistory?.close()
                     pendingHistory = null
                 },
@@ -252,11 +264,12 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
     activeLocalParams: com.projectnuke.keplerstudio.editor.EditParams,
     sourceBitmap: Bitmap,
     sourceConfig: Bitmap.Config,
+    startSnapshot: LeasedEditorSnapshot,
     originalHistoryRef: () -> PendingHistorySnapshot?,
     consumeHistory: () -> Unit,
     releaseHistory: () -> Unit,
 ) {
-    var leasedSnapshot: LeasedEditorSnapshot? = null
+    val leasedSnapshot = startSnapshot
     var ownedCopy: Bitmap? = null
     var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
     consumeHistory()
@@ -266,8 +279,7 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
     try {
         val prepared = withContext(Dispatchers.Default) {
             if (!isManagedEditTokenCurrent(operationToken)) return@withContext null
-            leasedSnapshot = acquireEditorSnapshot("createBackgroundSelection") ?: return@withContext null
-            val workerState = leasedSnapshot!!.state
+            val workerState = leasedSnapshot.state
             if (workerState.sourcePath != sourcePath) return@withContext null
             if (workerState.baseContentToken != baseContentToken) return@withContext null
             val workerActive = workerState.selectionLayers.firstOrNull { it.id == activeId }
@@ -338,7 +350,7 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
                 requestAllocationRecovery(MemoryRetryAction.BackgroundSelection, t.requiredBytes)
         }
     } finally {
-        leasedSnapshot?.close()
+        leasedSnapshot.close()
         ownedCopy?.takeIf { !it.isRecycled }?.recycle()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null

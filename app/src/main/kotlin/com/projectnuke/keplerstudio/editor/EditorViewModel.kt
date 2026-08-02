@@ -2094,6 +2094,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return pending
     }
 
+    internal fun prepareHistorySnapshot(
+        tag: String,
+        leased: LeasedEditorSnapshot,
+        storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
+    ): PendingHistorySnapshot {
+        val pending = PendingHistorySnapshot(CompletableDeferred())
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                pending.complete(
+                    captureHistorySnapshotForLeasedSnapshot(leased, storage)
+                )
+            } catch (cancelled: CancellationException) {
+                pending.close()
+                throw cancelled
+            }
+        }
+        return pending
+    }
+
     internal suspend fun captureHistorySnapshotForLeasedSnapshot(
         leased: LeasedEditorSnapshot,
         storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,

@@ -40,6 +40,7 @@ import com.projectnuke.keplerstudio.editor.toFeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.withFailedRender
 import com.projectnuke.keplerstudio.editor.withSuccessfulRender
 import com.projectnuke.keplerstudio.editor.withBakedFeatureProvenance
+import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -88,9 +89,12 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         return
     }
 
-    val current = prepareForExternalEdit()
+    prepareForExternalEdit()
+    val startSnapshot = acquireEditorSnapshot("maskAwareRemaster") ?: return
+    val current = startSnapshot.state
     val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
     if (basePreview == null) {
+        startSnapshot.close()
         updateUiState { it.copy(message = "모델 마스크 보조를 적용할 이미지가 없습니다.") }
         return
     }
@@ -101,7 +105,8 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             snapshotState = "copying",
             transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
         )
-    var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("maskAwareRemaster")
+    var pendingHistory: PendingHistorySnapshot? =
+        prepareHistorySnapshot("maskAwareRemaster", startSnapshot)
     var ownedBase: Bitmap? = null
     var ownedManualMask: Bitmap? = null
     try {
@@ -118,6 +123,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         ownedManualMask = null
         pendingHistory?.close()
         pendingHistory = null
+        startSnapshot.close()
         updateUiState { it.copy(message = "모델 마스크 보조 준비에 실패했습니다.") }
         if (t is BitmapAllocationRejectedException)
             requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
@@ -396,12 +402,14 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 pendingHistoryOwned?.close()
                 remasterTracker?.end()
+                startSnapshot.close()
             }
         },
         handoff =
             PreparedResourceHandoff.create(
                 "maskAwareRemaster",
                 {
+                    startSnapshot.close()
                     ownedBase?.takeIf { !it.isRecycled }?.recycle()
                     ownedBase = null
                 },
