@@ -6473,7 +6473,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun prepareForMaskInteraction(): EditorUiState {
         abortPendingParameterEdit()
-        if (brushTransactionState != BrushTransactionState.Idle) {
+        if (brushTransactionState != BrushTransactionState.Idle &&
+            brushTransactionState != BrushTransactionState.Finishing &&
+            brushTransactionState != BrushTransactionState.Cancelling
+        ) {
             cancelBrushStroke()
         }
         settleSelectionParamTransactionForSupersession()
@@ -6481,7 +6484,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun prepareForGlobalParamEdit(): EditorUiState {
-        if (brushTransactionState != BrushTransactionState.Idle) {
+        if (brushTransactionState != BrushTransactionState.Idle &&
+            brushTransactionState != BrushTransactionState.Finishing &&
+            brushTransactionState != BrushTransactionState.Cancelling
+        ) {
             cancelBrushStroke()
         }
         settleSelectionParamTransactionForSupersession()
@@ -7443,7 +7449,12 @@ private fun historySignedValue(value: Float): String =
     if (historyIsZero(value)) "0.00" else String.format(Locale.US, "%+.2f", value)
 
 internal fun EditorViewModel.acquireEditorSnapshot(tag: String): LeasedEditorSnapshot? =
-    if (hasActiveBrushStroke() || selectionParamTransaction != null) null
+    if (hasActiveBrushStroke() || selectionParamTransaction != null) {
+        updateUiState {
+            it.copy(message = "현재 브러시 또는 선택 미리보기가 마무리되는 중입니다.")
+        }
+        null
+    }
     else bitmapLeaseLedger.withStateTransition {
         bitmapLeaseLedger.capture(tag, uiState.value, historyCoordinator.currentGeneration())
     }
