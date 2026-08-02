@@ -477,7 +477,7 @@ class FlareGuardModelRunner private constructor(
             val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.FlareGuard)
             val validationToken = (validation as? ModelLoadResult.Ready)?.runner
                 ?: return validation.retypeFailure()
-            return create(context, validationToken)
+            return create(context.applicationContext, validationToken)
         }
 
         internal fun create(
@@ -525,14 +525,18 @@ class FlareGuardModelRunner private constructor(
                 ) {
                     return ModelLoadResult.RuntimeUnavailable("model validation became stale before load")
                 }
-                val validation =
-                    ModelAssetValidator.validate(manifest, assetOpen)
-                when (validation) {
-                    ModelAssetValidation.Missing ->
-                        return ModelLoadResult.AssetMissing("${manifest.asset.assetPath} is not packaged")
-                    is ModelAssetValidation.Invalid ->
-                        return ModelLoadResult.AssetInvalid(validation.detail)
-                    is ModelAssetValidation.Valid -> Unit
+                // Production callers must arrive with a registry-issued capability token. The
+                // validator-only branch is retained solely for the deterministic loader seam
+                // used by JVM tests; it is not reachable from either public production factory.
+                if (validationToken == null) {
+                    val validation = ModelAssetValidator.validate(manifest, assetOpen)
+                    when (validation) {
+                        ModelAssetValidation.Missing ->
+                            return ModelLoadResult.AssetMissing("${manifest.asset.assetPath} is not packaged")
+                        is ModelAssetValidation.Invalid ->
+                            return ModelLoadResult.AssetInvalid(validation.detail)
+                        is ModelAssetValidation.Valid -> Unit
+                    }
                 }
                 val modelBytes = factory.loadAsset()
                 ownedInterpreter =

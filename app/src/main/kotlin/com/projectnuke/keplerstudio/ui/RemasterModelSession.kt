@@ -13,8 +13,6 @@ import com.projectnuke.keplerstudio.editor.DeterministicModelFallback
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import com.projectnuke.keplerstudio.editor.ModelAlphaHandling
 import com.projectnuke.keplerstudio.editor.ModelAssetManifest
-import com.projectnuke.keplerstudio.editor.ModelAssetValidator
-import com.projectnuke.keplerstudio.editor.ModelAvailability
 import com.projectnuke.keplerstudio.editor.ModelChannelOrder
 import com.projectnuke.keplerstudio.editor.ModelColorSpace
 import com.projectnuke.keplerstudio.editor.ModelConfidence
@@ -439,28 +437,6 @@ object RemasterModelSession : ModelRunnerContract {
             statusText = "로드된 모델이 없습니다."
             true
         }
-
-    fun modelAvailability(
-        context: Context,
-        candidate: RemasterModelCandidate,
-    ): ModelAvailability {
-        val manifest =
-            ModelAssetManifest.byId(candidate.id)
-                ?: return ModelAvailability.ContractUnsupported
-        val validation =
-            ModelAssetValidator.validate(manifest) { path ->
-                runCatching { context.assets.open(path) }.getOrNull()
-            }
-        return ModelAssetValidator.availability(
-            entry = manifest,
-            validation = validation,
-            loaded = activeModel?.id == candidate.id && isModelLoaded,
-            inferenceAvailable =
-                activeModel?.id == candidate.id &&
-                    isModelLoaded &&
-                    manifest.inferenceAdapterImplemented,
-        )
-    }
 
     private fun publishSessionClosed(): Boolean {
         if (registrySessionGeneration == 0L) return false
