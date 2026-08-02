@@ -229,7 +229,7 @@ object RemasterModelSession : ModelRunnerContract {
                 ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
             val validationToken =
                 (validation as? ModelLoadResult.Ready)?.runner
-                    ?: return@withLock validation as ModelLoadResult<Nothing>
+                    ?: return@withLock validation.asUnitFailure()
             if (activeModel?.id == "edge_masker" && isModelLoaded && closeableModel != null) {
                 return@withLock ModelLoadResult.Ready(Unit)
             }
@@ -692,6 +692,16 @@ object RemasterModelSession : ModelRunnerContract {
         }
     }
 }
+
+private fun ModelLoadResult<*>.asUnitFailure(): ModelLoadResult<Unit> =
+    when (this) {
+        is ModelLoadResult.AssetMissing -> ModelLoadResult.AssetMissing(detail)
+        is ModelLoadResult.AssetInvalid -> ModelLoadResult.AssetInvalid(detail)
+        is ModelLoadResult.UnsupportedContract -> ModelLoadResult.UnsupportedContract(detail)
+        is ModelLoadResult.RuntimeUnavailable -> ModelLoadResult.RuntimeUnavailable(detail)
+        is ModelLoadResult.LoadFailed -> ModelLoadResult.LoadFailed(detail)
+        is ModelLoadResult.Ready -> error("ready result cannot be converted to a failure")
+    }
 
 internal fun categoryMaskAlpha(category: Int, foregroundCategoryIds: Set<Int>): Int {
     require(foregroundCategoryIds.isNotEmpty()) { "Foreground category mapping must be explicit" }
