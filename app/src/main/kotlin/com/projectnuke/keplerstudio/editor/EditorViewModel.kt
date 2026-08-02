@@ -275,6 +275,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun createBrushSelectionInternal(allowRecovery: Boolean = true) {
         if (!canEnterEditorAction(allowMaskSupersession = true)) return
+        createBrushSelectionAsyncInternal(allowRecovery)
+        return
         val state = uiState.value
         val base =
             state.originalPreviewBitmap
@@ -362,6 +364,99 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         brushTracker?.end()
         markMemoryRetrySucceeded(MemoryRetryAction.CreateBrushSelection)
         persistDraftSnapshot()
+    }
+
+    private fun createBrushSelectionAsyncInternal(allowRecovery: Boolean) {
+        invalidateComparison()
+        val start = acquireEditorSnapshot("createBrushSelection") ?: return
+        val state = start.state
+        val base = start.originalPreviewBitmap ?: start.previewBitmap
+        if (base == null) {
+            start.close()
+            updateUiState { it.copy(message = "브러시 마스크를 만들 이미지가 없습니다.") }
+            return
+        }
+        val reservation =
+            selectionMaskOwnership.reserve(
+                owner = "brushSelection:${start.identity.revision}:${UUID.randomUUID()}",
+                bytes = BitmapMemoryBudget.bytes(base.width, base.height, Bitmap.Config.ARGB_8888),
+            )
+        if (reservation == null) {
+            start.close()
+            if (allowRecovery) {
+                requestAllocationRecovery(
+                    MemoryRetryAction.CreateBrushSelection,
+                    BitmapMemoryBudget.bytes(base.width, base.height),
+                )
+            } else {
+                updateUiState { it.copy(message = "선택 마스크 메모리가 부족합니다.") }
+            }
+            return
+        }
+        updateUiState { it.copy(isBusy = true) }
+        viewModelScope.launch(Dispatchers.Default) {
+            var mask: Bitmap? = null
+            var before: EditorHistorySnapshot? = null
+            try {
+                mask = createBitmapOrThrow(base.width, base.height, Bitmap.Config.ARGB_8888)
+                before = captureHistorySnapshotForLeasedSnapshot(start)
+                withContext(Dispatchers.Main) {
+                    val live = uiState.value
+                    val current =
+                        !shuttingDown &&
+                            live.sourcePath == start.identity.sourcePath &&
+                            live.baseContentToken == start.identity.baseContentToken &&
+                            live.revision == start.identity.revision &&
+                            historyCoordinator.currentGeneration() == start.identity.generation
+                    val preparedMask = checkNotNull(mask)
+                    if (current && before != null) {
+                        val layer =
+                            SelectionLayer(
+                                id = "sel_" + UUID.randomUUID().toString().take(8),
+                                name = "브러시 마스크 ${live.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
+                                kind = SelectionLayerKind.Brush,
+                                bitmap = preparedMask,
+                            )
+                        updateUiStateAndRecycleReplaced {
+                            it.copy(
+                                selectionLayers = it.selectionLayers + layer,
+                                activeSelectionLayerId = layer.id,
+                                revision = it.revision + 1,
+                                isBusy = false,
+                                message = "브러시 마스크를 만들었습니다.",
+                            )
+                        }
+                        mask = null
+                        val retained = before
+                        before = null
+                        commitUndoSnapshot(retained!!, clearRedo = true)
+                        forceDraftSaveAsync()
+                        markMemoryRetrySucceeded(MemoryRetryAction.CreateBrushSelection)
+                    } else {
+                        if (live.sourcePath == start.identity.sourcePath && live.baseContentToken == start.identity.baseContentToken) {
+                            updateUiState { it.copy(isBusy = false) }
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                withContext(Dispatchers.Main) {
+                    val live = uiState.value
+                    if (live.sourcePath == start.identity.sourcePath && live.baseContentToken == start.identity.baseContentToken) {
+                        updateUiState { it.copy(isBusy = false, message = "브러시 마스크를 만들지 못했습니다.") }
+                        if (allowRecovery && failure is BitmapAllocationRejectedException) {
+                            requestAllocationRecovery(MemoryRetryAction.CreateBrushSelection, failure.requiredBytes)
+                        }
+                    }
+                }
+            } finally {
+                before?.let(::recycleHistorySnapshot)
+                mask?.takeIf { !it.isRecycled }?.recycle()
+                reservation.close()
+                start.close()
+            }
+        }
     }
 
     internal fun requestAllocationRecovery(

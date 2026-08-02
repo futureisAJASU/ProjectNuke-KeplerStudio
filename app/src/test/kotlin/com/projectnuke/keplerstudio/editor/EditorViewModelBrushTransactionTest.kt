@@ -74,4 +74,16 @@ class EditorViewModelBrushTransactionTest {
         settle(vm) { vm.uiState.value.canUndo }
         assertTrue(vm.uiState.value.canUndo)
     }
+
+    @Test
+    fun `brush selection creation prepares mask and history off main`() {
+        val vm = viewModel()
+        awaitEditorReady(vm)
+
+        vm.createBrushSelectionInternal(allowRecovery = false)
+        settle(vm) { !vm.uiState.value.isBusy && vm.uiState.value.selectionLayers.size == 2 }
+
+        assertEquals(1, vm.uiState.value.revision)
+        settle(vm) { vm.uiState.value.canUndo }
+    }
 }
