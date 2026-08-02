@@ -134,7 +134,17 @@ object RemasterModelSession : ModelRunnerContract {
         modelScope.launch {
             modelMutex.withLock {
                 if (generation != commandGeneration.get()) return@withLock
-                if (!ModelAvailabilityRegistry.isCurrent(validationToken)) return@withLock
+                if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
+                    isModelLoading = false
+                    lifecycle = ModelRunnerLifecycle.Failed
+                    ModelAvailabilityRegistry.reportEdgeLoad(
+                        ModelLoadResult.RuntimeUnavailable("model validation became stale before load"),
+                        registryLoadGeneration,
+                    )
+                    GlobalModelDiagnostics.publish("RemasterModelSession", "failed")
+                    statusText = "${candidate.title}: model validation became stale"
+                    return@withLock
+                }
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
@@ -256,6 +266,12 @@ object RemasterModelSession : ModelRunnerContract {
             }
             return@withLock try {
                 if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
+                    isModelLoading = false
+                    lifecycle = ModelRunnerLifecycle.Failed
+                    ModelAvailabilityRegistry.reportEdgeLoad(
+                        ModelLoadResult.RuntimeUnavailable("model validation became stale before load"),
+                        loadGeneration,
+                    )
                     return@withLock ModelLoadResult.RuntimeUnavailable(
                         "model validation became stale before load"
                     )
