@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
+import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
@@ -11,6 +12,8 @@ import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionLayerKind
+import com.projectnuke.keplerstudio.editor.MaskReservation
+import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopy
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -104,6 +107,7 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
 ) {
     val leasedSnapshot = startSnapshot
     var ownedCopy: Bitmap? = null
+    var outputReservation: MaskReservation? = null
     var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
     consumeHistory()
     var undoSnapshotOwned: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? =
@@ -117,6 +121,13 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
             if (workerState.baseContentToken != baseContentToken) return@withContext null
             val workerActive = workerState.selectionLayers.firstOrNull { it.id == activeId }
                 ?: return@withContext null
+            outputReservation = reserveSelectionMaskCopy(
+                "duplicate:$activeId",
+                workerActive.bitmap,
+                sourceConfig,
+            ) ?: throw BitmapAllocationRejectedException(
+                BitmapMemoryBudget.bytes(workerActive.bitmap.width, workerActive.bitmap.height, sourceConfig)
+            )
             ownedCopy = workerActive.bitmap.copyOrThrow(sourceConfig, true)
             ownedCopy
         }
@@ -180,6 +191,7 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
     } finally {
         leasedSnapshot.close()
         ownedCopy?.takeIf { !it.isRecycled }?.recycle()
+        outputReservation?.close()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
         pendingHistoryOwned?.close()
@@ -271,6 +283,7 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
 ) {
     val leasedSnapshot = startSnapshot
     var ownedCopy: Bitmap? = null
+    var outputReservation: MaskReservation? = null
     var pendingHistoryOwned: PendingHistorySnapshot? = originalHistoryRef()
     consumeHistory()
     var undoSnapshotOwned: com.projectnuke.keplerstudio.editor.EditorHistorySnapshot? =
@@ -285,6 +298,13 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
             val workerActive = workerState.selectionLayers.firstOrNull { it.id == activeId }
                 ?: return@withContext null
             val source = if (workerActive.bitmap === sourceBitmap && !sourceBitmap.isRecycled) sourceBitmap else workerActive.bitmap
+            outputReservation = reserveSelectionMaskCopy(
+                "background:$activeId",
+                source,
+                sourceConfig,
+            ) ?: throw BitmapAllocationRejectedException(
+                BitmapMemoryBudget.bytes(source.width, source.height, sourceConfig)
+            )
             ownedCopy = source.copyOrThrow(sourceConfig, true)
             ownedCopy
         }
@@ -352,6 +372,7 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
     } finally {
         leasedSnapshot.close()
         ownedCopy?.takeIf { !it.isRecycled }?.recycle()
+        outputReservation?.close()
         undoSnapshotOwned?.let(::recycleHistorySnapshot)
         undoSnapshotOwned = null
         pendingHistoryOwned?.close()

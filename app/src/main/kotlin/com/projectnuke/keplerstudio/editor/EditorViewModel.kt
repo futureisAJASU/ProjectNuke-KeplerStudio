@@ -296,13 +296,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 updateUiStateAndRecycleReplaced {
                     it.copy(message = "선택 마스크를 더 만들 수 없습니다. 먼저 불필요한 마스크를 삭제해 주세요.")
                 }
-            }
-            return
         }
+        return
+    }
+        val maskReservation =
+            selectionMaskOwnership.reserve(
+                owner = "brushSelection:${state.revision}",
+                bytes = BitmapMemoryBudget.bytes(base.width, base.height, Bitmap.Config.ARGB_8888),
+            ) ?: run {
+                brushTracker?.end()
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "선택 마스크 메모리 한도를 초과했습니다.")
+                }
+                return
+            }
         val mask =
             try {
                 createBitmapOrThrow(base.width, base.height, Bitmap.Config.ARGB_8888)
             } catch (t: Throwable) {
+                maskReservation.close()
                 brushTracker?.end()
                 if (allowRecovery && t is BitmapAllocationRejectedException) {
                     requestAllocationRecovery(
@@ -321,6 +333,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val preparedBase = prepared.originalPreviewBitmap ?: prepared.previewBitmap
         if (preparedBase !== base || base.isRecycled) {
             mask.recycle()
+            maskReservation.close()
             brushTracker?.end()
             return
         }
@@ -341,9 +354,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (!adopted) {
             if (!mask.isRecycled) mask.recycle()
+            maskReservation.close()
             brushTracker?.end()
             return
         }
+        maskReservation.close()
         brushTracker?.end()
         markMemoryRetrySucceeded(MemoryRetryAction.CreateBrushSelection)
         persistDraftSnapshot()
@@ -2048,9 +2063,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             return null
         }
-        return runCatching {
-            state
-                .toHistorySnapshotFromRefs(
+        val reservations = ArrayList<MaskReservation>(state.selectionLayers.size)
+        if (effectiveStorage == HistorySnapshotStorage.Exact) state.selectionLayers.forEach { layer ->
+            val reservation =
+                selectionMaskOwnership.reserve(
+                    owner = "history:${historyCoordinator.currentGeneration()}:${layer.id}",
+                    bytes = BitmapMemoryBudget.bytes(layer.bitmap),
+                )
+            if (reservation == null) {
+                reservations.forEach(MaskReservation::close)
+                return null
+            }
+            reservations += reservation
+        }
+        val snapshot =
+            runCatching {
+                state.toHistorySnapshotFromRefs(
                     effectiveStorage,
                     previewRef,
                     originalRef,
@@ -2060,7 +2088,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     it.coordinatorGeneration = generation
                     it.attachLocalDiagnostics(trackerSession, generation)
                 }
-        }.getOrNull()
+            }.getOrElse {
+                reservations.forEach(MaskReservation::close)
+                return null
+            }
+        snapshot.maskReservations += reservations
+        return snapshot
     }
 
     /**
@@ -2483,6 +2516,29 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             .getOrNull()
+            ?.takeIf { snapshot -> admitHistoryMaskReservations(snapshot, "syncHistory") }
+    }
+
+    private fun admitHistoryMaskReservations(
+        snapshot: EditorHistorySnapshot,
+        ownerPrefix: String,
+    ): Boolean {
+        val reservations = ArrayList<MaskReservation>(snapshot.selectionLayers.size)
+        snapshot.selectionLayers.forEach { layer ->
+            val reservation =
+                selectionMaskOwnership.reserve(
+                    owner = "$ownerPrefix:${snapshot.coordinatorGeneration ?: "unknown"}:${layer.id}",
+                    bytes = BitmapMemoryBudget.bytes(layer.bitmap),
+                )
+            if (reservation == null) {
+                reservations.forEach(MaskReservation::close)
+                snapshot.recycleBitmaps()
+                return false
+            }
+            reservations += reservation
+        }
+        snapshot.maskReservations += reservations
+        return true
     }
 
     internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean): Boolean {
@@ -6546,6 +6602,9 @@ internal data class EditorHistorySnapshot(
     @Transient
     private var admissionOwner: HistorySnapshotAdmissionOwner = HistorySnapshotAdmissionOwner.Caller,
 ) {
+    @Transient
+    internal var maskReservations: MutableList<MaskReservation> = mutableListOf()
+
     internal fun claimCoordinatorOwnership() {
         admissionOwner = HistorySnapshotAdmissionOwner.Coordinator
     }
@@ -7015,6 +7074,16 @@ internal fun EditorViewModel.acquireMaskOwner(
     kind: MaskOwnerKind,
 ): MaskOwnerHandle? = selectionMaskOwnership.acquire(bitmap, kind)
 
+internal fun EditorViewModel.reserveSelectionMaskCopy(
+    owner: String,
+    source: Bitmap,
+    config: Bitmap.Config? = source.config,
+): MaskReservation? =
+    selectionMaskOwnership.reserve(
+        owner = owner,
+        bytes = BitmapMemoryBudget.bytes(source.width, source.height, config),
+    )
+
 private fun identityBitmapSet(): MutableSet<Bitmap> =
     Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
 
@@ -7089,6 +7158,8 @@ internal fun EditorHistorySnapshot.recycleBitmaps() {
         return
     }
     releaseLocalDiagnostics()
+    maskReservations.forEach(MaskReservation::close)
+    maskReservations.clear()
     resourcesReleased = true
     val bitmaps = identityBitmapSet()
     previewBitmap?.let(bitmaps::add)
@@ -7103,6 +7174,8 @@ internal fun EditorHistorySnapshot.recycleBitmaps() {
 internal fun EditorHistorySnapshot.releaseBitmapOwnership() {
     check(!resourcesReleased) { "history snapshot resources already released" }
     releaseLocalDiagnostics()
+    maskReservations.forEach(MaskReservation::close)
+    maskReservations.clear()
     resourcesReleased = true
     previewBitmap = null
     originalPreviewBitmap = null

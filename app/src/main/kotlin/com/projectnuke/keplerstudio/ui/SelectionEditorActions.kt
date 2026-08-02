@@ -6,6 +6,7 @@ import com.projectnuke.keplerstudio.editor.AlgorithmContracts
 import com.projectnuke.keplerstudio.editor.BakedFeatureProvenance
 import com.projectnuke.keplerstudio.editor.BakedFeatureType
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
+import com.projectnuke.keplerstudio.editor.MaskReservation
 import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorRenderer
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
@@ -36,6 +37,7 @@ import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
 import com.projectnuke.keplerstudio.editor.analyzeManualMask
 import com.projectnuke.keplerstudio.editor.copyOrThrow
+import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopy
 import com.projectnuke.keplerstudio.editor.engineSelection
 import com.projectnuke.keplerstudio.editor.newBaseContentToken
 import com.projectnuke.keplerstudio.editor.refineTrackedSubjectSelectionV2
@@ -143,6 +145,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 withContext(Dispatchers.Default) { pendingHistoryOwned?.await() }
             pendingHistoryOwned = null
             var pendingLayerBitmap: Bitmap? = null
+            var outputReservation: MaskReservation? = null
             var featureMaskSummary: FeatureMaskSummary? = null
             try {
                 val inferenceJob = currentCoroutineContext()[Job]
@@ -243,6 +246,17 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                         // exactly once (and recycle the source bitmap) via TrackedMask.
                         val ownedMask =
                             try {
+                                outputReservation = reserveSelectionMaskCopy(
+                                    "subject:$sourceRevision",
+                                    finalTracked.bitmap,
+                                    Bitmap.Config.ARGB_8888,
+                                ) ?: throw BitmapAllocationRejectedException(
+                                    BitmapMemoryBudget.bytes(
+                                        finalTracked.bitmap.width,
+                                        finalTracked.bitmap.height,
+                                        Bitmap.Config.ARGB_8888,
+                                    )
+                                )
                                 finalTracked.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
                             } finally {
                                 finalTracked.recycleAndRelease()
@@ -393,6 +407,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
             } finally {
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
                 ownedManualMaskOwned?.takeIf { !it.isRecycled }?.recycle()
+                outputReservation?.close()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 pendingHistoryOwned?.close()
                 selectionTracker?.end()
