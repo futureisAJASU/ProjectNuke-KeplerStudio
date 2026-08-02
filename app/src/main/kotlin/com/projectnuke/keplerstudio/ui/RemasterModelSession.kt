@@ -123,7 +123,8 @@ object RemasterModelSession : ModelRunnerContract {
             }
 
     fun load(context: Context, candidate: RemasterModelCandidate) {
-        if (ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster) != null) return
+        val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.Remaster)
+        val validationToken = (validation as? ModelLoadResult.Ready)?.runner ?: return
         val generation = commandGeneration.incrementAndGet()
         val registryLoadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
         isModelLoading = true
@@ -133,6 +134,7 @@ object RemasterModelSession : ModelRunnerContract {
         modelScope.launch {
             modelMutex.withLock {
                 if (generation != commandGeneration.get()) return@withLock
+                if (!ModelAvailabilityRegistry.isCurrent(validationToken)) return@withLock
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
@@ -223,9 +225,11 @@ object RemasterModelSession : ModelRunnerContract {
 
     internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> =
         modelMutex.withLock {
-            ModelAvailabilityRegistry.loaderRejection(ModelFeature.SubjectSelection)?.let {
-                return@withLock it
-            }
+            val validation =
+                ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
+            val validationToken =
+                (validation as? ModelLoadResult.Ready)?.runner
+                    ?: return@withLock validation as ModelLoadResult<Nothing>
             if (activeModel?.id == "edge_masker" && isModelLoaded && closeableModel != null) {
                 return@withLock ModelLoadResult.Ready(Unit)
             }
@@ -248,6 +252,11 @@ object RemasterModelSession : ModelRunnerContract {
                 }
             }
             return@withLock try {
+                if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
+                    return@withLock ModelLoadResult.RuntimeUnavailable(
+                        "model validation became stale before load"
+                    )
+                }
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = createImageSegmenter(context, candidate.assetPath)

@@ -211,6 +211,20 @@ class ModelAvailabilityRegistryTest {
         assertEquals(null, ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster))
         assertEquals(null, ModelAvailabilityRegistry.loaderRejection(ModelFeature.SubjectSelection))
     }
+
+    @Test
+    fun validatedCapabilityTokenBecomesStaleWhenAProbeStarts() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val token =
+            (ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
+                as ModelLoadResult.Ready).runner
+        assertTrue(ModelAvailabilityRegistry.isCurrent(token))
+
+        ModelAvailabilityRegistry.beginProbe()
+
+        assertFalse(ModelAvailabilityRegistry.isCurrent(token))
+    }
+
     @Test
     fun lateLoaderCannotDowngradeOrFailAnActiveReadySession() {
         val ready =

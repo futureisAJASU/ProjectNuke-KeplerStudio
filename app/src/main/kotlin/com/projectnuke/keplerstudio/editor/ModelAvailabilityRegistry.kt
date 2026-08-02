@@ -100,6 +100,13 @@ internal data class ModelCapabilityObservation(
     val failure: ModelCapabilityFailure? = null,
 )
 
+/** Immutable authorization issued only from validated registry facts. */
+class ValidatedModelCapabilityToken internal constructor(
+    val feature: ModelFeature,
+    val validationSequence: Long,
+    val validationGeneration: Long,
+)
+
 internal fun reduceModelCapability(
     current: ModelCapabilityState,
     observation: ModelCapabilityObservation,
@@ -258,6 +265,43 @@ object ModelAvailabilityRegistry {
             ModelCapabilityPhase.Unloaded -> if (capability.factsLoadable) null
             else ModelLoadResult.RuntimeUnavailable("model capability facts are incomplete")
         }
+    }
+
+    fun validatedCapabilityToken(feature: ModelFeature): ModelLoadResult<ValidatedModelCapabilityToken> {
+        val capability = state.value[feature]
+            ?: return ModelLoadResult.RuntimeUnavailable("capability unavailable")
+        @Suppress("UNCHECKED_CAST")
+        val rejection = loaderRejection(feature) as ModelLoadResult<ValidatedModelCapabilityToken>?
+        rejection?.let { return it }
+        return ModelLoadResult.Ready(
+            ValidatedModelCapabilityToken(
+                feature = feature,
+                validationSequence = capability.observationSequence,
+                validationGeneration = maxOf(
+                    capability.probeGeneration,
+                    capability.loadGeneration,
+                    capability.sessionGeneration,
+                ),
+            )
+        )
+    }
+
+    fun isCurrent(token: ValidatedModelCapabilityToken): Boolean {
+        val capability = state.value[token.feature] ?: return false
+        return capability.factsLoadable &&
+            capability.phase in
+                setOf(
+                    ModelCapabilityPhase.Loadable,
+                    ModelCapabilityPhase.Loading,
+                    ModelCapabilityPhase.Ready,
+                    ModelCapabilityPhase.Unloaded,
+                ) &&
+            capability.observationSequence >= token.validationSequence &&
+            maxOf(
+                capability.probeGeneration,
+                capability.loadGeneration,
+                capability.sessionGeneration,
+            ) >= token.validationGeneration
     }
 
     fun beginProbe(): Long = probeGeneration.incrementAndGet().also { generation ->
