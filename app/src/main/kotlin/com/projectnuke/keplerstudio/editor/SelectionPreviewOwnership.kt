@@ -53,6 +53,64 @@ internal sealed interface SelectionPreviewPreparationOutcome {
     ) : SelectionPreviewPreparationOutcome
 }
 
+/** Atomic owner transfer across a cancellable dispatcher return. */
+internal class OwnedHandoff<T : AutoCloseable> : AutoCloseable {
+    private sealed interface State<T> {
+        class Open<T> : State<T>
+        data class Published<T>(val value: T) : State<T>
+        class Transferred<T> : State<T>
+        class Closed<T> : State<T>
+    }
+
+    private val state = AtomicReference<State<T>>(State.Open())
+
+    fun publish(value: T): Boolean {
+        while (true) {
+            when (val current = state.get()) {
+                is State.Open -> if (state.compareAndSet(current, State.Published(value))) return true
+                is State.Published, is State.Transferred, is State.Closed -> {
+                    value.close()
+                    return false
+                }
+            }
+        }
+    }
+
+    fun take(): T? {
+        while (true) {
+            when (val current = state.get()) {
+                is State.Published -> if (state.compareAndSet(current, State.Transferred())) return current.value
+                is State.Open, is State.Transferred, is State.Closed -> return null
+            }
+        }
+    }
+
+    override fun close() {
+        while (true) {
+            when (val current = state.get()) {
+                is State.Open -> if (state.compareAndSet(current, State.Closed())) return
+                is State.Published -> if (state.compareAndSet(current, State.Closed())) {
+                    current.value.close()
+                    return
+                }
+                is State.Transferred, is State.Closed -> return
+            }
+        }
+    }
+}
+
+internal class OwnedRenderSuccess(val result: RenderResult.Success) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+
+    fun takeOutput(): Bitmap? = if (closed.compareAndSet(false, true)) result.output else null
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            result.output.takeUnless(Bitmap::isRecycled)?.recycle()
+        }
+    }
+}
+
 /** Owns every source-side resource created by one prepared live-preview attempt. */
 internal class PreparedSelectionPreview(
     val identity: SelectionPreviewIdentity,
@@ -106,19 +164,11 @@ internal class PreparedSelectionPreview(
 
 /** Retains a prepared owner across a cancellable dispatcher handoff. */
 internal class PreparedSelectionPreviewSlot : AutoCloseable {
-    private val closed = AtomicBoolean(false)
-    private val owner = AtomicReference<PreparedSelectionPreview?>(null)
+    private val handoff = OwnedHandoff<PreparedSelectionPreview>()
 
-    fun publish(value: PreparedSelectionPreview) {
-        if (closed.get() || !owner.compareAndSet(null, value)) {
-            value.close()
-        }
-    }
+    fun publish(value: PreparedSelectionPreview): Boolean = handoff.publish(value)
 
-    fun take(): PreparedSelectionPreview? = owner.getAndSet(null)
+    fun take(): PreparedSelectionPreview? = handoff.take()
 
-    override fun close() {
-        if (!closed.compareAndSet(false, true)) return
-        owner.getAndSet(null)?.close()
-    }
+    override fun close() = handoff.close()
 }

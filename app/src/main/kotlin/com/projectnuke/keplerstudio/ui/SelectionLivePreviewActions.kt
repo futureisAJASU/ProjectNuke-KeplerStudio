@@ -16,6 +16,8 @@ import com.projectnuke.keplerstudio.editor.SelectionPreviewIdentity
 import com.projectnuke.keplerstudio.editor.SelectionPreviewPreparationOutcome
 import com.projectnuke.keplerstudio.editor.PreparedSelectionPreview
 import com.projectnuke.keplerstudio.editor.PreparedSelectionPreviewSlot
+import com.projectnuke.keplerstudio.editor.OwnedHandoff
+import com.projectnuke.keplerstudio.editor.OwnedRenderSuccess
 import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopies
 import com.projectnuke.keplerstudio.editor.SelectionPreviewPreparationGateway
 import com.projectnuke.keplerstudio.editor.beginMemoryTracking
@@ -120,7 +122,9 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
     activeId: String,
 ) {
     val preparedSlot = PreparedSelectionPreviewSlot()
+    val renderSlot = OwnedHandoff<OwnedRenderSuccess>()
     var preparedOwner: PreparedSelectionPreview? = null
+    var renderOwner: OwnedRenderSuccess? = null
     var previewResult: Bitmap? = null
     var observedRevision: Int = 0
     try {
@@ -241,9 +245,10 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                     it.revision == observedRevision
             })
 
-        val success =
-            withContext(Dispatchers.Default) {
-                EditorRenderer.render(
+        withContext(Dispatchers.Default) {
+            val owned =
+                OwnedRenderSuccess(
+                    EditorRenderer.render(
                     createRenderRequest(
                         state = stateForRender,
                         operation = RenderOperation.SelectionLivePreview,
@@ -253,10 +258,15 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                         selectionLayers = checkNotNull(preparedOwner).requireLayers(),
                         documentGeneration = checkNotNull(preparedOwner).snapshot.identity.generation,
                     )
-                ).successOrThrow()
+                    ).successOrThrow()
+                )
+            if (!renderSlot.publish(owned)) return@withContext
+            SelectionPreviewPreparationGateway.awaitRenderOutputHookForTest()
         }
-        previewResult = success.output
-        preparedOwner?.tracker()?.track(previewResult, "selectionPreview:result")
+        renderOwner = checkNotNull(renderSlot.take())
+        val success = checkNotNull(renderOwner).result
+        previewResult = checkNotNull(renderOwner).takeOutput()
+        preparedOwner?.tracker()?.track(checkNotNull(previewResult), "selectionPreview:result")
 
         val producedPreview = previewResult ?: error("missing selection live preview")
         var adoptedByCurrentTransaction = false
@@ -333,6 +343,8 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
         )
         preparedOwner?.close()
         preparedSlot.close()
+        renderOwner?.close()
+        renderSlot.close()
     }
 }
 

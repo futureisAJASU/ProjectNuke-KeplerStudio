@@ -19,6 +19,7 @@ internal object SelectionPreviewPreparationGateway {
     private val prepareCountAtomic = AtomicLong(0L)
     private val copyCountAtomic = AtomicLong(0L)
     @Volatile private var preparedOwnerHookForTest: (suspend () -> Unit)? = null
+    @Volatile private var renderOutputHookForTest: (suspend () -> Unit)? = null
 
     val prepareCount: Long get() = prepareCountAtomic.get()
     val copyCount: Long get() = copyCountAtomic.get()
@@ -35,6 +36,7 @@ internal object SelectionPreviewPreparationGateway {
         prepareCountAtomic.set(0L)
         copyCountAtomic.set(0L)
         preparedOwnerHookForTest = null
+        renderOutputHookForTest = null
     }
 
     internal fun installPreparedOwnerHookForTest(hook: suspend () -> Unit) {
@@ -44,6 +46,15 @@ internal object SelectionPreviewPreparationGateway {
 
     internal suspend fun awaitPreparedOwnerHookForTest() {
         preparedOwnerHookForTest?.invoke()
+    }
+
+    internal fun installRenderOutputHookForTest(hook: suspend () -> Unit) {
+        check(renderOutputHookForTest == null) { "render output hook already installed" }
+        renderOutputHookForTest = hook
+    }
+
+    internal suspend fun awaitRenderOutputHookForTest() {
+        renderOutputHookForTest?.invoke()
     }
 }
 
