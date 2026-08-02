@@ -3621,9 +3621,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun resetAdjustments() {
         if (isShuttingDown()) return
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-        val current = prepareForExternalEdit()
+        prepareForExternalEdit()
+        val startSnapshot = acquireEditorSnapshot("resetAdjustments") ?: return
+        val current = startSnapshot.state
         val sourcePath = current.sourcePath
         if (sourcePath == null) {
+            startSnapshot.close()
             updateUiStateAndRecycleReplaced { it.copy(message = "초기화할 이미지가 없습니다.") }
             return
         }
@@ -3635,7 +3638,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 snapshotState = "decoding",
                 transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
             )
-        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+        var pendingHistory: PendingHistorySnapshot? =
+            prepareHistorySnapshot("resetAdjustments", startSnapshot)
         val nextRevision = startRevision + 1
         renderJob?.cancel()
         invalidateExport()
@@ -3644,6 +3648,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(isBusy = true, revision = nextRevision, message = "초기화하는 중입니다")
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
+            var undoSnapshot: EditorHistorySnapshot? =
+                withContext(Dispatchers.Default) { pendingHistory?.await() }
+            pendingHistory = null
             try {
                 withContext(Dispatchers.IO) {
                     val result =
@@ -3716,11 +3723,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 decoded?.takeIf { !it.isRecycled }?.recycle()
+                startSnapshot.close()
             }
         }, PreparedResourceHandoff.create(
             "resetAdjustments",
             { decoded?.takeIf { !it.isRecycled }?.recycle(); decoded = null },
-            { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            {
+                pendingHistory?.close()
+                pendingHistory = null
+                startSnapshot.close()
+            },
             { resetTracker?.end() },
             {
                 val live = _uiState.value
@@ -4946,14 +4958,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun rotatePreview90() {
         if (shuttingDown) return
+        rotatePreview90Async()
+        return
         val current = _uiState.value
         if (current.isBusy) return
         abortPendingParameterEdit()
         invalidateSelectionPreview()
         invalidateManagedEdits()
         renderJob?.cancel()
-        val preview = current.previewBitmap
-        if (preview == null) {
+        val preview = current.previewBitmap ?: return
+        if (preview.isRecycled) {
             updateUiStateAndRecycleReplaced { it.copy(message = "회전할 이미지가 없습니다.") }
             return
         }
@@ -4969,7 +4983,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 when {
                     current.originalPreviewBitmap == null -> null
                     current.originalPreviewBitmap === preview -> rotatedPreview
-                    else -> rotateBitmap90(current.originalPreviewBitmap)
+                    else -> rotateBitmap90(checkNotNull(current.originalPreviewBitmap))
                 }
             if (rotatedOriginal != null && rotatedOriginal !== rotatedPreview) {
                 rotateTracker?.track(rotatedOriginal!!, "rotatePreview90:rotatedOriginal")
@@ -5035,6 +5049,111 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun rotatePreview90Async() {
+        if (uiState.value.isBusy) return
+        abortPendingParameterEdit()
+        invalidateSelectionPreview()
+        invalidateManagedEdits()
+        renderJob?.cancel()
+        prepareForExternalEdit()
+        val start = acquireEditorSnapshot("rotatePreview90") ?: return
+        val state = start.state
+        val preview = start.previewBitmap
+        if (preview == null || preview.isRecycled) {
+            start.close()
+            updateUiState { it.copy(message = "\uD68C\uC804\uD560 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.") }
+            return
+        }
+        val pendingHistory = prepareHistorySnapshot("rotatePreview90", start)
+        updateUiState { it.copy(isBusy = true) }
+        viewModelScope.launch(Dispatchers.Default) {
+            var before: EditorHistorySnapshot? = null
+            var rotatedPreview: Bitmap? = null
+            var rotatedOriginal: Bitmap? = null
+            val rotatedMasks = ArrayList<Bitmap>(start.selectionLayers.size)
+            try {
+                before = pendingHistory.await()
+                rotatedPreview = rotateBitmap90(preview)
+                rotatedOriginal = when {
+                    start.originalPreviewBitmap == null -> null
+                    start.originalPreviewBitmap === preview -> rotatedPreview
+                    else -> rotateBitmap90(start.originalPreviewBitmap)
+                }
+                start.selectionLayers.forEach { rotatedMasks += rotateBitmap90(it.bitmap) }
+                val nextCrop =
+                    state.cropState.copy(
+                        cropLeft = 1f - state.cropState.cropBottom,
+                        cropTop = state.cropState.cropLeft,
+                        cropRight = 1f - state.cropState.cropTop,
+                        cropBottom = state.cropState.cropRight,
+                        aspectRatio = state.cropState.aspectRatio.rotatedForQuarterTurn(),
+                        rotationDegrees = state.cropState.rotationDegrees,
+                    ).normalized()
+                withContext(Dispatchers.Main) {
+                    val current = uiState.value
+                    val currentIdentity =
+                        !shuttingDown &&
+                            current.sourcePath == start.identity.sourcePath &&
+                            current.baseContentToken == start.identity.baseContentToken &&
+                            current.revision == start.identity.revision &&
+                            currentDocumentGeneration() == start.identity.generation
+                    if (currentIdentity && before != null) {
+                        val nextPreview = checkNotNull(rotatedPreview)
+                        val nextOriginal = rotatedOriginal
+                        val nextMasks = rotatedMasks.toList()
+                        updateUiStateAndRecycleReplaced { live ->
+                            live.copy(
+                                previewBitmap = nextPreview,
+                                originalPreviewBitmap = nextOriginal,
+                                selectionLayers =
+                                    live.selectionLayers.mapIndexed { index, layer ->
+                                        layer.copy(bitmap = nextMasks[index])
+                                    },
+                                cropState = nextCrop,
+                                baseBitmapDirty = true,
+                                baseContentToken = newBaseContentToken(),
+                                revision = live.revision + 1,
+                                isBusy = false,
+                                message = "\uBBF8\uB9AC\uBDF0\uC744 90\uB3C4 \uD68C\uC804\uD588\uC2B5\uB2C8\uB2E4.",
+                            )
+                        }
+                        rotatedPreview = null
+                        rotatedOriginal = null
+                        rotatedMasks.clear()
+                        val retained = before
+                        before = null
+                        settleAdoptedEditHistory(retained)
+                        forceDraftSaveAsync()
+                    } else if (current.sourcePath == start.identity.sourcePath &&
+                        current.baseContentToken == start.identity.baseContentToken) {
+                        updateUiState { it.copy(isBusy = false) }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                withContext(Dispatchers.Main) {
+                    if (uiState.value.sourcePath == start.identity.sourcePath &&
+                        uiState.value.baseContentToken == start.identity.baseContentToken) {
+                        updateUiState { it.copy(isBusy = false, message = "\uBBF8\uB9AC\uBDF0 \uD68C\uC804\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.") }
+                        if (failure is BitmapAllocationRejectedException) {
+                            requestAllocationRecovery(MemoryRetryAction.RotatePreview, failure.requiredBytes)
+                        }
+                    }
+                }
+            } finally {
+                before?.let(::recycleHistorySnapshot)
+                pendingHistory.close()
+                val cleanup = Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
+                rotatedPreview?.let(cleanup::add)
+                rotatedOriginal?.let(cleanup::add)
+                rotatedMasks.forEach(cleanup::add)
+                cleanup.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
+                start.close()
+            }
+        }
+    }
+
     fun applySpotCleanup() {
         applyNativeSpecialEffects(
             title = "기본 정리",
@@ -5086,16 +5205,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         if (isShuttingDown()) return
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-        val current = prepareForExternalEdit()
-        val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
-        if (baseOriginal == null) {
+        prepareForExternalEdit()
+        val startSnapshot = acquireEditorSnapshot("nativeSpecialEffects") ?: return
+        val current = startSnapshot.state
+        val baseOriginal = startSnapshot.originalPreviewBitmap ?: startSnapshot.previewBitmap
+        if (baseOriginal == null || baseOriginal.isRecycled) {
+            startSnapshot.close()
             updateUiStateAndRecycleReplaced { it.copy(message = "적용할 이미지가 없습니다.") }
             return
         }
         val currentQuickEffects = current.activeQuickEffects
         val nextActiveQuickEffects = currentQuickEffects.toggle(effect)
-        if (nextActiveQuickEffects == currentQuickEffects) return
-        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+        if (nextActiveQuickEffects == currentQuickEffects) {
+            startSnapshot.close()
+            return
+        }
+        var pendingHistory: PendingHistorySnapshot? =
+            prepareHistorySnapshot("nativeSpecialEffects", startSnapshot)
         var ownedBase: Bitmap? = null
         val sourcePath = current.sourcePath
         val baseContentToken = current.baseContentToken
@@ -5110,6 +5236,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(isBusy = true, revision = nextRevision, message = "$title 적용 중입니다.")
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
+            var undoSnapshot: EditorHistorySnapshot? =
+                withContext(Dispatchers.Default) { pendingHistory?.await() }
+            pendingHistory = null
             var renderedPreview: Bitmap? = null
             var renderSuccess: RenderResult.Success? = null
             val effectsTracker =
@@ -5205,10 +5334,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
                 ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 effectsTracker?.end()
+                startSnapshot.close()
             }
         }, PreparedResourceHandoff.create(
             "nativeSpecialEffects",
-            { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            {
+                pendingHistory?.close()
+                pendingHistory = null
+                startSnapshot.close()
+            },
             {
                 val live = _uiState.value
                 if (live.revision == nextRevision && live.sourcePath == sourcePath &&
@@ -5225,9 +5359,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (stateBeforePrepare.isBusy && !isBusyOwnedByMaskSupersedable()) {
             return
         }
-        val current = prepareForExternalEdit()
-        val baseOriginal = current.originalPreviewBitmap ?: current.previewBitmap
-        if (baseOriginal == null) {
+        prepareForExternalEdit()
+        val startSnapshot = acquireEditorSnapshot("flareGuard") ?: return
+        val current = startSnapshot.state
+        val baseOriginal =
+            startSnapshot.originalPreviewBitmap ?: startSnapshot.previewBitmap
+                ?: run {
+                    startSnapshot.close()
+                    return
+                }
+        if (baseOriginal.isRecycled) {
+            startSnapshot.close()
             updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화를 적용할 이미지가 없습니다.") }
             return
         }
@@ -5237,7 +5379,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 FlareGuardMode.DaySun -> "태양 번짐 영역 감지"
             }
         val nextRevision = current.revision + 1
-        var undoSnapshot: EditorHistorySnapshot? = captureCurrentHistorySnapshot()
+        var pendingHistory: PendingHistorySnapshot? =
+            prepareHistorySnapshot("flareGuard", startSnapshot)
         val sourcePath = current.sourcePath
         val baseContentToken = current.baseContentToken
         val params = current.params
@@ -5265,8 +5408,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var renderedPreview: Bitmap? = null
             var renderSuccess: RenderResult.Success? = null
             var resolvedFlareRoute: ResolvedFeatureRoute<FlareGuardRoute>? = null
-            var undoSnapshotOwned: EditorHistorySnapshot? = undoSnapshot
-            undoSnapshot = null
+            var undoSnapshotOwned: EditorHistorySnapshot? =
+                withContext(Dispatchers.Default) { pendingHistory?.await() }
+            pendingHistory = null
             var ownedBaseOwned: Bitmap? = null
             val flareTracker =
                 beginMemoryTracking(
@@ -5521,10 +5665,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()
                 undoSnapshotOwned?.let(::recycleHistorySnapshot)
                 flareTracker?.end()
+                startSnapshot.close()
             }
         }, PreparedResourceHandoff.create(
             "modelFlareGuard",
-            { undoSnapshot?.let(::recycleHistorySnapshot); undoSnapshot = null },
+            {
+                pendingHistory?.close()
+                pendingHistory = null
+                startSnapshot.close()
+            },
             {
                 val live = _uiState.value
                 if (live.revision == nextRevision && live.sourcePath == sourcePath &&

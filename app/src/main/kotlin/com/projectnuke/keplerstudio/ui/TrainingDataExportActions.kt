@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.ui
 
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.buildUniversalBalancerTrainingRow
 import java.io.File
 import java.text.SimpleDateFormat
@@ -12,10 +13,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.exportUniversalBalancerTrainingRow() {
-    val state = uiState.value
+    val snapshot = acquireEditorSnapshot("trainingRowExport")
+    if (snapshot == null) {
+        updateUiState { it.copy(message = "\uC0AC\uC6A9 \uC911\uC778 \uD3B8\uC9D1 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.") }
+        return
+    }
+    val state = snapshot.state
     val sourcePath = state.sourcePath
-    val preview = state.originalPreviewBitmap ?: state.previewBitmap
+    val preview = snapshot.originalPreviewBitmap ?: snapshot.previewBitmap
     if (sourcePath == null || preview == null) {
+        snapshot.close()
         updateUiState { it.copy(message = "\uC0AC\uC6A9 \uC911\uC778 \uD3B8\uC9D1 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.") }
         return
     }
@@ -29,8 +36,9 @@ fun EditorViewModel.exportUniversalBalancerTrainingRow() {
         height = preview.height,
         source = "kepler_manual_edit_v1",
         params = state.params,
-        sceneTags = emptyList()
+        sceneTags = emptyList(),
     )
+    snapshot.close()
 
     viewModelScope.launch {
         val outFile = withContext(Dispatchers.IO) {

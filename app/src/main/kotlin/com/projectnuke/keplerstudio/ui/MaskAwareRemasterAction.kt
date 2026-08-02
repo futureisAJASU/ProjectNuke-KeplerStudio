@@ -72,7 +72,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
             RemasterRoute.V2MaskAware -> false
             RemasterRoute.Compare -> true
         }
-    val manualMaskAtEntry =
+    val manualMaskAvailable =
         if (!useModel) {
             stateAtEntry.selectionLayers
                 .firstOrNull { it.id == stateAtEntry.activeSelectionLayerId && it.enabled }
@@ -84,7 +84,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         updateUiState { it.copy(message = "모델 보조 V2를 사용할 수 없습니다. 모델과 런타임 상태를 확인해 주세요.") }
         return
     }
-    if (!useModel && manualMaskAtEntry == null) {
+    if (!useModel && manualMaskAvailable == null) {
         updateUiState { it.copy(message = "수동 마스크 V2를 사용하려면 선택 영역을 만들거나 활성화해 주세요.") }
         return
     }
@@ -92,6 +92,19 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     prepareForExternalEdit()
     val startSnapshot = acquireEditorSnapshot("maskAwareRemaster") ?: return
     val current = startSnapshot.state
+    val manualMaskAtEntry =
+        if (!useModel) {
+            current.selectionLayers
+                .firstOrNull { it.id == current.activeSelectionLayerId && it.enabled }
+                ?.bitmap
+        } else {
+            null
+        }
+    if (!useModel && manualMaskAtEntry == null) {
+        startSnapshot.close()
+        updateUiState { it.copy(message = "?섎룞 留덉뒪??V2瑜??ъ슜?섎젮硫??좏깮 ?곸뿭??留뚮뱾嫄곕굹 ?쒖꽦?뷀빐 二쇱꽭??") }
+        return
+    }
     val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
     if (basePreview == null) {
         startSnapshot.close()
