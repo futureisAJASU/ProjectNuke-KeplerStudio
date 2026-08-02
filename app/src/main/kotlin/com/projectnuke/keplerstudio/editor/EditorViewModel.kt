@@ -1637,8 +1637,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun beginSelectionParamGesture(): Boolean {
         if (selectionParamTransaction != null) return true
-        val state = _uiState.value
         val leased = acquireEditorSnapshot("selectionParamGesture") ?: return false
+        val state = leased.state
         // Defer the full Exact snapshot capture to a worker. The transaction holds a
         // Deferred handle so consumers (settlement, rollback) await the actual snapshot.
         // The lightweight params-only transaction identity is created synchronously so the
