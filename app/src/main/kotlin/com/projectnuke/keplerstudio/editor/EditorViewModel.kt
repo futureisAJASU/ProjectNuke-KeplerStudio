@@ -7400,7 +7400,7 @@ internal class SelectionParamTransaction(
     var finalPreviewBaseToken: String? = null
     var finalPreviewLayerId: String? = null
     var previewJob: Job? = null
-    var succeeded: Boolean = false
+    @Volatile var succeeded: Boolean = false
     var committed: Boolean = false
     var settled: Boolean = false
     var historyPreparationFailed: Boolean = false
