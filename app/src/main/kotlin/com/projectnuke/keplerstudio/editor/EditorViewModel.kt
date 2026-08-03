@@ -3402,6 +3402,121 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (shuttingDown) return
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         prepareForGlobalParamEdit()
+        val source = acquireEditorSnapshot("updateParams") ?: return
+        val start = source.state
+        val next = transform(start.params)
+        if (next == start.params) {
+            source.close()
+            return
+        }
+        val nextRevision = start.revision + 1
+        if (!paramUndoWindowOpen) {
+            pendingParamUndoSnapshot = captureCurrentHistorySnapshot(HistorySnapshotStorage.MetadataOnly)
+            paramUndoSnapshotCommitted = false
+            paramUndoWindowOpen = true
+        }
+        paramUndoWindowJob?.cancel()
+        paramUndoWindowJob = viewModelScope.launch {
+            delay(900L)
+            paramUndoWindowOpen = false
+        }
+        updateUiStateAndRecycleReplaced {
+            it.copy(params = next, revision = nextRevision, isBusy = true, message = "誘몃━蹂닿린瑜??뚮뜑留곹븯??以묒엯?덈떎")
+        }
+        renderJob?.cancel()
+        activeParamRenderRevision = nextRevision
+        val tracker = beginMemoryTracking(
+            "updateParams",
+            snapshotState = "rendering",
+            transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
+        )
+        launchManagedRenderWithPreparedResources(
+            { operationToken ->
+                val baseSlot = OwnedHandoff<OwnedBitmap>()
+                val renderSlot = OwnedHandoff<OwnedRenderSuccess>()
+                var base: Bitmap? = null
+                var output: Bitmap? = null
+                try {
+                    delay(120L)
+                    withContext(Dispatchers.Default) {
+                        baseSlot.publish(OwnedBitmap((start.originalPreviewBitmap ?: start.previewBitmap)
+                            ?.copyOrThrow() ?: error("missing parameter preview source")))
+                    }
+                    base = checkNotNull(baseSlot.take()?.take())
+                    tracker?.track(base, "updateParams:base")
+                    withContext(Dispatchers.Default) {
+                        renderSlot.publish(
+                            OwnedRenderSuccess(
+                                EditorRenderer.render(
+                                    createRenderRequest(
+                                        state = start,
+                                        operation = RenderOperation.NativePreview,
+                                        basePreview = checkNotNull(base),
+                                        revision = nextRevision,
+                                        params = next,
+                                        diagnostics = tracker,
+                                    )
+                                ).successOrThrow()
+                            )
+                        )
+                    }
+                    val owner = checkNotNull(renderSlot.take())
+                    val result = owner.result
+                    output = checkNotNull(owner.takeOutput())
+                    tracker?.track(output, "updateParams:output")
+                    if (isManagedEditCurrent(operationToken, nextRevision)) {
+                        updateUiStateAndRecycleReplaced {
+                            it.copy(
+                                params = next,
+                                previewBitmap = output,
+                                isBusy = false,
+                                correctionEngineState = it.correctionEngineState.withSuccessfulRender(
+                                    start.correctionEngineState.documentEngine,
+                                    result.copy(output = checkNotNull(output)),
+                                ),
+                            )
+                        }
+                        lastSuccessfullyRenderedParams = next
+                        activeParamRenderRevision = null
+                        output = null
+                        commitPendingParamUndoSnapshot()
+                        scheduleDraftAutosave()
+                    } else {
+                        activeParamRenderRevision = null
+                    }
+                } catch (ce: CancellationException) {
+                    if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
+                    throw ce
+                } catch (failure: Throwable) {
+                    if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
+                    if (isManagedEditCurrent(operationToken, nextRevision)) {
+                        takePendingParamUndoSnapshotForRollback()?.let {
+                            restoreSnapshotWithoutHistory(it, (failure as? RenderFailedException)?.failure)
+                        }
+                        updateUiState { it.copy(params = lastSuccessfullyRenderedParams, isBusy = false) }
+                    }
+                } finally {
+                    output?.takeUnless(Bitmap::isRecycled)?.recycle()
+                    base?.takeUnless(Bitmap::isRecycled)?.recycle()
+                    baseSlot.close()
+                    renderSlot.close()
+                    source.close()
+                    tracker?.end()
+                }
+            },
+            PreparedResourceHandoff.create("parameterRender", { source.close() }, {
+                if (activeParamRenderRevision == nextRevision) {
+                    activeParamRenderRevision = null
+                    if (_uiState.value.revision == nextRevision) updateUiState { it.copy(isBusy = false) }
+                }
+            }),
+        )
+    }
+
+    private fun updateParamsLegacy(transform: (EditParams) -> EditParams) {
+        if (shuttingDown) return
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+        prepareForGlobalParamEdit()
         val windowWasOpen = paramUndoWindowOpen
         if (!paramUndoWindowOpen) {
             val hasActiveRender = activeParamRenderRevision != null && renderJob?.isActive == true
