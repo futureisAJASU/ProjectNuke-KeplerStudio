@@ -281,6 +281,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                     if (!stillCurrent) current
                     else {
                         adoptedByCurrentTransaction = true
+                        transaction.succeeded = true
                         current.copy(
                             previewBitmap = producedPreview,
                             isBusy = false,
