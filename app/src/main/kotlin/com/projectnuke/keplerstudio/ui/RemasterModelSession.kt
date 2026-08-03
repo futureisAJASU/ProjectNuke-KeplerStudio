@@ -184,24 +184,26 @@ object RemasterModelSession : ModelRunnerContract {
                 }
                 try {
                 runCatching {
-                        val createdRunner =
+                        val runnerOwner = LocalRunnerOwner()
+                        runnerOwner.install(
                             when (candidate.id) {
                                 "edge_masker" -> createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
-                                else -> null
+                                else -> error("unsupported runner")
                             }
+                        )
                         try {
                             runnerPostCreateHookForTest?.invoke()
                             if (generation != commandGeneration.get()) {
-                                runCatching { createdRunner?.close() }
+                                runnerOwner.close()
                                 isModelLoading = false
                                 lifecycle = ModelRunnerLifecycle.Failed
                                 return@withLock
                             }
                         } catch (failure: Throwable) {
-                            runCatching { createdRunner?.close() }
+                            runnerOwner.close()
                             throw failure
                         }
-                        closeableModel = createdRunner
+                        closeableModel = runnerOwner.transfer()
                     }
                     .onSuccess {
                         if (generation != commandGeneration.get() ||
@@ -323,7 +325,7 @@ object RemasterModelSession : ModelRunnerContract {
                     ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
                 }
             }
-            var locallyOwnedRunner: AutoCloseable? = null
+            val runnerOwner = LocalRunnerOwner()
             return@withLock try {
                 if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
                     isModelLoading = false
@@ -339,12 +341,12 @@ object RemasterModelSession : ModelRunnerContract {
                 publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 sessionValidationIdentity = null
-                locallyOwnedRunner =
+                runnerOwner.install(
                     createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
+                )
                 runnerPostCreateHookForTest?.invoke()
                 if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
-                    runCatching { locallyOwnedRunner?.close() }
-                    locallyOwnedRunner = null
+                    runnerOwner.close()
                     isModelLoaded = false
                     isModelLoading = false
                     lifecycle = ModelRunnerLifecycle.Failed
@@ -352,8 +354,7 @@ object RemasterModelSession : ModelRunnerContract {
                     ModelAvailabilityRegistry.reportEdgeLoad(stale, loadGeneration)
                     return@withLock stale
                 }
-                closeableModel = checkNotNull(locallyOwnedRunner)
-                locallyOwnedRunner = null
+                closeableModel = runnerOwner.transfer()
                 isModelLoaded = true
                 sessionValidationIdentity = validationToken.sessionIdentity()
                 isModelLoading = false
@@ -367,8 +368,7 @@ object RemasterModelSession : ModelRunnerContract {
                     runnerPostPublicationHookForTest?.invoke()
                 }
             } catch (failure: Throwable) {
-                runCatching { locallyOwnedRunner?.close() }
-                locallyOwnedRunner = null
+                runnerOwner.close()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 isModelLoaded = false
@@ -818,6 +818,24 @@ internal data class ModelSessionValidationIdentity(
     val contractSchema: Int,
     val runtimeType: com.projectnuke.keplerstudio.editor.ModelRuntimeType,
 )
+
+/** Runner remains local until registry/session publication has completed. */
+private class LocalRunnerOwner {
+    private var runner: AutoCloseable? = null
+
+    fun install(value: AutoCloseable) {
+        check(runner == null)
+        runner = value
+    }
+
+    fun transfer(): AutoCloseable = checkNotNull(runner).also { runner = null }
+
+    fun close() {
+        val value = runner ?: return
+        runner = null
+        runCatching { value.close() }
+    }
+}
 
 internal fun com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken.sessionIdentity(): ModelSessionValidationIdentity =
     ModelSessionValidationIdentity(

@@ -1082,6 +1082,9 @@ internal class EditorHistoryStorage(
     context: Context,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     internal val fullDecodeObserverForTest: ((File) -> Unit)? = null,
+    private val syncDirectories: Boolean = true,
+    internal val publishFailureObserverForTest: ((Throwable) -> Unit)? = null,
+    private val enforceDiskSpace: Boolean = true,
 ) : HistoryStorageBackend {
     private val root = File(context.filesDir, "editor_history_v3")
 
@@ -1113,7 +1116,7 @@ internal class EditorHistoryStorage(
         if (!isSafeId(entry.id) || !isSafeId(entry.documentGeneration)) return@withContext null
         session.mkdirs()
         val diskReserve = 8L * 1024L * 1024L
-        if (root.usableSpace < BitmapMemoryBudget.saturatingAdd(snapshot.bitmapBytes(), diskReserve)) return@withContext null
+        if (enforceDiskSpace && root.usableSpace < BitmapMemoryBudget.saturatingAdd(snapshot.bitmapBytes(), diskReserve)) return@withContext null
         val staging = File(session, "$STAGING_PREFIX${entry.id}-${UUID.randomUUID()}")
         val published = File(session, "$ENTRY_PREFIX${entry.id}")
         try {
@@ -1121,16 +1124,17 @@ internal class EditorHistoryStorage(
             val manifest = snapshotManifest(entry, snapshot, staging)
             writeSynced(File(staging, MANIFEST), manifest.toString().toByteArray(Charsets.UTF_8))
             writeSynced(File(staging, COMPLETE), "ok".toByteArray(Charsets.US_ASCII))
-            syncDirectory(staging)
+            if (syncDirectories) syncDirectory(staging)
             if (published.exists()) published.deleteRecursively()
             check(staging.renameTo(published))
-            syncDirectory(session)
+            if (syncDirectories) syncDirectory(session)
             ColdHistoryPayload(published, published.directoryBytes(), snapshot.bitmapBytes(), entry.documentGeneration)
         } catch (ce: CancellationException) {
             staging.deleteRecursively()
             published.takeIf { isOwnedEntryDirectory(it, entry.documentGeneration, entry.id) }?.deleteRecursively()
             throw ce
-        } catch (_: Throwable) {
+        } catch (failure: Throwable) {
+            publishFailureObserverForTest?.invoke(failure)
             staging.deleteRecursively()
             published.takeIf { isOwnedEntryDirectory(it, entry.documentGeneration, entry.id) }?.deleteRecursively()
             null
