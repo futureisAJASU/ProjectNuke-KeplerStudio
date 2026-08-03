@@ -61,6 +61,7 @@ object RemasterModelSession : ModelRunnerContract {
     private var sessionValidationIdentity: ModelSessionValidationIdentity? = null
     private var runnerFactoryOverride: ((Context, String) -> AutoCloseable?)? = null
     private var runnerPostCreateHookForTest: (() -> Unit)? = null
+    private var runnerPostPublicationHookForTest: (() -> Unit)? = null
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
     private val commandGeneration = AtomicLong()
@@ -227,13 +228,14 @@ object RemasterModelSession : ModelRunnerContract {
                                 ModelLoadResult.Ready(Unit),
                                 registryLoadGeneration,
                             )
-                            registrySessionGeneration =
+                                registrySessionGeneration =
                                 ModelAvailabilityRegistry.reportSessionReady(
                                     listOf(
                                         ModelFeature.Remaster,
                                         ModelFeature.SubjectSelection,
                                     )
                                 )
+                            runnerPostPublicationHookForTest?.invoke()
                         } else {
                             ModelAvailabilityRegistry.reportEdgeLoad(
                                 ModelLoadResult.LoadFailed("runner creation returned null"),
@@ -362,6 +364,7 @@ object RemasterModelSession : ModelRunnerContract {
                         ModelAvailabilityRegistry.reportSessionReady(
                             listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection)
                         )
+                    runnerPostPublicationHookForTest?.invoke()
                 }
             } catch (failure: Throwable) {
                 runCatching { locallyOwnedRunner?.close() }
@@ -792,10 +795,15 @@ object RemasterModelSession : ModelRunnerContract {
     internal fun clearRunnerFactoryForTest() {
         runnerFactoryOverride = null
         runnerPostCreateHookForTest = null
+        runnerPostPublicationHookForTest = null
     }
 
     internal fun installRunnerPostCreateFailureForTest(failure: () -> Unit) {
         runnerPostCreateHookForTest = failure
+    }
+
+    internal fun installRunnerPostPublicationFailureForTest(failure: () -> Unit) {
+        runnerPostPublicationHookForTest = failure
     }
 }
 
