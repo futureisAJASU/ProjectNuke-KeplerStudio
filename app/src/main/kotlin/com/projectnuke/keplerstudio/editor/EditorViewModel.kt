@@ -281,11 +281,38 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         brushLastY = y
     }
     private var paramUndoWindowJob: Job? = null
-    private var paramUndoWindowOpen: Boolean = false
-    private var pendingParamUndoSnapshot: EditorHistorySnapshot? = null
-    private var paramUndoSnapshotCommitted: Boolean = false
     private var lastSuccessfullyRenderedParams: EditParams = EditParams()
     private var activeParamRenderRevision: Int? = null
+    private var parameterGesture: ParameterGestureTransaction? = null
+    private var parameterGestureCounter: Long = 0L
+
+    private class ParameterGestureTransaction(
+        val id: Long,
+        val start: LeasedEditorSnapshot,
+    ) : AutoCloseable {
+        var historyHandle: PendingHistorySnapshot? = null
+        var historyJob: Job? = null
+        var historySnapshot: EditorHistorySnapshot? = null
+        var historyFailure: Throwable? = null
+        var latestRevision: Int = start.state.revision
+        var latestParams: EditParams = start.state.params
+        var renderJob: Job? = null
+        var windowExpired: Boolean = false
+        var historyCommitted: Boolean = false
+        private var closed = false
+
+        override fun close() {
+            if (closed) return
+            closed = true
+            renderJob?.cancel()
+            historyJob?.cancel()
+            historyHandle?.close()
+            historyHandle = null
+            historySnapshot?.takeUnless { historyCommitted }?.recycleBitmaps()
+            historySnapshot = null
+            start.close()
+        }
+    }
     private var restoreDraftToken: Long = 0L
     internal val trackerSession: TrackerSession? = DebugMemoryTracker.createEditorSession(this)
     internal val tracker: TrackerDiagnostics = DebugMemoryTracker.diagnostics(trackerSession)
@@ -3402,28 +3429,28 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (shuttingDown) return
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         prepareForGlobalParamEdit()
-        val source = acquireEditorSnapshot("updateParams") ?: return
-        val start = source.state
-        val next = transform(start.params)
-        if (next == start.params) {
-            source.close()
-            return
-        }
-        val nextRevision = start.revision + 1
-        if (!paramUndoWindowOpen) {
-            pendingParamUndoSnapshot = null
-            paramUndoSnapshotCommitted = false
-            paramUndoWindowOpen = true
-        }
+        val transaction =
+            parameterGesture ?: run {
+                val source = acquireEditorSnapshot("updateParams") ?: return
+                ParameterGestureTransaction(++parameterGestureCounter, source).also {
+                    parameterGesture = it
+                    lastSuccessfullyRenderedParams = source.state.params
+                }
+            }
+        val next = transform(_uiState.value.params)
+        if (next == _uiState.value.params) return
+        val nextRevision = _uiState.value.revision + 1
+        transaction.latestParams = next
+        transaction.latestRevision = nextRevision
         paramUndoWindowJob?.cancel()
         paramUndoWindowJob = viewModelScope.launch {
             delay(900L)
-            paramUndoWindowOpen = false
+            transaction.windowExpired = true
+            maybeCloseParameterGesture(transaction)
         }
         updateUiStateAndRecycleReplaced {
             it.copy(params = next, revision = nextRevision, isBusy = true, message = "誘몃━蹂닿린瑜??뚮뜑留곹븯??以묒엯?덈떎")
         }
-        updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
         updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
         renderJob?.cancel()
         activeParamRenderRevision = nextRevision
@@ -3434,20 +3461,36 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
         launchManagedRenderWithPreparedResources(
             { operationToken ->
+                val thisJob = coroutineContext[Job]
                 val baseSlot = OwnedHandoff<OwnedBitmap>()
                 val renderSlot = OwnedHandoff<OwnedRenderSuccess>()
                 var base: Bitmap? = null
                 var output: Bitmap? = null
-                var historyHandle: PendingHistorySnapshot? = null
                 try {
                     delay(120L)
-                    if (!paramUndoSnapshotCommitted && pendingParamUndoSnapshot == null) {
-                        historyHandle = prepareHistorySnapshot("updateParams", source)
-                        pendingParamUndoSnapshot = historyHandle?.await()
-                        historyHandle = null
+                    if (transaction.historyHandle == null &&
+                        transaction.historySnapshot == null &&
+                        transaction.historyFailure == null
+                    ) {
+                        transaction.historyHandle =
+                            prepareHistorySnapshot("updateParams:${transaction.id}", transaction.start)
+                        transaction.historyJob = viewModelScope.launch(Dispatchers.Default) {
+                            try {
+                                transaction.historySnapshot = transaction.historyHandle?.await()
+                            } catch (ce: CancellationException) {
+                                throw ce
+                            } catch (failure: Throwable) {
+                                transaction.historyFailure = failure
+                            }
+                        }
+                    }
+                    transaction.historyJob?.join()
+                    transaction.historyFailure?.let { throw it }
+                    if (transaction.historyHandle != null && transaction.historySnapshot == null) {
+                        error("parameter history preparation produced no snapshot")
                     }
                     withContext(Dispatchers.Default) {
-                        baseSlot.publish(OwnedBitmap((start.originalPreviewBitmap ?: start.previewBitmap)
+                        baseSlot.publish(OwnedBitmap((transaction.start.originalPreviewBitmap ?: transaction.start.previewBitmap)
                             ?.copyOrThrow() ?: error("missing parameter preview source")))
                     }
                     base = checkNotNull(baseSlot.take()?.take())
@@ -3457,7 +3500,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             OwnedRenderSuccess(
                                 EditorRenderer.render(
                                     createRenderRequest(
-                                        state = start,
+                                        state = transaction.start.state,
                                         operation = RenderOperation.NativePreview,
                                         basePreview = checkNotNull(base),
                                         revision = nextRevision,
@@ -3479,15 +3522,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 previewBitmap = output,
                                 isBusy = false,
                                 correctionEngineState = it.correctionEngineState.withSuccessfulRender(
-                                    start.correctionEngineState.documentEngine,
+                                    transaction.start.state.correctionEngineState.documentEngine,
                                     result.copy(output = checkNotNull(output)),
                                 ),
                             )
                         }
-                        lastSuccessfullyRenderedParams = next
                         activeParamRenderRevision = null
                         output = null
-                        commitPendingParamUndoSnapshot()
+                        maybeCloseParameterGesture(transaction)
                         scheduleDraftAutosave()
                     } else {
                         activeParamRenderRevision = null
@@ -3498,7 +3540,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (failure: Throwable) {
                     if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     if (isManagedEditCurrent(operationToken, nextRevision)) {
-                        takePendingParamUndoSnapshotForRollback()?.let {
+                        takePendingParameterSnapshotForRollback(transaction)?.let {
                             restoreSnapshotWithoutHistory(it, (failure as? RenderFailedException)?.failure)
                         }
                         updateUiState { it.copy(params = lastSuccessfullyRenderedParams, isBusy = false) }
@@ -3508,18 +3550,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     base?.takeUnless(Bitmap::isRecycled)?.recycle()
                     baseSlot.close()
                     renderSlot.close()
-                    historyHandle?.close()
-                    source.close()
                     tracker?.end()
+                    if (transaction.renderJob === thisJob) transaction.renderJob = null
+                    maybeCloseParameterGesture(transaction)
                 }
             },
-            PreparedResourceHandoff.create("parameterRender", { tracker?.end(); source.close() }, {
+            PreparedResourceHandoff.create("parameterRender", { tracker?.end() }, {
                 if (activeParamRenderRevision == nextRevision) {
                     activeParamRenderRevision = null
                     if (_uiState.value.revision == nextRevision) updateUiState { it.copy(isBusy = false) }
                 }
             }),
-        )
+        ).also { transaction.renderJob = it }
     }
 
     fun applyAutoEnhance() {
@@ -6535,36 +6577,58 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun commitPendingParamUndoSnapshot() {
-        if (!paramUndoSnapshotCommitted) {
-            settleAdoptedEditHistory(pendingParamUndoSnapshot)
-            paramUndoSnapshotCommitted = true
+    private fun commitPendingParameterTransaction(transaction: ParameterGestureTransaction) {
+        if (!transaction.historyCommitted) {
+            settleAdoptedEditHistory(transaction.historySnapshot)
+            transaction.historySnapshot = null
+            transaction.historyCommitted = true
         }
-        pendingParamUndoSnapshot = null
+        lastSuccessfullyRenderedParams = transaction.latestParams
+        maybeCloseParameterGesture(transaction)
+    }
+
+    private fun takePendingParameterSnapshotForRollback(
+        transaction: ParameterGestureTransaction,
+    ): EditorHistorySnapshot? {
+        val snapshot = transaction.historySnapshot
+        transaction.historySnapshot = null
+        transaction.historyCommitted = true
+        closeParameterGesture(transaction)
+        return snapshot
+    }
+
+    private fun maybeCloseParameterGesture(transaction: ParameterGestureTransaction) {
+        if (parameterGesture !== transaction || !transaction.windowExpired) return
+        if (transaction.renderJob?.isActive == true || transaction.historyJob?.isActive == true) return
+        if (!transaction.historyCommitted && transaction.historySnapshot != null) {
+            commitPendingParameterTransaction(transaction)
+            return
+        }
+        closeParameterGesture(transaction)
+    }
+
+    private fun closeParameterGesture(transaction: ParameterGestureTransaction) {
+        if (parameterGesture !== transaction) return
+        parameterGesture = null
+        paramUndoWindowJob?.cancel()
+        paramUndoWindowJob = null
+        transaction.close()
     }
 
     private fun discardPendingParamUndoSnapshot() {
-        if (!paramUndoSnapshotCommitted) pendingParamUndoSnapshot?.recycleBitmaps()
-        pendingParamUndoSnapshot = null
+        parameterGesture?.let(::closeParameterGesture)
         closeParamUndoWindow()
-    }
-
-    private fun takePendingParamUndoSnapshotForRollback(): EditorHistorySnapshot? {
-        val snapshot = pendingParamUndoSnapshot
-        pendingParamUndoSnapshot = null
-        closeParamUndoWindow()
-        return snapshot
     }
 
     internal fun abortPendingParameterEdit() {
         val unresolved =
-            activeParamRenderRevision != null ||
-                _uiState.value.params != lastSuccessfullyRenderedParams ||
-                pendingParamUndoSnapshot != null ||
-                paramUndoWindowOpen
+            parameterGesture != null ||
+                activeParamRenderRevision != null ||
+                _uiState.value.params != lastSuccessfullyRenderedParams
         if (!unresolved) return
         renderJob?.cancel()
         activeParamRenderRevision = null
+        val transaction = parameterGesture
         updateUiState {
             it.copy(
                 params = lastSuccessfullyRenderedParams,
@@ -6572,7 +6636,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 isBusy = false,
             )
         }
-        discardPendingParamUndoSnapshot()
+        if (transaction != null) {
+            transaction.windowExpired = true
+            closeParameterGesture(transaction)
+        } else {
+            discardPendingParamUndoSnapshot()
+        }
     }
 
     private fun prepareForMaskInteraction(): EditorUiState {
@@ -6606,7 +6675,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun closeParamUndoWindow() {
         paramUndoWindowJob?.cancel()
         paramUndoWindowJob = null
-        paramUndoWindowOpen = false
     }
 
     private fun applyHistorySnapshot(snapshot: EditorHistorySnapshot, message: String): Boolean {

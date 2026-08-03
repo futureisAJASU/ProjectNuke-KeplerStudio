@@ -257,10 +257,12 @@ object RemasterModelSession : ModelRunnerContract {
                             else "${candidate.title}: 실행 경로를 준비하는 중입니다."
                     }
                     .onFailure {
+                        publishSessionClosed()
                         runCatching { closeableModel?.close() }
                         closeableModel = null
                         sessionValidationIdentity = null
                         isModelLoaded = false
+                        activeModel = null
                         ModelAvailabilityRegistry.reportEdgeLoad(
                             ModelLoadResult.LoadFailed(
                                 it.message ?: "Edge Masker load failed"
@@ -273,10 +275,12 @@ object RemasterModelSession : ModelRunnerContract {
                         statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
                     }
             } catch (failure: Throwable) {
+                publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 sessionValidationIdentity = null
                 isModelLoaded = false
+                activeModel = null
                 isModelLoading = false
                 lifecycle = ModelRunnerLifecycle.Failed
                 ModelAvailabilityRegistry.reportEdgeLoad(
@@ -369,10 +373,13 @@ object RemasterModelSession : ModelRunnerContract {
                 }
             } catch (failure: Throwable) {
                 runnerOwner.close()
+                publishSessionClosed()
                 runCatching { closeableModel?.close() }
                 closeableModel = null
+                sessionValidationIdentity = null
                 isModelLoaded = false
                 isModelLoading = false
+                activeModel = null
                 lifecycle = ModelRunnerLifecycle.Failed
                 ModelLoadResult.LoadFailed(
                     failure.message ?: "Edge Masker load failed"

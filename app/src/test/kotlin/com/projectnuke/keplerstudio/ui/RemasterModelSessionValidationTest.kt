@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.ui
 
 import com.projectnuke.keplerstudio.editor.ModelRuntimeType
 import com.projectnuke.keplerstudio.editor.ModelFeature
+import com.projectnuke.keplerstudio.editor.ModelCapabilityPhase
 import com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelLoadResult
@@ -100,6 +101,8 @@ class RemasterModelSessionValidationTest {
         assertTrue(result is ModelLoadResult.LoadFailed)
         assertEquals(1, runner.closeCount)
         assertFalse(RemasterModelSession.isModelLoaded)
+        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
+        assertNotEquals(ModelCapabilityPhase.Ready, ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).phase)
     }
 
     @Test
@@ -116,6 +119,8 @@ class RemasterModelSessionValidationTest {
         assertTrue(result is ModelLoadResult.LoadFailed)
         assertEquals(1, runner.closeCount)
         assertFalse(RemasterModelSession.isModelLoaded)
+        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
+        assertNotEquals(ModelCapabilityPhase.Ready, ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).phase)
     }
 
     private class FakeRunner : AutoCloseable {

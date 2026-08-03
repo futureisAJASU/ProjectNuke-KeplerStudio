@@ -201,8 +201,6 @@ private suspend fun createBoundedHistogram(bitmap: Bitmap): PreviewHistogram? {
         }
     } finally {
         sampleSlot.close()
-        withContext(Dispatchers.Default) {
-            sampledBitmap?.takeUnless(Bitmap::isRecycled)?.recycle()
-        }
+        sampledBitmap?.takeUnless(Bitmap::isRecycled)?.recycle()
     }
 }
