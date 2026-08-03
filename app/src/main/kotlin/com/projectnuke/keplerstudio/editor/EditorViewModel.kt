@@ -3424,6 +3424,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(params = next, revision = nextRevision, isBusy = true, message = "誘몃━蹂닿린瑜??뚮뜑留곹븯??以묒엯?덈떎")
         }
         updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
+        updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
         renderJob?.cancel()
         activeParamRenderRevision = nextRevision
         val tracker = beginMemoryTracking(

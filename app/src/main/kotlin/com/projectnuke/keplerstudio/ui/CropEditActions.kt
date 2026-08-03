@@ -318,6 +318,21 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
     }
 
     try {
+        val startLayers = leasedSnapshot.state.selectionLayers
+        if (startLayers.isNotEmpty()) {
+            var outputBytes = 0L
+            startLayers.forEach { layer ->
+                check(layer.bitmap.width == capturedPreviewWidth && layer.bitmap.height == capturedPreviewHeight)
+                val dimensions = cropTransformedDimensions(layer.bitmap.width, layer.bitmap.height, crop)
+                outputBytes = BitmapMemoryBudget.saturatingAdd(
+                    outputBytes,
+                    BitmapMemoryBudget.bytes(dimensions.first, dimensions.second),
+                )
+            }
+            outputMaskReservation =
+                reserveSelectionMaskOutput("crop-output:$operationToken", outputBytes)
+                    ?: throw BitmapAllocationRejectedException(outputBytes)
+        }
         undoSnapshotOwned = captureHistorySnapshotForLeasedSnapshot(leasedSnapshot)
         if (undoSnapshotOwned == null) return
         // Worker-side re-read: the authoritative state may differ from the synchronous
@@ -391,21 +406,6 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
         }
 
         cropPrepareTracker?.end()
-
-        if (maskInputs.isNotEmpty()) {
-            var outputBytes = 0L
-            maskInputs.forEach {
-                val dimensions = cropTransformedDimensions(it.bitmap.width, it.bitmap.height, crop)
-                outputBytes =
-                    BitmapMemoryBudget.saturatingAdd(
-                        outputBytes,
-                        BitmapMemoryBudget.bytes(dimensions.first, dimensions.second),
-                    )
-            }
-            outputMaskReservation =
-                reserveSelectionMaskOutput("crop-output:$operationToken", outputBytes)
-                    ?: throw BitmapAllocationRejectedException(outputBytes)
-        }
 
         withContext(Dispatchers.Default) {
             val o = originalInput?.let { renderCropTransform(it, crop) }
