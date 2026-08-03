@@ -120,8 +120,10 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                         ).successOrThrow().let { it.copy(participation = RenderParticipation(rule = true)) }
                     renderSlot.publish(OwnedRenderSuccess(success))
                 }
-                previewSuccess = checkNotNull(renderSlot.take()?.result)
-                ownedPreview = previewSuccess?.output
+                val renderOwner = checkNotNull(renderSlot.take())
+                previewSuccess = renderOwner.result
+                ownedPreview = checkNotNull(renderOwner.takeOutput())
+                renderOwner.close()
                 adoptedFlare = checkNotNull(ownedBaseOwned)
                 val adoptedPreview = checkNotNull(ownedPreview)
                 if (

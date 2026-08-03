@@ -1,5 +1,6 @@
 package com.projectnuke.keplerstudio.editor
 
+import android.graphics.Bitmap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -44,5 +45,14 @@ class OwnedHandoffTest {
         handoff.close()
         assertEquals(1, closes.get())
         assertNull(handoff.take())
+    }
+
+    @Test
+    fun bitmapOwnerIsRecycledWhenPublishIsRejected() {
+        val handoff = OwnedHandoff<OwnedBitmap>()
+        handoff.close()
+        val bitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        assertFalse(handoff.publish(OwnedBitmap(bitmap)))
+        assertTrue(bitmap.isRecycled)
     }
 }
