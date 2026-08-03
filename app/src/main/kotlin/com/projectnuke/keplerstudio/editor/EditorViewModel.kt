@@ -3411,7 +3411,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val nextRevision = start.revision + 1
         if (!paramUndoWindowOpen) {
-            pendingParamUndoSnapshot = captureCurrentHistorySnapshot(HistorySnapshotStorage.MetadataOnly)
+            pendingParamUndoSnapshot = null
             paramUndoSnapshotCommitted = false
             paramUndoWindowOpen = true
         }
@@ -3423,6 +3423,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             it.copy(params = next, revision = nextRevision, isBusy = true, message = "誘몃━蹂닿린瑜??뚮뜑留곹븯??以묒엯?덈떎")
         }
+        updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
         renderJob?.cancel()
         activeParamRenderRevision = nextRevision
         val tracker = beginMemoryTracking(
@@ -3436,8 +3437,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val renderSlot = OwnedHandoff<OwnedRenderSuccess>()
                 var base: Bitmap? = null
                 var output: Bitmap? = null
+                var historyHandle: PendingHistorySnapshot? = null
                 try {
                     delay(120L)
+                    if (!paramUndoSnapshotCommitted && pendingParamUndoSnapshot == null) {
+                        historyHandle = prepareHistorySnapshot("updateParams", source)
+                        pendingParamUndoSnapshot = historyHandle?.await()
+                        historyHandle = null
+                    }
                     withContext(Dispatchers.Default) {
                         baseSlot.publish(OwnedBitmap((start.originalPreviewBitmap ?: start.previewBitmap)
                             ?.copyOrThrow() ?: error("missing parameter preview source")))
@@ -3500,11 +3507,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     base?.takeUnless(Bitmap::isRecycled)?.recycle()
                     baseSlot.close()
                     renderSlot.close()
+                    historyHandle?.close()
                     source.close()
                     tracker?.end()
                 }
             },
-            PreparedResourceHandoff.create("parameterRender", { source.close() }, {
+            PreparedResourceHandoff.create("parameterRender", { tracker?.end(); source.close() }, {
                 if (activeParamRenderRevision == nextRevision) {
                     activeParamRenderRevision = null
                     if (_uiState.value.revision == nextRevision) updateUiState { it.copy(isBusy = false) }
@@ -3513,6 +3521,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    /* Removed legacy global-preview implementation; retained only in source history. */
+    /*
     private fun updateParamsLegacy(transform: (EditParams) -> EditParams) {
         if (shuttingDown) return
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
@@ -3681,6 +3691,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         ))
     }
 
+    */
     fun applyAutoEnhance() {
         if (shuttingDown) return
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
