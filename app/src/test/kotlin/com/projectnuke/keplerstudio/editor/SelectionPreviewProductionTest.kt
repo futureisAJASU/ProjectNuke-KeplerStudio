@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
+import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RuntimeEnvironment
@@ -23,6 +24,12 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class SelectionPreviewProductionTest {
+    @After
+    fun tearDown() {
+        EditorRenderer.clearRendererOverrideForTest()
+        SelectionPreviewPreparationGateway.resetForTest()
+    }
+
     private fun viewModel(): EditorViewModel {
         val vm = EditorViewModel(RuntimeEnvironment.getApplication() as Application)
         val base = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
@@ -55,6 +62,15 @@ class SelectionPreviewProductionTest {
             Thread.sleep(10)
         }
         assertTrue(predicate(), "selection preview did not settle")
+    }
+
+    private fun awaitSignal(signal: CompletableDeferred<Unit>) {
+        repeat(4000) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+            if (signal.isCompleted) return
+            Thread.yield()
+        }
+        assertTrue(signal.isCompleted, "selection preview synchronization signal did not arrive")
     }
 
     @Test
@@ -231,8 +247,14 @@ class SelectionPreviewProductionTest {
         val releaseA = CompletableDeferred<Unit>()
         val hookCalls = AtomicInteger()
         val rendererCalls = AtomicInteger()
+        val preparedAClosed = CompletableDeferred<Unit>()
+        val adopted = CompletableDeferred<Unit>()
         val rendered = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         rendered.eraseColor(0xff3366aa.toInt())
+        settle { vm.canEnterEditorAction() }
+        assertTrue(vm.beginSelectionParamGesture())
+        val transaction = assertNotNull(vm.currentSelectionParamTransaction())
+        var firstPreviewToken = -1L
         SelectionPreviewPreparationGateway.installPreparedOwnerHookForTest {
             when (hookCalls.incrementAndGet()) {
                 1 -> {
@@ -240,6 +262,11 @@ class SelectionPreviewProductionTest {
                 releaseA.await()
                 }
                 2 -> preparedB.complete(Unit)
+            }
+        }
+        SelectionPreviewPreparationGateway.installPreviewAdoptedHookForTest { identity ->
+            if (identity.gestureId == transaction.gestureId && identity.previewToken == transaction.latestPreviewToken) {
+                adopted.complete(Unit)
             }
         }
         EditorRenderer.installRendererOverrideForTest {
@@ -258,38 +285,35 @@ class SelectionPreviewProductionTest {
             )
         }
         try {
-            settle { vm.canEnterEditorAction() }
-            assertTrue(vm.beginSelectionParamGesture())
             val baselineReservations = vm.selectionMaskOwnership.reservedBytes()
             vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.2f) }
-            settle { preparedA.isCompleted }
+            awaitSignal(preparedA)
+            firstPreviewToken = transaction.latestPreviewToken ?: error("missing first preview token")
+            SelectionPreviewPreparationGateway.installPreparedOwnerClosedHookForTest { identity ->
+                if (identity.gestureId == transaction.gestureId && identity.previewToken == firstPreviewToken) {
+                    preparedAClosed.complete(Unit)
+                }
+            }
             vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.4f) }
             releaseA.complete(Unit)
-            settle { preparedB.isCompleted }
-            val transaction = assertNotNull(vm.currentSelectionParamTransaction())
-            var adopted = false
-            repeat(400) {
-                shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-                if (
-                        transaction.succeeded &&
-                        vm.uiState.value.previewBitmap === rendered &&
-                        vm.selectionMaskOwnership.reservedBytes() == baselineReservations
-                ) {
-                    adopted = true
-                    return@repeat
-                }
-                Thread.sleep(10)
-            }
-            assertTrue(
-                adopted,
-                "calls=${hookCalls.get()} renders=${rendererCalls.get()} adopted=${vm.uiState.value.previewBitmap === rendered} reserved=${vm.selectionMaskOwnership.reservedBytes()} busy=${vm.uiState.value.isBusy} message=${vm.uiState.value.message} token=${transaction.latestPreviewToken} revision=${vm.uiState.value.revision} current=${vm.isSelectionPreviewCurrent(transaction, transaction.latestPreviewToken ?: -1L, vm.uiState.value.revision, transaction.baseContentToken, vm.uiState.value.activeSelectionLayerId)}",
-            )
+            awaitSignal(preparedAClosed)
+            awaitSignal(preparedB)
+            awaitSignal(adopted)
 
             assertEquals(1, rendererCalls.get())
             assertEquals(baselineReservations, vm.selectionMaskOwnership.reservedBytes())
             assertEquals(0xff3366aa.toInt(), vm.uiState.value.previewBitmap?.getPixel(3, 3))
             vm.finishSelectionParamGesture()
-            settle { vm.currentSelectionParamTransaction() == null && vm.uiState.value.canUndo }
+            val finished = CompletableDeferred<Unit>()
+            vm.viewModelScope.launch {
+                vm.awaitSelectionParamGestureFinishedForTest()
+                finished.complete(Unit)
+            }
+            awaitSignal(finished)
+            assertTrue(
+                vm.currentSelectionParamTransaction() == null && vm.uiState.value.canUndo,
+                "transaction=${vm.currentSelectionParamTransaction()} canUndo=${vm.uiState.value.canUndo} busy=${vm.uiState.value.isBusy} message=${vm.uiState.value.message}",
+            )
             assertTrue(vm.uiState.value.canUndo)
             assertEquals(baselineReservations, vm.selectionMaskOwnership.reservedBytes())
         } finally {

@@ -202,9 +202,11 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                 SelectionPreviewPreparationGateway.awaitPreparedOwnerHookForTest()
             } catch (cancelled: CancellationException) {
                 owner.close()
+                SelectionPreviewPreparationGateway.awaitPreparedOwnerClosedHookForTest(owner.identity)
                 throw cancelled
             } catch (failure: Throwable) {
                 owner.close()
+                SelectionPreviewPreparationGateway.awaitPreparedOwnerClosedHookForTest(owner.identity)
                 return@withContext SelectionPreviewPreparationOutcome.Rejected(
                     previewIdentity,
                     if (failure is BitmapAllocationRejectedException) {
@@ -295,6 +297,16 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                 }
                 if (adoptedByCurrentTransaction) {
                     markSelectionPreviewSucceeded(transaction, previewToken, stateForRender.revision, transaction.baseContentToken, activeId)
+                    SelectionPreviewPreparationGateway.awaitPreviewAdoptedHookForTest(
+                        SelectionPreviewIdentity(
+                            gestureId = transaction.gestureId,
+                            previewToken = previewToken,
+                            revision = stateForRender.revision,
+                            documentGeneration = transaction.documentGeneration,
+                            baseContentToken = transaction.baseContentToken,
+                            activeSelectionLayerId = activeId,
+                        )
+                    )
                 }
             }
         }
@@ -342,7 +354,10 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
             baseToken = transaction.baseContentToken,
             activeId = activeId,
         )
-        preparedOwner?.close()
+        preparedOwner?.let { owner ->
+            owner.close()
+            SelectionPreviewPreparationGateway.awaitPreparedOwnerClosedHookForTest(owner.identity)
+        }
         preparedSlot.close()
         renderOwner?.close()
         renderSlot.close()

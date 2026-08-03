@@ -20,6 +20,8 @@ internal object SelectionPreviewPreparationGateway {
     private val copyCountAtomic = AtomicLong(0L)
     @Volatile private var preparedOwnerHookForTest: (suspend () -> Unit)? = null
     @Volatile private var renderOutputHookForTest: (suspend () -> Unit)? = null
+    @Volatile private var preparedOwnerClosedHookForTest: (suspend (SelectionPreviewIdentity) -> Unit)? = null
+    @Volatile private var previewAdoptedHookForTest: (suspend (SelectionPreviewIdentity) -> Unit)? = null
 
     val prepareCount: Long get() = prepareCountAtomic.get()
     val copyCount: Long get() = copyCountAtomic.get()
@@ -37,6 +39,8 @@ internal object SelectionPreviewPreparationGateway {
         copyCountAtomic.set(0L)
         preparedOwnerHookForTest = null
         renderOutputHookForTest = null
+        preparedOwnerClosedHookForTest = null
+        previewAdoptedHookForTest = null
     }
 
     internal fun installPreparedOwnerHookForTest(hook: suspend () -> Unit) {
@@ -55,6 +59,28 @@ internal object SelectionPreviewPreparationGateway {
 
     internal suspend fun awaitRenderOutputHookForTest() {
         renderOutputHookForTest?.invoke()
+    }
+
+    internal fun installPreparedOwnerClosedHookForTest(
+        hook: suspend (SelectionPreviewIdentity) -> Unit,
+    ) {
+        check(preparedOwnerClosedHookForTest == null) { "prepared owner closed hook already installed" }
+        preparedOwnerClosedHookForTest = hook
+    }
+
+    internal suspend fun awaitPreparedOwnerClosedHookForTest(identity: SelectionPreviewIdentity) {
+        preparedOwnerClosedHookForTest?.invoke(identity)
+    }
+
+    internal fun installPreviewAdoptedHookForTest(
+        hook: suspend (SelectionPreviewIdentity) -> Unit,
+    ) {
+        check(previewAdoptedHookForTest == null) { "preview adopted hook already installed" }
+        previewAdoptedHookForTest = hook
+    }
+
+    internal suspend fun awaitPreviewAdoptedHookForTest(identity: SelectionPreviewIdentity) {
+        previewAdoptedHookForTest?.invoke(identity)
     }
 }
 

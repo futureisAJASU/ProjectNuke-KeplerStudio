@@ -1905,6 +1905,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         transaction.finishJobRef = job
     }
 
+    /** Test synchronization seam: joins the production settlement job without sampling state. */
+    internal suspend fun awaitSelectionParamGestureFinishedForTest() {
+        transactionFinishJob?.join()
+    }
+
     /**
      * Settle the active transaction: commit on success + current + token match, otherwise restore.
      *
