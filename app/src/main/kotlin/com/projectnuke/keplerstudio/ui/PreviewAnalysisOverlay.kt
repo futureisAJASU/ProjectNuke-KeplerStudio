@@ -19,6 +19,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.OwnedBitmap
+import com.projectnuke.keplerstudio.editor.OwnedHandoff
 import com.projectnuke.keplerstudio.editor.pinBitmapLease
 import kotlin.math.max
 import kotlin.math.min
@@ -165,7 +167,9 @@ internal fun fittedPreviewRect(size: Size, imageWidth: Int, imageHeight: Int): R
     com.projectnuke.keplerstudio.editor.fittedImageRect(size, imageWidth, imageHeight)
 
 private suspend fun createBoundedHistogram(bitmap: Bitmap): PreviewHistogram? {
-    val sampledBitmap =
+    val sampleSlot = OwnedHandoff<OwnedBitmap>()
+    var sampledBitmap: Bitmap? = null
+    try {
         withContext(Dispatchers.Default) {
             if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return@withContext null
             val maxSide = 256
@@ -178,13 +182,13 @@ private suspend fun createBoundedHistogram(bitmap: Bitmap): PreviewHistogram? {
                 } else {
                     Bitmap.createScaledBitmap(bitmap, width, height, true)
                 }
-            }.getOrNull()
-        } ?: return null
-    return try {
-        withContext(Dispatchers.Default) {
-            if (sampledBitmap.isRecycled) return@withContext null
-            val pixels = IntArray(sampledBitmap.width * sampledBitmap.height)
-            sampledBitmap.getPixels(
+            }.getOrNull()?.let { sampleSlot.publish(OwnedBitmap(it)) }
+        }
+        sampledBitmap = sampleSlot.take()?.take() ?: return null
+        return withContext(Dispatchers.Default) {
+            if (sampledBitmap?.isRecycled != false) return@withContext null
+            val pixels = IntArray(sampledBitmap!!.width * sampledBitmap!!.height)
+            sampledBitmap!!.getPixels(
                 pixels,
                 0,
                 sampledBitmap.width,
@@ -196,8 +200,9 @@ private suspend fun createBoundedHistogram(bitmap: Bitmap): PreviewHistogram? {
             calculatePreviewHistogram(pixels)
         }
     } finally {
+        sampleSlot.close()
         withContext(Dispatchers.Default) {
-            if (!sampledBitmap.isRecycled) sampledBitmap.recycle()
+            sampledBitmap?.takeUnless(Bitmap::isRecycled)?.recycle()
         }
     }
 }

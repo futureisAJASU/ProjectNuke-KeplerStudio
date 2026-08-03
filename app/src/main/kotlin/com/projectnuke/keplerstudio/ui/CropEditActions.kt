@@ -22,6 +22,8 @@ import com.projectnuke.keplerstudio.editor.renderCropTransform
 import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
 import com.projectnuke.keplerstudio.editor.MaskReservationBatch
 import com.projectnuke.keplerstudio.editor.MaskReservation
+import com.projectnuke.keplerstudio.editor.OwnedBitmap
+import com.projectnuke.keplerstudio.editor.OwnedHandoff
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.reserveSelectionMaskCopies
 import com.projectnuke.keplerstudio.editor.reserveSelectionMaskOutput
@@ -128,8 +130,12 @@ fun EditorViewModel.autoStraightenCrop() {
     val launchedJob =
         viewModelScope.launch {
             if (!handoff.claimForChild()) return@launch
+            val inputSlot = OwnedHandoff<OwnedBitmap>()
             try {
-                input = withContext(Dispatchers.Default) { bitmap.copyOrThrow(mutable = false) }
+                withContext(Dispatchers.Default) {
+                    inputSlot.publish(OwnedBitmap(bitmap.copyOrThrow(mutable = false)))
+                }
+                input = checkNotNull(inputSlot.take()?.take())
                 cropTracker?.track(checkNotNull(input), "autoStraightenCrop:input")
                 val angle =
                     withContext(Dispatchers.Default) {
@@ -159,6 +165,7 @@ fun EditorViewModel.autoStraightenCrop() {
                 if (t is BitmapAllocationRejectedException)
                     requestAllocationRecovery(MemoryRetryAction.AutoStraightenCrop, t.requiredBytes)
             } finally {
+                inputSlot.close()
                 sourceSnapshot.close()
                 handoff.settleChildOwned()
             }
