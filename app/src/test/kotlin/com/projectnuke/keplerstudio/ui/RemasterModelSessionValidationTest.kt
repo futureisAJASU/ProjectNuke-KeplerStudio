@@ -15,9 +15,11 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Before
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -123,10 +125,51 @@ class RemasterModelSessionValidationTest {
         assertNotEquals(ModelCapabilityPhase.Ready, ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).phase)
     }
 
+    @Test
+    fun `load closes runner exactly once on success then unload`() = runBlocking {
+        val runner = FakeRunner()
+        RemasterModelSession.installRunnerFactoryForTest { _, _ -> runner }
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val context = RuntimeEnvironment.getApplication()
+
+        RemasterModelSession.load(context, OnDeviceRemasterModels.first { it.id == "edge_masker" })
+        awaitIdle(200)
+
+        assertTrue(RemasterModelSession.isModelLoaded)
+
+        RemasterModelSession.unload()
+        awaitIdle(200)
+
+        assertEquals(1, runner.closeCount)
+    }
+
+    @Test
+    fun `load failure closes runner exactly once`() = runBlocking {
+        val runner = FakeRunner()
+        RemasterModelSession.installRunnerFactoryForTest { _, _ -> runner }
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("forced failure"))
+        val context = RuntimeEnvironment.getApplication()
+
+        RemasterModelSession.load(context, OnDeviceRemasterModels.first { it.id == "edge_masker" })
+        awaitIdle(200)
+
+        assertEquals(0, runner.closeCount)
+        assertFalse(RemasterModelSession.isModelLoaded)
+        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionActive)
+    }
+
     private class FakeRunner : AutoCloseable {
         var closeCount = 0
         override fun close() {
             closeCount += 1
+        }
+    }
+
+    private fun awaitIdle(ms: Long) {
+        val deadline = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < deadline) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(5, java.util.concurrent.TimeUnit.MILLISECONDS)
+            Thread.sleep(2)
         }
     }
 }

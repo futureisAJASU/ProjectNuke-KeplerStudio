@@ -208,9 +208,10 @@ object RemasterModelSession : ModelRunnerContract {
                     .onSuccess {
                         if (generation != commandGeneration.get() ||
                             !ModelAvailabilityRegistry.isCurrent(validationToken)
-                        ) {
-                            runCatching { closeableModel?.close() }
+) {
+                            val model = closeableModel
                             closeableModel = null
+                            runCatching { model?.close() }
                             sessionValidationIdentity = null
                             isModelLoaded = false
                             isModelLoading = false
@@ -256,10 +257,11 @@ object RemasterModelSession : ModelRunnerContract {
                             if (closeableModel != null) "${candidate.title}: 사용 가능"
                             else "${candidate.title}: 실행 경로를 준비하는 중입니다."
                     }
-                    .onFailure {
-                        publishSessionClosed()
-                        runCatching { closeableModel?.close() }
+.onFailure {
+                        val model = closeableModel
                         closeableModel = null
+                        publishSessionClosed()
+                        runCatching { model?.close() }
                         sessionValidationIdentity = null
                         isModelLoaded = false
                         activeModel = null
@@ -274,10 +276,11 @@ object RemasterModelSession : ModelRunnerContract {
                         GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                         statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
                     }
-            } catch (failure: Throwable) {
-                publishSessionClosed()
-                runCatching { closeableModel?.close() }
+} catch (failure: Throwable) {
+                val model = closeableModel
                 closeableModel = null
+                publishSessionClosed()
+                runCatching { model?.close() }
                 sessionValidationIdentity = null
                 isModelLoaded = false
                 activeModel = null
