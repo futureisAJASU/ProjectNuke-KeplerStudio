@@ -296,6 +296,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         Committed, RolledBack, Closed,
     }
 
+    internal enum class SettlementReason {
+        ExternalEdit,
+        ManualDraftSave,
+        Autosave,
+        SaveAndLeave,
+        Shutdown,
+        DocumentReplacement,
+        Export,
+    }
+
+    internal sealed class SettlementResult {
+        data class Committed(val adoptedRevision: Int) : SettlementResult()
+        data class RolledBack(val startRevision: Int) : SettlementResult()
+        data object NoTransaction : SettlementResult()
+    }
+
     private class ParameterGestureTransaction(
         val id: Long,
         val start: LeasedEditorSnapshot,
@@ -3086,7 +3102,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val currentJob = currentCoroutineContext()[Job]
         if (currentJob != null) draftSaveJob = currentJob
         return try {
-            persistDraftSnapshotInternal(epoch)
+            persistDraftSnapshotInternal(epoch, SettlementReason.ManualDraftSave)
         } finally {
             if (draftSaveJob === currentJob) draftSaveJob = null
         }
@@ -3098,7 +3114,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             viewModelScope.launch {
                 try {
                     delay(delayMs)
-                    persistDraftSnapshotInternal(epoch)
+                    persistDraftSnapshotInternal(epoch, SettlementReason.Autosave)
                 } finally {
                     if (draftSaveJob === currentCoroutineContext()[Job]) draftSaveJob = null
                 }
@@ -3112,7 +3128,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val job =
             viewModelScope.launch {
                 try {
-                    persistDraftSnapshotInternal(epoch)
+                    persistDraftSnapshotInternal(epoch, SettlementReason.ManualDraftSave)
                 } finally {
                     if (draftSaveJob === currentCoroutineContext()[Job]) draftSaveJob = null
                 }
@@ -3122,7 +3138,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (job.isCompleted && draftSaveJob === job) draftSaveJob = null
     }
 
-    private suspend fun persistDraftSnapshotInternal(draftEpoch: Long): Boolean {
+    private suspend fun persistDraftSnapshotInternal(draftEpoch: Long, reason: SettlementReason): Boolean {
         val context = getApplication<Application>()
         val expectedPointer =
             withContext(Dispatchers.IO) {
@@ -3133,7 +3149,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     DraftPointerSnapshot(diskPointer)
                 }
             } ?: return false
-        settleParameterTransactionBeforeExternalEdit()
+        settleParameterTransaction(reason)
         val draftSnapshot = acquireEditorSnapshot("draftSave") ?: return false
         val draftState = draftSnapshot.state
         val draftTracker =
@@ -6754,12 +6770,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * Settlement completes before the external action captures state.
      * This method is safe to call when no parameter transaction is active.
      */
-    internal fun settleParameterTransactionBeforeExternalEdit() {
+    internal fun settleParameterTransaction(reason: SettlementReason): SettlementResult {
         val unresolved =
             parameterGesture != null ||
                 activeParamRenderRevision != null ||
                 _uiState.value.params != lastSuccessfullyRenderedParams
-        if (!unresolved) return
+        if (!unresolved) return SettlementResult.NoTransaction
 
         renderJob?.cancel()
         activeParamRenderRevision = null
@@ -6767,6 +6783,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         paramUndoWindowJob?.cancel()
         paramUndoWindowJob = null
+
+        val shouldScheduleDraft = reason == SettlementReason.ExternalEdit ||
+            reason == SettlementReason.DocumentReplacement ||
+            reason == SettlementReason.Export
 
         if (transaction != null) {
             transaction.windowExpired = true
@@ -6783,16 +6803,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         updateUiState { it.copy(params = checkNotNull(transaction.adoptedParams)) }
                     }
                     lastSuccessfullyRenderedParams = transaction.adoptedParams ?: transaction.latestParams
+                    val revision = _uiState.value.revision
+                    updateUiState { it.copy(isBusy = false) }
                     updateHistoryFlags()
-                    scheduleDraftAutosave()
+                    if (shouldScheduleDraft) scheduleDraftAutosave()
                     closeParameterGesture(transaction)
+                    return SettlementResult.Committed(revision)
                 }
                 else -> {
-                    // Field-scoped rollback: restore only transaction-owned fields.
-                    // Preserve unrelated state: viewport, export prefs, saved exports,
-                    // comparison UI, overlay visibility, recovery/debug state, messages.
                     transaction.transitionTo(ParamTransactionState.RollingBack)
                     val startState = transaction.start.state
+                    val startRevision = startState.revision
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             params = lastSuccessfullyRenderedParams,
@@ -6803,6 +6824,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                     closeParameterGesture(transaction)
+                    return SettlementResult.RolledBack(startRevision)
                 }
             }
         } else {
@@ -6814,7 +6836,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             discardPendingParamUndoSnapshot()
+            return SettlementResult.NoTransaction
         }
+    }
+
+    internal fun settleParameterTransactionBeforeExternalEdit(): SettlementResult {
+        return settleParameterTransaction(SettlementReason.ExternalEdit)
     }
 
     internal fun abortPendingParameterEdit() {
