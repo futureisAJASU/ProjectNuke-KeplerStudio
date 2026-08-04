@@ -332,7 +332,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         private fun isLegalTransition(from: ParamTransactionState, to: ParamTransactionState): Boolean {
-            if (from == to) return false
+            if (from == to) {
+                return from == ParamTransactionState.Adopted || from == ParamTransactionState.Rendering
+            }
             return when (from) {
                 ParamTransactionState.Active ->
                     to == ParamTransactionState.WaitingForHistory ||
