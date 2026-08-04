@@ -3153,6 +3153,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         settleParameterTransaction(reason)
         val draftSnapshot = acquireEditorSnapshot("draftSave") ?: return false
         val draftState = draftSnapshot.state
+        ParameterLifecycleTestHook.notifyDraftCaptureBegan(draftEpoch)
         val draftTracker =
             beginMemoryTracking(
                 "persistDraftSnapshot",
@@ -3539,6 +3540,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 ParameterGestureTransaction(++parameterGestureCounter, source).also {
                     parameterGesture = it
                     lastSuccessfullyRenderedParams = source.state.params
+                    ParameterLifecycleTestHook.notifyTransactionCreated(it.id)
                 }
             }
         val nextRevision = _uiState.value.revision + 1
@@ -3552,6 +3554,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             delay(900L)
             if (transaction.inactivityGeneration == tickGeneration) {
                 transaction.windowExpired = true
+                ParameterLifecycleTestHook.notifyInactivityTimerFired(transaction.id)
                 maybeCloseParameterGesture(transaction)
             }
         }
@@ -3589,6 +3592,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                         snap.recycleBitmaps()
                                     } else {
                                         transaction.historySnapshotPublished = true
+                                        ParameterLifecycleTestHook.notifyHistoryPublished(transaction.id)
                                     }
                                 }
                             } catch (ce: CancellationException) {
@@ -3611,6 +3615,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     base = checkNotNull(baseSlot.take()?.take())
                     tracker?.track(base, "updateParams:base")
+                    ParameterLifecycleTestHook.notifyRenderRequestStarted(nextRevision)
                     withContext(Dispatchers.Default) {
                         renderSlot.publish(
                             OwnedRenderSuccess(
@@ -3627,6 +3632,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             )
                         )
                     }
+                    ParameterLifecycleTestHook.notifyRenderOutputProduced(nextRevision)
                     val owner = checkNotNull(renderSlot.take())
                     val result = owner.result
                     output = checkNotNull(owner.takeOutput())
@@ -3650,6 +3656,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             }
                             activeParamRenderRevision = null
                             output = null
+                            ParameterLifecycleTestHook.notifyRenderOutputAdopted(nextRevision)
                             maybeCloseParameterGesture(transaction)
                         }
                     } else {
@@ -6705,6 +6712,7 @@ fun exportPreview() {
             closeParameterGesture(transaction)
             return
         }
+        ParameterLifecycleTestHook.notifyTransactionCommitBegan(transaction.id)
         if (!transaction.historyCommitted) {
             if (!transaction.transitionTo(ParamTransactionState.Committing)) {
                 transaction.forceTransitionTo(ParamTransactionState.Committed)
@@ -6717,6 +6725,7 @@ fun exportPreview() {
         lastSuccessfullyRenderedParams = transaction.adoptedParams ?: transaction.latestParams
         scheduleDraftAutosave()
         maybeCloseParameterGesture(transaction)
+        ParameterLifecycleTestHook.notifyTransactionCommitted(transaction.adoptedRevision ?: transaction.latestRevision)
     }
 
     private fun takePendingParameterSnapshotForRollback(
@@ -6726,6 +6735,7 @@ fun exportPreview() {
         val snapshot = transaction.takeOwnedSnapshot()
         transaction.historyCommitted = true
         closeParameterGesture(transaction)
+        ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(transaction.start.state.revision)
         return snapshot
     }
 
@@ -6745,6 +6755,7 @@ fun exportPreview() {
         paramUndoWindowJob?.cancel()
         paramUndoWindowJob = null
         transaction.close()
+        ParameterLifecycleTestHook.notifyTransactionClosed(transaction.id)
     }
 
     private fun discardPendingParamUndoSnapshot() {
@@ -6798,6 +6809,7 @@ fun exportPreview() {
             transaction.windowExpired = true
             when (transaction.currentState()) {
                 ParamTransactionState.Adopted -> {
+                    ParameterLifecycleTestHook.notifyTransactionCommitBegan(transaction.id)
                     if (!transaction.transitionTo(ParamTransactionState.Committing)) {
                         transaction.forceTransitionTo(ParamTransactionState.Committed)
                     } else {
@@ -6818,6 +6830,7 @@ fun exportPreview() {
                     updateHistoryFlags()
                     if (shouldScheduleDraft) scheduleDraftAutosave()
                     closeParameterGesture(transaction)
+                    ParameterLifecycleTestHook.notifyTransactionCommitted(settledRevision)
                     return SettlementResult.Committed(settledRevision)
                 }
                 else -> {
@@ -6834,6 +6847,7 @@ fun exportPreview() {
                         )
                     }
                     closeParameterGesture(transaction)
+                    ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(startRevision)
                     return SettlementResult.RolledBack(startRevision)
                 }
             }
