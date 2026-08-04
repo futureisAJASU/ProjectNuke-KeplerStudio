@@ -312,6 +312,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         data object NoTransaction : SettlementResult()
     }
 
+    internal class OwnedHistorySnapshot(val snapshot: EditorHistorySnapshot) : AutoCloseable {
+        override fun close() { snapshot.recycleBitmaps() }
+    }
+
     private class ParameterGestureTransaction(
         val id: Long,
         val start: LeasedEditorSnapshot,
@@ -319,8 +323,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         @Volatile private var state: ParamTransactionState = ParamTransactionState.Active
         var historyHandle: PendingHistorySnapshot? = null
         var historyJob: Job? = null
-        var historySnapshot: EditorHistorySnapshot? = null
+        val historyHandoff = OwnedHandoff<OwnedHistorySnapshot>()
         var historyFailure: Throwable? = null
+        @Volatile var historySnapshotPublished = false
         var latestRevision: Int = start.state.revision
         var latestParams: EditParams = start.state.params
         var renderJob: Job? = null
@@ -379,7 +384,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
 
 /**
-         * Atomically take and transfer ownership of [historySnapshot] from the
+         * Atomically take and transfer ownership of [historyHandoff] from the
          * transaction to the caller. Prevents race between [close] and a late
          * history result. Returns null if this transaction is closed or the
          * snapshot has already been taken for another purpose.
@@ -387,9 +392,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         internal fun takeOwnedSnapshot(): EditorHistorySnapshot? {
             synchronized(stateLock) {
                 if (closed || historyCommitted) return null
-                val stored = historySnapshot
-                historySnapshot = null
-                return stored
+                return historyHandoff.take()?.snapshot
             }
         }
 
@@ -403,8 +406,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             historyJob?.cancel()
             historyHandle?.close()
             historyHandle = null
-            historySnapshot?.takeUnless { historyCommitted }?.recycleBitmaps()
-            historySnapshot = null
+            if (!historyCommitted) historyHandoff.close()
             start.close()
         }
     }
@@ -3572,7 +3574,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 try {
                     delay(120L)
                     if (transaction.historyHandle == null &&
-                        transaction.historySnapshot == null &&
                         transaction.historyFailure == null
                     ) {
                         if (!transaction.transitionTo(ParamTransactionState.WaitingForHistory)) {
@@ -3583,8 +3584,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         transaction.historyJob = viewModelScope.launch(Dispatchers.Default) {
                             try {
                                 val snap = transaction.historyHandle?.await()
-                                synchronized(transaction.stateLock) {
-                                    transaction.historySnapshot = snap
+                                if (snap != null) {
+                                    if (!transaction.historyHandoff.publish(OwnedHistorySnapshot(snap))) {
+                                        snap.recycleBitmaps()
+                                    } else {
+                                        transaction.historySnapshotPublished = true
+                                    }
                                 }
                             } catch (ce: CancellationException) {
                                 throw ce
@@ -3597,7 +3602,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     transaction.historyJob?.join()
                     transaction.historyFailure?.let { throw it }
-                    if (transaction.historyHandle != null && transaction.historySnapshot == null) {
+                    if (transaction.historyHandle != null && !transaction.historySnapshotPublished) {
                         error("parameter history preparation produced no snapshot")
                     }
                     withContext(Dispatchers.Default) {
@@ -6726,7 +6731,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun maybeCloseParameterGesture(transaction: ParameterGestureTransaction) {
         if (parameterGesture !== transaction || !transaction.windowExpired) return
         if (transaction.renderJob?.isActive == true || transaction.historyJob?.isActive == true) return
-        if (!transaction.historyCommitted && transaction.historySnapshot != null) {
+        if (!transaction.historyCommitted && transaction.historySnapshotPublished) {
             commitPendingParameterTransaction(transaction)
             return
         }
