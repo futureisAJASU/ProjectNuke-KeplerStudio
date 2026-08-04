@@ -3510,6 +3510,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun updateParams(transform: (EditParams) -> EditParams) {
         if (shuttingDown) return
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+        val next = transform(_uiState.value.params)
+        if (next == _uiState.value.params) return
         prepareForGlobalParamEdit()
         val transaction =
             parameterGesture ?: run {
@@ -3519,8 +3521,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     lastSuccessfullyRenderedParams = source.state.params
                 }
             }
-        val next = transform(_uiState.value.params)
-        if (next == _uiState.value.params) return
         val nextRevision = _uiState.value.revision + 1
         transaction.latestParams = next
         transaction.latestRevision = nextRevision
