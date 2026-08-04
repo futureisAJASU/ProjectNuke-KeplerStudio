@@ -7232,6 +7232,14 @@ fun exportPreview() {
     }
 
     override fun onCleared() {
+        // Shutdown settlement must run before shuttingDown and before any Draft
+        // operation invalidation: an open parameter transaction is resolved into a
+        // coherent final state synchronously (adopted edits committed, otherwise
+        // exact start-state rollback), and the Shutdown reason never schedules a
+        // Draft autosave. Settling after invalidation would cancel the very Draft
+        // job that records the last adopted revision, leaving an older Draft to
+        // silently represent the pending transaction.
+        settleParameterTransaction(SettlementReason.Shutdown)
         shuttingDown = true
         brushSnapshotJob?.cancel()
         brushSettlementJob?.cancel()
@@ -7265,7 +7273,6 @@ fun exportPreview() {
         renderJob?.cancel()
         invalidateExport()
         invalidateSelectionPreview()
-        abortPendingParameterEdit()
         paramUndoWindowJob?.cancel()
         cropJob?.cancel()
         transactionFinishJob?.cancel()
