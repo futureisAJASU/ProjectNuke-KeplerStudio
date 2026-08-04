@@ -6680,6 +6680,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             transaction.historyCommitted = true
         }
         lastSuccessfullyRenderedParams = transaction.latestParams
+        scheduleDraftAutosave()
         maybeCloseParameterGesture(transaction)
     }
 
