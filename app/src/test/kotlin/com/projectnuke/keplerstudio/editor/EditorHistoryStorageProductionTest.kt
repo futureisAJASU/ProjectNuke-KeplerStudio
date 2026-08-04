@@ -7,7 +7,9 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -15,6 +17,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
@@ -177,5 +180,120 @@ class EditorHistoryStorageProductionTest {
             Thread.sleep(5)
         }
         assertTrue(vm.canEnterEditorAction())
+    }
+
+    private fun corruptEntry(entry: EditorHistoryEntry, mutate: (org.json.JSONObject) -> Unit) {
+        val payload = checkNotNull(entry.coldPayload)
+        val manifest = org.json.JSONObject(File(payload.directory, "manifest.json").readText(Charsets.UTF_8))
+        mutate(manifest)
+        File(payload.directory, "manifest.json").writeText(manifest.toString(), Charsets.UTF_8)
+    }
+
+    private suspend fun setupPublishedEntry(suffix: String): Triple<EditorHistoryStorage, String, EditorHistoryEntry> {
+        val vm = editor(false, suffix)
+        awaitReady(vm)
+        val snapshot = checkNotNull(vm.captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact))
+        val storage = EditorHistoryStorage(context, Dispatchers.Unconfined, { fail("decode should not happen") }, syncDirectories = false, enforceDiskSpace = false)
+        val generation = suffix
+        val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
+        storage.registerSession(generation)
+        storage.initializeSession(generation)
+        val payload = checkNotNull(storage.publish(entry, snapshot))
+        entry.hotSnapshot = null
+        entry.coldPayload = payload
+        entry.payloadState = HistoryPayloadState.Hot
+        return Triple(storage, generation, entry)
+    }
+
+    @Test
+    fun coldHistoryRejectsExtraPayloadBeforeDecode() = runBlocking {
+        val (storage, generation, entry) = setupPublishedEntry("schema-reject-extra")
+        var decoded = 0
+        corruptEntry(entry) { manifest ->
+            val specs = manifest.getJSONArray("bitmaps")
+            val last = specs.getJSONObject(specs.length() - 1)
+            val extra = org.json.JSONObject()
+            extra.put("key", "extra_payload")
+            extra.put("file", "extra_payload.png")
+            extra.put("width", last.getInt("width"))
+            extra.put("height", last.getInt("height"))
+            extra.put("config", "ARGB_8888")
+            specs.put(extra)
+        }
+        val loaded = storage.loadWithSelectionMaskPreflight(entry, generation, { AutoCloseable { } }, { decoded++ })
+        assertNull(loaded)
+        assertEquals(0, decoded)
+        storage.deleteSession(generation)
+        storage.unregisterSession(generation)
+    }
+
+    @Test
+    fun coldHistoryRejectsMissingPayloadBeforeDecode() = runBlocking {
+        val (storage, generation, entry) = setupPublishedEntry("schema-reject-missing")
+        var decoded = 0
+        corruptEntry(entry) { manifest ->
+            manifest.getJSONObject("metadata").put("previewKey", "nonexistent_bitmap_key")
+        }
+        val loaded = storage.loadWithSelectionMaskPreflight(entry, generation, { AutoCloseable { } }, { decoded++ })
+        assertNull(loaded)
+        assertEquals(0, decoded)
+        storage.deleteSession(generation)
+        storage.unregisterSession(generation)
+    }
+
+    @Test
+    fun coldHistoryRejectsDuplicateBitmapKeyBeforeDecode() = runBlocking {
+        val (storage, generation, entry) = setupPublishedEntry("schema-reject-dupkey")
+        var decoded = 0
+        corruptEntry(entry) { manifest ->
+            val specs = manifest.getJSONArray("bitmaps")
+            val first = specs.getJSONObject(0)
+            val dup = org.json.JSONObject()
+            dup.put("key", first.getString("key"))
+            dup.put("file", "dup_file.png")
+            dup.put("width", first.getInt("width"))
+            dup.put("height", first.getInt("height"))
+            dup.put("config", "ARGB_8888")
+            specs.put(dup)
+        }
+        val loaded = storage.loadWithSelectionMaskPreflight(entry, generation, { AutoCloseable { } }, { decoded++ })
+        assertNull(loaded)
+        assertEquals(0, decoded)
+        storage.deleteSession(generation)
+        storage.unregisterSession(generation)
+    }
+
+    @Test
+    fun coldHistoryRejectsPathEscapeBeforeDecode() = runBlocking {
+        val (storage, generation, entry) = setupPublishedEntry("schema-reject-escape")
+        var decoded = 0
+        corruptEntry(entry) { manifest ->
+            manifest.getJSONArray("bitmaps").getJSONObject(0).put("file", "../escape.png")
+        }
+        val loaded = storage.loadWithSelectionMaskPreflight(entry, generation, { AutoCloseable { } }, { decoded++ })
+        assertNull(loaded)
+        assertEquals(0, decoded)
+        storage.deleteSession(generation)
+        storage.unregisterSession(generation)
+    }
+
+    @Test
+    fun requiredBitmapBytesRejectsSchemaMismatch() = runBlocking {
+        val (storage, generation, entry) = setupPublishedEntry("schema-reject-requiredbytes")
+        corruptEntry(entry) { manifest ->
+            val specs = manifest.getJSONArray("bitmaps")
+            val last = specs.getJSONObject(specs.length() - 1)
+            val extra = org.json.JSONObject()
+            extra.put("key", "extra_payload")
+            extra.put("file", "extra_extra.png")
+            extra.put("width", last.getInt("width"))
+            extra.put("height", last.getInt("height"))
+            extra.put("config", "ARGB_8888")
+            specs.put(extra)
+        }
+        val bytes = storage.requiredBitmapBytes(entry, generation)
+        assertNull(bytes)
+        storage.deleteSession(generation)
+        storage.unregisterSession(generation)
     }
 }

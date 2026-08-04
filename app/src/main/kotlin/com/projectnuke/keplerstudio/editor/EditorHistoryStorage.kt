@@ -1199,12 +1199,25 @@ val bitmapSpecs = json.getJSONArray("bitmaps")
                 validatedFiles[key] = file
                 requiredBytes = BitmapMemoryBudget.saturatingAdd(requiredBytes, BitmapMemoryBudget.bytes(width, height))
             }
-            val metadata = json.getJSONObject("metadata")
+val metadata = json.getJSONObject("metadata")
             val layerSpecs = metadata.getJSONArray("layers")
             check(layerSpecs.length() <= BitmapMemoryBudget.maxSelectionMaskLayers())
+            val referencedKeys = HashSet<String>()
+            if (!metadata.isNull("previewKey") && metadata.getString("previewKey").isNotBlank()) {
+                referencedKeys.add(metadata.getString("previewKey"))
+            }
+            if (!metadata.isNull("originalKey") && metadata.getString("originalKey").isNotBlank()) {
+                referencedKeys.add(metadata.getString("originalKey"))
+            }
             val maskKeys = HashSet<String>()
             for (index in 0 until layerSpecs.length()) {
-                maskKeys += layerSpecs.getJSONObject(index).getString("bitmapKey")
+                val bitmapKey = layerSpecs.getJSONObject(index).getString("bitmapKey")
+                check(maskKeys.add(bitmapKey))
+                referencedKeys.add(bitmapKey)
+            }
+            val bitmapKeys = keys
+            check(referencedKeys == bitmapKeys) {
+                "referenced keys $referencedKeys do not match payload keys $bitmapKeys"
             }
             var maskBytes = 0L
             maskKeys.forEach { key ->
@@ -1267,14 +1280,50 @@ val bitmapSpecs = json.getJSONArray("bitmaps")
         }
     }
 
-    override suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long? = withContext(ioDispatcher) {
+override suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long? = withContext(ioDispatcher) {
         runCatching {
             val payload = checkNotNull(entry.coldPayload)
             val directory = payload.directory
             check(entry.documentGeneration == expectedGeneration && isOwnedEntryDirectory(directory, expectedGeneration, entry.id))
             val json = JSONObject(File(directory, MANIFEST).readText(Charsets.UTF_8))
             check(json.getInt("version") == VERSION && json.getString("entryId") == entry.id && json.getString("documentGeneration") == expectedGeneration)
+
+            // Validate referenced/payload key sets before summing bytes.
+            val metadata = json.getJSONObject("metadata")
+            val referencedKeys = HashSet<String>()
+            if (!metadata.isNull("previewKey") && metadata.getString("previewKey").isNotBlank()) {
+                referencedKeys.add(metadata.getString("previewKey"))
+            }
+            if (!metadata.isNull("originalKey") && metadata.getString("originalKey").isNotBlank()) {
+                referencedKeys.add(metadata.getString("originalKey"))
+            }
+            val layerSpecs = metadata.getJSONArray("layers")
+            check(layerSpecs.length() <= BitmapMemoryBudget.maxSelectionMaskLayers())
+            val bitmapKeys = HashSet<String>()
             val specs = json.getJSONArray("bitmaps")
+            check(specs.length() in 1..(2 + BitmapMemoryBudget.maxSelectionMaskLayers())) {
+                "bitmap count ${specs.length()} exceeds schema-derived maximum"
+            }
+            for (i in 0 until specs.length()) {
+                val spec = specs.getJSONObject(i)
+                val key = spec.getString("key")
+                val fileName = spec.getString("file")
+                check(bitmapKeys.add(key) && isSafePayloadName(fileName))
+                val file = File(directory, fileName)
+                check(file.isFile && file.canonicalFile.parentFile == directory.canonicalFile)
+                val bounds = BitmapFactory.Options().also { it.inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.absolutePath, bounds)
+                check(spec.getInt("width") == bounds.outWidth && spec.getInt("height") == bounds.outHeight)
+            }
+            for (index in 0 until layerSpecs.length()) {
+                val bitmapKey = layerSpecs.getJSONObject(index).getString("bitmapKey")
+                check(referencedKeys.add(bitmapKey))
+                check(bitmapKeys.contains(bitmapKey)) { "selection mask references missing payload: $bitmapKey" }
+            }
+            check(referencedKeys == bitmapKeys) {
+                "referenced keys $referencedKeys do not match payload keys $bitmapKeys"
+            }
+
             var total = 0L
             for (index in 0 until specs.length()) {
                 val spec = specs.getJSONObject(index)
