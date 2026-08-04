@@ -2,11 +2,12 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -17,6 +18,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -38,113 +40,229 @@ class DraftSelfCancellationProductionTest {
         draftGenerationsRoot(context).deleteRecursively()
     }
 
+    // Test 1: active adopted transaction — save-and-leave before inactivity fires.
     @Test
-    fun saveAndLeaveAfterAdoptionCompletesWithoutSelfCancellation() = runBlocking {
-        val sourceFile = draftSourceFile("draft-adopt-source.png")
+    fun saveAndLeaveInActiveAdoptedTransactionCommitsExactlyOnce() = runBlocking {
+        val sourceFile = draftSourceFile("draft-active-adopt-source.png")
         val vm = editor(sourceFile.absolutePath)
-        val output = renderOutput()
-        try {
-            EditorRenderer.installRendererOverrideForTest {
-                RenderResult.Success(
-                    operation = RenderOperation.NativePreview,
-                    requestedRoute = NativeRenderRoute.V1,
-                    output = output,
-                    actualRoute = NativeRenderRoute.V1,
-                    decision = RenderRouteDecision.FollowDocument,
-                    usedDebugOverride = false,
-                    algorithmVersion = AlgorithmContracts.NATIVE_V1,
-                    participation = RenderParticipation(),
-                    durationMillis = 0L,
-                    knownTransientBytes = 0L,
+        val output = renderOutput(0xff224466.toInt())
+        var adoptedRevisions = mutableListOf<Int>()
+        var inactivityFired = 0
+        var commitBegan = mutableListOf<Long>()
+        var committed = mutableListOf<Int>()
+        var closed = mutableListOf<Long>()
+        var draftCaptures = mutableListOf<Long>()
+        val renderer = EditorRenderer.installRendererOverrideForTest {
+            RenderResult.Success(
+                operation = RenderOperation.NativePreview,
+                requestedRoute = NativeRenderRoute.V1,
+                output = output,
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
+        val hooks =
+            ParameterLifecycleTestHook.install(
+                ParameterLifecycleHooks(
+                    onRenderOutputAdopted = { adoptedRevisions += it },
+                    onInactivityTimerFired = { inactivityFired++ },
+                    onTransactionCommitBegan = { commitBegan += it },
+                    onTransactionCommitted = { committed += it },
+                    onTransactionClosed = { closed += it },
+                    onDraftCaptureBegan = { draftCaptures += it },
                 )
-            }
+            )
+        try {
             awaitReady(vm)
+            val epochBefore = vm.draftEpochForTest()
+            assertEquals(0f, vm.uiState.value.params.exposure)
+
             vm.updateParams { it.copy(exposure = 0.3f) }
-            await { vm.uiState.value.canUndo && vm.uiState.value.params.exposure == 0.3f }
+            // prove adoption through the seam, not canUndo
+            awaitEvent(vm) { adoptedRevisions.isNotEmpty() }
+
+            // Transaction must still be open: adoption happened, inactivity did not fire
+            assertTrue("transaction must still be open", vm.hasOpenParameterGesture())
+            assertEquals(0, inactivityFired)
+            assertFalse("undo flag must still be false before commit", vm.uiState.value.canUndo)
 
             val saved = vm.persistDraftSnapshotNow()
             assertTrue("save-and-leave must succeed", saved)
+
+            // Draft epoch advanced by exactly one (only the current save)
+            assertEquals(epochBefore + 1L, vm.draftEpochForTest())
+            assertEquals(1, draftCaptures.size)
+            // commit began exactly once for the transaction, then closed
+            assertEquals(1, commitBegan.size)
+            assertEquals(1, committed.size)
+            assertEquals(1, closed.size)
+            assertEquals(1, adoptedRevisions.size)
+            // transaction closed by settlement
+            assertFalse("transaction must close after settlement", vm.hasOpenParameterGesture())
+            // no replacement autosave is scheduled
+            assertFalse("no autosave may be queued after save-and-leave", vm.hasActiveDraftSaveJobForTest())
+
+            // before-history commits exactly once
+            assertEquals(1, vm.undoEntryCountForTest())
 
             val validated = validateCurrentDraftGeneration(context)
                 ?: error("draft must validate after save")
             assertEquals("draft must record adopted exposure", 0.3f, validated.manifest.params.exposure)
             assertTrue(validated.sourceFile.isFile)
             assertTrue(validated.thumbnailFile.isFile)
+            assertPixelClose(outputPixelColor(output), thumbnailPixelColor(validated.thumbnailFile), "draft thumbnail pixels must match adopted output")
         } finally {
-            EditorRenderer.clearRendererOverrideForTest()
+            hooks.close()
+            renderer.close()
+            if (!output.isRecycled) output.recycle()
             sourceFile.delete()
         }
     }
 
-    // Test: save during pending newer render uses adopted params (not latest optimistic)
+    // Test 2: adopted revision plus pending newer render, then save-and-leave.
     @Test
-    fun saveDuringPendingRenderCapturesAdoptedNotSpeculative() = runBlocking {
-        val sourceFile = draftSourceFile("draft-pending-source.png")
+    fun saveDuringPendingNewerRenderCommitsAdoptedRevision() = runBlocking {
+        val sourceFile = draftSourceFile("draft-pending-adopt-source.png")
         val vm = editor(sourceFile.absolutePath)
-        val output1 = renderOutput(0x224466)
-        val output2 = renderOutput(0x4466AA)
-        try {
-            val renderCount = java.util.concurrent.atomic.AtomicInteger(0)
-            EditorRenderer.installRendererOverrideForTest {
-                renderCount.incrementAndGet()
-                val out = if (renderCount.get() == 1) output1 else output2
-                RenderResult.Success(
-                    operation = RenderOperation.NativePreview,
-                    requestedRoute = NativeRenderRoute.V1,
-                    output = out,
-                    actualRoute = NativeRenderRoute.V1,
-                    decision = RenderRouteDecision.FollowDocument,
-                    usedDebugOverride = false,
-                    algorithmVersion = AlgorithmContracts.NATIVE_V1,
-                    participation = RenderParticipation(),
-                    durationMillis = 0L,
-                    knownTransientBytes = 0L,
-                )
+        val output1 = renderOutput(0xff224466.toInt())
+        val output2 = renderOutput(0xff4466AA.toInt())
+        val pendingGate = CompletableDeferred<Unit>()
+        val renderCalls = AtomicInteger(0)
+        val requests = mutableListOf<Int>()
+        var adopted = mutableListOf<Int>()
+        var closed = 0
+        val renderer = EditorRenderer.installRendererOverrideForTest { request ->
+            val call = renderCalls.incrementAndGet()
+            if (call == 2) {
+                pendingGate.await()
             }
+            RenderResult.Success(
+                operation = RenderOperation.NativePreview,
+                requestedRoute = NativeRenderRoute.V1,
+                output = if (call == 1) output1 else output2,
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
+        val hooks =
+            ParameterLifecycleTestHook.install(
+                ParameterLifecycleHooks(
+                    onRenderRequestStarted = { requests += it },
+                    onRenderOutputAdopted = { adopted += it },
+                    onTransactionClosed = { closed++ },
+                )
+            )
+        try {
             awaitReady(vm)
 
-            // adopt 0.2
+            // adopt 0.2 inside an open transaction
             vm.updateParams { it.copy(exposure = 0.2f) }
-            await { vm.uiState.value.canUndo && vm.uiState.value.params.exposure == 0.2f }
+            awaitEvent(vm) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            assertEquals(0.2f, vm.adoptedParamsForTest()?.exposure)
+            assertTrue(vm.hasOpenParameterGesture())
 
-            // save now — settlement commits the adopted params, Draft captures them
+            // request 0.4; the renderer suspends after starting (no adoption)
+            vm.updateParams { it.copy(exposure = 0.4f) }
+            awaitEvent(vm) { requests.size >= 2 && vm.pendingParamRenderRevision() != null }
+            assertTrue("0.4 render must be suspended", requests.size >= 2)
+            assertEquals("adopted params stay 0.2", 0.2f, vm.adoptedParamsForTest()?.exposure)
+            assertEquals("latest optimistic params are 0.4", 0.4f, vm.latestParamsForTest()?.exposure)
+            assertEquals("visible pixels stay the 0.2 output", outputPixelColor(output1), uiPixelColor(vm))
+            assertTrue("transaction remains open", vm.hasOpenParameterGesture())
+
+            // save-and-leave cancels the pending 0.4 render and commits 0.2
             val saved = vm.persistDraftSnapshotNow()
-            assertTrue("save must succeed with adopted", saved)
+            assertTrue("manual save must not be canceled", saved)
+
+            // 0.4 never adopts
+            assertTrue("only one adoption (0.2)", adopted.size == 1)
+            // UI settles to 0.2 params and pixels
+            assertEquals(0.2f, vm.uiState.value.params.exposure)
+            assertFalse("busy clears synchronously", vm.uiState.value.isBusy)
+            assertFalse(vm.hasOpenParameterGesture())
+            assertEquals(1, closed)
+            assertEquals("one parameter Undo entry", 1, vm.undoEntryCountForTest())
 
             val validated = validateCurrentDraftGeneration(context) ?: error("no validated draft")
-            assertEquals(0.2f, validated.manifest.params.exposure)
-
-            assertFalse("busy must be cleared", vm.uiState.value.isBusy)
+            assertEquals("draft records 0.2", 0.2f, validated.manifest.params.exposure)
+            assertPixelClose(outputPixelColor(output1), thumbnailPixelColor(validated.thumbnailFile), "draft pixels record 0.2 output")
         } finally {
-            EditorRenderer.clearRendererOverrideForTest()
+            pendingGate.complete(Unit)
+            hooks.close()
+            renderer.close()
+            if (!output1.isRecycled) output1.recycle()
+            if (!output2.isRecycled) output2.recycle()
             sourceFile.delete()
         }
     }
 
-    // Test: save before any adoption — rollback, no commit, no Undo entry
+    // Test 3: no adoption — save rolls back to exact start state.
     @Test
-    fun saveBeforeAdoptionRollsBackWithoutUndoEntry() = runBlocking {
+    fun saveBeforeAnyAdoptionRollsBackExactStartState() = runBlocking {
         val sourceFile = draftSourceFile("draft-noadopt-source.png")
         val vm = editor(sourceFile.absolutePath)
+        val suspended = CompletableDeferred<Unit>()
+        val startPixels = uiPixelColor(vm)
+        var adopted = 0
+        val renderer = EditorRenderer.installRendererOverrideForTest {
+            suspended.await()
+            RenderResult.Success(
+                operation = RenderOperation.NativePreview,
+                requestedRoute = NativeRenderRoute.V1,
+                output = renderOutput(0xffff0000.toInt()),
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
+        val hooks =
+            ParameterLifecycleTestHook.install(
+                ParameterLifecycleHooks(
+                    onRenderOutputAdopted = { adopted++ },
+                )
+            )
         try {
-            // don't install renderer — renderer will fail, meaning no output is produced
-
             awaitReady(vm)
-            assertFalse("no undo before edit", vm.uiState.value.canUndo)
+            assertEquals(0f, vm.uiState.value.params.exposure)
 
-            // trigger a param update but without renderer → render fails
-            vm.updateParams { it.copy(exposure = 0.5f) }
-            // force settlement immediately before render completes
+            vm.updateParams { it.copy(exposure = 0.7f) }
+            awaitEvent(vm) { vm.pendingParamRenderRevision() != null }
+            assertEquals(0, adopted)
+
+            // save before any adoption: settlement rolls back to start
+            val epochBefore = vm.draftEpochForTest()
             val saved = vm.persistDraftSnapshotNow()
-            // Without a renderer, the gesture may settle before producing output.
-            // The key assertion: save returns a result — true means Draft was written.
-            // If no adoption happened, no parameter Undo should be registered.
             assertTrue("save must complete", saved)
+            assertEquals(epochBefore + 1L, vm.draftEpochForTest())
 
-            assertFalse("no undo entry for abandoned gesture", vm.uiState.value.canUndo)
-            // After settlement, isBusy must be cleared
-            assertFalse("busy must be cleared", vm.uiState.value.isBusy)
+            assertEquals("params roll back to start", 0f, vm.uiState.value.params.exposure)
+            assertEquals("pixels roll back to start", startPixels, uiPixelColor(vm))
+            assertFalse("busy clears synchronously", vm.uiState.value.isBusy)
+            assertFalse("transaction closed", vm.hasOpenParameterGesture())
+            assertEquals(0, adopted)
+            assertEquals("no undo entry for rolled-back gesture", 0, vm.undoEntryCountForTest())
+
+            val validated = validateCurrentDraftGeneration(context) ?: error("no validated draft")
+            assertEquals("draft records start params", 0f, validated.manifest.params.exposure)
+            assertPixelClose(startPixels, thumbnailPixelColor(validated.thumbnailFile), "draft records start pixels")
         } finally {
+            suspended.complete(Unit)
+            hooks.close()
+            renderer.close()
             sourceFile.delete()
         }
     }
@@ -162,7 +280,7 @@ class DraftSelfCancellationProductionTest {
         return source
     }
 
-    private fun renderOutput(color: Int = -0xddbb9a): Bitmap {
+    private fun renderOutput(color: Int): Bitmap {
         val bmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         bmp.eraseColor(color)
         return bmp
@@ -171,6 +289,7 @@ class DraftSelfCancellationProductionTest {
     private fun editor(sourcePath: String): EditorViewModel {
         val vm = EditorViewModel(context)
         val base = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        base.eraseColor(0xff00ff00.toInt())
         vm.updateUiState {
             it.copy(
                 sourcePath = sourcePath,
@@ -182,6 +301,30 @@ class DraftSelfCancellationProductionTest {
         return vm
     }
 
+    private fun uiPixelColor(vm: EditorViewModel): Int {
+        val preview = vm.uiState.value.previewBitmap ?: error("no preview")
+        return preview.getPixel(8, 8)
+    }
+
+    private fun outputPixelColor(output: Bitmap): Int = output.getPixel(8, 8)
+
+    private fun assertPixelClose(expected: Int, actual: Int, message: String) {
+        for (shift in intArrayOf(24, 16, 8, 0)) {
+            val e = (expected shr shift) and 0xff
+            val a = (actual shr shift) and 0xff
+            assertTrue("$message (channel shift $shift): expected $e got $a", kotlin.math.abs(e - a) <= 3)
+        }
+    }
+
+    private fun thumbnailPixelColor(file: File): Int {
+        val decoded = BitmapFactory.decodeFile(file.absolutePath) ?: error("thumbnail decode failed")
+        try {
+            return decoded.getPixel(decoded.width / 2, decoded.height / 2)
+        } finally {
+            if (!decoded.isRecycled) decoded.recycle()
+        }
+    }
+
     private fun awaitReady(vm: EditorViewModel) {
         repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
@@ -191,7 +334,7 @@ class DraftSelfCancellationProductionTest {
         assertTrue(vm.canEnterEditorAction())
     }
 
-    private fun await(predicate: () -> Boolean) {
+    private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
         repeat(300) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return

@@ -232,6 +232,12 @@ internal class EditorHistoryCoordinator(
     fun currentGeneration(): String = documentGeneration
     fun navigationTargetId(undoDirection: Boolean): String? = (if (undoDirection) undo else redo).lastOrNull()?.id
 
+    /** Pure read-only inspection for tests: committed undo-stack entry count. */
+    internal fun undoEntryCountForTest(): Int = undo.size
+
+    /** Pure read-only inspection for tests: committed redo-stack entry count. */
+    internal fun redoEntryCountForTest(): Int = redo.size
+
     fun canCapture(requiredBytes: Long): Boolean {
         return !visibleFlags.busy && requiredBytes >= 0L && BitmapMemoryBudget.canAllocate(requiredBytes)
     }

@@ -207,6 +207,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal var cropJob: Job? = null
     private var draftSaveJob: Job? = null
     private val draftSaveMutex = Mutex()
+
+    /** Pure read-only inspection for tests: current Draft save epoch. */
+    internal fun draftEpochForTest(): Long = draftOperationEpoch
+
+    /** Pure read-only inspection for tests: whether a Draft save job is queued/running. */
+    internal fun hasActiveDraftSaveJobForTest(): Boolean = draftSaveJob?.isActive == true
     private val savedExportHistoryMutex = Mutex()
     @Volatile private var savedExportHistoryRevision: Long = 0L
     /** Invalidates every queued draft save/restore when the document changes. */
@@ -285,6 +291,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var activeParamRenderRevision: Int? = null
     private var parameterGesture: ParameterGestureTransaction? = null
     private var parameterGestureCounter: Long = 0L
+
+    /** Pure read-only inspection for tests: a parameter transaction is open. */
+    internal fun hasOpenParameterGesture(): Boolean = parameterGesture != null
+
+    /** Pure read-only inspection for tests: the currently pending render revision. */
+    internal fun pendingParamRenderRevision(): Int? = activeParamRenderRevision
+
+    /** Pure read-only inspection for tests: latest adopted params in the open transaction. */
+    internal fun adoptedParamsForTest(): EditParams? = parameterGesture?.adoptedParams
+
+    /** Pure read-only inspection for tests: latest optimistic params in the open transaction. */
+    internal fun latestParamsForTest(): EditParams? = parameterGesture?.latestParams
+
+    /** Pure read-only inspection for tests: committed undo-stack entry count. */
+    internal fun undoEntryCountForTest(): Int = historyCoordinator.undoEntryCountForTest()
+
+    /** Pure read-only inspection for tests: committed redo-stack entry count. */
+    internal fun redoEntryCountForTest(): Int = historyCoordinator.redoEntryCountForTest()
 
     /**
      * Explicit transaction state within a parameter gesture window. Loosely follows
