@@ -286,10 +286,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var parameterGesture: ParameterGestureTransaction? = null
     private var parameterGestureCounter: Long = 0L
 
+    /**
+     * Explicit transaction state within a parameter gesture window. Loosely follows
+     * Active → WaitingForHistory → Rendering → Adopted → Committing → Committed
+     * or any non-terminal → RollingBack → RolledBack → Closed.
+     */
+    internal enum class ParamTransactionState {
+        Active, WaitingForHistory, Rendering, Adopted, Committing, RollingBack,
+        Committed, RolledBack, Closed,
+    }
+
     private class ParameterGestureTransaction(
         val id: Long,
         val start: LeasedEditorSnapshot,
     ) : AutoCloseable {
+        @Volatile private var state: ParamTransactionState = ParamTransactionState.Active
         var historyHandle: PendingHistorySnapshot? = null
         var historyJob: Job? = null
         var historySnapshot: EditorHistorySnapshot? = null
@@ -299,11 +310,62 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         var renderJob: Job? = null
         var windowExpired: Boolean = false
         var historyCommitted: Boolean = false
+        @Volatile var adoptedRevision: Int? = null
+        @Volatile var adoptedParams: EditParams? = null
+        @Volatile var inactivityGeneration: Long = 0L
+        private val stateLock = Any()
         private var closed = false
 
+        internal fun currentState(): ParamTransactionState = state
+
+        internal fun transitionTo(next: ParamTransactionState): Boolean {
+            synchronized(stateLock) {
+                if (closed) return false
+                if (!isLegalTransition(state, next)) return false
+                state = next
+                return true
+            }
+        }
+
+        internal fun forceTransitionTo(next: ParamTransactionState) {
+            synchronized(stateLock) { if (!closed) state = next }
+        }
+
+        private fun isLegalTransition(from: ParamTransactionState, to: ParamTransactionState): Boolean {
+            if (from == to) return false
+            return when (from) {
+                ParamTransactionState.Active ->
+                    to == ParamTransactionState.WaitingForHistory ||
+                        to == ParamTransactionState.RolledBack ||
+                        to == ParamTransactionState.Closed
+                ParamTransactionState.WaitingForHistory ->
+                    to == ParamTransactionState.Adopted ||
+                        to == ParamTransactionState.RolledBack ||
+                        to == ParamTransactionState.Closed
+                ParamTransactionState.Rendering ->
+                    to == ParamTransactionState.Adopted ||
+                        to == ParamTransactionState.RollingBack ||
+                        to == ParamTransactionState.Closed
+                ParamTransactionState.Adopted ->
+                    to == ParamTransactionState.Committing ||
+                        to == ParamTransactionState.RollingBack ||
+                        to == ParamTransactionState.Closed
+                ParamTransactionState.Committing ->
+                    to == ParamTransactionState.Committed ||
+                        to == ParamTransactionState.Closed
+                ParamTransactionState.RollingBack ->
+                    to == ParamTransactionState.RolledBack ||
+                        to == ParamTransactionState.Closed
+                ParamTransactionState.Committed, ParamTransactionState.RolledBack, ParamTransactionState.Closed -> false
+            }
+        }
+
         override fun close() {
-            if (closed) return
-            closed = true
+            synchronized(stateLock) {
+                if (closed) return
+                closed = true
+                state = ParamTransactionState.Closed
+            }
             renderJob?.cancel()
             historyJob?.cancel()
             historyHandle?.close()
@@ -3447,15 +3509,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val nextRevision = _uiState.value.revision + 1
         transaction.latestParams = next
         transaction.latestRevision = nextRevision
+        transaction.inactivityGeneration++
         paramUndoWindowJob?.cancel()
+        val tickGeneration = transaction.inactivityGeneration
         paramUndoWindowJob = viewModelScope.launch {
             delay(900L)
-            transaction.windowExpired = true
-            maybeCloseParameterGesture(transaction)
+            if (transaction.inactivityGeneration == tickGeneration) {
+                transaction.windowExpired = true
+                maybeCloseParameterGesture(transaction)
+            }
         }
-        updateUiStateAndRecycleReplaced {
-            it.copy(params = next, revision = nextRevision, isBusy = true, message = "誘몃━蹂닿린瑜??뚮뜑留곹븯??以묒엯?덈떎")
-        }
+        updateUiState { it.copy(params = next, revision = nextRevision, isBusy = true) }
         updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
         renderJob?.cancel()
         activeParamRenderRevision = nextRevision
@@ -3477,6 +3541,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         transaction.historySnapshot == null &&
                         transaction.historyFailure == null
                     ) {
+                        if (!transaction.transitionTo(ParamTransactionState.WaitingForHistory)) {
+                            error("parameter transaction in state=${transaction.currentState()}, cannot start history")
+                        }
                         transaction.historyHandle =
                             prepareHistorySnapshot("updateParams:${transaction.id}", transaction.start)
                         transaction.historyJob = viewModelScope.launch(Dispatchers.Default) {
@@ -3521,21 +3588,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     output = checkNotNull(owner.takeOutput())
                     tracker?.track(output, "updateParams:output")
                     if (isManagedEditCurrent(operationToken, nextRevision)) {
-                        updateUiStateAndRecycleReplaced {
-                            it.copy(
-                                params = next,
-                                previewBitmap = output,
-                                isBusy = false,
-                                correctionEngineState = it.correctionEngineState.withSuccessfulRender(
-                                    transaction.start.state.correctionEngineState.documentEngine,
-                                    result.copy(output = checkNotNull(output)),
-                                ),
-                            )
+                        if (!transaction.transitionTo(ParamTransactionState.Adopted)) {
+                            activeParamRenderRevision = null
+                        } else {
+                            transaction.adoptedRevision = nextRevision
+                            transaction.adoptedParams = next
+                            updateUiStateAndRecycleReplaced {
+                                it.copy(
+                                    params = next,
+                                    previewBitmap = output,
+                                    isBusy = false,
+                                    correctionEngineState = it.correctionEngineState.withSuccessfulRender(
+                                        transaction.start.state.correctionEngineState.documentEngine,
+                                        result.copy(output = checkNotNull(output)),
+                                    ),
+                                )
+                            }
+                            activeParamRenderRevision = null
+                            output = null
+                            maybeCloseParameterGesture(transaction)
                         }
-                        activeParamRenderRevision = null
-                        output = null
-                        maybeCloseParameterGesture(transaction)
-                        scheduleDraftAutosave()
                     } else {
                         activeParamRenderRevision = null
                     }
@@ -6584,6 +6656,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun commitPendingParameterTransaction(transaction: ParameterGestureTransaction) {
         if (!transaction.historyCommitted) {
+            if (!transaction.transitionTo(ParamTransactionState.Committing)) {
+                transaction.forceTransitionTo(ParamTransactionState.Committed)
+                return
+            }
             settleAdoptedEditHistory(transaction.historySnapshot)
             transaction.historySnapshot = null
             transaction.historyCommitted = true
@@ -6595,6 +6671,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun takePendingParameterSnapshotForRollback(
         transaction: ParameterGestureTransaction,
     ): EditorHistorySnapshot? {
+        transaction.transitionTo(ParamTransactionState.RollingBack)
         val snapshot = transaction.historySnapshot
         transaction.historySnapshot = null
         transaction.historyCommitted = true
@@ -6643,6 +6720,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (transaction != null) {
             transaction.windowExpired = true
+            transaction.transitionTo(ParamTransactionState.RollingBack)
             closeParameterGesture(transaction)
         } else {
             discardPendingParamUndoSnapshot()
