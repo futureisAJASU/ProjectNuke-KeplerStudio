@@ -313,7 +313,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         @Volatile var adoptedRevision: Int? = null
         @Volatile var adoptedParams: EditParams? = null
         @Volatile var inactivityGeneration: Long = 0L
-        private val stateLock = Any()
+        internal val stateLock = Any()
         private var closed = false
 
         internal fun currentState(): ParamTransactionState = state
@@ -3565,11 +3565,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             prepareHistorySnapshot("updateParams:${transaction.id}", transaction.start)
                         transaction.historyJob = viewModelScope.launch(Dispatchers.Default) {
                             try {
-                                transaction.historySnapshot = transaction.historyHandle?.await()
+                                val snap = transaction.historyHandle?.await()
+                                synchronized(transaction.stateLock) {
+                                    transaction.historySnapshot = snap
+                                }
                             } catch (ce: CancellationException) {
                                 throw ce
                             } catch (failure: Throwable) {
-                                transaction.historyFailure = failure
+                                synchronized(transaction.stateLock) {
+                                    transaction.historyFailure = failure
+                                }
                             }
                         }
                     }
