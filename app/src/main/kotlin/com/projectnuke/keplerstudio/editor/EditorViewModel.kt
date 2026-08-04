@@ -1699,6 +1699,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
         if (shuttingDown) return false
+        abortPendingParameterEdit()
         // An editor action is an intent to capture a new start state. Settle interactive
         // owners before answering so the caller's first click cannot capture working pixels
         // or observe a still-live optimistic selection transaction.
