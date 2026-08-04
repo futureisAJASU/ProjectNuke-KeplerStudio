@@ -3545,6 +3545,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val nextRevision = _uiState.value.revision + 1
         transaction.latestParams = next
         transaction.latestRevision = nextRevision
+        transaction.windowExpired = false
         transaction.inactivityGeneration++
         paramUndoWindowJob?.cancel()
         val tickGeneration = transaction.inactivityGeneration
