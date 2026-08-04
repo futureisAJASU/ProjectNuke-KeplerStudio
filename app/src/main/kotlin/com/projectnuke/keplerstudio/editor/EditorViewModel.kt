@@ -1926,9 +1926,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun startSelectionParamGesture(): Boolean {
         if (shuttingDown) return false
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
         prepareForMaskInteraction()
-        if (uiState.value.isBusy) return false
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
         return beginSelectionParamGesture()
     }
 
@@ -2256,9 +2255,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (shuttingDown) return false
         if (brushTransactionState != BrushTransactionState.Idle) return true
         if (historyCoordinator.flags().busy) return false
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
         prepareForMaskInteraction()
-        if (uiState.value.isBusy) return false
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
         val state = _uiState.value
         val layerId = state.activeSelectionLayerId ?: return false
         val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
@@ -4310,15 +4308,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun exportPreview() {
+fun exportPreview() {
         if (shuttingDown) return
+        prepareForExternalEdit()
         val state = _uiState.value
         val sourcePath = state.sourcePath
         val exportBusyMessage =
             "${state.exportFormat.label} 형식, ${state.exportResolution.label} 목표 해상도로 내보내는 중입니다."
         if (sourcePath == null) {
             val missingMsg =
-                "\uB0B4\uBCF4\uB0BC \uC6D0\uBCF8 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4"
+                "\uB0B0\ub9AC\ubc88\uc6d0 \uc774\ubbf8\uc9c0\uAC00 \uC5C5\uC2B5\uB2C8\uB2E4"
             if (state.message != missingMsg) {
                 updateUiStateAndRecycleReplaced { it.copy(message = missingMsg) }
             }
@@ -5372,8 +5371,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun rotatePreview90Async() {
-        if (uiState.value.isBusy) return
         abortPendingParameterEdit()
+        if (uiState.value.isBusy) return
         invalidateSelectionPreview()
         invalidateManagedEdits()
         renderJob?.cancel()
@@ -5526,8 +5525,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         effect: ActiveQuickEffect,
     ) {
         if (isShuttingDown()) return
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         prepareForExternalEdit()
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val startSnapshot = acquireEditorSnapshot("nativeSpecialEffects") ?: return
         val current = startSnapshot.state
         val baseOriginal = startSnapshot.originalPreviewBitmap ?: startSnapshot.previewBitmap
