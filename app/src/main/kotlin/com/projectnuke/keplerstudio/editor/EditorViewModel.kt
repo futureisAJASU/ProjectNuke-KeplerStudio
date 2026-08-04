@@ -3133,6 +3133,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     DraftPointerSnapshot(diskPointer)
                 }
             } ?: return false
+        settleParameterTransactionBeforeExternalEdit()
         val draftSnapshot = acquireEditorSnapshot("draftSave") ?: return false
         val draftState = draftSnapshot.state
         val draftTracker =
