@@ -6757,10 +6757,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     closeParameterGesture(transaction)
                 }
                 else -> {
+                    // Field-scoped rollback: restore only transaction-owned fields.
+                    // Preserve unrelated state: viewport, export prefs, saved exports,
+                    // comparison UI, overlay visibility, recovery/debug state, messages.
                     transaction.transitionTo(ParamTransactionState.RollingBack)
-                    updateUiState {
+                    val startState = transaction.start.state
+                    updateUiStateAndRecycleReplaced {
                         it.copy(
                             params = lastSuccessfullyRenderedParams,
+                            previewBitmap = startState.previewBitmap,
+                            correctionEngineState = startState.correctionEngineState,
                             revision = it.revision + 1,
                             isBusy = false,
                         )
@@ -6769,7 +6775,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         } else {
-            updateUiState {
+            updateUiStateAndRecycleReplaced {
                 it.copy(
                     params = lastSuccessfullyRenderedParams,
                     revision = it.revision + 1,
