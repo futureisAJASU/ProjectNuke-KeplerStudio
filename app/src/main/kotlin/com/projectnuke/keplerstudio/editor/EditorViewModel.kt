@@ -3511,10 +3511,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun updateParams(transform: (EditParams) -> EditParams) {
         if (shuttingDown) return
+        prepareForGlobalParamEdit()
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val next = transform(_uiState.value.params)
         if (next == _uiState.value.params) return
-        prepareForGlobalParamEdit()
         val transaction =
             parameterGesture ?: run {
                 val source = acquireEditorSnapshot("updateParams") ?: return
@@ -3660,8 +3660,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun applyAutoEnhance() {
         if (shuttingDown) return
+        prepareForExternalEdit()
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
-        val current = prepareForExternalEdit()
+        val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정을 적용할 이미지가 없습니다") }
@@ -3815,8 +3816,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         message: String,
     ) {
         if (isShuttingDown()) return
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val current = prepareForExternalEdit()
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val nextEngines =
             EngineSelection(
                     noiseEngine = noiseEngine ?: current.noiseEngine,
@@ -3971,8 +3972,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun resetAdjustments() {
         if (isShuttingDown()) return
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         prepareForExternalEdit()
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
         val startSnapshot = acquireEditorSnapshot("resetAdjustments") ?: return
         val current = startSnapshot.state
         val sourcePath = current.sourcePath
@@ -4101,9 +4102,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         message: String,
     ): PresetApplyResult {
         if (isShuttingDown()) return PresetApplyResult.Rejected
+        val current = prepareForExternalEdit()
         if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable())
             return PresetApplyResult.Rejected
-        val current = prepareForExternalEdit()
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
             updateUiStateAndRecycleReplaced { it.copy(message = "적용할 이미지가 없습니다.") }
