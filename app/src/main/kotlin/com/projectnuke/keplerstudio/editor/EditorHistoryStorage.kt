@@ -1175,8 +1175,11 @@ internal class EditorHistoryStorage(
             check(json.getString("entryId") == entry.id)
             check(json.getString("documentGeneration") == expectedGeneration)
             check(json.getString("storage") in HistorySnapshotStorage.entries.map(Enum<*>::name))
-            val bitmapSpecs = json.getJSONArray("bitmaps")
-            check(bitmapSpecs.length() in 1..MAX_BITMAP_PAYLOADS)
+val bitmapSpecs = json.getJSONArray("bitmaps")
+            val maxPayloads = 2 + BitmapMemoryBudget.maxSelectionMaskLayers()
+            check(bitmapSpecs.length() in 1..maxPayloads) {
+                "bitmap count ${bitmapSpecs.length()} exceeds schema-derived maximum $maxPayloads"
+            }
             val keys = HashSet<String>()
             val fileNames = HashSet<String>()
             val validatedFiles = HashMap<String, File>()
@@ -1581,9 +1584,8 @@ internal class EditorHistoryStorage(
 
     private inline fun <reified T : Enum<T>> enumValueStrict(value: String): T = enumValueOf(value)
 
-    private companion object {
+private companion object {
         const val VERSION = 3
-        const val MAX_BITMAP_PAYLOADS = 512
         const val SESSION_PREFIX = "session-"
         const val ENTRY_PREFIX = "entry-"
         const val STAGING_PREFIX = ".staging-"
