@@ -213,6 +213,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Pure read-only inspection for tests: whether a Draft save job is queued/running. */
     internal fun hasActiveDraftSaveJobForTest(): Boolean = draftSaveJob?.isActive == true
+
+    /**
+     * Completes when the startup init coroutine (engine prefs, Draft restore,
+     * export-history rebuild) has fully finished. Tests await this before
+     * ending a test or clearing the ViewModel so no init IO outlives the
+     * test sandbox.
+     */
+    internal val startupInitCompletion = CompletableDeferred<Unit>()
+
     private val savedExportHistoryMutex = Mutex()
     @Volatile private var savedExportHistoryRevision: Long = 0L
     /** Invalidates every queued draft save/restore when the document changes. */
@@ -3389,6 +3398,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             historyResult.retention ?: it.exportHistoryRetention,
                     )
             }
+            startupInitCompletion.complete(Unit)
         }
     }
 

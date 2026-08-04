@@ -298,6 +298,10 @@ class DraftSelfCancellationProductionTest {
                 originalPreviewBitmap = base,
             )
         }
+        // Drain the startup init coroutine before the test body so no export-
+        // history IO outlives the test sandbox. The MediaStore rebuild can take
+        // seconds in Robolectric, so give it a generous budget.
+        awaitInit(vm)
         return vm
     }
 
@@ -332,6 +336,15 @@ class DraftSelfCancellationProductionTest {
             Thread.sleep(5)
         }
         assertTrue(vm.canEnterEditorAction())
+    }
+
+    private fun awaitInit(vm: EditorViewModel) {
+        repeat(1200) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+            if (vm.startupInitCompletion.isCompleted) return
+            Thread.sleep(5)
+        }
+        assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {

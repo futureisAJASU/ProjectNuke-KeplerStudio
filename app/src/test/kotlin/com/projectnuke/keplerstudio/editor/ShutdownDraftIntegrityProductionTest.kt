@@ -469,6 +469,9 @@ class ShutdownDraftIntegrityProductionTest {
                 originalPreviewBitmap = base,
             )
         }
+        // Drain the startup init coroutine before the test body so no export-
+        // history IO outlives the test sandbox or the teardown clear().
+        awaitInit(vm)
         return vm
     }
 
@@ -503,6 +506,15 @@ class ShutdownDraftIntegrityProductionTest {
             Thread.sleep(5)
         }
         assertTrue(vm.canEnterEditorAction())
+    }
+
+    private fun awaitInit(vm: EditorViewModel) {
+        repeat(1200) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+            if (vm.startupInitCompletion.isCompleted) return
+            Thread.sleep(5)
+        }
+        assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
