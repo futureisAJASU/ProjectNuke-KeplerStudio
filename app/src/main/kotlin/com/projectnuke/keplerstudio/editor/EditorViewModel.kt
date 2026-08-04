@@ -1731,6 +1731,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
+        if (!settleForEditorAction()) return false
+        return canEnterEditorActionPure(allowMaskSupersession)
+    }
+
+    /**
+     * Settles interactive owners (pending parameter transaction, brush stroke,
+     * selection transaction) so the caller's first action cannot capture
+     * working pixels or observe a still-live optimistic transaction. Returns
+     * false while a live owner remains or during shutdown. Side-effecting:
+     * this is the only entrypoint that may mutate settlement state.
+     */
+    internal fun settleForEditorAction(): Boolean {
         if (shuttingDown) return false
         abortPendingParameterEdit()
         // An editor action is an intent to capture a new start state. Settle interactive
@@ -1746,6 +1758,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (selectionParamTransaction != null) settleSelectionParamTransactionForSupersession()
         if (brushTransactionState != BrushTransactionState.Idle) return false
         if (selectionParamTransaction != null) return false
+        return true
+    }
+
+    /**
+     * Pure readiness predicate: answers whether an editor action may start
+     * from the current settled state. Must never mutate state; callers invoke
+     * [settleForEditorAction] first.
+     */
+    internal fun canEnterEditorActionPure(allowMaskSupersession: Boolean = false): Boolean {
+        if (shuttingDown) return false
         if (historyCoordinator.flags().busy) return false
         val state = _uiState.value
         return !state.isBusy || allowMaskSupersession && isBusyOwnedByMaskSupersedable()
