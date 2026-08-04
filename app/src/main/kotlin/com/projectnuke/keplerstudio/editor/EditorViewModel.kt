@@ -6799,16 +6799,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         if (snapshot != null) settleAdoptedEditHistory(snapshot)
                         transaction.historyCommitted = true
                     }
-                    if (transaction.adoptedParams != null && _uiState.value.params != transaction.adoptedParams) {
-                        updateUiState { it.copy(params = checkNotNull(transaction.adoptedParams)) }
+                    val settledParams = transaction.adoptedParams ?: transaction.latestParams
+                    lastSuccessfullyRenderedParams = settledParams
+                    val settledRevision = _uiState.value.revision + 1
+                    updateUiStateAndRecycleReplaced {
+                        it.copy(
+                            params = settledParams,
+                            revision = settledRevision,
+                            isBusy = false,
+                        )
                     }
-                    lastSuccessfullyRenderedParams = transaction.adoptedParams ?: transaction.latestParams
-                    val revision = _uiState.value.revision
-                    updateUiState { it.copy(isBusy = false) }
                     updateHistoryFlags()
                     if (shouldScheduleDraft) scheduleDraftAutosave()
                     closeParameterGesture(transaction)
-                    return SettlementResult.Committed(revision)
+                    return SettlementResult.Committed(settledRevision)
                 }
                 else -> {
                     transaction.transitionTo(ParamTransactionState.RollingBack)
