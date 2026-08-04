@@ -6681,7 +6681,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             if (snapshot != null) settleAdoptedEditHistory(snapshot)
             transaction.historyCommitted = true
         }
-        lastSuccessfullyRenderedParams = transaction.latestParams
+        lastSuccessfullyRenderedParams = transaction.adoptedParams ?: transaction.latestParams
         scheduleDraftAutosave()
         maybeCloseParameterGesture(transaction)
     }
@@ -6768,7 +6768,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         if (snapshot != null) settleAdoptedEditHistory(snapshot)
                         transaction.historyCommitted = true
                     }
-                    lastSuccessfullyRenderedParams = transaction.latestParams
+                    if (transaction.adoptedParams != null && _uiState.value.params != transaction.adoptedParams) {
+                        updateUiState { it.copy(params = checkNotNull(transaction.adoptedParams)) }
+                    }
+                    lastSuccessfullyRenderedParams = transaction.adoptedParams ?: transaction.latestParams
                     updateHistoryFlags()
                     scheduleDraftAutosave()
                     closeParameterGesture(transaction)
