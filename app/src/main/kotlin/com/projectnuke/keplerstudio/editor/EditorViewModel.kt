@@ -6678,6 +6678,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun commitPendingParameterTransaction(transaction: ParameterGestureTransaction) {
+        if (transaction.adoptedParams == null) {
+            closeParameterGesture(transaction)
+            return
+        }
         if (!transaction.historyCommitted) {
             if (!transaction.transitionTo(ParamTransactionState.Committing)) {
                 transaction.forceTransitionTo(ParamTransactionState.Committed)
