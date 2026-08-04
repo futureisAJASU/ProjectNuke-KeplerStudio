@@ -6702,29 +6702,86 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         closeParamUndoWindow()
     }
 
-    internal fun abortPendingParameterEdit() {
+    /**
+     * Explicit settlement coordinator used before any external edit action
+     * (crop, rotate, undo/redo, selection, brush, engine change, image
+     * replacement, draft restore, export, comparison source changes, etc.).
+     *
+     * **Adopted preview exists:**
+     * 1. Commit the before-history snapshot immediately.
+     * 2. Retain matching params and pixels.
+     * 3. Update lastSuccessfullyRenderedParams to the adopted params.
+     * 4. Cancel inactivity timer.
+     * 5. Close transaction ownership.
+     * 6. Schedule Draft save after commit.
+     *
+     * **No adopted preview:**
+     * 1. Cancel pending render and history jobs.
+     * 2. Consume or close the pending history snapshot.
+     * 3. Restore exact transaction-start fields (params → lastSuccessfullyRenderedParams).
+     * 4. Recycle transient outputs.
+     * 5. Create no history entry.
+     * 6. Close transaction.
+     *
+     * Settlement completes before the external action captures state.
+     * This method is safe to call when no parameter transaction is active.
+     */
+    internal fun settleParameterTransactionBeforeExternalEdit() {
         val unresolved =
             parameterGesture != null ||
                 activeParamRenderRevision != null ||
                 _uiState.value.params != lastSuccessfullyRenderedParams
         if (!unresolved) return
+
         renderJob?.cancel()
         activeParamRenderRevision = null
         val transaction = parameterGesture
-        updateUiState {
-            it.copy(
-                params = lastSuccessfullyRenderedParams,
-                revision = it.revision + 1,
-                isBusy = false,
-            )
-        }
+
+        paramUndoWindowJob?.cancel()
+        paramUndoWindowJob = null
+
         if (transaction != null) {
             transaction.windowExpired = true
-            transaction.transitionTo(ParamTransactionState.RollingBack)
-            closeParameterGesture(transaction)
+            when (transaction.currentState()) {
+                ParamTransactionState.Adopted -> {
+                    if (!transaction.transitionTo(ParamTransactionState.Committing)) {
+                        transaction.forceTransitionTo(ParamTransactionState.Committed)
+                    } else {
+                        settleAdoptedEditHistory(transaction.historySnapshot)
+                        transaction.historySnapshot = null
+                        transaction.historyCommitted = true
+                    }
+                    lastSuccessfullyRenderedParams = transaction.latestParams
+                    updateHistoryFlags()
+                    scheduleDraftAutosave()
+                    closeParameterGesture(transaction)
+                }
+                else -> {
+                    transaction.transitionTo(ParamTransactionState.RollingBack)
+                    updateUiState {
+                        it.copy(
+                            params = lastSuccessfullyRenderedParams,
+                            revision = it.revision + 1,
+                            isBusy = false,
+                        )
+                    }
+                    closeParameterGesture(transaction)
+                }
+            }
         } else {
+            updateUiState {
+                it.copy(
+                    params = lastSuccessfullyRenderedParams,
+                    revision = it.revision + 1,
+                    isBusy = false,
+                )
+            }
             discardPendingParamUndoSnapshot()
         }
+    }
+
+    internal fun abortPendingParameterEdit() {
+        settleParameterTransactionBeforeExternalEdit()
     }
 
     private fun prepareForMaskInteraction(): EditorUiState {
