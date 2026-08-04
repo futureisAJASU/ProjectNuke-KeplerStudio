@@ -360,6 +360,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
+/**
+         * Atomically take and transfer ownership of [historySnapshot] from the
+         * transaction to the caller. Prevents race between [close] and a late
+         * history result. Returns null if this transaction is closed or the
+         * snapshot has already been taken for another purpose.
+         */
+        internal fun takeOwnedSnapshot(): EditorHistorySnapshot? {
+            synchronized(stateLock) {
+                if (closed || historyCommitted) return null
+                val stored = historySnapshot
+                historySnapshot = null
+                return stored
+            }
+        }
+
         override fun close() {
             synchronized(stateLock) {
                 if (closed) return
@@ -6660,8 +6675,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 transaction.forceTransitionTo(ParamTransactionState.Committed)
                 return
             }
-            settleAdoptedEditHistory(transaction.historySnapshot)
-            transaction.historySnapshot = null
+            val snapshot = transaction.takeOwnedSnapshot()
+            if (snapshot != null) settleAdoptedEditHistory(snapshot)
             transaction.historyCommitted = true
         }
         lastSuccessfullyRenderedParams = transaction.latestParams
@@ -6672,8 +6687,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         transaction: ParameterGestureTransaction,
     ): EditorHistorySnapshot? {
         transaction.transitionTo(ParamTransactionState.RollingBack)
-        val snapshot = transaction.historySnapshot
-        transaction.historySnapshot = null
+        val snapshot = transaction.takeOwnedSnapshot()
         transaction.historyCommitted = true
         closeParameterGesture(transaction)
         return snapshot
@@ -6747,8 +6761,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (!transaction.transitionTo(ParamTransactionState.Committing)) {
                         transaction.forceTransitionTo(ParamTransactionState.Committed)
                     } else {
-                        settleAdoptedEditHistory(transaction.historySnapshot)
-                        transaction.historySnapshot = null
+                        val snapshot = transaction.takeOwnedSnapshot()
+                        if (snapshot != null) settleAdoptedEditHistory(snapshot)
                         transaction.historyCommitted = true
                     }
                     lastSuccessfullyRenderedParams = transaction.latestParams
