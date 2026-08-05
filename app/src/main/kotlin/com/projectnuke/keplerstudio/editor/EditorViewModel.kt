@@ -330,6 +330,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Pure read-only inspection for tests: latest optimistic params in the open transaction. */
     internal fun latestParamsForTest(): EditParams? = parameterGesture?.latestParams
 
+    /** Pure read-only inspection for tests: render progress phase of the open transaction. */
+    internal fun paramRenderPhaseForTest(): ParamRenderPhase? = parameterGesture?.currentRenderPhase()
+
     /** Pure read-only inspection for tests: committed undo-stack entry count. */
     internal fun undoEntryCountForTest(): Int = historyCoordinator.undoEntryCountForTest()
 
@@ -3679,9 +3682,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (transaction.historyHandle == null &&
                         transaction.historyFailure == null
                     ) {
-                        if (!transaction.markRendering()) {
-                            error("parameter transaction terminal=${transaction.currentTerminalState()}, cannot start render")
-                        }
                         transaction.historyHandle =
                             prepareHistorySnapshot("updateParams:${transaction.id}", transaction.start)
                         transaction.historyJob = viewModelScope.launch(Dispatchers.Default) {
@@ -3709,6 +3709,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 }
                             }
                         }
+                    }
+                    if (!transaction.markRendering()) {
+                        error("parameter transaction terminal=${transaction.currentTerminalState()}, cannot start render")
                     }
                     transaction.historyJob?.join()
                     transaction.historyFailure?.let { throw it }
