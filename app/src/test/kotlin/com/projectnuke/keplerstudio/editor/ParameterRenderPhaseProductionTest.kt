@@ -121,6 +121,10 @@ class ParameterRenderPhaseProductionTest {
             awaitEvent(vm) { adopted.size == 3 }
             assertEquals("third adoption leaves phase Adopted", EditorViewModel.ParamRenderPhase.Adopted, vm.paramRenderPhaseForTest())
             assertEquals(0.7f, vm.uiState.value.params.exposure)
+            val ownedRevisions = vm.paramRenderRevisionPhasesForTest()
+            assertEquals(EditorViewModel.ParamRenderRevisionPhase.Closed, ownedRevisions[adopted[0]])
+            assertEquals(EditorViewModel.ParamRenderRevisionPhase.Closed, ownedRevisions[adopted[1]])
+            assertEquals(EditorViewModel.ParamRenderRevisionPhase.Adopted, ownedRevisions[adopted[2]])
 
             val result = vm.settleParameterTransactionBeforeExternalEdit()
             assertEquals(EditorViewModel.SettlementResult.Committed::class, result::class)

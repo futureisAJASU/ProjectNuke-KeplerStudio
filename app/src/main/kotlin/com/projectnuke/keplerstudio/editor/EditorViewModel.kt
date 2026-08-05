@@ -316,6 +316,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Pure read-only inspection for tests: render progress phase of the open transaction. */
     internal fun paramRenderPhaseForTest(): ParamRenderPhase? = parameterGesture?.currentRenderPhase()
+    internal fun paramRenderRevisionPhasesForTest(): Map<Int, ParamRenderRevisionPhase> =
+        parameterGesture?.renderRevisionPhases().orEmpty()
 
     /** Pure read-only inspection for tests: committed undo-stack entry count. */
     internal fun undoEntryCountForTest(): Int = historyCoordinator.undoEntryCountForTest()
@@ -352,6 +354,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         Idle, Rendering, Adopted,
     }
 
+    internal enum class ParamRenderRevisionPhase {
+        Requested, Preparing, Rendering, Produced, Adopted, Canceled, Failed, Closed,
+    }
+
     internal enum class SettlementReason {
         ExternalEdit,
         ManualDraftSave,
@@ -379,7 +385,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val historyPublishSeam: HistoryPublishTestSeam?,
     ) : AutoCloseable {
         @Volatile private var terminalState: ParamTransactionTerminalState = ParamTransactionTerminalState.Active
-        @Volatile private var renderPhase: ParamRenderPhase = ParamRenderPhase.Idle
+        private data class RenderRevisionOwner(
+            val revision: Int,
+            val params: EditParams,
+            val sourceIdentity: DocumentIdentity,
+            var operationToken: Long? = null,
+            var phase: ParamRenderRevisionPhase = ParamRenderRevisionPhase.Requested,
+            var job: Job? = null,
+            var outputOwned: Boolean = false,
+            var terminalReason: String? = null,
+        )
+        private val renderRevisions = LinkedHashMap<Int, RenderRevisionOwner>()
         var historyHandle: PendingHistorySnapshot? = null
         var historyJob: Job? = null
         val historyHandoff = OwnedHandoff<OwnedHistorySnapshot>()
@@ -398,40 +414,90 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
         internal fun currentTerminalState(): ParamTransactionTerminalState = terminalState
 
-        internal fun currentRenderPhase(): ParamRenderPhase = renderPhase
+        internal fun currentRenderPhase(): ParamRenderPhase = synchronized(stateLock) {
+            val latest = renderRevisions[latestRevision]
+            when (latest?.phase) {
+                ParamRenderRevisionPhase.Requested,
+                ParamRenderRevisionPhase.Preparing,
+                ParamRenderRevisionPhase.Rendering,
+                ParamRenderRevisionPhase.Produced -> ParamRenderPhase.Rendering
+                ParamRenderRevisionPhase.Adopted -> ParamRenderPhase.Adopted
+                else -> if (adoptedRevision != null) ParamRenderPhase.Adopted else ParamRenderPhase.Idle
+            }
+        }
+
+        internal fun renderRevisionPhases(): Map<Int, ParamRenderRevisionPhase> =
+            synchronized(stateLock) { renderRevisions.mapValues { it.value.phase } }
+
+        internal fun requestRender(revision: Int, params: EditParams) = synchronized(stateLock) {
+            check(!closed && terminalState == ParamTransactionTerminalState.Active)
+            renderRevisions.values
+                .filter { it.revision != adoptedRevision && it.phase !in setOf(ParamRenderRevisionPhase.Canceled, ParamRenderRevisionPhase.Failed, ParamRenderRevisionPhase.Closed) }
+                .forEach { it.phase = ParamRenderRevisionPhase.Canceled; it.terminalReason = "superseded"; it.job?.cancel() }
+            renderRevisions[revision] = RenderRevisionOwner(revision, params, start.identity)
+        }
+
+        internal fun prepareRender(revision: Int, operationToken: Long, job: Job?) = synchronized(stateLock) {
+            val owner = renderRevisions[revision] ?: return@synchronized false
+            if (closed || owner.phase == ParamRenderRevisionPhase.Canceled) return@synchronized false
+            owner.operationToken = operationToken
+            owner.job = job
+            owner.phase = ParamRenderRevisionPhase.Preparing
+            true
+        }
 
         /** A render job for the latest requested revision now owns the phase. */
-        internal fun markRendering(): Boolean {
+        internal fun markRendering(revision: Int): Boolean {
             synchronized(stateLock) {
-                if (closed || terminalState != ParamTransactionTerminalState.Active) return false
-                renderPhase = ParamRenderPhase.Rendering
+                val owner = renderRevisions[revision] ?: return false
+                if (closed || terminalState != ParamTransactionTerminalState.Active || owner.phase == ParamRenderRevisionPhase.Canceled) return false
+                owner.phase = ParamRenderRevisionPhase.Rendering
                 return true
             }
         }
 
+        internal fun markProduced(revision: Int): Boolean = synchronized(stateLock) {
+            val owner = renderRevisions[revision] ?: return@synchronized false
+            if (closed || owner.phase != ParamRenderRevisionPhase.Rendering) return@synchronized false
+            owner.phase = ParamRenderRevisionPhase.Produced
+            owner.outputOwned = true
+            true
+        }
+
         /** The current render adopted; its output is retained as the gesture state. */
-        internal fun adopt(): Boolean {
+        internal fun adopt(revision: Int): Boolean {
             synchronized(stateLock) {
-                if (closed || terminalState != ParamTransactionTerminalState.Active) return false
-                renderPhase = ParamRenderPhase.Adopted
+                val owner = renderRevisions[revision] ?: return false
+                if (closed || terminalState != ParamTransactionTerminalState.Active || revision != latestRevision || owner.phase != ParamRenderRevisionPhase.Produced) return false
+                adoptedRevision?.takeIf { it != revision }?.let { previous ->
+                    renderRevisions[previous]?.apply { phase = ParamRenderRevisionPhase.Closed; terminalReason = "replaced by adoption $revision" }
+                }
+                owner.phase = ParamRenderRevisionPhase.Adopted
+                owner.outputOwned = false
                 return true
             }
         }
 
         /** A failed newer render left the previously adopted output in place. */
-        internal fun retainAdoptedOutput(): Boolean {
+        internal fun failRender(revision: Int, reason: String): Boolean {
             synchronized(stateLock) {
-                if (closed) return false
-                renderPhase = ParamRenderPhase.Adopted
+                val owner = renderRevisions[revision] ?: return false
+                if (owner.phase == ParamRenderRevisionPhase.Adopted || owner.phase == ParamRenderRevisionPhase.Closed) return false
+                owner.phase = ParamRenderRevisionPhase.Failed
+                owner.terminalReason = reason
+                owner.outputOwned = false
                 return true
             }
         }
 
         /** A render ended with nothing adopted. */
-        internal fun clearRender(): Boolean {
+        internal fun cancelRender(revision: Int, reason: String): Boolean {
             synchronized(stateLock) {
-                if (closed) return false
-                renderPhase = ParamRenderPhase.Idle
+                val owner = renderRevisions[revision] ?: return false
+                if (owner.phase == ParamRenderRevisionPhase.Adopted || owner.phase == ParamRenderRevisionPhase.Closed) return false
+                owner.phase = ParamRenderRevisionPhase.Canceled
+                owner.terminalReason = reason
+                owner.outputOwned = false
                 return true
             }
         }
@@ -472,6 +538,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (closed) return
                 closed = true
                 terminalState = ParamTransactionTerminalState.Closed
+                renderRevisions.values.forEach { owner ->
+                    if (owner.phase != ParamRenderRevisionPhase.Adopted) owner.phase = ParamRenderRevisionPhase.Closed
+                    owner.job?.cancel()
+                    owner.outputOwned = false
+                }
             }
             renderJob?.cancel()
             historyJob?.cancel()
@@ -3646,6 +3717,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val nextRevision = _uiState.value.revision + 1
         transaction.latestParams = next
         transaction.latestRevision = nextRevision
+        transaction.requestRender(nextRevision, next)
         transaction.windowExpired = false
         transaction.inactivityGeneration++
         paramUndoWindowJob?.cancel()
@@ -3670,6 +3742,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         launchManagedRenderWithPreparedResources(
             { operationToken ->
                 val thisJob = coroutineContext[Job]
+                if (!transaction.prepareRender(nextRevision, operationToken, thisJob)) return@launchManagedRenderWithPreparedResources
                 val baseSlot = OwnedHandoff<OwnedBitmap>()
                 val renderSlot = OwnedHandoff<OwnedRenderSuccess>()
                 var base: Bitmap? = null
@@ -3710,7 +3783,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         }
                     }
-                    if (!transaction.markRendering()) {
+                    if (!transaction.markRendering(nextRevision)) {
                         error("parameter transaction terminal=${transaction.currentTerminalState()}, cannot start render")
                     }
                     transaction.historyJob?.join()
@@ -3741,13 +3814,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             )
                         )
                     }
+                    check(transaction.markProduced(nextRevision)) { "parameter render $nextRevision produced after terminal transition" }
                     transaction.lifecycleInstallation?.hooks?.onRenderOutputProduced?.invoke(nextRevision)
                     val owner = checkNotNull(renderSlot.take())
                     val result = owner.result
                     output = checkNotNull(owner.takeOutput())
                     tracker?.track(output, "updateParams:output")
                     if (isManagedEditCurrent(operationToken, nextRevision)) {
-                        if (transaction.adopt()) {
+                        if (transaction.adopt(nextRevision)) {
                             transaction.adoptedRevision = nextRevision
                             transaction.adoptedParams = next
                             updateUiStateAndRecycleReplaced {
@@ -3766,22 +3840,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             transaction.lifecycleInstallation?.hooks?.onRenderOutputAdopted?.invoke(nextRevision)
                             maybeCloseParameterGesture(transaction)
                         } else {
+                            transaction.cancelRender(nextRevision, "adoption rejected")
                             if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                         }
                     } else {
+                        transaction.cancelRender(nextRevision, "stale managed edit")
                         if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     }
                 } catch (ce: CancellationException) {
+                    transaction.cancelRender(nextRevision, "canceled")
                     if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     throw ce
                 } catch (failure: Throwable) {
+                    transaction.failRender(nextRevision, failure.message ?: failure::class.java.simpleName)
                     if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     if (isManagedEditCurrent(operationToken, nextRevision)) {
                         val retainedParams = transaction.adoptedParams
                         if (retainedParams != null) {
                             // A newer render failed: keep the previously adopted
                             // output; only the latest adopted revision decides.
-                            transaction.retainAdoptedOutput()
                             updateUiState { it.copy(params = retainedParams, isBusy = false) }
                         } else {
                             takePendingParameterSnapshotForRollback(transaction)?.let {
