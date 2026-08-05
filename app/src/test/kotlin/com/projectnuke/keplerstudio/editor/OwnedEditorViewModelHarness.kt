@@ -10,6 +10,18 @@ import org.robolectric.Shadows.shadowOf
 internal class OwnedEditorViewModelHarness(
     private val application: Application,
 ) : AutoCloseable {
+    init {
+        // Keep startup initialization deterministic for owned tests.  An
+        // uninitialized export-history preference would make Robolectric query
+        // the synthetic MediaStore, which is not part of these editor tests.
+        application
+            .getSharedPreferences("kepler_studio_editor", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("saved_exports_initialized", true)
+            .putString("saved_exports", "")
+            .commit()
+    }
+
     private val store = ViewModelStore()
     private val sequence = AtomicLong()
     private val files = ArrayDeque<File>()

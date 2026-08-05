@@ -367,15 +367,20 @@ class ParameterMultiAdoptionProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        repeat(300) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+        repeat(200) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
+        }
+        repeat(5000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (predicate()) return
+            Thread.yield()
         }
         assertTrue(predicate())
     }

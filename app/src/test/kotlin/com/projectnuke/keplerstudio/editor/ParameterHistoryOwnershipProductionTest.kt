@@ -5,7 +5,10 @@ import android.graphics.Bitmap
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -92,9 +95,8 @@ class ParameterHistoryOwnershipProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) {
-                publishSeam.reached.isCompleted && vm.pendingParamRenderRevision() != null
-            }
+            awaitEvent(vm) { publishSeam.reached.isCompleted }
+            assertTrue("render remains pending while history publication is gated", vm.pendingParamRenderRevision() != null)
             assertTrue(
                 "history capture reserved the selection mask",
                 vm.selectionMaskOwnership.reservedBytes() > 0L,
@@ -157,9 +159,8 @@ class ParameterHistoryOwnershipProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) {
-                publishSeam.reached.isCompleted && vm.pendingParamRenderRevision() != null
-            }
+            awaitEvent(vm) { publishSeam.reached.isCompleted }
+            assertTrue("render remains pending while history publication is gated", vm.pendingParamRenderRevision() != null)
             assertTrue(
                 "history capture reserved the selection mask",
                 vm.selectionMaskOwnership.reservedBytes() > 0L,
@@ -306,6 +307,7 @@ class ParameterHistoryOwnershipProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -319,11 +321,18 @@ class ParameterHistoryOwnershipProductionTest {
         assertTrue(vm.canEnterEditorAction())
     }
 
-    private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        repeat(300) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+    private suspend fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
+        repeat(400) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (predicate()) return
+            withContext(Dispatchers.Default) { yield() }
+        }
+        repeat(5000) {
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (predicate()) return
+            withContext(Dispatchers.Default) { yield() }
         }
         assertTrue(predicate())
     }

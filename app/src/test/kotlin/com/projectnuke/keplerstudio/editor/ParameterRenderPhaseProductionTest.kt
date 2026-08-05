@@ -6,7 +6,10 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -248,6 +251,7 @@ class ParameterRenderPhaseProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -261,11 +265,15 @@ class ParameterRenderPhaseProductionTest {
         assertTrue(vm.canEnterEditorAction())
     }
 
-    private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        repeat(300) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+    private suspend fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
+        repeat(200) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
+        }
+        repeat(5000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (predicate()) return
+            withContext(Dispatchers.Default) { yield() }
         }
         assertTrue(predicate())
     }

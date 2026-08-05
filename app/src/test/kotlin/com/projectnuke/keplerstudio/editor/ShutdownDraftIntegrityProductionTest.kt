@@ -32,12 +32,6 @@ class ShutdownDraftIntegrityProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
-        context
-            .getSharedPreferences("kepler_studio_editor", android.content.Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean("saved_exports_initialized", true)
-            .putString("saved_exports", "")
-            .commit()
         deleteOwnedTestPath(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
         deleteOwnedTestPath(draftGenerationsRoot(context))

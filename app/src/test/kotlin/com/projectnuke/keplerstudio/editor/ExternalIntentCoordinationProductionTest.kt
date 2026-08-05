@@ -126,7 +126,11 @@ class ExternalIntentCoordinationProductionTest {
         val hooksHandle = ParameterLifecycleTestHook.install(wrappedHooks)
         awaitReady(vm)
         vm.updateParams { it.copy(exposure = 0.2f) }
-        awaitEvent(vm) { vm.uiState.value.params.exposure == 0.2f && !vm.uiState.value.isBusy }
+        awaitEvent(vm) {
+            vm.uiState.value.params.exposure == 0.2f &&
+                !vm.uiState.value.isBusy &&
+                vm.adoptedParamsForTest()?.exposure == 0.2f
+        }
         assertTrue("open adopted gesture", vm.hasOpenParameterGesture())
         assertEquals(0, commitBegan.get())
         return AdoptedSetup(vm, commitBegan, committed, closed, rollbacks, renderCalls, rendererHandle, hooksHandle)
@@ -337,15 +341,21 @@ class ExternalIntentCoordinationProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean): Boolean {
-        repeat(600) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+        repeat(200) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return true
             shadowOf(android.os.Looper.getMainLooper()).idle()
+        }
+        repeat(5000) {
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (predicate()) return true
+            Thread.yield()
         }
         return false
     }

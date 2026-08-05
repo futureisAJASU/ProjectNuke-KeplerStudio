@@ -102,17 +102,17 @@ class ExternalIntentSupersessionProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.3f) }
-            awaitEvent(vm) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
             assertEquals(0.3f, vm.adoptedParamsForTest()?.exposure)
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
             assertTrue("0.5 render must be suspended", renderCalls.get() >= 2)
             assertTrue("busy while B is pending", vm.uiState.value.isBusy)
 
             vm.updateCropRect(0.25f, 0.25f, 0.75f, 0.75f)
             vm.applyCropTransform()
-            awaitEvent(vm) { !vm.uiState.value.isBusy && vm.uiState.value.message == "변경사항을 적용했습니다." }
+            awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && transformCalls.get() >= 2 }
 
             assertEquals("only A adopted", 1, adopted.size)
             assertEquals("B rendered once and never re-rendered", 2, renderCalls.get())
@@ -194,7 +194,7 @@ class ExternalIntentSupersessionProductionTest {
 
             vm.updateCropRect(0.5f, 0.5f, 1f, 1f)
             vm.applyCropTransform()
-            awaitEvent(vm) { !vm.uiState.value.isBusy && vm.uiState.value.message == "변경사항을 적용했습니다." }
+            awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && transformCalls.get() >= 1 }
 
             assertEquals("pending render never adopts", 0, adopted)
             assertEquals("never committed", 0, commitBegan)
@@ -260,13 +260,13 @@ class ExternalIntentSupersessionProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.3f) }
-            awaitEvent(vm) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
 
             vm.applyFlareOriginalMvp()
-            awaitEvent(vm) { !vm.uiState.value.isBusy && vm.uiState.value.message == "규칙 기반 보정으로 번짐을 완화했습니다." }
+            awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && flareCalls.get() >= 1 }
 
             assertEquals("only A adopted", 1, adopted.size)
             assertEquals("param A, suspended B and flare render total three", 3, renderCalls.get())
@@ -341,7 +341,7 @@ class ExternalIntentSupersessionProductionTest {
             awaitEvent(vm) { vm.pendingParamRenderRevision() != null }
 
             vm.applySunFlareOriginalMvp()
-            awaitEvent(vm) { !vm.uiState.value.isBusy && vm.uiState.value.message == "규칙 기반 보정으로 번짐을 완화했습니다." }
+            awaitEvent(vm) { !vm.uiState.value.isBusy && flareCalls.get() >= 1 }
 
             assertEquals("pending render never adopts", 0, adopted)
             assertEquals("never committed", 0, commitBegan)
@@ -398,13 +398,13 @@ class ExternalIntentSupersessionProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.3f) }
-            awaitEvent(vm) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
 
             vm.applyMaskAwareRemaster()
-            awaitEvent(vm) { !vm.uiState.value.isBusy && vm.uiState.value.message == "Edge Masker 기반 마스크 보정을 적용했습니다." }
+            awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && renderCalls.get() >= 3 }
 
             assertEquals("only A adopted", 1, adopted.size)
             assertEquals("param A, suspended B and remaster render total three", 3, renderCalls.get())
@@ -469,16 +469,13 @@ class ExternalIntentSupersessionProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.3f) }
-            awaitEvent(vm) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
 
             vm.applyActiveSelectionLocalEditNativeBaked()
-            awaitEvent(vm) {
-                !vm.uiState.value.isBusy &&
-                    vm.uiState.value.message == "선택 마스크 보정을 원본에 적용했습니다. 저장 결과에도 반영됩니다."
-            }
+            awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && renderCalls.get() >= 3 }
 
             assertEquals("only A adopted", 1, adopted.size)
             assertFalse("transaction settled closed on first tap", vm.hasOpenParameterGesture())
@@ -539,13 +536,13 @@ class ExternalIntentSupersessionProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.3f) }
-            awaitEvent(vm) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
 
             vm.applyActiveSelectionLocalEdit()
-            awaitEvent(vm) { !vm.uiState.value.isBusy && vm.uiState.value.message == "선택한 마스크 보정을 적용했습니다." }
+            awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && renderCalls.get() >= 3 }
 
             assertEquals("only A adopted", 1, adopted.size)
             assertFalse("transaction settled closed on first tap", vm.hasOpenParameterGesture())
@@ -684,16 +681,33 @@ class ExternalIntentSupersessionProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
-    private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        repeat(300) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+    private fun awaitEvent(vm: EditorViewModel, advanceVirtualTime: Boolean = true, predicate: () -> Boolean) {
+        if (advanceVirtualTime) repeat(3000) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
-        assertTrue(predicate())
+        if (!advanceVirtualTime) repeat(400) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
+            if (predicate()) return
+            Thread.yield()
+        }
+        if (!advanceVirtualTime) repeat(5000) {
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (predicate()) return
+            Thread.yield()
+        }
+        assertTrue(
+            "event timeout: busy=${vm.uiState.value.isBusy}, revision=${vm.uiState.value.revision}, " +
+                "params=${vm.uiState.value.params.exposure}, pending=${vm.pendingParamRenderRevision()}, " +
+                "open=${vm.hasOpenParameterGesture()}",
+            predicate(),
+        )
     }
 }

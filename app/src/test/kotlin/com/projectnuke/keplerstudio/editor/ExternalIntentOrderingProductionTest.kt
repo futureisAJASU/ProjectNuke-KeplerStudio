@@ -93,12 +93,12 @@ class ExternalIntentOrderingProductionTest {
 
             // adopt 0.2 inside an open transaction
             vm.updateParams { it.copy(exposure = 0.2f) }
-            awaitEvent(vm) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
             assertEquals(0.2f, vm.adoptedParamsForTest()?.exposure)
 
             // request 0.4; the renderer suspends — no adoption, transaction still open
             vm.updateParams { it.copy(exposure = 0.4f) }
-            awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
             assertTrue("0.4 render must be suspended", renderCalls.get() >= 2)
             assertEquals("adopted params stay 0.2", 0.2f, vm.adoptedParamsForTest()?.exposure)
             assertEquals("latest optimistic params are 0.4", 0.4f, vm.latestParamsForTest()?.exposure)
@@ -182,12 +182,12 @@ class ExternalIntentOrderingProductionTest {
             awaitReady(vm)
 
             vm.updateParams { it.copy(exposure = 0.3f) }
-            awaitEvent(vm) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
             assertEquals("adopted pixels are the 16x8 output", 16, uiPixelBitmap(vm).width)
             assertEquals(8, uiPixelBitmap(vm).height)
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
             assertTrue("0.5 render must be suspended", renderCalls.get() >= 2)
             assertTrue("busy while render is pending", vm.uiState.value.isBusy)
             val revisionBeforeRotate = vm.uiState.value.revision
@@ -195,7 +195,7 @@ class ExternalIntentOrderingProductionTest {
 
             // rotate on first invocation
             vm.rotatePreview90()
-            awaitEvent(vm) {
+            awaitEvent(vm, advanceVirtualTime = false) {
                 val preview = vm.uiState.value.previewBitmap
                 preview != null && !vm.uiState.value.isBusy && preview.width == 8 && preview.height == 16
             }
@@ -373,16 +373,33 @@ class ExternalIntentOrderingProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
-    private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        repeat(300) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+    private fun awaitEvent(vm: EditorViewModel, advanceVirtualTime: Boolean = true, predicate: () -> Boolean) {
+        if (advanceVirtualTime) repeat(3000) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
-        assertTrue(predicate())
+        if (!advanceVirtualTime) repeat(400) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
+            if (predicate()) return
+            Thread.yield()
+        }
+        if (!advanceVirtualTime) repeat(5000) {
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (predicate()) return
+            Thread.yield()
+        }
+        assertTrue(
+            "event timeout: busy=${vm.uiState.value.isBusy}, revision=${vm.uiState.value.revision}, " +
+                "params=${vm.uiState.value.params.exposure}, pending=${vm.pendingParamRenderRevision()}, " +
+                "open=${vm.hasOpenParameterGesture()}",
+            predicate(),
+        )
     }
 }
