@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class RemasterModelSessionValidationTest {
+    private var testSeam: AutoCloseable? = null
 
     @Before
     fun resetSession() = runBlocking {
@@ -33,7 +34,8 @@ class RemasterModelSessionValidationTest {
 
     @After
     fun closeSession() = runBlocking {
-        RemasterModelSession.clearRunnerFactoryForTest()
+        testSeam?.close()
+        testSeam = null
         RemasterModelSession.unloadIdleNow()
         ModelAvailabilityRegistry.resetForTest()
     }
@@ -76,7 +78,7 @@ class RemasterModelSessionValidationTest {
         val second = FakeRunner()
         runners += first
         runners += second
-        RemasterModelSession.installRunnerFactoryForTest { _, _ -> runners.removeFirst() }
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runners.removeFirst() })
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         val context = RuntimeEnvironment.getApplication()
 
@@ -92,10 +94,10 @@ class RemasterModelSessionValidationTest {
     @Test
     fun `post-create publication failure closes the locally owned runner`() = runBlocking {
         val runner = FakeRunner()
-        RemasterModelSession.installRunnerFactoryForTest { _, _ -> runner }
-        RemasterModelSession.installRunnerPostCreateFailureForTest {
-            error("test publication failure")
-        }
+        testSeam = RemasterModelSession.installTestSeam(
+            factory = { _, _ -> runner },
+            postCreate = { error("test publication failure") },
+        )
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
 
         val result = RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication())
@@ -110,10 +112,10 @@ class RemasterModelSessionValidationTest {
     @Test
     fun `post-ready publication failure closes the installed runner`() = runBlocking {
         val runner = FakeRunner()
-        RemasterModelSession.installRunnerFactoryForTest { _, _ -> runner }
-        RemasterModelSession.installRunnerPostPublicationFailureForTest {
-            error("post-ready failure")
-        }
+        testSeam = RemasterModelSession.installTestSeam(
+            factory = { _, _ -> runner },
+            postReady = { error("post-ready failure") },
+        )
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
 
         val result = RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication())
@@ -128,7 +130,7 @@ class RemasterModelSessionValidationTest {
     @Test
     fun `load closes runner exactly once on success then unload`() = runBlocking {
         val runner = FakeRunner()
-        RemasterModelSession.installRunnerFactoryForTest { _, _ -> runner }
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         val context = RuntimeEnvironment.getApplication()
 
@@ -146,7 +148,7 @@ class RemasterModelSessionValidationTest {
     @Test
     fun `load failure closes runner exactly once`() = runBlocking {
         val runner = FakeRunner()
-        RemasterModelSession.installRunnerFactoryForTest { _, _ -> runner }
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("forced failure"))
         val context = RuntimeEnvironment.getApplication()
 

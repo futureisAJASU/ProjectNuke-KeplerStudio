@@ -59,9 +59,13 @@ object RemasterModelSession : ModelRunnerContract {
 
     private var closeableModel: AutoCloseable? = null
     private var sessionValidationIdentity: ModelSessionValidationIdentity? = null
-    private var runnerFactoryOverride: ((Context, String) -> AutoCloseable?)? = null
-    private var runnerPostCreateHookForTest: (() -> Unit)? = null
-    private var runnerPostPublicationHookForTest: (() -> Unit)? = null
+    private data class ModelTestSeam(
+        val factory: ((Context, String) -> AutoCloseable?)?,
+        val postCreate: (() -> Unit)?,
+        val postReady: (() -> Unit)?,
+    )
+    private val modelTestSeamLock = Any()
+    @Volatile private var modelTestSeam: ModelTestSeam? = null
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
     private val commandGeneration = AtomicLong()
@@ -129,6 +133,7 @@ object RemasterModelSession : ModelRunnerContract {
         val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.Remaster)
         val validationToken = (validation as? ModelLoadResult.Ready)?.runner ?: return
         val generation = commandGeneration.incrementAndGet()
+        val capturedTestSeam = synchronized(modelTestSeamLock) { modelTestSeam }
         val registryLoadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
         isModelLoading = true
         isModelLoaded = false
@@ -186,12 +191,12 @@ object RemasterModelSession : ModelRunnerContract {
                         val runnerOwner = LocalRunnerOwner()
                         runnerOwner.install(
                             when (candidate.id) {
-                                "edge_masker" -> createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
+                                "edge_masker" -> createImageSegmenter(applicationContext, validationToken.approvedAssetPath, capturedTestSeam)
                                 else -> error("unsupported runner")
                             }
                         )
                         try {
-                            runnerPostCreateHookForTest?.invoke()
+                            capturedTestSeam?.postCreate?.invoke()
                             if (generation != commandGeneration.get()) {
                                 runnerOwner.close()
                                 isModelLoading = false
@@ -241,7 +246,7 @@ object RemasterModelSession : ModelRunnerContract {
                                         ModelFeature.SubjectSelection,
                                     )
                                 )
-                            runnerPostPublicationHookForTest?.invoke()
+                            capturedTestSeam?.postReady?.invoke()
                         } else {
                             ModelAvailabilityRegistry.reportEdgeLoad(
                                 ModelLoadResult.LoadFailed("runner creation returned null"),
@@ -300,6 +305,7 @@ object RemasterModelSession : ModelRunnerContract {
 
     internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> =
         modelMutex.withLock {
+            val capturedTestSeam = synchronized(modelTestSeamLock) { modelTestSeam }
             val applicationContext = context.applicationContext
             val validation =
                 ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
@@ -351,9 +357,9 @@ object RemasterModelSession : ModelRunnerContract {
                 runCatching { closeableModel?.close() }
                 sessionValidationIdentity = null
                 runnerOwner.install(
-                    createImageSegmenter(applicationContext, validationToken.approvedAssetPath)
+                    createImageSegmenter(applicationContext, validationToken.approvedAssetPath, capturedTestSeam)
                 )
-                runnerPostCreateHookForTest?.invoke()
+                capturedTestSeam?.postCreate?.invoke()
                 if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
                     runnerOwner.close()
                     isModelLoaded = false
@@ -375,7 +381,7 @@ object RemasterModelSession : ModelRunnerContract {
                         ModelAvailabilityRegistry.reportSessionReady(
                             listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection)
                         )
-                    runnerPostPublicationHookForTest?.invoke()
+                    capturedTestSeam?.postReady?.invoke()
                 }
             } catch (failure: Throwable) {
                 runnerOwner.close()
@@ -563,8 +569,8 @@ object RemasterModelSession : ModelRunnerContract {
             manifest.asset.requiredContractSchemaVersion == ModelAssetManifest.CONTRACT_SCHEMA_VERSION
     }
 
-    private fun createImageSegmenter(context: Context, assetPath: String): AutoCloseable {
-        runnerFactoryOverride?.invoke(context, assetPath)?.let { return it }
+    private fun createImageSegmenter(context: Context, assetPath: String, testSeam: ModelTestSeam? = null): AutoCloseable {
+        testSeam?.factory?.invoke(context, assetPath)?.let { return it }
         val baseOptions = BaseOptions.builder().setModelAssetPath(assetPath).build()
         val options =
             ImageSegmenter.ImageSegmenterOptions.builder()
@@ -800,24 +806,25 @@ object RemasterModelSession : ModelRunnerContract {
         }
     }
 
-    /** Test seam used by lifecycle tests; production always uses the MediaPipe factory below. */
-    internal fun installRunnerFactoryForTest(factory: (Context, String) -> AutoCloseable?) {
-        runnerFactoryOverride = factory
+    /** One owner-bound model seam, captured before an async command starts. */
+    internal fun installTestSeam(
+        factory: ((Context, String) -> AutoCloseable?)? = null,
+        postCreate: (() -> Unit)? = null,
+        postReady: (() -> Unit)? = null,
+    ): AutoCloseable {
+        val seam = ModelTestSeam(factory, postCreate, postReady)
+        synchronized(modelTestSeamLock) {
+            check(modelTestSeam == null) { "model test seam already installed" }
+            modelTestSeam = seam
+        }
+        return AutoCloseable {
+            synchronized(modelTestSeamLock) {
+                if (modelTestSeam === seam) modelTestSeam = null
+            }
+        }
     }
 
-    internal fun clearRunnerFactoryForTest() {
-        runnerFactoryOverride = null
-        runnerPostCreateHookForTest = null
-        runnerPostPublicationHookForTest = null
-    }
-
-    internal fun installRunnerPostCreateFailureForTest(failure: () -> Unit) {
-        runnerPostCreateHookForTest = failure
-    }
-
-    internal fun installRunnerPostPublicationFailureForTest(failure: () -> Unit) {
-        runnerPostPublicationHookForTest = failure
-    }
+    internal fun installedTestSeamCount(): Int = synchronized(modelTestSeamLock) { if (modelTestSeam == null) 0 else 1 }
 }
 
 /** Immutable validation facts bound to a loaded native/model session. */
