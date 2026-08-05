@@ -7,6 +7,7 @@ import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import java.util.concurrent.atomic.AtomicLong
 
 internal fun cropTransformedDimensions(sourceWidth: Int, sourceHeight: Int, cropState: CropState): Pair<Int, Int> {
     val state = cropState.normalized()
@@ -26,6 +27,7 @@ internal fun cropTransformedDimensions(sourceWidth: Int, sourceHeight: Int, crop
  */
 private val cropTransformTestLock = Any()
 private class CropTransformInstallation(
+    val generation: Long,
     private val transform: suspend (Bitmap, CropState) -> Bitmap,
 ) {
     @Volatile private var active = true
@@ -40,11 +42,12 @@ private class CropTransformInstallation(
     }
 }
 private var cropTransformInstallation: CropTransformInstallation? = null
+private val cropTransformInstallationGeneration = AtomicLong()
 
 internal fun installCropTransformForTest(
     transform: suspend (Bitmap, CropState) -> Bitmap,
 ): AutoCloseable {
-    val installation = CropTransformInstallation(transform)
+    val installation = CropTransformInstallation(cropTransformInstallationGeneration.incrementAndGet(), transform)
     synchronized(cropTransformTestLock) {
         check(cropTransformInstallation == null) { "crop transform test seam already installed" }
         cropTransformInstallation = installation

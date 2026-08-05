@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import kotlinx.coroutines.CancellationException
+import java.util.concurrent.atomic.AtomicLong
 
 data class RenderIdentity(
     val documentGeneration: String,
@@ -134,6 +135,7 @@ internal fun RenderResult.successOrThrow(): RenderResult.Success =
  */
 internal object EditorRenderer {
     private class RendererInstallation(
+        val generation: Long,
         private val renderer: suspend (RenderRequest) -> RenderResult,
     ) {
         @Volatile private var active = true
@@ -150,9 +152,10 @@ internal object EditorRenderer {
 
     @Volatile private var rendererInstallation: RendererInstallation? = null
     private val rendererOverrideLock = Any()
+    private val rendererInstallationGeneration = AtomicLong()
 
     internal fun installRendererOverrideForTest(renderer: suspend (RenderRequest) -> RenderResult): AutoCloseable {
-        val installation = RendererInstallation(renderer)
+        val installation = RendererInstallation(rendererInstallationGeneration.incrementAndGet(), renderer)
         synchronized(rendererOverrideLock) {
             check(rendererInstallation == null) { "renderer test override already installed" }
             rendererInstallation = installation

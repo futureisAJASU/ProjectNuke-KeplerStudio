@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.editor.PresetColorLook
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import com.projectnuke.keplerstudio.editor.applyPresetColorLookInPlace
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Kotlin -> C++ bridge.
@@ -333,6 +334,7 @@ object NativePhotoCore {
  */
 private val nativeSessionFactoryTestLock = Any()
 private class NativeSessionFactoryInstallation(
+    val generation: Long,
     private val factory: (String) -> Long,
 ) {
     @Volatile private var active = true
@@ -347,9 +349,10 @@ private class NativeSessionFactoryInstallation(
     }
 }
 private var nativeSessionFactoryInstallation: NativeSessionFactoryInstallation? = null
+private val nativeSessionFactoryInstallationGeneration = AtomicLong()
 
 internal fun installNativeSessionFactoryForTest(factory: (String) -> Long): AutoCloseable {
-    val installation = NativeSessionFactoryInstallation(factory)
+    val installation = NativeSessionFactoryInstallation(nativeSessionFactoryInstallationGeneration.incrementAndGet(), factory)
     synchronized(nativeSessionFactoryTestLock) {
         check(nativeSessionFactoryInstallation == null) { "native session factory test seam already installed" }
         nativeSessionFactoryInstallation = installation
@@ -385,6 +388,7 @@ internal fun nativeCreateSessionOrTest(sourcePath: String): Long =
  */
 private val nativeFlareGuardTestLock = Any()
 private class NativeFlareGuardInstallation(
+    val generation: Long,
     private val kernel: suspend (Bitmap, Int, Float, Int) -> Int,
 ) {
     @Volatile private var active = true
@@ -399,11 +403,12 @@ private class NativeFlareGuardInstallation(
     }
 }
 private var nativeFlareGuardInstallation: NativeFlareGuardInstallation? = null
+private val nativeFlareGuardInstallationGeneration = AtomicLong()
 
 internal fun installNativeFlareGuardInPlaceForTest(
     kernel: suspend (Bitmap, Int, Float, Int) -> Int,
 ): AutoCloseable {
-    val installation = NativeFlareGuardInstallation(kernel)
+    val installation = NativeFlareGuardInstallation(nativeFlareGuardInstallationGeneration.incrementAndGet(), kernel)
     synchronized(nativeFlareGuardTestLock) {
         check(nativeFlareGuardInstallation == null) { "native flare test seam already installed" }
         nativeFlareGuardInstallation = installation

@@ -63,6 +63,7 @@ object RemasterModelSession : ModelRunnerContract {
     private var installedCommandGeneration: Long = 0L
     internal enum class PublicationStage { RunnerCreated, LoaderReady, SessionReady, FieldsInstalled }
     private class ModelTestSeam(
+        val generation: Long,
         private val factory: ((Context, String) -> AutoCloseable?)?,
         private val postCreate: (() -> Unit)?,
         private val postReady: (() -> Unit)?,
@@ -90,6 +91,7 @@ object RemasterModelSession : ModelRunnerContract {
     }
     private val modelTestOwnerLock = Any()
     @Volatile private var installedModelTestOwner: ModelTestSeam? = null
+    private val modelTestOwnerGeneration = AtomicLong()
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
     private val commandGeneration = AtomicLong()
@@ -781,7 +783,15 @@ object RemasterModelSession : ModelRunnerContract {
         onClose: (() -> Unit)? = null,
         beforeCreate: (suspend () -> Unit)? = null,
     ): AutoCloseable {
-        val seam = ModelTestSeam(factory, postCreate, postReady, onStage, onClose, beforeCreate)
+        val seam = ModelTestSeam(
+            modelTestOwnerGeneration.incrementAndGet(),
+            factory,
+            postCreate,
+            postReady,
+            onStage,
+            onClose,
+            beforeCreate,
+        )
         synchronized(modelTestOwnerLock) {
             check(installedModelTestOwner == null) { "model test owner already installed" }
             installedModelTestOwner = seam
