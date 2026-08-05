@@ -27,15 +27,21 @@ internal class OwnedEditorViewModelHarness(
 
     fun ownSeam(handle: AutoCloseable): AutoCloseable = handle.also { seamHandles.addFirst(it) }
 
+    /** Terminal production ownership boundary used by shutdown tests. */
+    fun clearViewModels() {
+        store.clear()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+    }
+
     override fun close() {
         if (closed) return
         closed = true
-        store.clear()
-        shadowOf(android.os.Looper.getMainLooper()).idle()
+        clearViewModels()
         seamHandles.forEach { runCatching { it.close() } }
         seamHandles.clear()
         check(ParameterLifecycleTestHook.installedForTestCount() == 0)
         check(HistoryPublishTestSeam.installedForTestCount() == 0)
+        check(DraftSaveTestSeam.installedForTestCount() == 0)
         check(SelectionPreviewPreparationGateway.installedHookCountForTest() == 0)
         check(cropTransformTestSeamCount() == 0)
         files.forEach { path -> runCatching { if (path.isDirectory) path.deleteRecursively() else path.delete() } }

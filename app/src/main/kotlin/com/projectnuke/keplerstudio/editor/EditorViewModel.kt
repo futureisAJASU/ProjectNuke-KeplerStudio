@@ -3228,11 +3228,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean): Boolean {
+        if (shuttingDown) {
+            snapshot.recycleBitmaps()
+            return false
+        }
         val reserve = _uiState.value.historyBitmapBytes()
         val started = java.util.concurrent.atomic.AtomicBoolean(false)
         snapshot.claimCoordinatorOwnership()
         val job =
-            viewModelScope.launch(NonCancellable) {
+            viewModelScope.launch {
                 started.set(true)
                 val result = historyCoordinator.admitAdoptedSnapshot(snapshot, clearRedo, reserve)
                 if (historyIoJob === currentCoroutineContext()[Job]) historyIoJob = null
@@ -3263,24 +3267,33 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun persistDraftSnapshotNow(): Boolean {
+        if (shuttingDown) return false
+        // This is the app-level save-and-leave boundary. Settle the visible
+        // parameter transaction first, then await the filesystem commit. Android
+        // teardown itself cannot provide this suspend guarantee.
+        settleParameterTransaction(SettlementReason.SaveAndLeave)
+        if (shuttingDown) return false
         val (epoch, previous) = beginDraftSaveOperation()
+        val testSeam = DraftSaveTestSeam.capture()
         previous?.join()
         val currentJob = currentCoroutineContext()[Job]
         if (currentJob != null) draftSaveJob = currentJob
         return try {
-            persistDraftSnapshotInternal(epoch, SettlementReason.ManualDraftSave)
+            persistDraftSnapshotInternal(epoch, SettlementReason.ManualDraftSave, testSeam)
         } finally {
             if (draftSaveJob === currentJob) draftSaveJob = null
         }
     }
 
     internal fun scheduleDraftAutosave(delayMs: Long = 2000L) {
+        if (shuttingDown) return
         val (epoch, _) = beginDraftSaveOperation()
+        val testSeam = DraftSaveTestSeam.capture()
         val job =
             viewModelScope.launch {
                 try {
                     delay(delayMs)
-                    persistDraftSnapshotInternal(epoch, SettlementReason.Autosave)
+                    persistDraftSnapshotInternal(epoch, SettlementReason.Autosave, testSeam)
                 } finally {
                     if (draftSaveJob === currentCoroutineContext()[Job]) draftSaveJob = null
                 }
@@ -3290,11 +3303,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun forceDraftSaveAsync() {
+        if (shuttingDown) return
         val (epoch, _) = beginDraftSaveOperation()
+        val testSeam = DraftSaveTestSeam.capture()
         val job =
             viewModelScope.launch {
                 try {
-                    persistDraftSnapshotInternal(epoch, SettlementReason.ManualDraftSave)
+                    persistDraftSnapshotInternal(epoch, SettlementReason.ManualDraftSave, testSeam)
                 } finally {
                     if (draftSaveJob === currentCoroutineContext()[Job]) draftSaveJob = null
                 }
@@ -3304,7 +3319,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (job.isCompleted && draftSaveJob === job) draftSaveJob = null
     }
 
-    private suspend fun persistDraftSnapshotInternal(draftEpoch: Long, reason: SettlementReason): Boolean {
+    private suspend fun persistDraftSnapshotInternal(
+        draftEpoch: Long,
+        reason: SettlementReason,
+        testSeam: DraftSaveTestSeam?,
+    ): Boolean {
         val context = getApplication<Application>()
         val expectedPointer =
             withContext(Dispatchers.IO) {
@@ -3319,6 +3338,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val draftSnapshot = acquireEditorSnapshot("draftSave") ?: return false
         val draftState = draftSnapshot.state
         ParameterLifecycleTestHook.notifyDraftCaptureBegan(draftEpoch)
+        testSeam?.awaitRelease()
         val draftTracker =
             beginMemoryTracking(
                 "persistDraftSnapshot",
@@ -3378,10 +3398,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 isDraftPayloadCurrent(payload)
                         }
                     committed?.let { saved ->
-                        settled =
-                            withContext(NonCancellable) {
-                                settleCommittedDraft(context, saved, payload, owningJob)
-                            }
+                        // Publication is predicate-guarded up to the pointer commit.
+                        // Post-commit UI/old-generation settlement remains cancellable:
+                        // teardown must not retain a ViewModel-owned coroutine. A valid
+                        // committed pointer is recoverable on the next process start.
+                        settled = settleCommittedDraft(context, saved, payload, owningJob)
                     }
                 }
             }
@@ -3758,13 +3779,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             try {
                                 val snap = transaction.historyHandle?.await()
                                 if (snap != null) {
-                                    // The deliberate test park models a publication that has
-                                    // already crossed the cancellation boundary.  Its scoped
-                                    // installation releases the gate before uninstalling, so
-                                    // this non-cancellable handoff cannot outlive teardown.
-                                    withContext(NonCancellable) {
-                                        transaction.historyPublishSeam?.awaitRelease()
-                                    }
+                                    // The scoped owner gate is cancellable: terminal ViewModel
+                                    // settlement must be able to stop publication before the
+                                    // history coordinator closes.
+                                    transaction.historyPublishSeam?.awaitRelease()
                                     if (!transaction.historyHandoff.publish(OwnedHistorySnapshot(snap))) {
                                         // The rejected handoff already closed the wrapper,
                                         // which released the snapshot exactly once. Nothing
@@ -5542,8 +5560,9 @@ fun exportPreview() {
     }
 
     internal fun clearRedoAfterAdoptedEdit() {
+        if (shuttingDown) return
         val job =
-            viewModelScope.launch(NonCancellable) {
+            viewModelScope.launch {
                 historyCoordinator.clearRedoAfterAdoptedEdit()
                 if (historyIoJob === currentCoroutineContext()[Job]) historyIoJob = null
                 updateHistoryFlags()
@@ -7037,7 +7056,13 @@ fun exportPreview() {
                 if (!transaction.historyCommitted) {
                     transaction.commit()
                     val snapshot = transaction.takeOwnedSnapshot()
-                    if (snapshot != null) settleAdoptedEditHistory(snapshot)
+                    if (snapshot != null) {
+                        if (reason == SettlementReason.Shutdown) {
+                            recycleHistorySnapshot(snapshot)
+                        } else {
+                            settleAdoptedEditHistory(snapshot)
+                        }
+                    }
                     transaction.historyCommitted = true
                 }
                 lastSuccessfullyRenderedParams = adoptedParams
@@ -7427,15 +7452,13 @@ fun exportPreview() {
     }
 
     override fun onCleared() {
-        // Shutdown settlement must run before shuttingDown and before any Draft
-        // operation invalidation: an open parameter transaction is resolved into a
-        // coherent final state synchronously (adopted edits committed, otherwise
-        // exact start-state rollback), and the Shutdown reason never schedules a
-        // Draft autosave. Settling after invalidation would cancel the very Draft
-        // job that records the last adopted revision, leaving an older Draft to
-        // silently represent the pending transaction.
-        settleParameterTransaction(SettlementReason.Shutdown)
+        // Android teardown is a non-suspending terminal ownership boundary. The
+        // app-level leave action has already awaited Draft persistence; onCleared
+        // only blocks new work, resolves visible parameter state synchronously,
+        // cancels owned jobs, and releases memory/history ownership. It does not
+        // claim that filesystem persistence can be completed here.
         shuttingDown = true
+        settleParameterTransaction(SettlementReason.Shutdown)
         brushSnapshotJob?.cancel()
         brushSettlementJob?.cancel()
         val shutdownBrushSnapshot = brushingSnapshot

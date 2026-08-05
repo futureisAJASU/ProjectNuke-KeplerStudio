@@ -3,8 +3,9 @@ package com.projectnuke.keplerstudio.editor
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import androidx.lifecycle.ViewModelStore
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -437,8 +438,132 @@ class ShutdownDraftIntegrityProductionTest {
         }
     }
 
+    @Test
+    fun saveAndLeaveWithAdoptedAAndPendingBRetainsA() = runBlocking {
+        val sourceFile = draftSourceFile("save-leave-pending-b.png")
+        val vm = editor(sourceFile.absolutePath)
+        val secondGate = CompletableDeferred<Unit>()
+        val calls = AtomicInteger()
+        val adopted = CompletableDeferred<Unit>()
+        val secondStarted = CompletableDeferred<Unit>()
+        val renderer = EditorRenderer.installRendererOverrideForTest {
+            if (calls.incrementAndGet() == 2) {
+                secondStarted.complete(Unit)
+                secondGate.await()
+            }
+            renderSuccess(if (calls.get() == 1) 0xff224466.toInt() else 0xff6688aa.toInt())
+        }
+        val hooks = ParameterLifecycleTestHook.install(
+            ParameterLifecycleHooks(onRenderOutputAdopted = { adopted.complete(Unit) })
+        )
+        try {
+            vm.updateParams { it.copy(exposure = 0.2f) }
+            adopted.await()
+            vm.updateParams { it.copy(exposure = 0.4f) }
+            secondStarted.await()
+
+            assertTrue(vm.persistDraftSnapshotNow())
+            val saved = validateCurrentDraftGeneration(context) ?: error("Draft missing")
+            assertEquals(0.2f, saved.manifest.params.exposure)
+            assertEquals(0.2f, vm.uiState.value.params.exposure)
+            assertFalse(vm.hasOpenParameterGesture())
+        } finally {
+            secondGate.complete(Unit)
+            hooks.close()
+            renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun saveAndLeaveBeforeAnyAdoptionRollsBackExactStart() = runBlocking {
+        val sourceFile = draftSourceFile("save-leave-no-adoption.png")
+        val vm = editor(sourceFile.absolutePath)
+        val renderGate = CompletableDeferred<Unit>()
+        val started = CompletableDeferred<Unit>()
+        val renderer = EditorRenderer.installRendererOverrideForTest {
+            started.complete(Unit)
+            renderGate.await()
+            renderSuccess(0xff6688aa.toInt())
+        }
+        try {
+            vm.updateParams { it.copy(exposure = 0.7f) }
+            started.await()
+            assertTrue(vm.persistDraftSnapshotNow())
+            val saved = validateCurrentDraftGeneration(context) ?: error("Draft missing")
+            assertEquals(0f, saved.manifest.params.exposure)
+            assertEquals(0f, vm.uiState.value.params.exposure)
+            assertFalse(vm.hasOpenParameterGesture())
+        } finally {
+            renderGate.complete(Unit)
+            renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun clearDuringHistoryPublicationHasNoLateHistoryOrLifecycleCallback() = runBlocking {
+        val sourceFile = draftSourceFile("clear-history-publication.png")
+        val vm = editor(sourceFile.absolutePath)
+        val publish = HistoryPublishTestSeam()
+        val publishHandle = HistoryPublishTestSeam.install(publish)
+        val historyCallbacks = AtomicInteger()
+        val lifecycleCallbacks = AtomicInteger()
+        val hooks = ParameterLifecycleTestHook.install(
+            ParameterLifecycleHooks(
+                onHistoryPublished = { historyCallbacks.incrementAndGet() },
+                onRenderOutputAdopted = { lifecycleCallbacks.incrementAndGet() },
+                onTransactionClosed = { lifecycleCallbacks.incrementAndGet() },
+            )
+        )
+        val renderer = EditorRenderer.installRendererOverrideForTest { renderSuccess(0xff224466.toInt()) }
+        try {
+            vm.updateParams { it.copy(exposure = 0.3f) }
+            publish.reached.await()
+            harness.clearViewModels()
+            val lifecycleAtClear = lifecycleCallbacks.get()
+            publish.releaseGate.complete(Unit)
+            awaitSettled { !vm.hasActiveDraftSaveJobForTest() }
+            assertEquals(0, historyCallbacks.get())
+            assertEquals(lifecycleAtClear, lifecycleCallbacks.get())
+            assertEquals(0L, vm.selectionMaskOwnership.reservedBytes())
+            assertFalse(vm.hasOpenParameterGesture())
+            assertTrue(vm.trackerSession?.snapshot()?.activeOperations?.isEmpty() != false)
+        } finally {
+            publish.releaseGate.complete(Unit)
+            publishHandle.close()
+            hooks.close()
+            renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun clearDuringDraftSaveCancelsOwnerWithoutEpochSelfInvalidation() = runBlocking {
+        val sourceFile = draftSourceFile("clear-draft-save.png")
+        val vm = editor(sourceFile.absolutePath)
+        val seam = DraftSaveTestSeam()
+        val seamHandle = DraftSaveTestSeam.install(seam)
+        try {
+            val save = async { vm.persistDraftSnapshotNow() }
+            seam.reached.await()
+            val epochAtCapture = vm.draftEpochForTest()
+            harness.clearViewModels()
+            seam.releaseGate.complete(Unit)
+            assertTrue(runCatching { save.await() }.isFailure)
+            assertEquals(epochAtCapture + 1L, vm.draftEpochForTest())
+            assertFalse(vm.hasActiveDraftSaveJobForTest())
+            assertEquals(0L, vm.selectionMaskOwnership.reservedBytes())
+            assertTrue(vm.trackerSession?.snapshot()?.activeOperations?.isEmpty() != false)
+        } finally {
+            seam.releaseGate.complete(Unit)
+            seamHandle.close()
+            sourceFile.delete()
+        }
+    }
+
     private fun shutDown(vm: EditorViewModel) {
-        ViewModelStore().apply { put("editor", vm) }.clear()
+        harness.clearViewModels()
         // ViewModelStore.clear is the ownership boundary. Drain posted
         // cancellation/finalizer callbacks before the test deletes its Draft
         // and history directories.
@@ -472,7 +597,7 @@ class ShutdownDraftIntegrityProductionTest {
         return bmp
     }
 
-    private fun editor(sourcePath: String): EditorViewModel {
+    private suspend fun editor(sourcePath: String): EditorViewModel {
         val vm = harness.createEditor()
         val base = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         base.eraseColor(0xff00ff00.toInt())
@@ -514,30 +639,55 @@ class ShutdownDraftIntegrityProductionTest {
         }
     }
 
-    private fun awaitReady(vm: EditorViewModel) {
+    private suspend fun awaitReady(vm: EditorViewModel) {
         repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
-            Thread.sleep(5)
+            delay(1)
         }
         assertTrue(vm.canEnterEditorAction())
     }
 
-    private fun awaitInit(vm: EditorViewModel) {
+    private suspend fun awaitInit(vm: EditorViewModel) {
         repeat(1200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
-            Thread.sleep(5)
+            delay(1)
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
-    private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
+    private suspend fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
         repeat(300) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
-            Thread.sleep(5)
+            delay(1)
         }
         assertTrue(predicate())
+    }
+
+    private suspend fun awaitSettled(predicate: () -> Boolean) {
+        repeat(300) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+            if (predicate()) return
+            delay(1)
+        }
+        assertTrue(predicate())
+    }
+
+    private fun renderSuccess(color: Int): RenderResult.Success {
+        val output = renderOutput(color)
+        return RenderResult.Success(
+            operation = RenderOperation.NativePreview,
+            requestedRoute = NativeRenderRoute.V1,
+            output = output,
+            actualRoute = NativeRenderRoute.V1,
+            decision = RenderRouteDecision.FollowDocument,
+            usedDebugOverride = false,
+            algorithmVersion = AlgorithmContracts.NATIVE_V1,
+            participation = RenderParticipation(),
+            durationMillis = 0L,
+            knownTransientBytes = 0L,
+        )
     }
 }
