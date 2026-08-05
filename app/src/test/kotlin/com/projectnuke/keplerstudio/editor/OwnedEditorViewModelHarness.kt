@@ -36,10 +36,14 @@ internal class OwnedEditorViewModelHarness(
 
     /** Terminal production ownership boundary used by shutdown tests. */
     fun clearViewModels() {
+        val editors = sequence.get().let { count ->
+            (1L..count).mapNotNull { index -> store.get("editor-$index") as? EditorViewModel }
+        }
         preClearActions.forEach { runCatching { it() } }
         preClearActions.clear()
         store.clear()
         shadowOf(android.os.Looper.getMainLooper()).idle()
+        check(editors.none { it.hasActiveViewModelJobsForTest() })
     }
 
     override fun close() {

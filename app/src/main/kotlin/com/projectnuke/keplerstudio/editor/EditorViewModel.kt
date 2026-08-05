@@ -215,6 +215,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Pure read-only inspection for tests: whether a Draft save job is queued/running. */
     internal fun hasActiveDraftSaveJobForTest(): Boolean = draftSaveJob?.isActive == true
 
+    /** Terminal teardown assertion: no child of this ViewModel's owner scope may remain active. */
+    internal fun hasActiveViewModelJobsForTest(): Boolean =
+        viewModelScope.coroutineContext[Job]?.children?.any { it.isActive } == true
+
     /**
      * Completes when the startup init coroutine (engine prefs, Draft restore,
      * export-history rebuild) has fully finished. Tests await this before
