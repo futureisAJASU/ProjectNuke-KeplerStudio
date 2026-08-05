@@ -1168,6 +1168,90 @@ internal class EditorHistoryStorage(
             register,
         )
 
+    private data class ColdManifestValidation(
+        val json: JSONObject,
+        val requiredBytes: Long,
+        val maskBytes: Long,
+        val layerCount: Int,
+    )
+
+    /** Schema and payload validation shared by sizing and full-load paths. */
+    private fun validateColdManifest(
+        entry: EditorHistoryEntry,
+        expectedGeneration: String,
+    ): ColdManifestValidation {
+        val payload = checkNotNull(entry.coldPayload)
+        val directory = payload.directory
+        check(entry.documentGeneration == expectedGeneration)
+        check(isOwnedEntryDirectory(directory, expectedGeneration, entry.id))
+        check(directory.isCompleteHistoryDirectory())
+        val manifestFile = File(directory, MANIFEST)
+        val completeFile = File(directory, COMPLETE)
+        check(manifestFile.isFile && manifestFile.canonicalFile.parentFile == directory.canonicalFile)
+        check(completeFile.isFile && completeFile.canonicalFile.parentFile == directory.canonicalFile)
+        check(completeFile.readText(Charsets.US_ASCII) == "ok")
+        val json = JSONObject(manifestFile.readText(Charsets.UTF_8))
+        check(json.getInt("version") == VERSION)
+        check(json.getString("entryId") == entry.id)
+        check(json.getString("documentGeneration") == expectedGeneration)
+        check(json.getString("storage") == HistorySnapshotStorage.Exact.name)
+
+        val specs = json.getJSONArray("bitmaps")
+        val maxPayloads = 2 + BitmapMemoryBudget.maxSelectionMaskLayers()
+        check(specs.length() in 1..maxPayloads)
+        val keys = HashSet<String>()
+        val names = HashSet<String>()
+        val dimensions = HashMap<String, Pair<Int, Int>>()
+        var requiredBytes = 0L
+        for (index in 0 until specs.length()) {
+            val spec = specs.getJSONObject(index)
+            val key = spec.getString("key")
+            val name = spec.getString("file")
+            val width = spec.getInt("width")
+            val height = spec.getInt("height")
+            check(key.isNotBlank() && keys.add(key))
+            check(names.add(name) && isSafePayloadName(name))
+            check(width > 0 && height > 0)
+            check(spec.getString("config") == Bitmap.Config.ARGB_8888.name)
+            val file = File(directory, name)
+            check(file.isFile && file.canonicalFile.parentFile == directory.canonicalFile)
+            val bounds = BitmapFactory.Options().also { it.inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(file.absolutePath, bounds)
+            check(bounds.outWidth == width && bounds.outHeight == height)
+            dimensions[key] = width to height
+            requiredBytes = BitmapMemoryBudget.saturatingAdd(requiredBytes, BitmapMemoryBudget.bytes(width, height))
+        }
+        val actualPayloadNames = directory.listFiles().orEmpty()
+            .filter { it.name != MANIFEST && it.name != COMPLETE }
+            .mapTo(HashSet()) { it.name }
+        check(actualPayloadNames == names)
+
+        val metadata = json.getJSONObject("metadata")
+        val referenced = HashSet<String>()
+        fun addOptionalKey(name: String) {
+            if (!metadata.isNull(name)) metadata.optString(name).takeIf(String::isNotBlank)?.let { check(referenced.add(it)) }
+        }
+        addOptionalKey("previewKey")
+        addOptionalKey("originalKey")
+        val layers = metadata.getJSONArray("layers")
+        check(layers.length() <= BitmapMemoryBudget.maxSelectionMaskLayers())
+        val layerIds = HashSet<String>()
+        val maskKeys = HashSet<String>()
+        var maskBytes = 0L
+        for (index in 0 until layers.length()) {
+            val layer = layers.getJSONObject(index)
+            check(layerIds.add(layer.getString("id")))
+            val key = layer.getString("bitmapKey")
+            check(maskKeys.add(key) && referenced.add(key))
+            val size = checkNotNull(dimensions[key])
+            maskBytes = BitmapMemoryBudget.saturatingAdd(maskBytes, BitmapMemoryBudget.bytes(size.first, size.second))
+        }
+        val activeId = if (metadata.isNull("activeSelectionLayerId")) null else metadata.getString("activeSelectionLayerId").takeIf(String::isNotBlank)
+        check(activeId == null || activeId in layerIds)
+        check(referenced == keys)
+        return ColdManifestValidation(json, requiredBytes, maskBytes, layers.length())
+    }
+
     override suspend fun loadWithSelectionMaskPreflight(
         entry: EditorHistoryEntry,
         expectedGeneration: String,
@@ -1181,6 +1265,7 @@ internal class EditorHistoryStorage(
         var candidateAdmission: AutoCloseable? = null
         var requiredBytes = 0L
         try {
+            val sharedValidation = validateColdManifest(entry, expectedGeneration)
             val manifestFile = File(directory, MANIFEST)
             val completeFile = File(directory, COMPLETE)
             check(manifestFile.canonicalFile.parentFile == directory.canonicalFile)
@@ -1246,6 +1331,8 @@ val metadata = json.getJSONObject("metadata")
                     BitmapMemoryBudget.bytes(spec.getInt("width"), spec.getInt("height")),
                 )
             }
+            check(requiredBytes == sharedValidation.requiredBytes)
+            check(maskBytes == sharedValidation.maskBytes && layerSpecs.length() == sharedValidation.layerCount)
             candidateAdmission =
                 preflight(
                     HistorySelectionMaskPreflight(
@@ -1297,6 +1384,8 @@ val metadata = json.getJSONObject("metadata")
 
 override suspend fun requiredBitmapBytes(entry: EditorHistoryEntry, expectedGeneration: String): Long? = withContext(ioDispatcher) {
         runCatching {
+            return@runCatching validateColdManifest(entry, expectedGeneration).requiredBytes
+            @Suppress("UNREACHABLE_CODE")
             val payload = checkNotNull(entry.coldPayload)
             val directory = payload.directory
             check(entry.documentGeneration == expectedGeneration && isOwnedEntryDirectory(directory, expectedGeneration, entry.id))
