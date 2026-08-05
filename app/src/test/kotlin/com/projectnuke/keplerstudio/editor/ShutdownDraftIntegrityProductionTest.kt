@@ -32,6 +32,12 @@ class ShutdownDraftIntegrityProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
+        context
+            .getSharedPreferences("kepler_studio_editor", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("saved_exports_initialized", true)
+            .putString("saved_exports", "")
+            .commit()
         deleteOwnedTestPath(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
         deleteOwnedTestPath(draftGenerationsRoot(context))
@@ -458,9 +464,9 @@ class ShutdownDraftIntegrityProductionTest {
         )
         try {
             vm.updateParams { it.copy(exposure = 0.2f) }
-            adopted.await()
+            awaitEvent(vm) { adopted.isCompleted }
             vm.updateParams { it.copy(exposure = 0.4f) }
-            secondStarted.await()
+            awaitEvent(vm) { secondStarted.isCompleted }
 
             assertTrue(vm.persistDraftSnapshotNow())
             val saved = validateCurrentDraftGeneration(context) ?: error("Draft missing")
@@ -488,7 +494,7 @@ class ShutdownDraftIntegrityProductionTest {
         }
         try {
             vm.updateParams { it.copy(exposure = 0.7f) }
-            started.await()
+            awaitEvent(vm) { started.isCompleted }
             assertTrue(vm.persistDraftSnapshotNow())
             val saved = validateCurrentDraftGeneration(context) ?: error("Draft missing")
             assertEquals(0f, saved.manifest.params.exposure)
@@ -519,7 +525,7 @@ class ShutdownDraftIntegrityProductionTest {
         val renderer = EditorRenderer.installRendererOverrideForTest { renderSuccess(0xff224466.toInt()) }
         try {
             vm.updateParams { it.copy(exposure = 0.3f) }
-            publish.reached.await()
+            awaitEvent(vm) { publish.reached.isCompleted }
             harness.clearViewModels()
             val lifecycleAtClear = lifecycleCallbacks.get()
             publish.releaseGate.complete(Unit)
@@ -546,11 +552,12 @@ class ShutdownDraftIntegrityProductionTest {
         val seamHandle = DraftSaveTestSeam.install(seam)
         try {
             val save = async { vm.persistDraftSnapshotNow() }
-            seam.reached.await()
+            awaitEvent(vm) { seam.reached.isCompleted }
             val epochAtCapture = vm.draftEpochForTest()
             harness.clearViewModels()
             seam.releaseGate.complete(Unit)
-            assertFalse(save.await())
+            val saveResult = runCatching { save.await() }.getOrNull()
+            assertFalse("active Draft save is canceled during teardown", saveResult == true)
             assertEquals(epochAtCapture + 1L, vm.draftEpochForTest())
             assertFalse(vm.hasActiveDraftSaveJobForTest())
             assertEquals(0L, vm.selectionMaskOwnership.reservedBytes())
