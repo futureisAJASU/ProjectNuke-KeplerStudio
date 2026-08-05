@@ -65,6 +65,7 @@ class DraftRestoreProductionTest {
             ParameterLifecycleTestHook.install(
                 ParameterLifecycleHooks(onRenderOutputAdopted = { adopted.incrementAndGet() })
             )
+        var sessionFactory: AutoCloseable? = null
         try {
             awaitReady(vm1)
             vm1.updateParams { it.copy(exposure = 0.3f) }
@@ -80,7 +81,7 @@ class DraftRestoreProductionTest {
                 currentDraftGenerationId(context)
                     ?: error("draft pointer must exist after save")
 
-            val sessionFactory = installNativeSessionFactoryForTest { 1L }
+            sessionFactory = installNativeSessionFactoryForTest { 1L }
             val vm2 = harness.createEditor()
             awaitInit(vm2)
             assertEquals("restore render must have run", 1, restoreRenders.get())
@@ -96,8 +97,8 @@ class DraftRestoreProductionTest {
             assertEquals("restored original preview side", 16, vm2.uiState.value.originalPreviewBitmap?.width)
             assertFalse("restored document is not busy", vm2.uiState.value.isBusy)
             awaitEvent { vm2.canEnterEditorAction() }
-            sessionFactory.close()
         } finally {
+            sessionFactory?.close()
             hooks.close()
             renderer.close()
             sourceFile.delete()
@@ -118,6 +119,7 @@ class DraftRestoreProductionTest {
                     successOutput(0xffff0000.toInt())
                 }
             }
+        var sessionFactory: AutoCloseable? = null
         try {
             awaitReady(vm1)
             vm1.updateParams { it.copy(exposure = 0.25f) }
@@ -130,7 +132,7 @@ class DraftRestoreProductionTest {
             assertEquals("manifest records one mask", 1, validated.manifest.selectionLayers.size)
             assertEquals("mask file persisted", 1, validated.maskFiles.size)
 
-            val sessionFactory = installNativeSessionFactoryForTest { 1L }
+            sessionFactory = installNativeSessionFactoryForTest { 1L }
             val vm2 = harness.createEditor()
             awaitInit(vm2)
             assertEquals("restored params", 0.25f, vm2.uiState.value.params.exposure)
@@ -148,8 +150,8 @@ class DraftRestoreProductionTest {
             assertEquals("restored layer opacity", 0.5f, layer.opacity)
             assertEquals("restored active layer id", "restore-mask", vm2.uiState.value.activeSelectionLayerId)
             awaitEvent { vm2.canEnterEditorAction() }
-            sessionFactory.close()
         } finally {
+            sessionFactory?.close()
             renderer.close()
             sourceFile.delete()
         }
@@ -228,10 +230,16 @@ class DraftRestoreProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(200) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
+        repeat(400) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
+        }
+        repeat(5000) {
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (vm.canEnterEditorAction()) return
+            Thread.yield()
         }
         assertTrue(vm.canEnterEditorAction())
     }
@@ -241,6 +249,7 @@ class DraftRestoreProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -250,6 +259,7 @@ class DraftRestoreProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            Thread.yield()
         }
         assertTrue(predicate())
     }
