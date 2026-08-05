@@ -199,14 +199,14 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                     tracker?.track(it.bitmap, "selectionPreview:layer:${it.id}")
                 }
                 preparedSlot.publish(owner)
-                SelectionPreviewPreparationGateway.awaitPreparedOwnerHookForTest()
+                transaction.previewTestHooks?.preparedOwner()
             } catch (cancelled: CancellationException) {
                 owner.close()
-                SelectionPreviewPreparationGateway.awaitPreparedOwnerClosedHookForTest(owner.identity)
+                transaction.previewTestHooks?.preparedOwnerClosed(owner.identity)
                 throw cancelled
             } catch (failure: Throwable) {
                 owner.close()
-                SelectionPreviewPreparationGateway.awaitPreparedOwnerClosedHookForTest(owner.identity)
+                transaction.previewTestHooks?.preparedOwnerClosed(owner.identity)
                 return@withContext SelectionPreviewPreparationOutcome.Rejected(
                     previewIdentity,
                     if (failure is BitmapAllocationRejectedException) {
@@ -263,7 +263,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                     ).successOrThrow()
                 )
             if (!renderSlot.publish(owned)) return@withContext
-            SelectionPreviewPreparationGateway.awaitRenderOutputHookForTest()
+            transaction.previewTestHooks?.renderOutput()
         }
         renderOwner = checkNotNull(renderSlot.take())
         val success = checkNotNull(renderOwner).result
@@ -297,7 +297,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
                 }
                 if (adoptedByCurrentTransaction) {
                     markSelectionPreviewSucceeded(transaction, previewToken, stateForRender.revision, transaction.baseContentToken, activeId)
-                    SelectionPreviewPreparationGateway.awaitPreviewAdoptedHookForTest(
+                    transaction.previewTestHooks?.previewAdopted(
                         SelectionPreviewIdentity(
                             gestureId = transaction.gestureId,
                             previewToken = previewToken,
@@ -356,7 +356,7 @@ private suspend fun EditorViewModel.prepareAndRenderLivePreview(
         )
         preparedOwner?.let { owner ->
             owner.close()
-            SelectionPreviewPreparationGateway.awaitPreparedOwnerClosedHookForTest(owner.identity)
+            transaction.previewTestHooks?.preparedOwnerClosed(owner.identity)
         }
         preparedSlot.close()
         renderOwner?.close()

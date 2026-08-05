@@ -18,10 +18,23 @@ import java.util.concurrent.atomic.AtomicLong
 internal object SelectionPreviewPreparationGateway {
     private val prepareCountAtomic = AtomicLong(0L)
     private val copyCountAtomic = AtomicLong(0L)
-    @Volatile private var preparedOwnerHookForTest: (suspend () -> Unit)? = null
-    @Volatile private var renderOutputHookForTest: (suspend () -> Unit)? = null
-    @Volatile private var preparedOwnerClosedHookForTest: (suspend (SelectionPreviewIdentity) -> Unit)? = null
-    @Volatile private var previewAdoptedHookForTest: (suspend (SelectionPreviewIdentity) -> Unit)? = null
+    internal class Hooks(
+        val preparedOwner: (suspend () -> Unit)? = null,
+        val renderOutput: (suspend () -> Unit)? = null,
+        val preparedOwnerClosed: (suspend (SelectionPreviewIdentity) -> Unit)? = null,
+        val previewAdopted: (suspend (SelectionPreviewIdentity) -> Unit)? = null,
+    )
+
+    internal class Installation internal constructor(private val hooks: Hooks) : AutoCloseable {
+        @Volatile private var active = true
+        internal suspend fun preparedOwner() { if (active) hooks.preparedOwner?.invoke() }
+        internal suspend fun renderOutput() { if (active) hooks.renderOutput?.invoke() }
+        internal suspend fun preparedOwnerClosed(identity: SelectionPreviewIdentity) { if (active) hooks.preparedOwnerClosed?.invoke(identity) }
+        internal suspend fun previewAdopted(identity: SelectionPreviewIdentity) { if (active) hooks.previewAdopted?.invoke(identity) }
+        override fun close() { active = false; synchronized(hookLock) { if (installed === this) installed = null } }
+    }
+    private val hookLock = Any()
+    @Volatile private var installed: Installation? = null
 
     val prepareCount: Long get() = prepareCountAtomic.get()
     val copyCount: Long get() = copyCountAtomic.get()
@@ -37,51 +50,17 @@ internal object SelectionPreviewPreparationGateway {
     fun resetForTest() {
         prepareCountAtomic.set(0L)
         copyCountAtomic.set(0L)
-        preparedOwnerHookForTest = null
-        renderOutputHookForTest = null
-        preparedOwnerClosedHookForTest = null
-        previewAdoptedHookForTest = null
     }
 
-    internal fun installPreparedOwnerHookForTest(hook: suspend () -> Unit) {
-        check(preparedOwnerHookForTest == null) { "prepared owner hook already installed" }
-        preparedOwnerHookForTest = hook
+    internal fun installHooksForTest(hooks: Hooks): Installation {
+        synchronized(hookLock) {
+            check(installed == null) { "selection preview test hooks already installed" }
+            return Installation(hooks).also { installed = it }
+        }
     }
 
-    internal suspend fun awaitPreparedOwnerHookForTest() {
-        preparedOwnerHookForTest?.invoke()
-    }
-
-    internal fun installRenderOutputHookForTest(hook: suspend () -> Unit) {
-        check(renderOutputHookForTest == null) { "render output hook already installed" }
-        renderOutputHookForTest = hook
-    }
-
-    internal suspend fun awaitRenderOutputHookForTest() {
-        renderOutputHookForTest?.invoke()
-    }
-
-    internal fun installPreparedOwnerClosedHookForTest(
-        hook: suspend (SelectionPreviewIdentity) -> Unit,
-    ) {
-        check(preparedOwnerClosedHookForTest == null) { "prepared owner closed hook already installed" }
-        preparedOwnerClosedHookForTest = hook
-    }
-
-    internal suspend fun awaitPreparedOwnerClosedHookForTest(identity: SelectionPreviewIdentity) {
-        preparedOwnerClosedHookForTest?.invoke(identity)
-    }
-
-    internal fun installPreviewAdoptedHookForTest(
-        hook: suspend (SelectionPreviewIdentity) -> Unit,
-    ) {
-        check(previewAdoptedHookForTest == null) { "preview adopted hook already installed" }
-        previewAdoptedHookForTest = hook
-    }
-
-    internal suspend fun awaitPreviewAdoptedHookForTest(identity: SelectionPreviewIdentity) {
-        previewAdoptedHookForTest?.invoke(identity)
-    }
+    internal fun captureHooksForOperation(): Installation? = synchronized(hookLock) { installed }
+    internal fun installedHookCountForTest(): Int = synchronized(hookLock) { if (installed == null) 0 else 1 }
 }
 
 /**

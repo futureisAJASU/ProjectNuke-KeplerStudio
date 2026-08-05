@@ -2009,6 +2009,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     documentGeneration = leased.identity.generation,
                     baseContentToken = state.baseContentToken,
                     activeSelectionLayerId = state.activeSelectionLayerId,
+                    previewTestHooks = SelectionPreviewPreparationGateway.captureHooksForOperation(),
                 )
             selectionParamTransaction?.let { tx ->
                 tx.pendingSnapshot = pendingSnapshot
@@ -7635,6 +7636,7 @@ internal class SelectionParamTransaction(
     val documentGeneration: String,
     val baseContentToken: String,
     val activeSelectionLayerId: String?,
+    val previewTestHooks: SelectionPreviewPreparationGateway.Installation?,
 ) {
     /**
      * Optional deferred history snapshot capture. When the snapshot is captured asynchronously

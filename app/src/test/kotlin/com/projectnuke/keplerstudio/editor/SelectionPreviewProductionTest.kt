@@ -252,23 +252,34 @@ class SelectionPreviewProductionTest {
         val rendered = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         rendered.eraseColor(0xff3366aa.toInt())
         settle { vm.canEnterEditorAction() }
-        assertTrue(vm.beginSelectionParamGesture())
-        val transaction = assertNotNull(vm.currentSelectionParamTransaction())
+        lateinit var transaction: SelectionParamTransaction
         var firstPreviewToken = -1L
-        SelectionPreviewPreparationGateway.installPreparedOwnerHookForTest {
-            when (hookCalls.incrementAndGet()) {
-                1 -> {
-                preparedA.complete(Unit)
-                releaseA.await()
-                }
-                2 -> preparedB.complete(Unit)
-            }
-        }
-        SelectionPreviewPreparationGateway.installPreviewAdoptedHookForTest { identity ->
-            if (identity.gestureId == transaction.gestureId && identity.previewToken == transaction.latestPreviewToken) {
-                adopted.complete(Unit)
-            }
-        }
+        val previewHooks =
+            SelectionPreviewPreparationGateway.installHooksForTest(
+                SelectionPreviewPreparationGateway.Hooks(
+                    preparedOwner = {
+                        when (hookCalls.incrementAndGet()) {
+                            1 -> {
+                                preparedA.complete(Unit)
+                                releaseA.await()
+                            }
+                            2 -> preparedB.complete(Unit)
+                        }
+                    },
+                    preparedOwnerClosed = { identity ->
+                        if (identity.gestureId == transaction.gestureId && identity.previewToken == firstPreviewToken) {
+                            preparedAClosed.complete(Unit)
+                        }
+                    },
+                    previewAdopted = { identity ->
+                        if (identity.gestureId == transaction.gestureId && identity.previewToken == transaction.latestPreviewToken) {
+                            adopted.complete(Unit)
+                        }
+                    },
+                )
+            )
+        assertTrue(vm.beginSelectionParamGesture())
+        transaction = assertNotNull(vm.currentSelectionParamTransaction())
         EditorRenderer.installRendererOverrideForTest {
             rendererCalls.incrementAndGet()
             RenderResult.Success(
@@ -289,11 +300,6 @@ class SelectionPreviewProductionTest {
             vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.2f) }
             awaitSignal(preparedA)
             firstPreviewToken = transaction.latestPreviewToken ?: error("missing first preview token")
-            SelectionPreviewPreparationGateway.installPreparedOwnerClosedHookForTest { identity ->
-                if (identity.gestureId == transaction.gestureId && identity.previewToken == firstPreviewToken) {
-                    preparedAClosed.complete(Unit)
-                }
-            }
             vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.4f) }
             releaseA.complete(Unit)
             awaitSignal(preparedAClosed)
@@ -319,6 +325,7 @@ class SelectionPreviewProductionTest {
         } finally {
             releaseA.complete(Unit)
             EditorRenderer.clearRendererOverrideForTest()
+            previewHooks.close()
             SelectionPreviewPreparationGateway.resetForTest()
         }
     }
