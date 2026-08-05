@@ -184,6 +184,22 @@ internal class PendingHistorySnapshot(
     }
 }
 
+/**
+ * Test seam: parks the parameter-history publish between taking the snapshot
+ * from the pending handle and handing it to [OwnedHandoff.publish], so tests
+ * can close the transaction first and exercise the rejected-publish path
+ * deterministically. The publish still runs because the park is non-cancellable.
+ */
+@Volatile
+var parameterHistoryPublishTestGate: CompletableDeferred<Unit>? = null
+
+/**
+ * Test seam: completes when the parameter-history job has taken the snapshot
+ * and is parked at [parameterHistoryPublishTestGate].
+ */
+@Volatile
+var parameterHistoryPublishTestGateReached: CompletableDeferred<Unit>? = null
+
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val _uiState =
         MutableStateFlow(
@@ -3672,8 +3688,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             try {
                                 val snap = transaction.historyHandle?.await()
                                 if (snap != null) {
+                                    withContext(NonCancellable) {
+                                        parameterHistoryPublishTestGateReached?.complete(Unit)
+                                        parameterHistoryPublishTestGate?.await()
+                                    }
                                     if (!transaction.historyHandoff.publish(OwnedHistorySnapshot(snap))) {
-                                        snap.recycleBitmaps()
+                                        // The rejected handoff already closed the wrapper,
+                                        // which released the snapshot exactly once. Nothing
+                                        // to recycle here.
                                     } else {
                                         transaction.historySnapshotPublished = true
                                         ParameterLifecycleTestHook.notifyHistoryPublished(transaction.id)
@@ -6847,7 +6869,7 @@ fun exportPreview() {
         ParameterLifecycleTestHook.notifyTransactionClosed(transaction.id)
     }
 
-    private fun discardPendingParamUndoSnapshot() {
+    internal fun discardPendingParamUndoSnapshot() {
         parameterGesture?.let(::closeParameterGesture)
         closeParamUndoWindow()
     }
