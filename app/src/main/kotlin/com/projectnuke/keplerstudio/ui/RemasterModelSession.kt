@@ -48,6 +48,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 object RemasterModelSession : ModelRunnerContract {
+    private val EDGE_FEATURES = listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection)
     var activeModel by mutableStateOf<RemasterModelCandidate?>(null)
         private set
 
@@ -59,13 +60,26 @@ object RemasterModelSession : ModelRunnerContract {
 
     private var closeableModel: AutoCloseable? = null
     private var sessionValidationIdentity: ModelSessionValidationIdentity? = null
-    private data class ModelTestSeam(
-        val factory: ((Context, String) -> AutoCloseable?)?,
-        val postCreate: (() -> Unit)?,
-        val postReady: (() -> Unit)?,
-    )
-    private val modelTestSeamLock = Any()
-    @Volatile private var modelTestSeam: ModelTestSeam? = null
+    private var installedCommandGeneration: Long = 0L
+    internal enum class PublicationStage { RunnerCreated, LoaderReady, SessionReady, FieldsInstalled }
+    private class ModelTestSeam(
+        private val factory: ((Context, String) -> AutoCloseable?)?,
+        private val postCreate: (() -> Unit)?,
+        private val postReady: (() -> Unit)?,
+        private val onStage: (suspend (PublicationStage) -> Unit)? = null,
+    ) {
+        @Volatile private var active = true
+
+        fun create(context: Context, assetPath: String): AutoCloseable? =
+            if (active) factory?.invoke(context, assetPath) else null
+
+        fun afterCreate() { if (active) postCreate?.invoke() }
+        fun afterReady() { if (active) postReady?.invoke() }
+        suspend fun atStage(stage: PublicationStage) { if (active) onStage?.invoke(stage) }
+        fun deactivate() { active = false }
+    }
+    private val modelTestOwnerLock = Any()
+    @Volatile private var installedModelTestOwner: ModelTestSeam? = null
     private val modelScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val modelMutex = Mutex()
     private val commandGeneration = AtomicLong()
@@ -129,6 +143,190 @@ object RemasterModelSession : ModelRunnerContract {
             }
 
     fun load(context: Context, candidate: RemasterModelCandidate) {
+        val generation = commandGeneration.incrementAndGet()
+        val seam = synchronized(modelTestOwnerLock) { installedModelTestOwner }
+        isModelLoading = true
+        isModelLoaded = false
+        lifecycle = ModelRunnerLifecycle.Loading
+        GlobalModelDiagnostics.publish("RemasterModelSession", "loading")
+        modelScope.launch {
+            modelMutex.withLock {
+                if (generation != commandGeneration.get()) return@withLock
+                publishCandidateLocked(
+                    context.applicationContext,
+                    candidate,
+                    ModelFeature.Remaster,
+                    generation,
+                    seam,
+                )
+            }
+        }
+    }
+
+    internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> {
+        val generation = commandGeneration.incrementAndGet()
+        val seam = synchronized(modelTestOwnerLock) { installedModelTestOwner }
+        return modelMutex.withLock {
+            if (generation != commandGeneration.get()) {
+                return@withLock ModelLoadResult.RuntimeUnavailable("model load was superseded")
+            }
+            val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
+            val token = (validation as? ModelLoadResult.Ready)?.runner
+                ?: return@withLock validation.asUnitFailure()
+            if (
+                activeModel?.id == "edge_masker" &&
+                    isModelLoaded &&
+                    closeableModel != null &&
+                    sessionValidationIdentity == token.sessionIdentity()
+            ) {
+                return@withLock ModelLoadResult.Ready(Unit)
+            }
+            val candidate = OnDeviceRemasterModels.firstOrNull { it.id == "edge_masker" }
+                ?: return@withLock ModelLoadResult.RuntimeUnavailable("Edge Masker runner is not registered")
+            isModelLoading = true
+            isModelLoaded = false
+            lifecycle = ModelRunnerLifecycle.Loading
+            publishCandidateLocked(
+                context.applicationContext,
+                candidate,
+                ModelFeature.SubjectSelection,
+                generation,
+                seam,
+            )
+        }
+    }
+
+    private suspend fun publishCandidateLocked(
+        context: Context,
+        candidate: RemasterModelCandidate,
+        feature: ModelFeature,
+        generation: Long,
+        seam: ModelTestSeam?,
+    ): ModelLoadResult<Unit> {
+        var loadGeneration = 0L
+        val localRunner = LocalRunnerOwner()
+        var publishedSessionGeneration = 0L
+        var fieldsInstalled = false
+        var failureResult: ModelLoadResult<Unit>? = null
+        try {
+            closeInstalledRunnerLocked()
+            val validation = ModelAvailabilityRegistry.validatedCapabilityToken(feature)
+            val token = (validation as? ModelLoadResult.Ready)?.runner
+                ?: return validation.asUnitFailure().also { failureResult = it }
+            if (
+                !isSupportedModelContract(candidate) ||
+                    candidate.id != token.modelId ||
+                    candidate.assetPath != token.approvedAssetPath ||
+                    ModelAssetManifest.byId(candidate.id)?.asset?.sha256 != token.approvedAssetSha256 ||
+                    ModelAssetManifest.byId(candidate.id)?.asset?.packagingVersion != token.packagingVersion
+            ) {
+                loadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
+                return ModelLoadResult.UnsupportedContract("unsupported Edge Masker contract")
+                    .also { failureResult = it }
+            }
+            ModelAvailabilityRegistry.loaderRejection(feature)?.let { rejection ->
+                return rejection.also { failureResult = it }
+            }
+
+            loadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
+
+            localRunner.install(createImageSegmenter(context, token.approvedAssetPath, seam))
+            seam?.afterCreate()
+            seam?.atStage(PublicationStage.RunnerCreated)
+            checkPublicationCurrent(generation, token, "runner creation")
+
+            ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit), loadGeneration)
+            seam?.atStage(PublicationStage.LoaderReady)
+            checkPublicationCurrent(generation, token, "Loader Ready")
+
+            publishedSessionGeneration = ModelAvailabilityRegistry.reportSessionReady(EDGE_FEATURES)
+            seam?.afterReady()
+            seam?.atStage(PublicationStage.SessionReady)
+            checkPublicationCurrent(generation, token, "Session Ready")
+
+            closeInstalledRunnerLocked()
+            closeableModel = localRunner.peek()
+            activeModel = candidate
+            sessionValidationIdentity = token.sessionIdentity()
+            registrySessionGeneration = publishedSessionGeneration
+            installedCommandGeneration = generation
+            fieldsInstalled = true
+            seam?.atStage(PublicationStage.FieldsInstalled)
+            checkPublicationCurrent(generation, token, "field installation")
+            check(closeableModel === localRunner.peek()) { "installed runner identity changed" }
+
+            localRunner.transfer()
+            isModelLoaded = true
+            isModelLoading = false
+            lifecycle = ModelRunnerLifecycle.Loaded
+            GlobalModelDiagnostics.publish("RemasterModelSession", "loaded")
+            statusText = "${candidate.title}: available"
+            return ModelLoadResult.Ready(Unit)
+        } catch (cancelled: CancellationException) {
+            failureResult = ModelLoadResult.LoadFailed(cancelled.message ?: "model load cancelled")
+            throw cancelled
+        } catch (failure: Throwable) {
+            return ModelLoadResult.LoadFailed(failure.message ?: "Edge Masker load failed")
+                .also { failureResult = it }
+        } finally {
+            val failed = failureResult
+            if (failed != null) {
+                val superseded = generation != commandGeneration.get()
+                if (fieldsInstalled && installedCommandGeneration == generation) {
+                    closeableModel = null
+                    activeModel = null
+                    sessionValidationIdentity = null
+                    registrySessionGeneration = 0L
+                    installedCommandGeneration = 0L
+                }
+                localRunner.close()
+                if (publishedSessionGeneration != 0L) {
+                    ModelAvailabilityRegistry.reportSessionClosed(EDGE_FEATURES, publishedSessionGeneration)
+                    if (registrySessionGeneration == publishedSessionGeneration) registrySessionGeneration = 0L
+                }
+                if (loadGeneration != 0L) {
+                    ModelAvailabilityRegistry.reportEdgeLoad(
+                        if (superseded) ModelLoadResult.Ready(Unit) else failed,
+                        loadGeneration,
+                    )
+                }
+                if (!superseded) {
+                    isModelLoaded = closeableModel != null
+                    isModelLoading = false
+                    lifecycle = if (isModelLoaded) ModelRunnerLifecycle.Loaded else ModelRunnerLifecycle.Failed
+                    GlobalModelDiagnostics.publish(
+                        "RemasterModelSession",
+                        if (isModelLoaded) "loaded" else "unloaded",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun checkPublicationCurrent(
+        generation: Long,
+        token: com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken,
+        stage: String,
+    ) {
+        check(generation == commandGeneration.get() && ModelAvailabilityRegistry.isCurrent(token)) {
+            "model load was superseded after $stage"
+        }
+    }
+
+    private fun closeInstalledRunnerLocked() {
+        val runner = closeableModel
+        closeableModel = null
+        publishSessionClosed()
+        activeModel = null
+        sessionValidationIdentity = null
+        installedCommandGeneration = 0L
+        isModelLoaded = false
+        runCatching { runner?.close() }
+    }
+
+    /* Historical pre-transaction implementation, intentionally inactive while
+       the surrounding encoding-sensitive file is migrated in bounded owners.
+    private fun loadLegacy(context: Context, candidate: RemasterModelCandidate) {
         val applicationContext = context.applicationContext
         val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.Remaster)
         val validationToken = (validation as? ModelLoadResult.Ready)?.runner ?: return
@@ -303,7 +501,7 @@ object RemasterModelSession : ModelRunnerContract {
     }
     }
 
-    internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> =
+    private suspend fun ensureEdgeLoadedLegacy(context: Context): ModelLoadResult<Unit> =
         modelMutex.withLock {
             val capturedTestSeam = synchronized(modelTestSeamLock) { modelTestSeam }
             val applicationContext = context.applicationContext
@@ -320,6 +518,7 @@ object RemasterModelSession : ModelRunnerContract {
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 sessionValidationIdentity = null
+                installedCommandGeneration = 0L
                 activeModel = null
                 isModelLoaded = false
             }
@@ -400,6 +599,8 @@ object RemasterModelSession : ModelRunnerContract {
                 }
             }
         }
+
+    */
 
     internal suspend fun createForegroundMask(
         bitmap: Bitmap,
@@ -519,6 +720,7 @@ object RemasterModelSession : ModelRunnerContract {
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 sessionValidationIdentity = null
+                installedCommandGeneration = 0L
                 activeModel = null
                 isModelLoaded = false
                 isModelLoading = false
@@ -540,6 +742,7 @@ object RemasterModelSession : ModelRunnerContract {
             runCatching { closeableModel?.close() }
             closeableModel = null
             sessionValidationIdentity = null
+            installedCommandGeneration = 0L
             activeModel = null
             isModelLoaded = false
             isModelLoading = false
@@ -553,7 +756,7 @@ object RemasterModelSession : ModelRunnerContract {
     private fun publishSessionClosed(): Boolean {
         if (registrySessionGeneration == 0L) return false
         ModelAvailabilityRegistry.reportSessionClosed(
-            listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection),
+            EDGE_FEATURES,
             registrySessionGeneration,
         )
         registrySessionGeneration = 0L
@@ -570,7 +773,7 @@ object RemasterModelSession : ModelRunnerContract {
     }
 
     private fun createImageSegmenter(context: Context, assetPath: String, testSeam: ModelTestSeam? = null): AutoCloseable {
-        testSeam?.factory?.invoke(context, assetPath)?.let { return it }
+        testSeam?.create(context, assetPath)?.let { return it }
         val baseOptions = BaseOptions.builder().setModelAssetPath(assetPath).build()
         val options =
             ImageSegmenter.ImageSegmenterOptions.builder()
@@ -811,20 +1014,26 @@ object RemasterModelSession : ModelRunnerContract {
         factory: ((Context, String) -> AutoCloseable?)? = null,
         postCreate: (() -> Unit)? = null,
         postReady: (() -> Unit)? = null,
+        onStage: (suspend (PublicationStage) -> Unit)? = null,
     ): AutoCloseable {
-        val seam = ModelTestSeam(factory, postCreate, postReady)
-        synchronized(modelTestSeamLock) {
-            check(modelTestSeam == null) { "model test seam already installed" }
-            modelTestSeam = seam
+        val seam = ModelTestSeam(factory, postCreate, postReady, onStage)
+        synchronized(modelTestOwnerLock) {
+            check(installedModelTestOwner == null) { "model test owner already installed" }
+            installedModelTestOwner = seam
         }
         return AutoCloseable {
-            synchronized(modelTestSeamLock) {
-                if (modelTestSeam === seam) modelTestSeam = null
+            seam.deactivate()
+            synchronized(modelTestOwnerLock) {
+                if (installedModelTestOwner === seam) installedModelTestOwner = null
             }
         }
     }
 
-    internal fun installedTestSeamCount(): Int = synchronized(modelTestSeamLock) { if (modelTestSeam == null) 0 else 1 }
+    internal fun installedTestSeamCount(): Int = synchronized(modelTestOwnerLock) { if (installedModelTestOwner == null) 0 else 1 }
+
+    internal fun validationIdentityForTest(): ModelSessionValidationIdentity? = sessionValidationIdentity
+    internal fun sessionGenerationForTest(): Long = registrySessionGeneration
+    internal fun installedRunnerForTest(): AutoCloseable? = closeableModel
 }
 
 /** Immutable validation facts bound to a loaded native/model session. */
@@ -849,6 +1058,8 @@ private class LocalRunnerOwner {
     }
 
     fun transfer(): AutoCloseable = checkNotNull(runner).also { runner = null }
+
+    fun peek(): AutoCloseable = checkNotNull(runner)
 
     fun close() {
         val value = runner ?: return
