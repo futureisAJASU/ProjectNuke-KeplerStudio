@@ -61,15 +61,33 @@ internal class OwnedEditorViewModelHarness(
     override fun close() {
         if (closed) return
         closed = true
-        clearViewModels()
-        seamHandles.forEach { runCatching { it.close() } }
-        seamHandles.clear()
-        check(ParameterLifecycleTestHook.installedForTestCount() == 0)
-        check(HistoryPublishTestSeam.installedForTestCount() == 0)
-        check(DraftSaveTestSeam.installedForTestCount() == 0)
-        check(SelectionPreviewPreparationGateway.installedHookCountForTest() == 0)
-        check(cropTransformTestSeamCount() == 0)
-        files.forEach { path -> runCatching { if (path.isDirectory) path.deleteRecursively() else path.delete() } }
-        files.clear()
+        var failure: Throwable? = null
+        try {
+            clearViewModels()
+        } catch (t: Throwable) {
+            failure = t
+        } finally {
+            seamHandles.forEach { handle ->
+                runCatching { handle.close() }
+                    .onFailure { failure = failure ?: it }
+            }
+            seamHandles.clear()
+            runCatching { check(ParameterLifecycleTestHook.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
+            runCatching { check(HistoryPublishTestSeam.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
+            runCatching { check(DraftSaveTestSeam.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
+            runCatching { check(SelectionPreviewPreparationGateway.installedHookCountForTest() == 0) }
+                .onFailure { failure = failure ?: it }
+            runCatching { check(cropTransformTestSeamCount() == 0) }
+                .onFailure { failure = failure ?: it }
+            files.forEach { path ->
+                runCatching { if (path.isDirectory) path.deleteRecursively() else path.delete() }
+                    .onFailure { failure = failure ?: it }
+            }
+            files.clear()
+        }
+        failure?.let { throw it }
     }
 }
