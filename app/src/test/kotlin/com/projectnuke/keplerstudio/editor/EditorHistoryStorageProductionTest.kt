@@ -83,6 +83,7 @@ class EditorHistoryStorageProductionTest {
         assertNotNull(loaded)
         assertTrue(preflightSeen)
         assertTrue(!decodeBeforePreflight)
+        assertEquals(snapshot.bitmapBytes(), storage.requiredBitmapBytes(entry, generation))
         loaded?.recycleBitmaps()
         snapshot.recycleBitmaps()
         storage.deleteSession(generation)
@@ -192,11 +193,21 @@ class EditorHistoryStorageProductionTest {
         File(payload.directory, "manifest.json").writeText(manifest.toString(), Charsets.UTF_8)
     }
 
-    private suspend fun setupPublishedEntry(suffix: String): Triple<EditorHistoryStorage, String, EditorHistoryEntry> {
-        val vm = editor(false, suffix)
+    private suspend fun setupPublishedEntry(
+        suffix: String,
+        decodeObserver: ((File) -> Unit)? = null,
+        withMask: Boolean = false,
+    ): Triple<EditorHistoryStorage, String, EditorHistoryEntry> {
+        val vm = editor(withMask, suffix)
         awaitReady(vm)
         val snapshot = checkNotNull(vm.captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact))
-        val storage = EditorHistoryStorage(context, Dispatchers.Unconfined, { fail("decode should not happen") }, syncDirectories = false, enforceDiskSpace = false)
+        val storage = EditorHistoryStorage(
+            context,
+            Dispatchers.Unconfined,
+            decodeObserver ?: { fail("decode should not happen") },
+            syncDirectories = false,
+            enforceDiskSpace = false,
+        )
         val generation = suffix
         val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
         storage.registerSession(generation)
@@ -206,6 +217,25 @@ class EditorHistoryStorageProductionTest {
         entry.coldPayload = payload
         entry.payloadState = HistoryPayloadState.Hot
         return Triple(storage, generation, entry)
+    }
+
+    private suspend fun assertColdHistoryRejectedBeforeDecode(
+        suffix: String,
+        mutateManifest: (org.json.JSONObject) -> Unit,
+        mutateComplete: ((File) -> Unit)? = null,
+    ) {
+        var decoded = 0
+        val (storage, generation, entry) = setupPublishedEntry(suffix, decodeObserver = { decoded++ })
+        try {
+            corruptEntry(entry, mutateManifest)
+            mutateComplete?.invoke(File(checkNotNull(entry.coldPayload).directory, "COMPLETE"))
+            val loaded = storage.loadWithSelectionMaskPreflight(entry, generation, { AutoCloseable { } }, { decoded++ })
+            assertNull(loaded)
+            assertEquals(0, decoded)
+        } finally {
+            storage.deleteSession(generation)
+            storage.unregisterSession(generation)
+        }
     }
 
     @Test
@@ -278,6 +308,76 @@ class EditorHistoryStorageProductionTest {
         assertEquals(0, decoded)
         storage.deleteSession(generation)
         storage.unregisterSession(generation)
+    }
+
+    @Test
+    fun coldHistoryRejectsDuplicateFilenameBeforeDecode() = runBlocking {
+        assertColdHistoryRejectedBeforeDecode("schema-reject-dupfile", { manifest ->
+            val specs = manifest.getJSONArray("bitmaps")
+            specs.getJSONObject(1).put("file", specs.getJSONObject(0).getString("file"))
+        })
+    }
+
+    @Test
+    fun coldHistoryRejectsConfigMismatchBeforeDecode() = runBlocking {
+        assertColdHistoryRejectedBeforeDecode("schema-reject-config", { manifest ->
+            manifest.getJSONArray("bitmaps").getJSONObject(0).put("config", "RGB_565")
+        })
+    }
+
+    @Test
+    fun coldHistoryRejectsManifestDimensionMismatchBeforeDecode() = runBlocking {
+        assertColdHistoryRejectedBeforeDecode("schema-reject-dimension", { manifest ->
+            val spec = manifest.getJSONArray("bitmaps").getJSONObject(0)
+            spec.put("width", spec.getInt("width") + 1)
+        })
+    }
+
+    @Test
+    fun coldHistoryRejectsMaskGeometryMismatchBeforeDecode() = runBlocking {
+        var decoded = 0
+        val (storage, generation, entry) = setupPublishedEntry("schema-reject-mask-geometry", decodeObserver = { decoded++ }, withMask = true)
+        try {
+            corruptEntry(entry) { manifest ->
+                val specs = manifest.getJSONArray("bitmaps")
+                val maskKey = manifest.getJSONObject("metadata").getJSONArray("layers").getJSONObject(0).getString("bitmapKey")
+                for (index in 0 until specs.length()) {
+                    val spec = specs.getJSONObject(index)
+                    if (spec.getString("key") == maskKey) spec.put("width", spec.getInt("width") + 1)
+                }
+            }
+            val loaded = storage.loadWithSelectionMaskPreflight(entry, generation, { AutoCloseable { } }, { decoded++ })
+            assertNull(loaded)
+            assertEquals(0, decoded)
+        } finally {
+            storage.deleteSession(generation)
+            storage.unregisterSession(generation)
+        }
+    }
+
+    @Test
+    fun coldHistoryRejectsMissingCompleteMarkerBeforeDecode() = runBlocking {
+        assertColdHistoryRejectedBeforeDecode("schema-reject-no-complete", { }, { it.delete() })
+    }
+
+    @Test
+    fun coldHistoryRejectsInvalidCompleteMarkerBeforeDecode() = runBlocking {
+        assertColdHistoryRejectedBeforeDecode("schema-reject-bad-complete", { }, { it.writeText("bad", Charsets.US_ASCII) })
+    }
+
+    @Test
+    fun coldHistoryRejectsInvalidActiveSelectionBeforeDecode() = runBlocking {
+        assertColdHistoryRejectedBeforeDecode("schema-reject-active-selection", { manifest ->
+            manifest.getJSONObject("metadata").put("activeSelectionLayerId", "missing-layer")
+        })
+    }
+
+    @Test
+    fun coldHistoryRejectsExcessiveSelectionLayersBeforeDecode() = runBlocking {
+        assertColdHistoryRejectedBeforeDecode("schema-reject-layer-count", { manifest ->
+            val layers = manifest.getJSONObject("metadata").getJSONArray("layers")
+            repeat(BitmapMemoryBudget.maxSelectionMaskLayers() + 1) { layers.put(org.json.JSONObject()) }
+        })
     }
 
     @Test
