@@ -152,7 +152,6 @@ object RemasterModelSession : ModelRunnerContract {
                 runCatching { closeableModel?.close() }
                 closeableModel = null
                 sessionValidationIdentity = null
-                activeModel = candidate
                 if (!isSupportedModelContract(candidate) ||
                     candidate.id != validationToken.modelId ||
                     candidate.assetPath != validationToken.approvedAssetPath ||
@@ -224,6 +223,10 @@ object RemasterModelSession : ModelRunnerContract {
                             statusText = "${candidate.title}: model validation became stale"
                             return@onSuccess
                         }
+                        // Candidate identity is not visible until the runner,
+                        // validation token, and registry publication have all
+                        // survived their local ownership checks.
+                        activeModel = candidate.takeIf { closeableModel != null }
                         isModelLoaded = closeableModel != null
                         if (isModelLoaded) {
                             sessionValidationIdentity = validationToken.sessionIdentity()
@@ -320,7 +323,6 @@ object RemasterModelSession : ModelRunnerContract {
                         "Edge Masker runner is not registered"
                     )
             val loadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
-            activeModel = candidate
             isModelLoading = true
             lifecycle = ModelRunnerLifecycle.Loading
             if (!isSupportedModelContract(candidate)) {
@@ -362,6 +364,7 @@ object RemasterModelSession : ModelRunnerContract {
                     return@withLock stale
                 }
                 closeableModel = runnerOwner.transfer()
+                activeModel = candidate
                 isModelLoaded = true
                 sessionValidationIdentity = validationToken.sessionIdentity()
                 isModelLoading = false
