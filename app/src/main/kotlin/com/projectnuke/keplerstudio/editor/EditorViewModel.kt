@@ -3684,7 +3684,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             try {
                                 val snap = transaction.historyHandle?.await()
                                 if (snap != null) {
-                                    transaction.historyPublishSeam?.awaitRelease()
+                                    // The deliberate test park models a publication that has
+                                    // already crossed the cancellation boundary.  Its scoped
+                                    // installation releases the gate before uninstalling, so
+                                    // this non-cancellable handoff cannot outlive teardown.
+                                    withContext(NonCancellable) {
+                                        transaction.historyPublishSeam?.awaitRelease()
+                                    }
                                     if (!transaction.historyHandoff.publish(OwnedHistorySnapshot(snap))) {
                                         // The rejected handoff already closed the wrapper,
                                         // which released the snapshot exactly once. Nothing
