@@ -3514,50 +3514,53 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val startupRestoreToken = ++restoreDraftToken
         val startupRevision = _uiState.value.revision
         viewModelScope.launch {
-            val context = getApplication<Application>()
-            val engines = loadEngineSelection(context)
-            updateUiStateAndRecycleReplaced {
-                it.copy(
-                    noiseEngine = engines.noiseEngine,
-                    detailEngine = engines.detailEngine,
-                    toneEngine = engines.toneEngine,
-                    hazeEngine = engines.hazeEngine,
-                )
-            }
-            restoreDraftIfAvailable(context, startupRestoreToken, startupRevision)
-            val historyResult =
-                withContext(Dispatchers.IO) {
-                    savedExportHistoryMutex.withLock {
-                        val currentRetention = loadExportHistoryRetention(context)
-                        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                        val previous =
-                            if (
-                                prefs.getBoolean(KEY_SAVED_EXPORTS_INITIALIZED, false) ||
-                                    prefs.contains(KEY_SAVED_EXPORTS)
-                            ) {
-                                loadSavedExportsFromPrefs(context)
-                            } else emptyList()
-                        val next = loadOrRebuildSavedExportHistory(context, currentRetention)
-                        SavedExportHistoryResult(
-                            ++savedExportHistoryRevision,
-                            next,
-                            previous.map { it.uriString }.toSet() -
-                                next.map { it.uriString }.toSet(),
-                            retention = currentRetention,
-                        )
-                    }
-                }
-            invalidateRemovedHistoryThumbnails(context, historyResult)
-            updateUiStateAndRecycleReplaced {
-                if (historyResult.revision != savedExportHistoryRevision) it
-                else
+            try {
+                val context = getApplication<Application>()
+                val engines = loadEngineSelection(context)
+                updateUiStateAndRecycleReplaced {
                     it.copy(
-                        savedExports = historyResult.items,
-                        exportHistoryRetention =
-                            historyResult.retention ?: it.exportHistoryRetention,
+                        noiseEngine = engines.noiseEngine,
+                        detailEngine = engines.detailEngine,
+                        toneEngine = engines.toneEngine,
+                        hazeEngine = engines.hazeEngine,
                     )
+                }
+                restoreDraftIfAvailable(context, startupRestoreToken, startupRevision)
+                val historyResult =
+                    withContext(Dispatchers.IO) {
+                        savedExportHistoryMutex.withLock {
+                            val currentRetention = loadExportHistoryRetention(context)
+                            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                            val previous =
+                                if (
+                                    prefs.getBoolean(KEY_SAVED_EXPORTS_INITIALIZED, false) ||
+                                        prefs.contains(KEY_SAVED_EXPORTS)
+                                ) {
+                                    loadSavedExportsFromPrefs(context)
+                                } else emptyList()
+                            val next = loadOrRebuildSavedExportHistory(context, currentRetention)
+                            SavedExportHistoryResult(
+                                ++savedExportHistoryRevision,
+                                next,
+                                previous.map { it.uriString }.toSet() -
+                                    next.map { it.uriString }.toSet(),
+                                retention = currentRetention,
+                            )
+                        }
+                    }
+                invalidateRemovedHistoryThumbnails(context, historyResult)
+                updateUiStateAndRecycleReplaced {
+                    if (historyResult.revision != savedExportHistoryRevision) it
+                    else
+                        it.copy(
+                            savedExports = historyResult.items,
+                            exportHistoryRetention =
+                                historyResult.retention ?: it.exportHistoryRetention,
+                        )
+                }
+            } finally {
+                startupInitCompletion.complete(Unit)
             }
-            startupInitCompletion.complete(Unit)
         }
     }
 
