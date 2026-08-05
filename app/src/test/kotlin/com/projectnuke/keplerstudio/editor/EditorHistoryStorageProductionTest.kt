@@ -30,17 +30,23 @@ class EditorHistoryStorageProductionTest {
     @Before
     fun cleanHistoryRoot() {
         harness = OwnedEditorViewModelHarness(context)
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deletePath(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deletePath(draftGenerationsRoot(context))
     }
 
     @After
     fun cleanHistoryRootAfter() {
         harness.close()
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deletePath(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deletePath(draftGenerationsRoot(context))
+    }
+
+    private fun deletePath(path: File) {
+        runCatching {
+            if (path.isDirectory) path.deleteRecursively() else path.delete()
+        }
     }
 
     @Test
@@ -223,9 +229,14 @@ class EditorHistoryStorageProductionTest {
         suffix: String,
         mutateManifest: (org.json.JSONObject) -> Unit,
         mutateComplete: ((File) -> Unit)? = null,
+        withMask: Boolean = false,
     ) {
         var decoded = 0
-        val (storage, generation, entry) = setupPublishedEntry(suffix, decodeObserver = { decoded++ })
+        val (storage, generation, entry) = setupPublishedEntry(
+            suffix,
+            decodeObserver = { decoded++ },
+            withMask = withMask,
+        )
         try {
             corruptEntry(entry, mutateManifest)
             mutateComplete?.invoke(File(checkNotNull(entry.coldPayload).directory, "COMPLETE"))
@@ -315,7 +326,7 @@ class EditorHistoryStorageProductionTest {
         assertColdHistoryRejectedBeforeDecode("schema-reject-dupfile", { manifest ->
             val specs = manifest.getJSONArray("bitmaps")
             specs.getJSONObject(1).put("file", specs.getJSONObject(0).getString("file"))
-        })
+        }, withMask = true)
     }
 
     @Test

@@ -1229,7 +1229,7 @@ internal class EditorHistoryStorage(
         val metadata = json.getJSONObject("metadata")
         val referenced = HashSet<String>()
         fun addOptionalKey(name: String) {
-            if (!metadata.isNull(name)) metadata.optString(name).takeIf(String::isNotBlank)?.let { check(referenced.add(it)) }
+            if (!metadata.isNull(name)) metadata.optString(name).takeIf(String::isNotBlank)?.let { referenced.add(it) }
         }
         addOptionalKey("previewKey")
         addOptionalKey("originalKey")
