@@ -19,7 +19,19 @@ internal fun cropTransformedDimensions(sourceWidth: Int, sourceHeight: Int, crop
     ).roundToInt().coerceAtLeast(1)
 }
 
-suspend fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap {
+/**
+ * Deterministic crop-transform seam for production tests. When set, every
+ * crop transform call site uses it instead of the native library; the
+ * default (null) keeps the production native path unchanged.
+ */
+@Volatile
+internal var cropTransformForTest: (suspend (Bitmap, CropState) -> Bitmap)? = null
+
+suspend fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap =
+    cropTransformForTest?.invoke(source, cropState)
+        ?: renderCropTransformNative(source, cropState)
+
+private suspend fun renderCropTransformNative(source: Bitmap, cropState: CropState): Bitmap {
     val state = cropState.normalized()
     val rotation = state.rotationDegrees + state.straightenDegrees
     val dimensions = cropTransformedDimensions(source.width, source.height, state)
