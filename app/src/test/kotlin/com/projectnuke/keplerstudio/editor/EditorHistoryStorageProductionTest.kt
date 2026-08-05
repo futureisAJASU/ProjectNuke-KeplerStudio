@@ -23,11 +23,13 @@ import java.util.concurrent.TimeUnit
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class EditorHistoryStorageProductionTest {
+    private lateinit var harness: OwnedEditorViewModelHarness
     private val context: Application
         get() = RuntimeEnvironment.getApplication() as Application
 
     @Before
     fun cleanHistoryRoot() {
+        harness = OwnedEditorViewModelHarness(context)
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -35,6 +37,7 @@ class EditorHistoryStorageProductionTest {
 
     @After
     fun cleanHistoryRootAfter() {
+        harness.close()
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -157,7 +160,7 @@ class EditorHistoryStorageProductionTest {
     }
 
     private fun editor(withMask: Boolean, sourcePath: String = "history-storage-test"): EditorViewModel {
-        val vm = EditorViewModel(context)
+        val vm = harness.createEditor()
         val base = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         val mask = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         vm.updateUiState {

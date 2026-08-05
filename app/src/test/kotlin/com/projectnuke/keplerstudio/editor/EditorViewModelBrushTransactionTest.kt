@@ -8,6 +8,8 @@ import kotlin.test.assertTrue
 import com.projectnuke.keplerstudio.ui.paintActiveSelectionAt
 import com.projectnuke.keplerstudio.ui.deleteActiveSelectionLayer
 import org.junit.Test
+import org.junit.Before
+import org.junit.After
 import org.junit.runner.RunWith
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.RobolectricTestRunner
@@ -17,8 +19,16 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class EditorViewModelBrushTransactionTest {
+    private lateinit var harness: OwnedEditorViewModelHarness
+
+    @Before
+    fun setUpHarness() { harness = OwnedEditorViewModelHarness(RuntimeEnvironment.getApplication() as Application) }
+
+    @After
+    fun closeHarness() { harness.close() }
+
     private fun viewModel(): EditorViewModel {
-        val vm = EditorViewModel(RuntimeEnvironment.getApplication() as Application)
+        val vm = harness.createEditor()
         val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         val layerBitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         vm.updateUiState {

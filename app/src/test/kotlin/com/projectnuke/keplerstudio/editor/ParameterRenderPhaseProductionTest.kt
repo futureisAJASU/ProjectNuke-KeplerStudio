@@ -30,11 +30,13 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class ParameterRenderPhaseProductionTest {
+    private lateinit var harness: OwnedEditorViewModelHarness
     private val context: Application
         get() = RuntimeEnvironment.getApplication() as Application
 
     @Before
     fun cleanDraft() {
+        harness = OwnedEditorViewModelHarness(context)
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -42,6 +44,7 @@ class ParameterRenderPhaseProductionTest {
 
     @After
     fun cleanDraftAfter() {
+        harness.close()
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -219,7 +222,7 @@ class ParameterRenderPhaseProductionTest {
     }
 
     private fun editor(sourcePath: String): EditorViewModel {
-        val vm = EditorViewModel(context)
+        val vm = harness.createEditor()
         val previewBmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         previewBmp.eraseColor(0xff00ff00.toInt())
         val originalBmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)

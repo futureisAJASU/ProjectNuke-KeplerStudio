@@ -22,11 +22,13 @@ import java.util.concurrent.atomic.AtomicInteger
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class ParameterLifecycleHookTest {
+    private lateinit var harness: OwnedEditorViewModelHarness
     private val context: Application
         get() = RuntimeEnvironment.getApplication() as Application
 
     @Before
     fun cleanDraft() {
+        harness = OwnedEditorViewModelHarness(context)
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -34,6 +36,7 @@ class ParameterLifecycleHookTest {
 
     @After
     fun cleanDraftAfter() {
+        harness.close()
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -241,7 +244,7 @@ class ParameterLifecycleHookTest {
     }
 
     private fun editor(): EditorViewModel {
-        val vm = EditorViewModel(context)
+        val vm = harness.createEditor()
         vm.updateUiState {
             it.copy(
                 sourcePath = "hook-seam-test",

@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicInteger
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class ParameterMultiAdoptionProductionTest {
+    private lateinit var harness: OwnedEditorViewModelHarness
     private val context: Application
         get() = RuntimeEnvironment.getApplication() as Application
 
@@ -39,6 +40,7 @@ class ParameterMultiAdoptionProductionTest {
 
     @Before
     fun cleanDraft() {
+        harness = OwnedEditorViewModelHarness(context)
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -46,6 +48,7 @@ class ParameterMultiAdoptionProductionTest {
 
     @After
     fun cleanDraftAfter() {
+        harness.close()
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -328,7 +331,7 @@ class ParameterMultiAdoptionProductionTest {
     }
 
     private fun editor(sourcePath: String): EditorViewModel {
-        val vm = EditorViewModel(context)
+        val vm = harness.createEditor()
         val base = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         base.eraseColor(0xff00ff00.toInt())
         vm.updateUiState {

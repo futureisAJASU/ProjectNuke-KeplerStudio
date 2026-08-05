@@ -14,6 +14,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
 import org.junit.After
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RuntimeEnvironment
@@ -24,14 +25,21 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class SelectionPreviewProductionTest {
+    private lateinit var harness: OwnedEditorViewModelHarness
+
+    @Before
+    fun setUpHarness() {
+        harness = OwnedEditorViewModelHarness(RuntimeEnvironment.getApplication() as Application)
+    }
     @After
     fun tearDown() {
+        harness.close()
         EditorRenderer.clearRendererOverrideForTest()
         SelectionPreviewPreparationGateway.resetForTest()
     }
 
     private fun viewModel(): EditorViewModel {
-        val vm = EditorViewModel(RuntimeEnvironment.getApplication() as Application)
+        val vm = harness.createEditor()
         val base = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         val mask = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         vm.updateUiState {

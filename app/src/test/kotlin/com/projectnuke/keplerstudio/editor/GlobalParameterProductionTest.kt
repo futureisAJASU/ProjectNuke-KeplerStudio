@@ -8,6 +8,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import org.junit.Before
+import org.junit.After
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RuntimeEnvironment
@@ -21,19 +22,24 @@ import java.util.concurrent.atomic.AtomicInteger
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class GlobalParameterProductionTest {
+    private lateinit var harness: OwnedEditorViewModelHarness
     private val context: Application
         get() = RuntimeEnvironment.getApplication() as Application
 
     @Before
     fun cleanDraft() {
+        harness = OwnedEditorViewModelHarness(context)
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
     }
 
+    @After
+    fun closeHarness() { harness.close() }
+
     @Test
     fun updateParamsUsesWorkerRenderAndCreatesOneUndoEntry() {
-        val vm = EditorViewModel(RuntimeEnvironment.getApplication() as Application)
+        val vm = harness.createEditor()
         val base = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         val output = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         output.eraseColor(0xff224466.toInt())
@@ -75,7 +81,7 @@ class GlobalParameterProductionTest {
 
     @Test
     fun rapidTicksKeepTheExactFirstGestureStateForUndo() {
-        val vm = EditorViewModel(RuntimeEnvironment.getApplication() as Application)
+        val vm = harness.createEditor()
         val base = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         val renders = AtomicInteger()
         vm.updateUiState {
@@ -317,7 +323,7 @@ class GlobalParameterProductionTest {
     }
 
     private fun editor(): EditorViewModel {
-        val vm = EditorViewModel(context)
+        val vm = harness.createEditor()
         val base = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         base.eraseColor(0xff00ff00.toInt())
         vm.updateUiState {

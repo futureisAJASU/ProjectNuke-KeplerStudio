@@ -23,11 +23,13 @@ import java.util.concurrent.atomic.AtomicInteger
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class DraftRestoreProductionTest {
+    private lateinit var harness: OwnedEditorViewModelHarness
     private val context: Application
         get() = RuntimeEnvironment.getApplication() as Application
 
     @Before
     fun cleanDraft() {
+        harness = OwnedEditorViewModelHarness(context)
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -35,6 +37,7 @@ class DraftRestoreProductionTest {
 
     @After
     fun cleanDraftAfter() {
+        harness.close()
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -78,7 +81,7 @@ class DraftRestoreProductionTest {
                     ?: error("draft pointer must exist after save")
 
             val sessionFactory = installNativeSessionFactoryForTest { 1L }
-            val vm2 = EditorViewModel(context)
+            val vm2 = harness.createEditor()
             awaitInit(vm2)
             assertEquals("restore render must have run", 1, restoreRenders.get())
             assertEquals("restored params", 0.3f, vm2.uiState.value.params.exposure)
@@ -128,7 +131,7 @@ class DraftRestoreProductionTest {
             assertEquals("mask file persisted", 1, validated.maskFiles.size)
 
             val sessionFactory = installNativeSessionFactoryForTest { 1L }
-            val vm2 = EditorViewModel(context)
+            val vm2 = harness.createEditor()
             awaitInit(vm2)
             assertEquals("restored params", 0.25f, vm2.uiState.value.params.exposure)
             assertEquals("restored pixels", 0xff0000ff.toInt(), uiPixelColor(vm2))
@@ -166,7 +169,7 @@ class DraftRestoreProductionTest {
     }
 
     private fun editor(sourcePath: String, withMask: Boolean): EditorViewModel {
-        val vm = EditorViewModel(context)
+        val vm = harness.createEditor()
         val base = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         base.eraseColor(0xff00ff00.toInt())
         val mask = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
