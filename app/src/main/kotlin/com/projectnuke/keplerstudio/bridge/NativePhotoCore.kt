@@ -342,6 +342,37 @@ internal fun nativeCreateSessionOrTest(sourcePath: String): Long =
     nativeSessionFactoryForTest?.invoke(sourcePath)
         ?: NativePhotoCore.nativeCreateSession(sourcePath)
 
+/**
+ * Deterministic in-place flare kernel seam for production tests. When set,
+ * every flare rule call site uses it instead of the native library; the
+ * default (null) keeps the production native path unchanged.
+ *
+ * Lives outside the [NativePhotoCore] object on purpose: touching the object
+ * triggers its class initializer (System.loadLibrary), which fails in
+ * Robolectric and is cached as NoClassDefFoundError.
+ */
+@Volatile
+internal var nativeFlareGuardInPlaceForTest:
+    (suspend (Bitmap, Int, Float, Int) -> Int)? = null
+
+/**
+ * Flare rule kernel routed through the test seam when one is installed,
+ * otherwise the native library call.
+ */
+internal suspend fun nativeApplyFlareGuardInPlaceOrTest(
+    bitmap: Bitmap,
+    mode: Int,
+    strength: Float,
+    revision: Int,
+): Int =
+    nativeFlareGuardInPlaceForTest?.invoke(bitmap, mode, strength, revision)
+        ?: NativePhotoCore.nativeApplyFlareGuardInPlace(
+            bitmap,
+            mode,
+            strength,
+            revision,
+        )
+
 data class NativeCorrectionV2Params(
     val detail: Float = 0f,
     val luminanceNoise: Float = 0f,

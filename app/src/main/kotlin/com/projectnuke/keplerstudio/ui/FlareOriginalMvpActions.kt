@@ -1,7 +1,7 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.graphics.Bitmap
-import com.projectnuke.keplerstudio.bridge.NativePhotoCore
+import com.projectnuke.keplerstudio.bridge.nativeApplyFlareGuardInPlaceOrTest
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.AlgorithmContracts
 import com.projectnuke.keplerstudio.editor.BakedFeatureProvenance
@@ -46,6 +46,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
     strength: Float,
 ) {
     if (isShuttingDown()) return
+    settleParameterTransactionBeforeExternalEdit()
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
 
     prepareForExternalEdit()
@@ -97,7 +98,7 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
                 ownedBaseOwned = checkNotNull(baseSlot.take()?.take())
                 withContext(Dispatchers.Default) {
                     val result =
-                        NativePhotoCore.nativeApplyFlareGuardInPlace(
+                        nativeApplyFlareGuardInPlaceOrTest(
                             checkNotNull(ownedBaseOwned),
                             mode.ordinal,
                             strength.coerceIn(0f, 1f),

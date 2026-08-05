@@ -195,6 +195,7 @@ fun EditorViewModel.resetCropState() {
 
 fun EditorViewModel.applyCropTransform() {
     if (isShuttingDown()) return
+    settleParameterTransactionBeforeExternalEdit()
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
 
     prepareForExternalEdit()

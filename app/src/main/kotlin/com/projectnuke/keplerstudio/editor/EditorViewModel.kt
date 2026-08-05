@@ -5775,8 +5775,8 @@ fun exportPreview() {
 
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
         if (shuttingDown) return
-        val stateBeforePrepare = _uiState.value
-        if (stateBeforePrepare.isBusy && !isBusyOwnedByMaskSupersedable()) {
+        settleParameterTransactionBeforeExternalEdit()
+        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) {
             return
         }
         prepareForExternalEdit()

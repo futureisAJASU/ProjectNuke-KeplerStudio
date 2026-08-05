@@ -36,6 +36,7 @@ import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     if (isShuttingDown()) return
+    settleParameterTransactionBeforeExternalEdit()
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
     prepareForExternalEdit()
     val startSnapshot = acquireEditorSnapshot("selectionNativeBake") ?: return

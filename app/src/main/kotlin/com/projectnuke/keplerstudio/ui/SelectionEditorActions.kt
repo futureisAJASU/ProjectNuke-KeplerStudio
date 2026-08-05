@@ -587,6 +587,7 @@ fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditP
 
 fun EditorViewModel.applyActiveSelectionLocalEdit() {
     if (isShuttingDown()) return
+    settleParameterTransactionBeforeExternalEdit()
     if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
     invalidateSelectionPreview()
     prepareForExternalEdit()
