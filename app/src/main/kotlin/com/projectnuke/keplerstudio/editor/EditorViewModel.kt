@@ -320,13 +320,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun redoEntryCountForTest(): Int = historyCoordinator.redoEntryCountForTest()
 
     /**
-     * Explicit transaction state within a parameter gesture window. Loosely follows
-     * Active → WaitingForHistory → Rendering → Adopted → Committing → Committed
-     * or any non-terminal → RollingBack → RolledBack → Closed.
+     * Terminal state of the parameter gesture itself: an open gesture is
+     * [Active]; settlement makes it [Committed] (when at least one render was
+     * adopted) or [RolledBack] (when nothing was adopted). [Closed] is
+     * ownership release. Terminal state is decided ONLY by the adoption
+     * record, never by per-render progress.
      */
-    internal enum class ParamTransactionState {
-        Active, WaitingForHistory, Rendering, Adopted, Committing, RollingBack,
-        Committed, RolledBack, Closed,
+    internal enum class ParamTransactionTerminalState {
+        Active, Committed, RolledBack, Closed,
+    }
+
+    /**
+     * Progress of the gesture's current render, independent of the terminal
+     * state: [Idle] means no render in flight and nothing adopted yet,
+     * [Rendering] means a render for the latest requested revision is in
+     * flight, [Adopted] means the latest adopted revision is retained and no
+     * render is in flight. Multiple sequential adoptions in one gesture move
+     * the phase Rendering → Adopted → Rendering → Adopted without ever
+     * touching the terminal state.
+     */
+    internal enum class ParamRenderPhase {
+        Idle, Rendering, Adopted,
     }
 
     internal enum class SettlementReason {
@@ -353,7 +367,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val id: Long,
         val start: LeasedEditorSnapshot,
     ) : AutoCloseable {
-        @Volatile private var state: ParamTransactionState = ParamTransactionState.Active
+        @Volatile private var terminalState: ParamTransactionTerminalState = ParamTransactionTerminalState.Active
+        @Volatile private var renderPhase: ParamRenderPhase = ParamRenderPhase.Idle
         var historyHandle: PendingHistorySnapshot? = null
         var historyJob: Job? = null
         val historyHandoff = OwnedHandoff<OwnedHistorySnapshot>()
@@ -370,53 +385,65 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         internal val stateLock = Any()
         private var closed = false
 
-        internal fun currentState(): ParamTransactionState = state
+        internal fun currentTerminalState(): ParamTransactionTerminalState = terminalState
 
-        internal fun transitionTo(next: ParamTransactionState): Boolean {
+        internal fun currentRenderPhase(): ParamRenderPhase = renderPhase
+
+        /** A render job for the latest requested revision now owns the phase. */
+        internal fun markRendering(): Boolean {
             synchronized(stateLock) {
-                if (closed) return false
-                if (!isLegalTransition(state, next)) return false
-                state = next
+                if (closed || terminalState != ParamTransactionTerminalState.Active) return false
+                renderPhase = ParamRenderPhase.Rendering
                 return true
             }
         }
 
-        internal fun forceTransitionTo(next: ParamTransactionState) {
-            synchronized(stateLock) { if (!closed) state = next }
-        }
-
-        private fun isLegalTransition(from: ParamTransactionState, to: ParamTransactionState): Boolean {
-            if (from == to) {
-                return from == ParamTransactionState.Adopted || from == ParamTransactionState.Rendering
-            }
-            return when (from) {
-                ParamTransactionState.Active ->
-                    to == ParamTransactionState.WaitingForHistory ||
-                        to == ParamTransactionState.RolledBack ||
-                        to == ParamTransactionState.Closed
-                ParamTransactionState.WaitingForHistory ->
-                    to == ParamTransactionState.Adopted ||
-                        to == ParamTransactionState.RolledBack ||
-                        to == ParamTransactionState.Closed
-                ParamTransactionState.Rendering ->
-                    to == ParamTransactionState.Adopted ||
-                        to == ParamTransactionState.RollingBack ||
-                        to == ParamTransactionState.Closed
-                ParamTransactionState.Adopted ->
-                    to == ParamTransactionState.Committing ||
-                        to == ParamTransactionState.RollingBack ||
-                        to == ParamTransactionState.Closed
-                ParamTransactionState.Committing ->
-                    to == ParamTransactionState.Committed ||
-                        to == ParamTransactionState.Closed
-                ParamTransactionState.RollingBack ->
-                    to == ParamTransactionState.RolledBack ||
-                        to == ParamTransactionState.Closed
-                ParamTransactionState.Committed, ParamTransactionState.RolledBack, ParamTransactionState.Closed -> false
+        /** The current render adopted; its output is retained as the gesture state. */
+        internal fun adopt(): Boolean {
+            synchronized(stateLock) {
+                if (closed || terminalState != ParamTransactionTerminalState.Active) return false
+                renderPhase = ParamRenderPhase.Adopted
+                return true
             }
         }
 
-/**
+        /** A failed newer render left the previously adopted output in place. */
+        internal fun retainAdoptedOutput(): Boolean {
+            synchronized(stateLock) {
+                if (closed) return false
+                renderPhase = ParamRenderPhase.Adopted
+                return true
+            }
+        }
+
+        /** A render ended with nothing adopted. */
+        internal fun clearRender(): Boolean {
+            synchronized(stateLock) {
+                if (closed) return false
+                renderPhase = ParamRenderPhase.Idle
+                return true
+            }
+        }
+
+        /** Terminal commit; the only normal path to [ParamTransactionTerminalState.Committed]. */
+        internal fun commit(): Boolean {
+            synchronized(stateLock) {
+                if (closed || terminalState != ParamTransactionTerminalState.Active) return false
+                terminalState = ParamTransactionTerminalState.Committed
+                return true
+            }
+        }
+
+        /** Terminal rollback; the only normal path to [ParamTransactionTerminalState.RolledBack]. */
+        internal fun rollback(): Boolean {
+            synchronized(stateLock) {
+                if (closed || terminalState != ParamTransactionTerminalState.Active) return false
+                terminalState = ParamTransactionTerminalState.RolledBack
+                return true
+            }
+        }
+
+        /**
          * Atomically take and transfer ownership of [historyHandoff] from the
          * transaction to the caller. Prevents race between [close] and a late
          * history result. Returns null if this transaction is closed or the
@@ -433,7 +460,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             synchronized(stateLock) {
                 if (closed) return
                 closed = true
-                state = ParamTransactionState.Closed
+                terminalState = ParamTransactionTerminalState.Closed
             }
             renderJob?.cancel()
             historyJob?.cancel()
@@ -3635,8 +3662,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (transaction.historyHandle == null &&
                         transaction.historyFailure == null
                     ) {
-                        if (!transaction.transitionTo(ParamTransactionState.WaitingForHistory)) {
-                            error("parameter transaction in state=${transaction.currentState()}, cannot start history")
+                        if (!transaction.markRendering()) {
+                            error("parameter transaction terminal=${transaction.currentTerminalState()}, cannot start render")
                         }
                         transaction.historyHandle =
                             prepareHistorySnapshot("updateParams:${transaction.id}", transaction.start)
@@ -3694,9 +3721,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     output = checkNotNull(owner.takeOutput())
                     tracker?.track(output, "updateParams:output")
                     if (isManagedEditCurrent(operationToken, nextRevision)) {
-                        if (!transaction.transitionTo(ParamTransactionState.Adopted)) {
-                            activeParamRenderRevision = null
-                        } else {
+                        if (transaction.adopt()) {
                             transaction.adoptedRevision = nextRevision
                             transaction.adoptedParams = next
                             updateUiStateAndRecycleReplaced {
@@ -3714,9 +3739,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             output = null
                             ParameterLifecycleTestHook.notifyRenderOutputAdopted(nextRevision)
                             maybeCloseParameterGesture(transaction)
+                        } else {
+                            if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                         }
                     } else {
-                        activeParamRenderRevision = null
+                        if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     }
                 } catch (ce: CancellationException) {
                     if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
@@ -3724,10 +3751,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (failure: Throwable) {
                     if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     if (isManagedEditCurrent(operationToken, nextRevision)) {
-                        takePendingParameterSnapshotForRollback(transaction)?.let {
-                            restoreSnapshotWithoutHistory(it, (failure as? RenderFailedException)?.failure)
+                        val retainedParams = transaction.adoptedParams
+                        if (retainedParams != null) {
+                            // A newer render failed: keep the previously adopted
+                            // output; only the latest adopted revision decides.
+                            transaction.retainAdoptedOutput()
+                            updateUiState { it.copy(params = retainedParams, isBusy = false) }
+                        } else {
+                            takePendingParameterSnapshotForRollback(transaction)?.let {
+                                restoreSnapshotWithoutHistory(it, (failure as? RenderFailedException)?.failure)
+                            }
+                            updateUiState { it.copy(params = lastSuccessfullyRenderedParams, isBusy = false) }
                         }
-                        updateUiState { it.copy(params = lastSuccessfullyRenderedParams, isBusy = false) }
                     }
                 } finally {
                     output?.takeUnless(Bitmap::isRecycled)?.recycle()
@@ -6764,30 +6799,27 @@ fun exportPreview() {
     }
 
     private fun commitPendingParameterTransaction(transaction: ParameterGestureTransaction) {
-        if (transaction.adoptedParams == null) {
+        val adoptedParams = transaction.adoptedParams ?: run {
             closeParameterGesture(transaction)
             return
         }
         ParameterLifecycleTestHook.notifyTransactionCommitBegan(transaction.id)
         if (!transaction.historyCommitted) {
-            if (!transaction.transitionTo(ParamTransactionState.Committing)) {
-                transaction.forceTransitionTo(ParamTransactionState.Committed)
-                return
-            }
+            if (!transaction.commit()) return
             val snapshot = transaction.takeOwnedSnapshot()
             if (snapshot != null) settleAdoptedEditHistory(snapshot)
             transaction.historyCommitted = true
         }
-        lastSuccessfullyRenderedParams = transaction.adoptedParams ?: transaction.latestParams
+        lastSuccessfullyRenderedParams = adoptedParams
         scheduleDraftAutosave()
         maybeCloseParameterGesture(transaction)
-        ParameterLifecycleTestHook.notifyTransactionCommitted(transaction.adoptedRevision ?: transaction.latestRevision)
+        ParameterLifecycleTestHook.notifyTransactionCommitted(checkNotNull(transaction.adoptedRevision))
     }
 
     private fun takePendingParameterSnapshotForRollback(
         transaction: ParameterGestureTransaction,
     ): EditorHistorySnapshot? {
-        transaction.transitionTo(ParamTransactionState.RollingBack)
+        transaction.rollback()
         val snapshot = transaction.takeOwnedSnapshot()
         transaction.historyCommitted = true
         closeParameterGesture(transaction)
@@ -6824,18 +6856,21 @@ fun exportPreview() {
      * (crop, rotate, undo/redo, selection, brush, engine change, image
      * replacement, draft restore, export, comparison source changes, etc.).
      *
-     * **Adopted preview exists:**
-     * 1. Commit the before-history snapshot immediately.
-     * 2. Retain matching params and pixels.
-     * 3. Update lastSuccessfullyRenderedParams to the adopted params.
-     * 4. Cancel inactivity timer.
-     * 5. Close transaction ownership.
-     * 6. Schedule Draft save after commit.
+     * **At least one adopted preview exists:**
+     * 1. Commit the before-history snapshot immediately (exactly once).
+     * 2. Commit the latest ADOPTED revision only — pending renders for newer
+     *    requested revisions are cancelled and never influence the commit.
+     * 3. Retain matching params and pixels.
+     * 4. Update lastSuccessfullyRenderedParams to the adopted params.
+     * 5. Cancel inactivity timer.
+     * 6. Close transaction ownership.
+     * 7. Schedule Draft save after commit.
      *
      * **No adopted preview:**
      * 1. Cancel pending render and history jobs.
      * 2. Consume or close the pending history snapshot.
-     * 3. Restore exact transaction-start fields (params → lastSuccessfullyRenderedParams).
+     * 3. Restore the exact transaction-start state (params, pixels, engine
+     *    state) regardless of how many newer requests were issued.
      * 4. Recycle transient outputs.
      * 5. Create no history entry.
      * 6. Close transaction.
@@ -6863,50 +6898,45 @@ fun exportPreview() {
 
         if (transaction != null) {
             transaction.windowExpired = true
-            when (transaction.currentState()) {
-                ParamTransactionState.Adopted -> {
-                    ParameterLifecycleTestHook.notifyTransactionCommitBegan(transaction.id)
-                    if (!transaction.transitionTo(ParamTransactionState.Committing)) {
-                        transaction.forceTransitionTo(ParamTransactionState.Committed)
-                    } else {
-                        val snapshot = transaction.takeOwnedSnapshot()
-                        if (snapshot != null) settleAdoptedEditHistory(snapshot)
-                        transaction.historyCommitted = true
-                    }
-                    val settledParams = transaction.adoptedParams ?: transaction.latestParams
-                    lastSuccessfullyRenderedParams = settledParams
-                    val settledRevision = _uiState.value.revision + 1
-                    updateUiStateAndRecycleReplaced {
-                        it.copy(
-                            params = settledParams,
-                            revision = settledRevision,
-                            isBusy = false,
-                        )
-                    }
-                    updateHistoryFlags()
-                    if (shouldScheduleDraft) scheduleDraftAutosave()
-                    closeParameterGesture(transaction)
-                    ParameterLifecycleTestHook.notifyTransactionCommitted(settledRevision)
-                    return SettlementResult.Committed(settledRevision)
+            val adoptedParams = transaction.adoptedParams
+            if (adoptedParams != null) {
+                ParameterLifecycleTestHook.notifyTransactionCommitBegan(transaction.id)
+                if (!transaction.historyCommitted) {
+                    transaction.commit()
+                    val snapshot = transaction.takeOwnedSnapshot()
+                    if (snapshot != null) settleAdoptedEditHistory(snapshot)
+                    transaction.historyCommitted = true
                 }
-                else -> {
-                    transaction.transitionTo(ParamTransactionState.RollingBack)
-                    val startState = transaction.start.state
-                    val startRevision = startState.revision
-                    updateUiStateAndRecycleReplaced {
-                        it.copy(
-                            params = lastSuccessfullyRenderedParams,
-                            previewBitmap = startState.previewBitmap,
-                            correctionEngineState = startState.correctionEngineState,
-                            revision = it.revision + 1,
-                            isBusy = false,
-                        )
-                    }
-                    closeParameterGesture(transaction)
-                    ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(startRevision)
-                    return SettlementResult.RolledBack(startRevision)
+                lastSuccessfullyRenderedParams = adoptedParams
+                val settledRevision = _uiState.value.revision + 1
+                updateUiStateAndRecycleReplaced {
+                    it.copy(
+                        params = adoptedParams,
+                        revision = settledRevision,
+                        isBusy = false,
+                    )
                 }
+                updateHistoryFlags()
+                if (shouldScheduleDraft) scheduleDraftAutosave()
+                closeParameterGesture(transaction)
+                ParameterLifecycleTestHook.notifyTransactionCommitted(settledRevision)
+                return SettlementResult.Committed(settledRevision)
             }
+            transaction.rollback()
+            val startState = transaction.start.state
+            val startRevision = startState.revision
+            updateUiStateAndRecycleReplaced {
+                it.copy(
+                    params = startState.params,
+                    previewBitmap = startState.previewBitmap,
+                    correctionEngineState = startState.correctionEngineState,
+                    revision = it.revision + 1,
+                    isBusy = false,
+                )
+            }
+            closeParameterGesture(transaction)
+            ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(startRevision)
+            return SettlementResult.RolledBack(startRevision)
         } else {
             updateUiStateAndRecycleReplaced {
                 it.copy(
