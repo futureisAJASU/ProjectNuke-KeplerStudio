@@ -304,7 +304,7 @@ class RemasterModelSessionValidationTest {
         assertTrue(result is ModelLoadResult.LoadFailed)
         assertEquals(1, runner.closeCount)
         assertFailureState()
-        assertEquals("로드된 모델이 없습니다.", RemasterModelSession.statusText)
+        assertEquals("Edge Masker 모델을 불러오지 못했습니다.", RemasterModelSession.statusText)
     }
 
     @Test
