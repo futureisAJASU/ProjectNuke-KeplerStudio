@@ -76,7 +76,7 @@ class SelectionPreviewProductionTest {
         repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (signal.isCompleted) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue(signal.isCompleted, "selection preview synchronization signal did not arrive")
     }
