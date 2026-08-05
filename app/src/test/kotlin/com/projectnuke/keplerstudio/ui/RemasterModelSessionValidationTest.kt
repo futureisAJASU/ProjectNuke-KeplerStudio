@@ -202,6 +202,48 @@ class RemasterModelSessionValidationTest {
     }
 
     @Test
+    fun `loading a second model never exposes the previous available status`() = runBlocking {
+        val first = FakeRunner()
+        val second = FakeRunner()
+        val runners = ArrayDeque<FakeRunner>().apply { add(first); add(second) }
+        val reachedSecondRunner = CompletableDeferred<Unit>()
+        val releaseSecondRunner = CompletableDeferred<Unit>()
+        val createCount = AtomicInteger()
+        testSeam = RemasterModelSession.installTestSeam(
+            factory = { _, _ -> runners.removeFirst() },
+            onStage = { stage ->
+                if (stage == RemasterModelSession.PublicationStage.RunnerCreated &&
+                    createCount.incrementAndGet() == 2
+                ) {
+                    reachedSecondRunner.complete(Unit)
+                    releaseSecondRunner.await()
+                }
+            },
+        )
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val context = RuntimeEnvironment.getApplication()
+        val candidate = edgeCandidate()
+
+        RemasterModelSession.load(context, candidate)
+        awaitCondition { RemasterModelSession.isModelLoaded }
+        assertEquals("Edge Masker 모델을 사용할 수 있습니다.", RemasterModelSession.statusText)
+
+        RemasterModelSession.load(context, candidate)
+        reachedSecondRunner.await()
+        assertTrue(RemasterModelSession.isModelLoading)
+        assertFalse(RemasterModelSession.isModelLoaded)
+        assertEquals(ModelRunnerLifecycle.Loading, RemasterModelSession.lifecycle)
+        assertEquals("모델을 불러오는 중입니다.", RemasterModelSession.statusText)
+        assertEquals(null, RemasterModelSession.activeModel)
+
+        releaseSecondRunner.complete(Unit)
+        awaitCondition { RemasterModelSession.isModelLoaded }
+        assertEquals(1, first.closeCount)
+        assertEquals(0, second.closeCount)
+        assertEquals("Edge Masker 모델을 사용할 수 있습니다.", RemasterModelSession.statusText)
+    }
+
+    @Test
     fun `unsupported contract rejects before runner creation`() = runBlocking {
         val created = AtomicInteger()
         testSeam = RemasterModelSession.installTestSeam(factory = { _, _ ->
