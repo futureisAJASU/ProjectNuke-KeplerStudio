@@ -344,7 +344,7 @@ class RemasterModelSessionValidationTest {
             },
         )
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
-        val context = RuntimeEnvironment.getApplication<android.app.Application>()
+        val context = RuntimeEnvironment.getApplication()
         RemasterModelSession.load(context, edgeCandidate())
         reached.await()
         RemasterModelSession.load(context, edgeCandidate())
