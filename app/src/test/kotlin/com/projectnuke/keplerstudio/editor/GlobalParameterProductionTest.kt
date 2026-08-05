@@ -129,7 +129,7 @@ class GlobalParameterProductionTest {
         repeat(500) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue(predicate())
     }
@@ -380,7 +380,7 @@ class GlobalParameterProductionTest {
         repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue(vm.startupInitCompletion.isCompleted)
     }
@@ -389,7 +389,7 @@ class GlobalParameterProductionTest {
         repeat(600) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return true
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         return false
     }

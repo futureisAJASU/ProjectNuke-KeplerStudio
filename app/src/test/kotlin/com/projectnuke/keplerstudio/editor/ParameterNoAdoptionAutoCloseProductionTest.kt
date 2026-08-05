@@ -166,7 +166,7 @@ class ParameterNoAdoptionAutoCloseProductionTest {
         repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -175,7 +175,7 @@ class ParameterNoAdoptionAutoCloseProductionTest {
         repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue(vm.canEnterEditorAction())
     }
@@ -184,7 +184,7 @@ class ParameterNoAdoptionAutoCloseProductionTest {
         repeat(300) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue(predicate())
     }
@@ -192,7 +192,7 @@ class ParameterNoAdoptionAutoCloseProductionTest {
     private fun advanceInactivityWindow(vm: EditorViewModel) {
         repeat(4) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(300, TimeUnit.MILLISECONDS)
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
     }
 }

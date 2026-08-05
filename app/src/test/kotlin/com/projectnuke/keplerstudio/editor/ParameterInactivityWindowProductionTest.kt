@@ -341,7 +341,7 @@ class ParameterInactivityWindowProductionTest {
     private fun advanceInactivityWindow(vm: EditorViewModel) {
         repeat(4) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(300, TimeUnit.MILLISECONDS)
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
     }
 
@@ -387,7 +387,7 @@ class ParameterInactivityWindowProductionTest {
         repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue(vm.canEnterEditorAction())
     }
@@ -396,7 +396,7 @@ class ParameterInactivityWindowProductionTest {
         repeat(1200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -405,7 +405,7 @@ class ParameterInactivityWindowProductionTest {
         repeat(300) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue(predicate())
     }

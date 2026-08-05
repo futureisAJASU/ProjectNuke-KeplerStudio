@@ -49,7 +49,7 @@ class EditorViewModelBrushTransactionTest {
         repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return
-            Thread.sleep(5)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue(predicate(), "brush transaction did not settle")
     }

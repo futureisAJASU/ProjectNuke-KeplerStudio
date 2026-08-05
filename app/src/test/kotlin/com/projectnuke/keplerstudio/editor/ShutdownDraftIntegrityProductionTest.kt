@@ -562,6 +562,22 @@ class ShutdownDraftIntegrityProductionTest {
         }
     }
 
+    @Test
+    fun repeatedViewModelStoreClearIsIdempotentAfterShutdown() = runBlocking {
+        val sourceFile = draftSourceFile("repeated-clear.png")
+        val vm = editor(sourceFile.absolutePath)
+        try {
+            awaitReady(vm)
+            harness.clearViewModels()
+            harness.clearViewModels()
+            assertTrue(vm.isShuttingDown())
+            assertFalse(vm.hasActiveDraftSaveJobForTest())
+            assertFalse(vm.hasOpenParameterGesture())
+        } finally {
+            sourceFile.delete()
+        }
+    }
+
     private fun shutDown(vm: EditorViewModel) {
         harness.clearViewModels()
         // ViewModelStore.clear is the ownership boundary. Drain posted
