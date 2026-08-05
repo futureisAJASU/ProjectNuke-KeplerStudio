@@ -19,6 +19,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.unit.IntSize
 import com.projectnuke.keplerstudio.BuildConfig
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
+import com.projectnuke.keplerstudio.bridge.nativeCreateSessionOrTest
 import com.projectnuke.keplerstudio.bridge.NativeCorrectionV2Params
 import com.projectnuke.keplerstudio.bridge.NativeScratchPlanner
 import com.projectnuke.keplerstudio.ui.RemasterModelSession
@@ -3500,7 +3501,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     FLARE_GUARD_AI_TAG,
                     "Opened image with EXIF orientation: ${openedSource.name} preview=${decodedPreview.width}x${decodedPreview.height}",
                 )
-                createdSession = NativePhotoCore.nativeCreateSession(openedSource.absolutePath)
+                createdSession = nativeCreateSessionOrTest(openedSource.absolutePath)
                 tracker.registerNativeSession(
                     handle = createdSession,
                     documentGeneration = historyCoordinator.currentGeneration(),
@@ -6305,7 +6306,7 @@ fun exportPreview() {
             }
             withContext(Dispatchers.IO) {
                 val session =
-                    NativePhotoCore.nativeCreateSession(
+                    nativeCreateSessionOrTest(
                         checkNotNull(ownedWorkingSource).absolutePath
                     )
                 createdSession = session
@@ -6692,7 +6693,7 @@ fun exportPreview() {
                 recycleOwnedRestoreBitmaps()
                 return
             }
-            createdSession = NativePhotoCore.nativeCreateSession(sourcePath)
+            createdSession = nativeCreateSessionOrTest(sourcePath)
             tracker.registerNativeSession(
                 handle = createdSession,
                 documentGeneration = historyCoordinator.currentGeneration(),

@@ -322,6 +322,26 @@ object NativePhotoCore {
     ): Int
 }
 
+/**
+ * Deterministic session factory seam for production tests. When set, every
+ * session-creation call site uses it instead of the native library; the
+ * default (null) keeps the production native path unchanged.
+ *
+ * Lives outside the [NativePhotoCore] object on purpose: touching the object
+ * triggers its class initializer (System.loadLibrary), which fails in
+ * Robolectric and is cached as NoClassDefFoundError.
+ */
+@Volatile
+internal var nativeSessionFactoryForTest: ((String) -> Long)? = null
+
+/**
+ * Session creation routed through the test seam when one is installed,
+ * otherwise the native library call.
+ */
+internal fun nativeCreateSessionOrTest(sourcePath: String): Long =
+    nativeSessionFactoryForTest?.invoke(sourcePath)
+        ?: NativePhotoCore.nativeCreateSession(sourcePath)
+
 data class NativeCorrectionV2Params(
     val detail: Float = 0f,
     val luminanceNoise: Float = 0f,
