@@ -29,16 +29,16 @@ class ShutdownDraftIntegrityProductionTest {
 
     @Before
     fun cleanDraft() {
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteOwnedTestPath(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteOwnedTestPath(draftGenerationsRoot(context))
     }
 
     @After
     fun cleanDraftAfter() {
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteOwnedTestPath(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteOwnedTestPath(draftGenerationsRoot(context))
     }
 
     // Test 1: adopted transaction open when teardown occurs — settlement commits
@@ -440,6 +440,14 @@ class ShutdownDraftIntegrityProductionTest {
         // cancellation/finalizer callbacks before the test deletes its Draft
         // and history directories.
         shadowOf(android.os.Looper.getMainLooper()).idle()
+    }
+
+    private fun deleteOwnedTestPath(path: File) {
+        // A canceled background finalizer can race the test's own directory
+        // cleanup. Both owners only delete the same private test path; make
+        // cleanup idempotent rather than allowing FileTreeWalk to observe a
+        // directory disappearing between its existence check and walk setup.
+        runCatching { if (path.exists()) path.deleteRecursively() }
     }
 
     private fun draftSourceFile(name: String): File {
