@@ -67,16 +67,26 @@ object RemasterModelSession : ModelRunnerContract {
         private val postCreate: (() -> Unit)?,
         private val postReady: (() -> Unit)?,
         private val onStage: (suspend (PublicationStage) -> Unit)? = null,
+        private val onClose: (() -> Unit)? = null,
+        private val beforeCreate: (suspend () -> Unit)? = null,
     ) {
         @Volatile private var active = true
 
-        fun create(context: Context, assetPath: String): AutoCloseable? =
-            if (active) factory?.invoke(context, assetPath) else null
+        fun create(context: Context, assetPath: String): AutoCloseable? {
+            check(active) { "model test owner closed before runner creation" }
+            return factory?.invoke(context, assetPath)
+        }
 
         fun afterCreate() { if (active) postCreate?.invoke() }
         fun afterReady() { if (active) postReady?.invoke() }
         suspend fun atStage(stage: PublicationStage) { if (active) onStage?.invoke(stage) }
-        fun deactivate() { active = false }
+        suspend fun beforeRunnerCreate() { if (active) beforeCreate?.invoke() }
+        fun deactivate() {
+            if (active) {
+                active = false
+                runCatching { onClose?.invoke() }
+            }
+        }
     }
     private val modelTestOwnerLock = Any()
     @Volatile private var installedModelTestOwner: ModelTestSeam? = null
@@ -148,17 +158,21 @@ object RemasterModelSession : ModelRunnerContract {
         isModelLoading = true
         isModelLoaded = false
         lifecycle = ModelRunnerLifecycle.Loading
+        statusText = "모델을 불러오는 중입니다."
         GlobalModelDiagnostics.publish("RemasterModelSession", "loading")
         modelScope.launch {
             modelMutex.withLock {
                 if (generation != commandGeneration.get()) return@withLock
-                publishCandidateLocked(
+                val result = publishCandidateLocked(
                     context.applicationContext,
                     candidate,
                     ModelFeature.Remaster,
                     generation,
                     seam,
                 )
+                if (generation == commandGeneration.get()) {
+                    statusText = statusTextFor(candidate, result)
+                }
             }
         }
     }
@@ -172,13 +186,16 @@ object RemasterModelSession : ModelRunnerContract {
             }
             val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
             val token = (validation as? ModelLoadResult.Ready)?.runner
-                ?: return@withLock validation.asUnitFailure()
+                ?: return@withLock validation.asUnitFailure().also {
+                    if (generation == commandGeneration.get()) statusText = "모델을 불러오지 못했습니다."
+                }
             if (
                 activeModel?.id == "edge_masker" &&
                     isModelLoaded &&
                     closeableModel != null &&
                     sessionValidationIdentity == token.sessionIdentity()
             ) {
+                statusText = "${activeModel?.title ?: "Edge Masker"} 모델을 사용할 수 있습니다."
                 return@withLock ModelLoadResult.Ready(Unit)
             }
             val candidate = OnDeviceRemasterModels.firstOrNull { it.id == "edge_masker" }
@@ -186,15 +203,25 @@ object RemasterModelSession : ModelRunnerContract {
             isModelLoading = true
             isModelLoaded = false
             lifecycle = ModelRunnerLifecycle.Loading
+            statusText = "모델을 불러오는 중입니다."
             publishCandidateLocked(
                 context.applicationContext,
                 candidate,
                 ModelFeature.SubjectSelection,
                 generation,
                 seam,
-            )
+            ).also { result -> statusText = statusTextFor(candidate, result) }
         }
     }
+
+    private fun statusTextFor(
+        candidate: RemasterModelCandidate,
+        result: ModelLoadResult<Unit>,
+    ): String =
+        when (result) {
+            is ModelLoadResult.Ready -> "${candidate.title} 모델을 사용할 수 있습니다."
+            else -> "${candidate.title} 모델을 불러오지 못했습니다."
+        }
 
     private suspend fun publishCandidateLocked(
         context: Context,
@@ -230,6 +257,7 @@ object RemasterModelSession : ModelRunnerContract {
 
             loadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
 
+            seam?.beforeRunnerCreate()
             localRunner.install(createImageSegmenter(context, token.approvedAssetPath, seam))
             seam?.afterCreate()
             seam?.atStage(PublicationStage.RunnerCreated)
@@ -260,7 +288,7 @@ object RemasterModelSession : ModelRunnerContract {
             isModelLoading = false
             lifecycle = ModelRunnerLifecycle.Loaded
             GlobalModelDiagnostics.publish("RemasterModelSession", "loaded")
-            statusText = "${candidate.title}: available"
+            statusText = "${candidate.title} 모델을 사용할 수 있습니다."
             return ModelLoadResult.Ready(Unit)
         } catch (cancelled: CancellationException) {
             failureResult = ModelLoadResult.LoadFailed(cancelled.message ?: "model load cancelled")
@@ -323,284 +351,6 @@ object RemasterModelSession : ModelRunnerContract {
         isModelLoaded = false
         runCatching { runner?.close() }
     }
-
-    /* Historical pre-transaction implementation, intentionally inactive while
-       the surrounding encoding-sensitive file is migrated in bounded owners.
-    private fun loadLegacy(context: Context, candidate: RemasterModelCandidate) {
-        val applicationContext = context.applicationContext
-        val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.Remaster)
-        val validationToken = (validation as? ModelLoadResult.Ready)?.runner ?: return
-        val generation = commandGeneration.incrementAndGet()
-        val capturedTestSeam = synchronized(modelTestSeamLock) { modelTestSeam }
-        val registryLoadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
-        isModelLoading = true
-        isModelLoaded = false
-        lifecycle = ModelRunnerLifecycle.Loading
-        GlobalModelDiagnostics.publish("RemasterModelSession", "loading")
-        modelScope.launch {
-            modelMutex.withLock {
-                if (generation != commandGeneration.get()) return@withLock
-                if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
-                    isModelLoading = false
-                    lifecycle = ModelRunnerLifecycle.Failed
-                    ModelAvailabilityRegistry.reportEdgeLoad(
-                        ModelLoadResult.RuntimeUnavailable("model validation became stale before load"),
-                        registryLoadGeneration,
-                    )
-                    GlobalModelDiagnostics.publish("RemasterModelSession", "failed")
-                    statusText = "${candidate.title}: model validation became stale"
-                    return@withLock
-                }
-                publishSessionClosed()
-                runCatching { closeableModel?.close() }
-                closeableModel = null
-                sessionValidationIdentity = null
-                if (!isSupportedModelContract(candidate) ||
-                    candidate.id != validationToken.modelId ||
-                    candidate.assetPath != validationToken.approvedAssetPath ||
-                    ModelAssetManifest.byId(candidate.id)?.asset?.sha256 !=
-                        validationToken.approvedAssetSha256 ||
-                    ModelAssetManifest.byId(candidate.id)?.asset?.packagingVersion !=
-                        validationToken.packagingVersion
-                ) {
-                    isModelLoading = false
-                    lifecycle = ModelRunnerLifecycle.Failed
-                    GlobalModelDiagnostics.publish("RemasterModelSession", "failed")
-                    statusText = "${candidate.title}: unsupported model contract"
-                    ModelAvailabilityRegistry.reportEdgeLoad(
-                        ModelLoadResult.UnsupportedContract("unsupported Edge Masker contract"),
-                        registryLoadGeneration,
-                    )
-                    return@withLock
-                }
-                if (ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster) is ModelLoadResult.AssetMissing) {
-                    isModelLoading = false
-                    lifecycle = ModelRunnerLifecycle.Failed
-                    ModelAvailabilityRegistry.reportEdgeLoad(
-                        ModelLoadResult.AssetMissing(candidate.assetPath),
-                        registryLoadGeneration,
-                    )
-                    GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
-                    statusText = "${candidate.title}: 모델 파일 없음"
-                    return@withLock
-                }
-                try {
-                runCatching {
-                        val runnerOwner = LocalRunnerOwner()
-                        runnerOwner.install(
-                            when (candidate.id) {
-                                "edge_masker" -> createImageSegmenter(applicationContext, validationToken.approvedAssetPath, capturedTestSeam)
-                                else -> error("unsupported runner")
-                            }
-                        )
-                        try {
-                            capturedTestSeam?.postCreate?.invoke()
-                            if (generation != commandGeneration.get()) {
-                                runnerOwner.close()
-                                isModelLoading = false
-                                lifecycle = ModelRunnerLifecycle.Failed
-                                return@withLock
-                            }
-                        } catch (failure: Throwable) {
-                            runnerOwner.close()
-                            throw failure
-                        }
-                        closeableModel = runnerOwner.transfer()
-                    }
-                    .onSuccess {
-                        if (generation != commandGeneration.get() ||
-                            !ModelAvailabilityRegistry.isCurrent(validationToken)
-) {
-                            val model = closeableModel
-                            closeableModel = null
-                            runCatching { model?.close() }
-                            sessionValidationIdentity = null
-                            isModelLoaded = false
-                            isModelLoading = false
-                            lifecycle = ModelRunnerLifecycle.Failed
-                            ModelAvailabilityRegistry.reportEdgeLoad(
-                                ModelLoadResult.RuntimeUnavailable("model validation became stale after load"),
-                                registryLoadGeneration,
-                            )
-                            GlobalModelDiagnostics.publish("RemasterModelSession", "failed")
-                            statusText = "${candidate.title}: model validation became stale"
-                            return@onSuccess
-                        }
-                        // Candidate identity is not visible until the runner,
-                        // validation token, and registry publication have all
-                        // survived their local ownership checks.
-                        activeModel = candidate.takeIf { closeableModel != null }
-                        isModelLoaded = closeableModel != null
-                        if (isModelLoaded) {
-                            sessionValidationIdentity = validationToken.sessionIdentity()
-                            ModelAvailabilityRegistry.reportEdgeLoad(
-                                ModelLoadResult.Ready(Unit),
-                                registryLoadGeneration,
-                            )
-                                registrySessionGeneration =
-                                ModelAvailabilityRegistry.reportSessionReady(
-                                    listOf(
-                                        ModelFeature.Remaster,
-                                        ModelFeature.SubjectSelection,
-                                    )
-                                )
-                            capturedTestSeam?.postReady?.invoke()
-                        } else {
-                            ModelAvailabilityRegistry.reportEdgeLoad(
-                                ModelLoadResult.LoadFailed("runner creation returned null"),
-                                registryLoadGeneration,
-                            )
-                        }
-                        isModelLoading = false
-                        lifecycle =
-                            if (closeableModel != null) ModelRunnerLifecycle.Loaded
-                            else ModelRunnerLifecycle.Failed
-                        GlobalModelDiagnostics.publish(
-                            "RemasterModelSession",
-                            if (closeableModel != null) "loaded" else "unloaded",
-                        )
-                        statusText =
-                            if (closeableModel != null) "${candidate.title}: 사용 가능"
-                            else "${candidate.title}: 실행 경로를 준비하는 중입니다."
-                    }
-.onFailure {
-                        val model = closeableModel
-                        closeableModel = null
-                        publishSessionClosed()
-                        runCatching { model?.close() }
-                        sessionValidationIdentity = null
-                        isModelLoaded = false
-                        activeModel = null
-                        ModelAvailabilityRegistry.reportEdgeLoad(
-                            ModelLoadResult.LoadFailed(
-                                it.message ?: "Edge Masker load failed"
-                            ),
-                            registryLoadGeneration,
-                        )
-                        isModelLoading = false
-                        lifecycle = ModelRunnerLifecycle.Failed
-                        GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
-                        statusText = "${candidate.title}: 모델 로드에 실패했습니다: ${it.message}"
-                    }
-} catch (failure: Throwable) {
-                val model = closeableModel
-                closeableModel = null
-                publishSessionClosed()
-                runCatching { model?.close() }
-                sessionValidationIdentity = null
-                isModelLoaded = false
-                activeModel = null
-                isModelLoading = false
-                lifecycle = ModelRunnerLifecycle.Failed
-                ModelAvailabilityRegistry.reportEdgeLoad(
-                    ModelLoadResult.LoadFailed(failure.message ?: "Edge Masker publication failed"),
-                    registryLoadGeneration,
-                )
-            }
-        }
-    }
-    }
-
-    private suspend fun ensureEdgeLoadedLegacy(context: Context): ModelLoadResult<Unit> =
-        modelMutex.withLock {
-            val capturedTestSeam = synchronized(modelTestSeamLock) { modelTestSeam }
-            val applicationContext = context.applicationContext
-            val validation =
-                ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
-            val validationToken =
-                (validation as? ModelLoadResult.Ready)?.runner
-                    ?: return@withLock validation.asUnitFailure()
-            if (activeModel?.id == "edge_masker" && isModelLoaded && closeableModel != null) {
-                if (sessionValidationIdentity == validationToken.sessionIdentity()) {
-                    return@withLock ModelLoadResult.Ready(Unit)
-                }
-                publishSessionClosed()
-                runCatching { closeableModel?.close() }
-                closeableModel = null
-                sessionValidationIdentity = null
-                installedCommandGeneration = 0L
-                activeModel = null
-                isModelLoaded = false
-            }
-            val candidate =
-                OnDeviceRemasterModels.firstOrNull { it.id == "edge_masker" }
-                    ?: return@withLock ModelLoadResult.RuntimeUnavailable(
-                        "Edge Masker runner is not registered"
-                    )
-            val loadGeneration = ModelAvailabilityRegistry.reportEdgeLoading()
-            isModelLoading = true
-            lifecycle = ModelRunnerLifecycle.Loading
-            if (!isSupportedModelContract(candidate)) {
-                isModelLoading = false
-                lifecycle = ModelRunnerLifecycle.Failed
-                return@withLock ModelLoadResult.UnsupportedContract(
-                    "unsupported Edge Masker contract"
-                ).also {
-                    ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
-                }
-            }
-            val runnerOwner = LocalRunnerOwner()
-            return@withLock try {
-                if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
-                    isModelLoading = false
-                    lifecycle = ModelRunnerLifecycle.Failed
-                    ModelAvailabilityRegistry.reportEdgeLoad(
-                        ModelLoadResult.RuntimeUnavailable("model validation became stale before load"),
-                        loadGeneration,
-                    )
-                    return@withLock ModelLoadResult.RuntimeUnavailable(
-                        "model validation became stale before load"
-                    )
-                }
-                publishSessionClosed()
-                runCatching { closeableModel?.close() }
-                sessionValidationIdentity = null
-                runnerOwner.install(
-                    createImageSegmenter(applicationContext, validationToken.approvedAssetPath, capturedTestSeam)
-                )
-                capturedTestSeam?.postCreate?.invoke()
-                if (!ModelAvailabilityRegistry.isCurrent(validationToken)) {
-                    runnerOwner.close()
-                    isModelLoaded = false
-                    isModelLoading = false
-                    lifecycle = ModelRunnerLifecycle.Failed
-                    val stale = ModelLoadResult.RuntimeUnavailable("model validation became stale after load")
-                    ModelAvailabilityRegistry.reportEdgeLoad(stale, loadGeneration)
-                    return@withLock stale
-                }
-                closeableModel = runnerOwner.transfer()
-                activeModel = candidate
-                isModelLoaded = true
-                sessionValidationIdentity = validationToken.sessionIdentity()
-                isModelLoading = false
-                lifecycle = ModelRunnerLifecycle.Loaded
-                ModelLoadResult.Ready(Unit).also {
-                    ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
-                    registrySessionGeneration =
-                        ModelAvailabilityRegistry.reportSessionReady(
-                            listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection)
-                        )
-                    capturedTestSeam?.postReady?.invoke()
-                }
-            } catch (failure: Throwable) {
-                runnerOwner.close()
-                publishSessionClosed()
-                runCatching { closeableModel?.close() }
-                closeableModel = null
-                sessionValidationIdentity = null
-                isModelLoaded = false
-                isModelLoading = false
-                activeModel = null
-                lifecycle = ModelRunnerLifecycle.Failed
-                ModelLoadResult.LoadFailed(
-                    failure.message ?: "Edge Masker load failed"
-                ).also {
-                    ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
-                }
-            }
-        }
-
-    */
 
     internal suspend fun createForegroundMask(
         bitmap: Bitmap,
@@ -1015,8 +765,10 @@ object RemasterModelSession : ModelRunnerContract {
         postCreate: (() -> Unit)? = null,
         postReady: (() -> Unit)? = null,
         onStage: (suspend (PublicationStage) -> Unit)? = null,
+        onClose: (() -> Unit)? = null,
+        beforeCreate: (suspend () -> Unit)? = null,
     ): AutoCloseable {
-        val seam = ModelTestSeam(factory, postCreate, postReady, onStage)
+        val seam = ModelTestSeam(factory, postCreate, postReady, onStage, onClose, beforeCreate)
         synchronized(modelTestOwnerLock) {
             check(installedModelTestOwner == null) { "model test owner already installed" }
             installedModelTestOwner = seam

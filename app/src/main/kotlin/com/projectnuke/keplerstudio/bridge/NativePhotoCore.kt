@@ -332,22 +332,38 @@ object NativePhotoCore {
  * Robolectric and is cached as NoClassDefFoundError.
  */
 private val nativeSessionFactoryTestLock = Any()
-private var nativeSessionFactoryForTest: ((String) -> Long)? = null
+private class NativeSessionFactoryInstallation(
+    private val factory: (String) -> Long,
+) {
+    @Volatile private var active = true
+
+    fun create(sourcePath: String): Long {
+        check(active) { "native session test owner closed before creation" }
+        return factory(sourcePath)
+    }
+
+    fun close() {
+        active = false
+    }
+}
+private var nativeSessionFactoryInstallation: NativeSessionFactoryInstallation? = null
 
 internal fun installNativeSessionFactoryForTest(factory: (String) -> Long): AutoCloseable {
+    val installation = NativeSessionFactoryInstallation(factory)
     synchronized(nativeSessionFactoryTestLock) {
-        check(nativeSessionFactoryForTest == null) { "native session factory test seam already installed" }
-        nativeSessionFactoryForTest = factory
+        check(nativeSessionFactoryInstallation == null) { "native session factory test seam already installed" }
+        nativeSessionFactoryInstallation = installation
     }
     return AutoCloseable {
+        installation.close()
         synchronized(nativeSessionFactoryTestLock) {
-            if (nativeSessionFactoryForTest === factory) nativeSessionFactoryForTest = null
+            if (nativeSessionFactoryInstallation === installation) nativeSessionFactoryInstallation = null
         }
     }
 }
 
 internal fun nativeSessionFactoryTestSeamCount(): Int = synchronized(nativeSessionFactoryTestLock) {
-    if (nativeSessionFactoryForTest == null) 0 else 1
+    if (nativeSessionFactoryInstallation == null) 0 else 1
 }
 
 /**
@@ -355,7 +371,7 @@ internal fun nativeSessionFactoryTestSeamCount(): Int = synchronized(nativeSessi
  * otherwise the native library call.
  */
 internal fun nativeCreateSessionOrTest(sourcePath: String): Long =
-    synchronized(nativeSessionFactoryTestLock) { nativeSessionFactoryForTest }?.invoke(sourcePath)
+    synchronized(nativeSessionFactoryTestLock) { nativeSessionFactoryInstallation }?.create(sourcePath)
         ?: NativePhotoCore.nativeCreateSession(sourcePath)
 
 /**
@@ -368,25 +384,40 @@ internal fun nativeCreateSessionOrTest(sourcePath: String): Long =
  * Robolectric and is cached as NoClassDefFoundError.
  */
 private val nativeFlareGuardTestLock = Any()
-private var nativeFlareGuardInPlaceForTest:
-    (suspend (Bitmap, Int, Float, Int) -> Int)? = null
+private class NativeFlareGuardInstallation(
+    private val kernel: suspend (Bitmap, Int, Float, Int) -> Int,
+) {
+    @Volatile private var active = true
+
+    suspend fun invoke(bitmap: Bitmap, mode: Int, strength: Float, revision: Int): Int {
+        check(active) { "native flare test owner closed before execution" }
+        return kernel(bitmap, mode, strength, revision)
+    }
+
+    fun close() {
+        active = false
+    }
+}
+private var nativeFlareGuardInstallation: NativeFlareGuardInstallation? = null
 
 internal fun installNativeFlareGuardInPlaceForTest(
     kernel: suspend (Bitmap, Int, Float, Int) -> Int,
 ): AutoCloseable {
+    val installation = NativeFlareGuardInstallation(kernel)
     synchronized(nativeFlareGuardTestLock) {
-        check(nativeFlareGuardInPlaceForTest == null) { "native flare test seam already installed" }
-        nativeFlareGuardInPlaceForTest = kernel
+        check(nativeFlareGuardInstallation == null) { "native flare test seam already installed" }
+        nativeFlareGuardInstallation = installation
     }
     return AutoCloseable {
+        installation.close()
         synchronized(nativeFlareGuardTestLock) {
-            if (nativeFlareGuardInPlaceForTest === kernel) nativeFlareGuardInPlaceForTest = null
+            if (nativeFlareGuardInstallation === installation) nativeFlareGuardInstallation = null
         }
     }
 }
 
 internal fun nativeFlareGuardTestSeamCount(): Int = synchronized(nativeFlareGuardTestLock) {
-    if (nativeFlareGuardInPlaceForTest == null) 0 else 1
+    if (nativeFlareGuardInstallation == null) 0 else 1
 }
 
 /**
@@ -399,7 +430,7 @@ internal suspend fun nativeApplyFlareGuardInPlaceOrTest(
     strength: Float,
     revision: Int,
 ): Int =
-    synchronized(nativeFlareGuardTestLock) { nativeFlareGuardInPlaceForTest }?.invoke(bitmap, mode, strength, revision)
+    synchronized(nativeFlareGuardTestLock) { nativeFlareGuardInstallation }?.invoke(bitmap, mode, strength, revision)
         ?: NativePhotoCore.nativeApplyFlareGuardInPlace(
             bitmap,
             mode,

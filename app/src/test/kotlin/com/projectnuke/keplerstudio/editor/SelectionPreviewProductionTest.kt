@@ -34,7 +34,6 @@ class SelectionPreviewProductionTest {
     @After
     fun tearDown() {
         harness.close()
-        EditorRenderer.clearRendererOverrideForTest()
         SelectionPreviewPreparationGateway.resetForTest()
     }
 
@@ -67,7 +66,7 @@ class SelectionPreviewProductionTest {
         repeat(400) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
-            Thread.sleep(10)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
         }
         assertTrue(predicate(), "selection preview did not settle")
     }
@@ -170,7 +169,7 @@ class SelectionPreviewProductionTest {
         val rendererCalls = AtomicInteger(0)
         val rendered = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         rendered.eraseColor(0xff22aa44.toInt())
-        EditorRenderer.installRendererOverrideForTest { request ->
+        val renderer = EditorRenderer.installRendererOverrideForTest { request ->
             assertEquals(RenderOperation.SelectionLivePreview, request.operation)
             rendererCalls.incrementAndGet()
             RenderResult.Success(
@@ -209,14 +208,14 @@ class SelectionPreviewProductionTest {
             settle { !vm.uiState.value.canRedo && !vm.uiState.value.isBusy }
             assertEquals(0.25f, vm.uiState.value.selectionLayers.single().localParams.exposure)
         } finally {
-            EditorRenderer.clearRendererOverrideForTest()
+            renderer.close()
         }
     }
 
     @Test
     fun currentRenderFailureRollsBackTheOptimisticSelectionEdit() {
         val vm = viewModel()
-        EditorRenderer.installRendererOverrideForTest { request ->
+        val renderer = EditorRenderer.installRendererOverrideForTest { request ->
             RenderResult.Failure(
                 operation = request.operation,
                 requestedRoute = NativeRenderRoute.V1,
@@ -235,7 +234,7 @@ class SelectionPreviewProductionTest {
             assertEquals(0, vm.uiState.value.previewBitmap?.getPixel(4, 4))
             assertTrue(!vm.uiState.value.canUndo)
         } finally {
-            EditorRenderer.clearRendererOverrideForTest()
+            renderer.close()
         }
     }
 
@@ -288,7 +287,7 @@ class SelectionPreviewProductionTest {
             )
         assertTrue(vm.beginSelectionParamGesture())
         transaction = assertNotNull(vm.currentSelectionParamTransaction())
-        EditorRenderer.installRendererOverrideForTest {
+        val renderer = EditorRenderer.installRendererOverrideForTest {
             rendererCalls.incrementAndGet()
             RenderResult.Success(
                 operation = RenderOperation.SelectionLivePreview,
@@ -332,7 +331,7 @@ class SelectionPreviewProductionTest {
             assertEquals(baselineReservations, vm.selectionMaskOwnership.reservedBytes())
         } finally {
             releaseA.complete(Unit)
-            EditorRenderer.clearRendererOverrideForTest()
+            renderer.close()
             previewHooks.close()
             SelectionPreviewPreparationGateway.resetForTest()
         }

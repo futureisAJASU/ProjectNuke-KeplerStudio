@@ -25,28 +25,44 @@ internal fun cropTransformedDimensions(sourceWidth: Int, sourceHeight: Int, crop
  * default (null) keeps the production native path unchanged.
  */
 private val cropTransformTestLock = Any()
-private var cropTransformForTest: (suspend (Bitmap, CropState) -> Bitmap)? = null
+private class CropTransformInstallation(
+    private val transform: suspend (Bitmap, CropState) -> Bitmap,
+) {
+    @Volatile private var active = true
+
+    suspend fun invoke(source: Bitmap, cropState: CropState): Bitmap {
+        check(active) { "crop transform test owner closed before execution" }
+        return transform(source, cropState)
+    }
+
+    fun close() {
+        active = false
+    }
+}
+private var cropTransformInstallation: CropTransformInstallation? = null
 
 internal fun installCropTransformForTest(
     transform: suspend (Bitmap, CropState) -> Bitmap,
 ): AutoCloseable {
+    val installation = CropTransformInstallation(transform)
     synchronized(cropTransformTestLock) {
-        check(cropTransformForTest == null) { "crop transform test seam already installed" }
-        cropTransformForTest = transform
+        check(cropTransformInstallation == null) { "crop transform test seam already installed" }
+        cropTransformInstallation = installation
     }
     return AutoCloseable {
+        installation.close()
         synchronized(cropTransformTestLock) {
-            if (cropTransformForTest === transform) cropTransformForTest = null
+            if (cropTransformInstallation === installation) cropTransformInstallation = null
         }
     }
 }
 
 internal fun cropTransformTestSeamCount(): Int = synchronized(cropTransformTestLock) {
-    if (cropTransformForTest == null) 0 else 1
+    if (cropTransformInstallation == null) 0 else 1
 }
 
 suspend fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap =
-    synchronized(cropTransformTestLock) { cropTransformForTest }?.invoke(source, cropState)
+    synchronized(cropTransformTestLock) { cropTransformInstallation }?.invoke(source, cropState)
         ?: renderCropTransformNative(source, cropState)
 
 private suspend fun renderCropTransformNative(source: Bitmap, cropState: CropState): Bitmap {

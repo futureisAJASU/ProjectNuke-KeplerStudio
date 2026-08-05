@@ -51,7 +51,7 @@ class GlobalParameterProductionTest {
                 originalPreviewBitmap = base,
             )
         }
-        EditorRenderer.installRendererOverrideForTest {
+        val renderer = EditorRenderer.installRendererOverrideForTest {
             RenderResult.Success(
                 operation = RenderOperation.NativePreview,
                 requestedRoute = NativeRenderRoute.V1,
@@ -73,7 +73,7 @@ class GlobalParameterProductionTest {
             assertEquals(0.3f, vm.uiState.value.params.exposure)
             assertTrue(vm.uiState.value.canUndo)
         } finally {
-            EditorRenderer.clearRendererOverrideForTest()
+            renderer.close()
             if (!base.isRecycled) base.recycle()
             if (!output.isRecycled) output.recycle()
         }
@@ -92,7 +92,7 @@ class GlobalParameterProductionTest {
                 originalPreviewBitmap = base,
             )
         }
-        EditorRenderer.installRendererOverrideForTest {
+        val renderer = EditorRenderer.installRendererOverrideForTest {
             renders.incrementAndGet()
             val output = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
             output.eraseColor(0xff336699.toInt())
@@ -120,7 +120,7 @@ class GlobalParameterProductionTest {
             await { vm.uiState.value.params.exposure == 0f }
             assertEquals(0f, vm.uiState.value.params.exposure)
         } finally {
-            EditorRenderer.clearRendererOverrideForTest()
+            renderer.close()
             if (!base.isRecycled) base.recycle()
         }
     }

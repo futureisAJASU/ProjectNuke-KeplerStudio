@@ -133,27 +133,40 @@ internal fun RenderResult.successOrThrow(): RenderResult.Success =
  * executes selection layers through the same route, and reports the actual route.
  */
 internal object EditorRenderer {
-    @Volatile private var rendererOverrideForTest: (suspend (RenderRequest) -> RenderResult)? = null
+    private class RendererInstallation(
+        private val renderer: suspend (RenderRequest) -> RenderResult,
+    ) {
+        @Volatile private var active = true
+
+        suspend fun render(request: RenderRequest): RenderResult {
+            check(active) { "renderer test owner closed before execution" }
+            return renderer(request)
+        }
+
+        fun close() {
+            active = false
+        }
+    }
+
+    @Volatile private var rendererInstallation: RendererInstallation? = null
     private val rendererOverrideLock = Any()
 
     internal fun installRendererOverrideForTest(renderer: suspend (RenderRequest) -> RenderResult): AutoCloseable {
+        val installation = RendererInstallation(renderer)
         synchronized(rendererOverrideLock) {
-            check(rendererOverrideForTest == null) { "renderer test override already installed" }
-            rendererOverrideForTest = renderer
+            check(rendererInstallation == null) { "renderer test override already installed" }
+            rendererInstallation = installation
         }
         return AutoCloseable {
+            installation.close()
             synchronized(rendererOverrideLock) {
-                if (rendererOverrideForTest === renderer) rendererOverrideForTest = null
+                if (rendererInstallation === installation) rendererInstallation = null
             }
         }
     }
 
-    internal fun clearRendererOverrideForTest() {
-        synchronized(rendererOverrideLock) { rendererOverrideForTest = null }
-    }
-
     suspend fun render(request: RenderRequest): RenderResult {
-        rendererOverrideForTest?.let { return it(request) }
+        synchronized(rendererOverrideLock) { rendererInstallation }?.let { return it.render(request) }
         val route =
             RouteResolver.resolveNativeRoute(
                 RouteRequest(

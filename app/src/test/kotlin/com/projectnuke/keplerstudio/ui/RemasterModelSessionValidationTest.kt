@@ -6,6 +6,7 @@ import com.projectnuke.keplerstudio.editor.ModelCapabilityPhase
 import com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelLoadResult
+import com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertEquals
@@ -13,6 +14,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import org.junit.After
 import org.junit.Before
@@ -141,11 +143,23 @@ class RemasterModelSessionValidationTest {
         awaitIdle(200)
 
         assertTrue(RemasterModelSession.isModelLoaded)
+        assertEquals(ModelRunnerLifecycle.Loaded, RemasterModelSession.lifecycle)
+        val readyState = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection)
+        assertEquals(ModelCapabilityPhase.Ready, readyState.phase)
+        assertTrue(readyState.sessionActive)
+        assertTrue(RemasterModelSession.validationIdentityForTest() != null)
+        assertTrue(RemasterModelSession.installedRunnerForTest() === runner)
+        assertEquals("Edge Masker 모델을 사용할 수 있습니다.", RemasterModelSession.statusText)
 
         RemasterModelSession.unload()
         awaitIdle(200)
 
         assertEquals(1, runner.closeCount)
+        assertEquals(ModelRunnerLifecycle.Unloaded, RemasterModelSession.lifecycle)
+        assertFalse(RemasterModelSession.isModelLoaded)
+        assertEquals(null, RemasterModelSession.activeModel)
+        assertEquals(null, RemasterModelSession.validationIdentityForTest())
+        assertEquals("로드된 모델이 없습니다.", RemasterModelSession.statusText)
     }
 
     @Test
@@ -161,6 +175,30 @@ class RemasterModelSessionValidationTest {
         assertEquals(0, runner.closeCount)
         assertFalse(RemasterModelSession.isModelLoaded)
         assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionActive)
+        assertEquals("Edge Masker 모델을 불러오지 못했습니다.", RemasterModelSession.statusText)
+    }
+
+    @Test
+    fun `loading a second model after success clears the previous runner and status`() = runBlocking {
+        val runner = FakeRunner()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val context = RuntimeEnvironment.getApplication()
+        val edge = edgeCandidate()
+
+        RemasterModelSession.load(context, edge)
+        awaitCondition { RemasterModelSession.isModelLoaded }
+        assertEquals("Edge Masker 모델을 사용할 수 있습니다.", RemasterModelSession.statusText)
+
+        RemasterModelSession.load(
+            context,
+            OnDeviceRemasterModels.first { it.id == "flare_masker" },
+        )
+        awaitCondition { !RemasterModelSession.isModelLoading }
+
+        assertEquals(1, runner.closeCount)
+        assertFailureState()
+        assertEquals("Flare Masker 모델을 불러오지 못했습니다.", RemasterModelSession.statusText)
     }
 
     @Test
@@ -180,6 +218,7 @@ class RemasterModelSessionValidationTest {
 
         assertEquals(0, created.get())
         assertFailureState()
+        assertEquals("Edge Masker 모델을 불러오지 못했습니다.", RemasterModelSession.statusText)
     }
 
     @Test
@@ -196,6 +235,7 @@ class RemasterModelSessionValidationTest {
 
         assertEquals(0, created.get())
         assertFailureState()
+        assertEquals("Edge Masker 모델을 불러오지 못했습니다.", RemasterModelSession.statusText)
     }
 
     @Test
@@ -222,6 +262,7 @@ class RemasterModelSessionValidationTest {
         assertTrue(result is ModelLoadResult.LoadFailed)
         assertEquals(1, runner.closeCount)
         assertFailureState()
+        assertEquals("로드된 모델이 없습니다.", RemasterModelSession.statusText)
     }
 
     @Test
@@ -342,6 +383,141 @@ class RemasterModelSessionValidationTest {
         assertStageFailure(RemasterModelSession.PublicationStage.FieldsInstalled)
     }
 
+    @Test
+    fun `closed captured seam fails before runner creation without production fallback`() = runBlocking {
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val factoryCalls = AtomicInteger()
+        val handle = RemasterModelSession.installTestSeam(
+            factory = { _, _ ->
+                factoryCalls.incrementAndGet()
+                FakeRunner()
+            },
+            beforeCreate = {
+                reached.complete(Unit)
+                release.await()
+            },
+            onClose = { release.complete(Unit) },
+        )
+        testSeam = handle
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val command = async { RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) }
+        reached.await()
+
+        handle.close()
+        val result = command.await()
+
+        assertTrue(result is ModelLoadResult.LoadFailed)
+        assertEquals(0, factoryCalls.get())
+        assertFailureState()
+        assertEquals(0, RemasterModelSession.installedTestSeamCount())
+    }
+
+    @Test
+    fun `late Test A command cannot enter Test B seam`() = runBlocking {
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val factoryACalls = AtomicInteger()
+        val factoryBCalls = AtomicInteger()
+        val handleA = RemasterModelSession.installTestSeam(
+            factory = { _, _ ->
+                factoryACalls.incrementAndGet()
+                FakeRunner()
+            },
+            beforeCreate = {
+                reached.complete(Unit)
+                release.await()
+            },
+            onClose = { release.complete(Unit) },
+        )
+        testSeam = handleA
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val commandA = async { RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) }
+        reached.await()
+        handleA.close()
+        testSeam = null
+        val resultA = commandA.await()
+        assertTrue(resultA is ModelLoadResult.LoadFailed)
+        assertEquals(0, factoryACalls.get())
+        assertFailureState()
+
+        val handleB = RemasterModelSession.installTestSeam(factory = { _, _ ->
+            factoryBCalls.incrementAndGet()
+            FakeRunner()
+        })
+        testSeam = handleB
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val resultB = RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication())
+
+        assertTrue(resultB is ModelLoadResult.Ready)
+        assertEquals(1, factoryBCalls.get())
+        handleB.close()
+        testSeam = null
+    }
+
+    @Test
+    fun `unload while captured seam is closing leaves no model state`() = runBlocking {
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val handle = RemasterModelSession.installTestSeam(
+            factory = { _, _ -> FakeRunner() },
+            beforeCreate = {
+                reached.complete(Unit)
+                release.await()
+            },
+            onClose = { release.complete(Unit) },
+        )
+        testSeam = handle
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val command = async { RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) }
+        reached.await()
+        handle.close()
+        RemasterModelSession.unload()
+        command.await()
+        awaitCondition { RemasterModelSession.lifecycle == com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle.Unloaded }
+
+        assertFailureState()
+    }
+
+    @Test
+    fun `load A superseded by B uses distinct seam owners`() = runBlocking {
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val factoryACalls = AtomicInteger()
+        val factoryBCalls = AtomicInteger()
+        val handleA = RemasterModelSession.installTestSeam(
+            factory = { _, _ ->
+                factoryACalls.incrementAndGet()
+                FakeRunner()
+            },
+            beforeCreate = {
+                reached.complete(Unit)
+                release.await()
+            },
+            onClose = { release.complete(Unit) },
+        )
+        testSeam = handleA
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val context = RuntimeEnvironment.getApplication()
+        RemasterModelSession.load(context, edgeCandidate())
+        reached.await()
+        handleA.close()
+        testSeam = null
+        val handleB = RemasterModelSession.installTestSeam(factory = { _, _ ->
+            factoryBCalls.incrementAndGet()
+            FakeRunner()
+        })
+        testSeam = handleB
+        RemasterModelSession.load(context, edgeCandidate())
+        awaitCondition { RemasterModelSession.isModelLoaded }
+
+        assertEquals(0, factoryACalls.get())
+        assertEquals(1, factoryBCalls.get())
+        assertTrue(RemasterModelSession.activeModel?.id == "edge_masker")
+        handleB.close()
+        testSeam = null
+    }
+
     private class FakeRunner : AutoCloseable {
         var closeCount = 0
         override fun close() {
@@ -390,6 +566,7 @@ class RemasterModelSessionValidationTest {
         assertFalse(RemasterModelSession.isModelLoading)
         assertFalse(RemasterModelSession.isModelLoaded)
         assertEquals(null, RemasterModelSession.installedRunnerForTest())
+        assertEquals(ModelRunnerLifecycle.Failed, RemasterModelSession.lifecycle)
     }
 
     private fun edgeCandidate() = OnDeviceRemasterModels.first { it.id == "edge_masker" }
