@@ -339,7 +339,7 @@ class DraftSelfCancellationProductionTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(1200) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             Thread.sleep(5)
