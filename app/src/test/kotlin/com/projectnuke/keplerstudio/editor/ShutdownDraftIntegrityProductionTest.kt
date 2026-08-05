@@ -436,6 +436,10 @@ class ShutdownDraftIntegrityProductionTest {
 
     private fun shutDown(vm: EditorViewModel) {
         ViewModelStore().apply { put("editor", vm) }.clear()
+        // ViewModelStore.clear is the ownership boundary. Drain posted
+        // cancellation/finalizer callbacks before the test deletes its Draft
+        // and history directories.
+        shadowOf(android.os.Looper.getMainLooper()).idle()
     }
 
     private fun draftSourceFile(name: String): File {
