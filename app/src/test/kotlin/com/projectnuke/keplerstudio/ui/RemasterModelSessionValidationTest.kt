@@ -298,7 +298,7 @@ class RemasterModelSessionValidationTest {
         awaitCondition { RemasterModelSession.lifecycle == com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle.Unloaded }
 
         assertEquals(1, runner.closeCount)
-        assertFailureState()
+        assertFailureState(ModelRunnerLifecycle.Unloaded)
     }
 
     @Test
@@ -323,7 +323,7 @@ class RemasterModelSessionValidationTest {
         awaitCondition { RemasterModelSession.lifecycle == com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle.Unloaded }
 
         assertEquals(1, runner.closeCount)
-        assertFailureState()
+        assertFailureState(ModelRunnerLifecycle.Unloaded)
     }
 
     @Test
@@ -358,11 +358,6 @@ class RemasterModelSessionValidationTest {
     }
 
     @Test
-    fun `late completion of A cannot close successful B`() = runBlocking {
-        `load A superseded by B cannot replace or close B`()
-    }
-
-    @Test
     fun `successful load followed by repeated unload closes once`() = runBlocking {
         val runner = FakeRunner()
         testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
@@ -375,7 +370,7 @@ class RemasterModelSessionValidationTest {
         awaitCondition { RemasterModelSession.lifecycle == com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle.Unloaded }
 
         assertEquals(1, runner.closeCount)
-        assertFailureState()
+        assertFailureState(ModelRunnerLifecycle.Unloaded)
     }
 
     @Test
@@ -476,7 +471,7 @@ class RemasterModelSessionValidationTest {
         command.await()
         awaitCondition { RemasterModelSession.lifecycle == com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle.Unloaded }
 
-        assertFailureState()
+        assertFailureState(ModelRunnerLifecycle.Unloaded)
     }
 
     @Test
@@ -556,7 +551,7 @@ class RemasterModelSessionValidationTest {
         assertFailureState()
     }
 
-    private fun assertFailureState() {
+    private fun assertFailureState(expectedLifecycle: ModelRunnerLifecycle = ModelRunnerLifecycle.Failed) {
         val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection)
         assertNotEquals(ModelCapabilityPhase.Ready, state.phase)
         assertFalse(state.sessionActive)
@@ -566,7 +561,7 @@ class RemasterModelSessionValidationTest {
         assertFalse(RemasterModelSession.isModelLoading)
         assertFalse(RemasterModelSession.isModelLoaded)
         assertEquals(null, RemasterModelSession.installedRunnerForTest())
-        assertEquals(ModelRunnerLifecycle.Failed, RemasterModelSession.lifecycle)
+        assertEquals(expectedLifecycle, RemasterModelSession.lifecycle)
     }
 
     private fun edgeCandidate() = OnDeviceRemasterModels.first { it.id == "edge_masker" }

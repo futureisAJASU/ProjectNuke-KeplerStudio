@@ -393,6 +393,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             var phase: ParamRenderRevisionPhase = ParamRenderRevisionPhase.Requested,
             var job: Job? = null,
             var outputOwned: Boolean = false,
+            var adoptionIdentity: String? = null,
             var terminalReason: String? = null,
         )
         private val renderRevisions = LinkedHashMap<Int, RenderRevisionOwner>()
@@ -474,6 +475,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 owner.phase = ParamRenderRevisionPhase.Adopted
                 owner.outputOwned = false
+                owner.adoptionIdentity = "$id:$revision"
                 return true
             }
         }
