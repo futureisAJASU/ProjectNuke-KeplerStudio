@@ -550,7 +550,7 @@ class ShutdownDraftIntegrityProductionTest {
             val epochAtCapture = vm.draftEpochForTest()
             harness.clearViewModels()
             seam.releaseGate.complete(Unit)
-            assertTrue(runCatching { save.await() }.isFailure)
+            assertFalse(save.await())
             assertEquals(epochAtCapture + 1L, vm.draftEpochForTest())
             assertFalse(vm.hasActiveDraftSaveJobForTest())
             assertEquals(0L, vm.selectionMaskOwnership.reservedBytes())
