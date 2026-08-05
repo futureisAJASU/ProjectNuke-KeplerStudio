@@ -339,6 +339,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Pure read-only inspection for tests: committed redo-stack entry count. */
     internal fun redoEntryCountForTest(): Int = historyCoordinator.redoEntryCountForTest()
 
+    /** Test seam: invalidate the managed-edit token so that any in-flight
+     *  parameter render whose [isManagedEditCurrent] check will fail, leaving
+     *  the transaction with no adopted output. */
+    internal fun invalidateManagedEditsForTest() = invalidateManagedEdits()
+
     /**
      * Terminal state of the parameter gesture itself: an open gesture is
      * [Active]; settlement makes it [Committed] (when at least one render was
@@ -6826,7 +6831,20 @@ fun exportPreview() {
 
     private fun commitPendingParameterTransaction(transaction: ParameterGestureTransaction) {
         val adoptedParams = transaction.adoptedParams ?: run {
+            transaction.rollback()
+            val startState = transaction.start.state
+            val startRevision = startState.revision
+            updateUiStateAndRecycleReplaced {
+                it.copy(
+                    params = startState.params,
+                    previewBitmap = startState.previewBitmap,
+                    correctionEngineState = startState.correctionEngineState,
+                    revision = it.revision + 1,
+                    isBusy = false,
+                )
+            }
             closeParameterGesture(transaction)
+            ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(startRevision)
             return
         }
         ParameterLifecycleTestHook.notifyTransactionCommitBegan(transaction.id)
@@ -6856,6 +6874,23 @@ fun exportPreview() {
     private fun maybeCloseParameterGesture(transaction: ParameterGestureTransaction) {
         if (parameterGesture !== transaction || !transaction.windowExpired) return
         if (transaction.renderJob?.isActive == true || transaction.historyJob?.isActive == true) return
+        if (transaction.adoptedParams == null) {
+            transaction.rollback()
+            val startState = transaction.start.state
+            val startRevision = startState.revision
+            updateUiStateAndRecycleReplaced {
+                it.copy(
+                    params = startState.params,
+                    previewBitmap = startState.previewBitmap,
+                    correctionEngineState = startState.correctionEngineState,
+                    revision = it.revision + 1,
+                    isBusy = false,
+                )
+            }
+            closeParameterGesture(transaction)
+            ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(startRevision)
+            return
+        }
         if (!transaction.historyCommitted && transaction.historySnapshotPublished) {
             commitPendingParameterTransaction(transaction)
             return
