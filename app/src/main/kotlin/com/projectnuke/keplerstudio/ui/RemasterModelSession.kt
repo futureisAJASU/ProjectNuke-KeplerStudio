@@ -187,6 +187,7 @@ object RemasterModelSession : ModelRunnerContract {
                     return@withLock
                 }
                 try {
+                var localRunner: AutoCloseable? = null
                 runCatching {
                         val runnerOwner = LocalRunnerOwner()
                         runnerOwner.install(
@@ -207,15 +208,15 @@ object RemasterModelSession : ModelRunnerContract {
                             runnerOwner.close()
                             throw failure
                         }
-                        closeableModel = runnerOwner.transfer()
+                        localRunner = runnerOwner.transfer()
                     }
                     .onSuccess {
+                        try {
                         if (generation != commandGeneration.get() ||
                             !ModelAvailabilityRegistry.isCurrent(validationToken)
 ) {
-                            val model = closeableModel
-                            closeableModel = null
-                            runCatching { model?.close() }
+                            runCatching { localRunner?.close() }
+                            localRunner = null
                             sessionValidationIdentity = null
                             isModelLoaded = false
                             isModelLoading = false
@@ -231,15 +232,12 @@ object RemasterModelSession : ModelRunnerContract {
                         // Candidate identity is not visible until the runner,
                         // validation token, and registry publication have all
                         // survived their local ownership checks.
-                        activeModel = candidate.takeIf { closeableModel != null }
-                        isModelLoaded = closeableModel != null
-                        if (isModelLoaded) {
-                            sessionValidationIdentity = validationToken.sessionIdentity()
+                        if (localRunner != null) {
                             ModelAvailabilityRegistry.reportEdgeLoad(
                                 ModelLoadResult.Ready(Unit),
                                 registryLoadGeneration,
                             )
-                                registrySessionGeneration =
+                            registrySessionGeneration =
                                 ModelAvailabilityRegistry.reportSessionReady(
                                     listOf(
                                         ModelFeature.Remaster,
@@ -247,6 +245,12 @@ object RemasterModelSession : ModelRunnerContract {
                                     )
                                 )
                             capturedTestSeam?.postReady?.invoke()
+                            check(generation == commandGeneration.get() && ModelAvailabilityRegistry.isCurrent(validationToken))
+                            closeableModel = localRunner
+                            localRunner = null
+                            activeModel = candidate
+                            sessionValidationIdentity = validationToken.sessionIdentity()
+                            isModelLoaded = true
                         } else {
                             ModelAvailabilityRegistry.reportEdgeLoad(
                                 ModelLoadResult.LoadFailed("runner creation returned null"),
@@ -265,7 +269,15 @@ object RemasterModelSession : ModelRunnerContract {
                             if (closeableModel != null) "${candidate.title}: 사용 가능"
                             else "${candidate.title}: 실행 경로를 준비하는 중입니다."
                     }
+                        } catch (failure: Throwable) {
+                            runCatching { localRunner?.close() }
+                            localRunner = null
+                            throw failure
+                        }
+                    }
 .onFailure {
+                        runCatching { localRunner?.close() }
+                        localRunner = null
                         val model = closeableModel
                         closeableModel = null
                         publishSessionClosed()
@@ -369,20 +381,25 @@ object RemasterModelSession : ModelRunnerContract {
                     ModelAvailabilityRegistry.reportEdgeLoad(stale, loadGeneration)
                     return@withLock stale
                 }
-                closeableModel = runnerOwner.transfer()
+                val ready = ModelLoadResult.Ready(Unit)
+                ModelAvailabilityRegistry.reportEdgeLoad(ready, loadGeneration)
+                val publishedSessionGeneration =
+                    ModelAvailabilityRegistry.reportSessionReady(
+                        listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection)
+                    )
+                registrySessionGeneration = publishedSessionGeneration
+                capturedTestSeam?.postReady?.invoke()
+                check(ModelAvailabilityRegistry.isCurrent(validationToken)) {
+                    "model validation became stale after Ready publication"
+                }
+                val installedRunner = checkNotNull(runnerOwner.transfer())
+                closeableModel = installedRunner
                 activeModel = candidate
-                isModelLoaded = true
                 sessionValidationIdentity = validationToken.sessionIdentity()
+                isModelLoaded = true
                 isModelLoading = false
                 lifecycle = ModelRunnerLifecycle.Loaded
-                ModelLoadResult.Ready(Unit).also {
-                    ModelAvailabilityRegistry.reportEdgeLoad(it, loadGeneration)
-                    registrySessionGeneration =
-                        ModelAvailabilityRegistry.reportSessionReady(
-                            listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection)
-                        )
-                    capturedTestSeam?.postReady?.invoke()
-                }
+                ready
             } catch (failure: Throwable) {
                 runnerOwner.close()
                 publishSessionClosed()
