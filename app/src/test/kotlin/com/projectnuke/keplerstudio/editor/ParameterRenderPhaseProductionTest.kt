@@ -1,4 +1,4 @@
-﻿package com.projectnuke.keplerstudio.editor
+package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import android.graphics.Bitmap
