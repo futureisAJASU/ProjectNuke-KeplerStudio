@@ -25,63 +25,81 @@ internal class ParameterLifecycleHooks(
 )
 
 internal object ParameterLifecycleTestHook {
-    @Volatile private var installed: ParameterLifecycleHooks? = null
-    private val lock = Any()
+    internal class Installation internal constructor(
+        internal val generation: Long,
+        private val observer: ParameterLifecycleHooks,
+    ) : AutoCloseable {
+        @Volatile private var active = true
+        internal val hooks: ParameterLifecycleHooks? get() = if (active) observer else null
 
-    internal fun install(hooks: ParameterLifecycleHooks): AutoCloseable {
-        synchronized(lock) {
-            check(installed == null) { "parameter lifecycle test hooks already installed" }
-            installed = hooks
-        }
-        return AutoCloseable {
+        override fun close() {
+            active = false
             synchronized(lock) {
-                if (installed === hooks) installed = null
+                if (installed === this) installed = null
             }
         }
     }
 
+    @Volatile private var installed: Installation? = null
+    private val lock = Any()
+    private var nextGeneration = 0L
+
+    internal fun install(hooks: ParameterLifecycleHooks): Installation {
+        synchronized(lock) {
+            check(installed == null) { "parameter lifecycle test hooks already installed" }
+            return Installation(++nextGeneration, hooks).also { installed = it }
+        }
+    }
+
+    /** Capture once when a transaction is created; never re-read a later test installation. */
+    internal fun capture(): Installation? = synchronized(lock) { installed }
+
+    internal fun notifyTransactionCreated(installation: Installation?, transactionId: Long) {
+        installation?.hooks?.onTransactionCreated?.invoke(transactionId)
+    }
+
     internal fun notifyTransactionCreated(transactionId: Long) {
-        installed?.onTransactionCreated?.invoke(transactionId)
+        capture()?.hooks?.onTransactionCreated?.invoke(transactionId)
     }
 
     internal fun notifyHistoryPublished(transactionId: Long) {
-        installed?.onHistoryPublished?.invoke(transactionId)
+        capture()?.hooks?.onHistoryPublished?.invoke(transactionId)
     }
 
     internal fun notifyRenderRequestStarted(revision: Int) {
-        installed?.onRenderRequestStarted?.invoke(revision)
+        capture()?.hooks?.onRenderRequestStarted?.invoke(revision)
     }
 
     internal fun notifyRenderOutputProduced(revision: Int) {
-        installed?.onRenderOutputProduced?.invoke(revision)
+        capture()?.hooks?.onRenderOutputProduced?.invoke(revision)
     }
 
     internal fun notifyRenderOutputAdopted(revision: Int) {
-        installed?.onRenderOutputAdopted?.invoke(revision)
+        capture()?.hooks?.onRenderOutputAdopted?.invoke(revision)
     }
 
     internal fun notifyInactivityTimerFired(transactionId: Long) {
-        installed?.onInactivityTimerFired?.invoke(transactionId)
+        capture()?.hooks?.onInactivityTimerFired?.invoke(transactionId)
     }
 
     internal fun notifyTransactionCommitBegan(transactionId: Long) {
-        installed?.onTransactionCommitBegan?.invoke(transactionId)
+        capture()?.hooks?.onTransactionCommitBegan?.invoke(transactionId)
     }
 
     internal fun notifyTransactionCommitted(adoptedRevision: Int) {
-        installed?.onTransactionCommitted?.invoke(adoptedRevision)
+        capture()?.hooks?.onTransactionCommitted?.invoke(adoptedRevision)
     }
 
     internal fun notifyRollbackAdoptedStartState(startRevision: Int) {
-        installed?.onRollbackAdoptedStartState?.invoke(startRevision)
+        capture()?.hooks?.onRollbackAdoptedStartState?.invoke(startRevision)
     }
 
     internal fun notifyTransactionClosed(transactionId: Long) {
-        installed?.onTransactionClosed?.invoke(transactionId)
+        capture()?.hooks?.onTransactionClosed?.invoke(transactionId)
     }
 
     internal fun notifyDraftCaptureBegan(epoch: Long) {
-        installed?.onDraftCaptureBegan?.invoke(epoch)
+        capture()?.hooks?.onDraftCaptureBegan?.invoke(epoch)
     }
 
     internal fun installedForTestCount(): Int =

@@ -24,11 +24,29 @@ internal fun cropTransformedDimensions(sourceWidth: Int, sourceHeight: Int, crop
  * crop transform call site uses it instead of the native library; the
  * default (null) keeps the production native path unchanged.
  */
-@Volatile
-internal var cropTransformForTest: (suspend (Bitmap, CropState) -> Bitmap)? = null
+private val cropTransformTestLock = Any()
+private var cropTransformForTest: (suspend (Bitmap, CropState) -> Bitmap)? = null
+
+internal fun installCropTransformForTest(
+    transform: suspend (Bitmap, CropState) -> Bitmap,
+): AutoCloseable {
+    synchronized(cropTransformTestLock) {
+        check(cropTransformForTest == null) { "crop transform test seam already installed" }
+        cropTransformForTest = transform
+    }
+    return AutoCloseable {
+        synchronized(cropTransformTestLock) {
+            if (cropTransformForTest === transform) cropTransformForTest = null
+        }
+    }
+}
+
+internal fun cropTransformTestSeamCount(): Int = synchronized(cropTransformTestLock) {
+    if (cropTransformForTest == null) 0 else 1
+}
 
 suspend fun renderCropTransform(source: Bitmap, cropState: CropState): Bitmap =
-    cropTransformForTest?.invoke(source, cropState)
+    synchronized(cropTransformTestLock) { cropTransformForTest }?.invoke(source, cropState)
         ?: renderCropTransformNative(source, cropState)
 
 private suspend fun renderCropTransformNative(source: Bitmap, cropState: CropState): Bitmap {

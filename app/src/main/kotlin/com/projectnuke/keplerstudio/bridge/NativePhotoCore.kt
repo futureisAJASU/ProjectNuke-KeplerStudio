@@ -331,15 +331,31 @@ object NativePhotoCore {
  * triggers its class initializer (System.loadLibrary), which fails in
  * Robolectric and is cached as NoClassDefFoundError.
  */
-@Volatile
-internal var nativeSessionFactoryForTest: ((String) -> Long)? = null
+private val nativeSessionFactoryTestLock = Any()
+private var nativeSessionFactoryForTest: ((String) -> Long)? = null
+
+internal fun installNativeSessionFactoryForTest(factory: (String) -> Long): AutoCloseable {
+    synchronized(nativeSessionFactoryTestLock) {
+        check(nativeSessionFactoryForTest == null) { "native session factory test seam already installed" }
+        nativeSessionFactoryForTest = factory
+    }
+    return AutoCloseable {
+        synchronized(nativeSessionFactoryTestLock) {
+            if (nativeSessionFactoryForTest === factory) nativeSessionFactoryForTest = null
+        }
+    }
+}
+
+internal fun nativeSessionFactoryTestSeamCount(): Int = synchronized(nativeSessionFactoryTestLock) {
+    if (nativeSessionFactoryForTest == null) 0 else 1
+}
 
 /**
  * Session creation routed through the test seam when one is installed,
  * otherwise the native library call.
  */
 internal fun nativeCreateSessionOrTest(sourcePath: String): Long =
-    nativeSessionFactoryForTest?.invoke(sourcePath)
+    synchronized(nativeSessionFactoryTestLock) { nativeSessionFactoryForTest }?.invoke(sourcePath)
         ?: NativePhotoCore.nativeCreateSession(sourcePath)
 
 /**
@@ -351,9 +367,27 @@ internal fun nativeCreateSessionOrTest(sourcePath: String): Long =
  * triggers its class initializer (System.loadLibrary), which fails in
  * Robolectric and is cached as NoClassDefFoundError.
  */
-@Volatile
-internal var nativeFlareGuardInPlaceForTest:
+private val nativeFlareGuardTestLock = Any()
+private var nativeFlareGuardInPlaceForTest:
     (suspend (Bitmap, Int, Float, Int) -> Int)? = null
+
+internal fun installNativeFlareGuardInPlaceForTest(
+    kernel: suspend (Bitmap, Int, Float, Int) -> Int,
+): AutoCloseable {
+    synchronized(nativeFlareGuardTestLock) {
+        check(nativeFlareGuardInPlaceForTest == null) { "native flare test seam already installed" }
+        nativeFlareGuardInPlaceForTest = kernel
+    }
+    return AutoCloseable {
+        synchronized(nativeFlareGuardTestLock) {
+            if (nativeFlareGuardInPlaceForTest === kernel) nativeFlareGuardInPlaceForTest = null
+        }
+    }
+}
+
+internal fun nativeFlareGuardTestSeamCount(): Int = synchronized(nativeFlareGuardTestLock) {
+    if (nativeFlareGuardInPlaceForTest == null) 0 else 1
+}
 
 /**
  * Flare rule kernel routed through the test seam when one is installed,
@@ -365,7 +399,7 @@ internal suspend fun nativeApplyFlareGuardInPlaceOrTest(
     strength: Float,
     revision: Int,
 ): Int =
-    nativeFlareGuardInPlaceForTest?.invoke(bitmap, mode, strength, revision)
+    synchronized(nativeFlareGuardTestLock) { nativeFlareGuardInPlaceForTest }?.invoke(bitmap, mode, strength, revision)
         ?: NativePhotoCore.nativeApplyFlareGuardInPlace(
             bitmap,
             mode,

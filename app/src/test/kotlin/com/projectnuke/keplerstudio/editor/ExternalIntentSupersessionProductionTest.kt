@@ -2,7 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import android.graphics.Bitmap
-import com.projectnuke.keplerstudio.bridge.nativeFlareGuardInPlaceForTest
+import com.projectnuke.keplerstudio.bridge.installNativeFlareGuardInPlaceForTest
 import com.projectnuke.keplerstudio.ui.applyActiveSelectionLocalEdit
 import com.projectnuke.keplerstudio.ui.applyActiveSelectionLocalEditNativeBaked
 import com.projectnuke.keplerstudio.ui.applyCropTransform
@@ -56,8 +56,6 @@ class ExternalIntentSupersessionProductionTest {
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
-        cropTransformForTest = null
-        nativeFlareGuardInPlaceForTest = null
         ExperimentalLabController.resetForTest()
     }
 
@@ -88,7 +86,7 @@ class ExternalIntentSupersessionProductionTest {
                     onRollbackAdoptedStartState = { rollbacks++ },
                 )
             )
-        cropTransformForTest = { source, crop ->
+        val cropTransform = installCropTransformForTest { source, crop ->
             val dims = cropTransformedDimensions(source.width, source.height, crop)
             val color =
                 when (transformCalls.incrementAndGet()) {
@@ -141,6 +139,7 @@ class ExternalIntentSupersessionProductionTest {
             pendingGate.complete(Unit)
             hooks.close()
             renderer.close()
+            cropTransform.close()
             sourceFile.delete()
         }
     }
@@ -176,7 +175,7 @@ class ExternalIntentSupersessionProductionTest {
                     onRollbackAdoptedStartState = { rollbacks += it },
                 )
             )
-        cropTransformForTest = { source, crop ->
+        val cropTransform = installCropTransformForTest { source, crop ->
             val dims = cropTransformedDimensions(source.width, source.height, crop)
             transformCalls.incrementAndGet()
             outputBitmap(dims.first, dims.second, 0xffff00aa.toInt())
@@ -213,6 +212,7 @@ class ExternalIntentSupersessionProductionTest {
             pendingGate.complete(Unit)
             hooks.close()
             renderer.close()
+            cropTransform.close()
             sourceFile.delete()
         }
     }
@@ -249,7 +249,7 @@ class ExternalIntentSupersessionProductionTest {
                     onRollbackAdoptedStartState = { rollbacks++ },
                 )
             )
-        nativeFlareGuardInPlaceForTest = { bitmap, _, _, _ ->
+        val flareKernel = installNativeFlareGuardInPlaceForTest { bitmap, _, _, _ ->
             flareCalls.incrementAndGet()
             bitmap.eraseColor(0xff0000cc.toInt())
             0
@@ -289,6 +289,7 @@ class ExternalIntentSupersessionProductionTest {
             pendingGate.complete(Unit)
             hooks.close()
             renderer.close()
+            flareKernel.close()
             sourceFile.delete()
         }
     }
@@ -326,7 +327,7 @@ class ExternalIntentSupersessionProductionTest {
                     onRollbackAdoptedStartState = { rollbacks += it },
                 )
             )
-        nativeFlareGuardInPlaceForTest = { bitmap, _, _, _ ->
+        val flareKernel = installNativeFlareGuardInPlaceForTest { bitmap, _, _, _ ->
             flareCalls.incrementAndGet()
             bitmap.eraseColor(0xff0000cc.toInt())
             0
@@ -352,6 +353,7 @@ class ExternalIntentSupersessionProductionTest {
             pendingGate.complete(Unit)
             hooks.close()
             renderer.close()
+            flareKernel.close()
             sourceFile.delete()
         }
     }

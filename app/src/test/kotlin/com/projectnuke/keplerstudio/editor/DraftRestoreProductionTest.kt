@@ -2,7 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import android.graphics.Bitmap
-import com.projectnuke.keplerstudio.bridge.nativeSessionFactoryForTest
+import com.projectnuke.keplerstudio.bridge.installNativeSessionFactoryForTest
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -38,7 +38,6 @@ class DraftRestoreProductionTest {
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
-        nativeSessionFactoryForTest = null
     }
 
     // Test 1: a saved draft generation is actually restored into a fresh
@@ -78,7 +77,7 @@ class DraftRestoreProductionTest {
                 currentDraftGenerationId(context)
                     ?: error("draft pointer must exist after save")
 
-            nativeSessionFactoryForTest = { 1L }
+            val sessionFactory = installNativeSessionFactoryForTest { 1L }
             val vm2 = EditorViewModel(context)
             awaitInit(vm2)
             assertEquals("restore render must have run", 1, restoreRenders.get())
@@ -94,6 +93,7 @@ class DraftRestoreProductionTest {
             assertEquals("restored original preview side", 16, vm2.uiState.value.originalPreviewBitmap?.width)
             assertFalse("restored document is not busy", vm2.uiState.value.isBusy)
             awaitEvent { vm2.canEnterEditorAction() }
+            sessionFactory.close()
         } finally {
             hooks.close()
             renderer.close()
@@ -127,7 +127,7 @@ class DraftRestoreProductionTest {
             assertEquals("manifest records one mask", 1, validated.manifest.selectionLayers.size)
             assertEquals("mask file persisted", 1, validated.maskFiles.size)
 
-            nativeSessionFactoryForTest = { 1L }
+            val sessionFactory = installNativeSessionFactoryForTest { 1L }
             val vm2 = EditorViewModel(context)
             awaitInit(vm2)
             assertEquals("restored params", 0.25f, vm2.uiState.value.params.exposure)
@@ -145,6 +145,7 @@ class DraftRestoreProductionTest {
             assertEquals("restored layer opacity", 0.5f, layer.opacity)
             assertEquals("restored active layer id", "restore-mask", vm2.uiState.value.activeSelectionLayerId)
             awaitEvent { vm2.canEnterEditorAction() }
+            sessionFactory.close()
         } finally {
             renderer.close()
             sourceFile.delete()

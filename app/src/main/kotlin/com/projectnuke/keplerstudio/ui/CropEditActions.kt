@@ -214,8 +214,14 @@ fun EditorViewModel.applyCropTransform() {
     val baseContentToken = state.baseContentToken
     val activeSelectionLayerId = state.activeSelectionLayerId
     val capturedSelectionLayers = state.selectionLayers.toList()
-    val capturedPreviewWidth = preview?.width ?: 0
-    val capturedPreviewHeight = preview?.height ?: 0
+    // A valid original-only document is still crop-capable.  One reference
+    // geometry governs preview, original and every selection mask.
+    val reference = preview ?: original ?: run {
+        startSnapshot.close()
+        return
+    }
+    val capturedReferenceWidth = reference.width
+    val capturedReferenceHeight = reference.height
 
     val cropPrepareTracker =
         beginMemoryTracking(
@@ -237,8 +243,8 @@ fun EditorViewModel.applyCropTransform() {
                 baseContentToken = baseContentToken,
                 activeSelectionLayerId = activeSelectionLayerId,
                 capturedSelectionLayers = capturedSelectionLayers,
-                capturedPreviewWidth = capturedPreviewWidth,
-                capturedPreviewHeight = capturedPreviewHeight,
+                capturedReferenceWidth = capturedReferenceWidth,
+                capturedReferenceHeight = capturedReferenceHeight,
                 startSnapshot = startSnapshot,
                 cropPrepareTracker = cropPrepareTracker,
             )
@@ -287,8 +293,8 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
     baseContentToken: String,
     activeSelectionLayerId: String?,
     capturedSelectionLayers: List<SelectionLayer>,
-    capturedPreviewWidth: Int,
-    capturedPreviewHeight: Int,
+    capturedReferenceWidth: Int,
+    capturedReferenceHeight: Int,
     startSnapshot: LeasedEditorSnapshot,
     cropPrepareTracker: MemoryTrackerScope?,
 ) {
@@ -323,7 +329,7 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
         if (startLayers.isNotEmpty()) {
             var outputBytes = 0L
             startLayers.forEach { layer ->
-                check(layer.bitmap.width == capturedPreviewWidth && layer.bitmap.height == capturedPreviewHeight)
+                check(layer.bitmap.width == capturedReferenceWidth && layer.bitmap.height == capturedReferenceHeight)
                 val dimensions = cropTransformedDimensions(layer.bitmap.width, layer.bitmap.height, crop)
                 outputBytes = BitmapMemoryBudget.saturatingAdd(
                     outputBytes,
@@ -354,9 +360,11 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
             if (wPreview == null && wOriginal == null) return@withContext null
             // Defense-in-depth against a recycler race: dimensions must match those captured at
             // the synchronous start. If mismatched, treat as superseded.
-            if (wPreview != null && (wPreview.width != capturedPreviewWidth || wPreview.height != capturedPreviewHeight)) return@withContext null
-            if (wOriginal != null && (wOriginal.width != capturedPreviewWidth || wOriginal.height != capturedPreviewHeight)) return@withContext null
-            if (workerState.selectionLayers.any { it.bitmap.width != capturedPreviewWidth || it.bitmap.height != capturedPreviewHeight }) return@withContext null
+            val reference = wPreview ?: wOriginal ?: return@withContext null
+            if (reference.width != capturedReferenceWidth || reference.height != capturedReferenceHeight) return@withContext null
+            if (wPreview != null && (wPreview.width != capturedReferenceWidth || wPreview.height != capturedReferenceHeight)) return@withContext null
+            if (wOriginal != null && (wOriginal.width != capturedReferenceWidth || wOriginal.height != capturedReferenceHeight)) return@withContext null
+            if (workerState.selectionLayers.any { it.bitmap.width != capturedReferenceWidth || it.bitmap.height != capturedReferenceHeight }) return@withContext null
 
             maskReservations =
                 reserveSelectionMaskCopies("crop:$operationToken", workerState.selectionLayers)

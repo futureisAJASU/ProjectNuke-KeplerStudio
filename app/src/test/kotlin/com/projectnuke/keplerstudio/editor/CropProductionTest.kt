@@ -40,7 +40,6 @@ class CropProductionTest {
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
-        cropTransformForTest = null
     }
 
     // Test 1: crop with selection masks preflights output bytes before the undo
@@ -50,7 +49,7 @@ class CropProductionTest {
         val sourceFile = cropSourceFile("crop-mask-source.png")
         val vm = editor(sourceFile.absolutePath, withPreview = true, withMask = true)
         val transformCalls = AtomicInteger(0)
-        cropTransformForTest = { source, crop ->
+        val transform = installCropTransformForTest { source, crop ->
             val dims = cropTransformedDimensions(source.width, source.height, crop)
             val color =
                 when (transformCalls.incrementAndGet()) {
@@ -82,6 +81,7 @@ class CropProductionTest {
             assertEquals("one undo entry for the crop", 1, vm.undoEntryCountForTest())
             assertEquals("params untouched", 0f, vm.uiState.value.params.exposure)
         } finally {
+            transform.close()
             sourceFile.delete()
         }
     }
@@ -90,11 +90,11 @@ class CropProductionTest {
     // graceful no-op — the original document, crop rect and history stay
     // exactly as they were, and no undo entry is created.
     @Test
-    fun cropWithoutPreviewIsGracefulNoOp() = runBlocking {
+    fun cropWithoutPreviewUsesOriginalAsReferenceAndCommitsOneUndo() = runBlocking {
         val sourceFile = cropSourceFile("crop-previewless-source.png")
         val vm = editor(sourceFile.absolutePath, withPreview = false, withMask = false)
         var hookCalls = 0
-        cropTransformForTest = { source, crop ->
+        val transform = installCropTransformForTest { source, crop ->
             hookCalls++
             val dims = cropTransformedDimensions(source.width, source.height, crop)
             outputBitmap(dims.first, dims.second, 0xff00aaff.toInt())
@@ -110,13 +110,14 @@ class CropProductionTest {
             vm.applyCropTransform()
             awaitEvent { !vm.uiState.value.isBusy }
 
-            assertEquals("crop transform must not run without preview", 0, hookCalls)
-            assertEquals("preview still absent", null, vm.uiState.value.previewBitmap)
-            assertSame("original bitmap untouched", originalBitmap, vm.uiState.value.originalPreviewBitmap)
-            assertEquals("original pixels untouched", originalPixels, uiPixelColor(vm.uiState.value.originalPreviewBitmap))
-            assertEquals("crop rect preserved", cropRectBefore, vm.uiState.value.cropState)
-            assertEquals("no undo entry on previewless crop", 0, vm.undoEntryCountForTest())
+            assertEquals("original-only crop transforms one reference bitmap", 1, hookCalls)
+            assertNotNull("crop creates a preview", vm.uiState.value.previewBitmap)
+            assertFalse("original is replaced", originalBitmap === vm.uiState.value.originalPreviewBitmap)
+            assertFalse("original pixels changed", originalPixels == uiPixelColor(vm.uiState.value.originalPreviewBitmap))
+            assertFalse("crop state resets after apply", cropRectBefore == vm.uiState.value.cropState)
+            assertEquals("one exact crop undo entry", 1, vm.undoEntryCountForTest())
         } finally {
+            transform.close()
             sourceFile.delete()
         }
     }
@@ -130,7 +131,7 @@ class CropProductionTest {
         val startPixels = uiPixelColor(vm.uiState.value.previewBitmap)
         val startLayers = vm.uiState.value.selectionLayers.toList()
         val startToken = vm.uiState.value.baseContentToken
-        cropTransformForTest = { _, _ -> throw IllegalStateException("forced crop failure") }
+        val transform = installCropTransformForTest { _, _ -> throw IllegalStateException("forced crop failure") }
         try {
             awaitReady(vm)
             vm.updateCropRect(0.25f, 0.25f, 0.75f, 0.75f)
@@ -144,6 +145,7 @@ class CropProductionTest {
             assertEquals("base token unchanged after failure", startToken, vm.uiState.value.baseContentToken)
             assertEquals("no undo entry on failed crop", 0, vm.undoEntryCountForTest())
         } finally {
+            transform.close()
             sourceFile.delete()
         }
     }
@@ -167,7 +169,7 @@ class CropProductionTest {
         previewBmp.eraseColor(0xff00ff00.toInt())
         val originalBmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         originalBmp.eraseColor(0xff006600.toInt())
-        val mask = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        val mask = if (withMask) Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888) else null
         vm.updateUiState {
             it.copy(
                 sourcePath = sourcePath,
@@ -181,7 +183,7 @@ class CropProductionTest {
                                 id = "crop-mask",
                                 name = "Crop Mask",
                                 kind = SelectionLayerKind.Brush,
-                                bitmap = mask,
+                                bitmap = checkNotNull(mask),
                             )
                         )
                     } else {

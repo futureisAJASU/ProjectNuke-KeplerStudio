@@ -184,22 +184,6 @@ internal class PendingHistorySnapshot(
     }
 }
 
-/**
- * Test seam: parks the parameter-history publish between taking the snapshot
- * from the pending handle and handing it to [OwnedHandoff.publish], so tests
- * can close the transaction first and exercise the rejected-publish path
- * deterministically. The publish still runs because the park is non-cancellable.
- */
-@Volatile
-var parameterHistoryPublishTestGate: CompletableDeferred<Unit>? = null
-
-/**
- * Test seam: completes when the parameter-history job has taken the snapshot
- * and is parked at [parameterHistoryPublishTestGate].
- */
-@Volatile
-var parameterHistoryPublishTestGateReached: CompletableDeferred<Unit>? = null
-
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val _uiState =
         MutableStateFlow(
@@ -391,6 +375,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private class ParameterGestureTransaction(
         val id: Long,
         val start: LeasedEditorSnapshot,
+        val lifecycleInstallation: ParameterLifecycleTestHook.Installation?,
+        val historyPublishSeam: HistoryPublishTestSeam?,
     ) : AutoCloseable {
         @Volatile private var terminalState: ParamTransactionTerminalState = ParamTransactionTerminalState.Active
         @Volatile private var renderPhase: ParamRenderPhase = ParamRenderPhase.Idle
@@ -3645,10 +3631,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val transaction =
             parameterGesture ?: run {
                 val source = acquireEditorSnapshot("updateParams") ?: return
-                ParameterGestureTransaction(++parameterGestureCounter, source).also {
+                ParameterGestureTransaction(
+                    id = ++parameterGestureCounter,
+                    start = source,
+                    lifecycleInstallation = ParameterLifecycleTestHook.capture(),
+                    historyPublishSeam = HistoryPublishTestSeam.capture(),
+                ).also {
                     parameterGesture = it
                     lastSuccessfullyRenderedParams = source.state.params
-                    ParameterLifecycleTestHook.notifyTransactionCreated(it.id)
+                    ParameterLifecycleTestHook.notifyTransactionCreated(it.lifecycleInstallation, it.id)
                 }
             }
         val nextRevision = _uiState.value.revision + 1
@@ -3662,7 +3653,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             delay(900L)
             if (transaction.inactivityGeneration == tickGeneration) {
                 transaction.windowExpired = true
-                ParameterLifecycleTestHook.notifyInactivityTimerFired(transaction.id)
+                transaction.lifecycleInstallation?.hooks?.onInactivityTimerFired?.invoke(transaction.id)
                 maybeCloseParameterGesture(transaction)
             }
         }
@@ -3693,17 +3684,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             try {
                                 val snap = transaction.historyHandle?.await()
                                 if (snap != null) {
-                                    withContext(NonCancellable) {
-                                        parameterHistoryPublishTestGateReached?.complete(Unit)
-                                        parameterHistoryPublishTestGate?.await()
-                                    }
+                                    transaction.historyPublishSeam?.awaitRelease()
                                     if (!transaction.historyHandoff.publish(OwnedHistorySnapshot(snap))) {
                                         // The rejected handoff already closed the wrapper,
                                         // which released the snapshot exactly once. Nothing
                                         // to recycle here.
                                     } else {
                                         transaction.historySnapshotPublished = true
-                                        ParameterLifecycleTestHook.notifyHistoryPublished(transaction.id)
+                                        transaction.lifecycleInstallation?.hooks?.onHistoryPublished?.invoke(transaction.id)
                                     }
                                 }
                             } catch (ce: CancellationException) {
@@ -3729,7 +3717,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     base = checkNotNull(baseSlot.take()?.take())
                     tracker?.track(base, "updateParams:base")
-                    ParameterLifecycleTestHook.notifyRenderRequestStarted(nextRevision)
+                    transaction.lifecycleInstallation?.hooks?.onRenderRequestStarted?.invoke(nextRevision)
                     withContext(Dispatchers.Default) {
                         renderSlot.publish(
                             OwnedRenderSuccess(
@@ -3746,7 +3734,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             )
                         )
                     }
-                    ParameterLifecycleTestHook.notifyRenderOutputProduced(nextRevision)
+                    transaction.lifecycleInstallation?.hooks?.onRenderOutputProduced?.invoke(nextRevision)
                     val owner = checkNotNull(renderSlot.take())
                     val result = owner.result
                     output = checkNotNull(owner.takeOutput())
@@ -3768,7 +3756,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             }
                             activeParamRenderRevision = null
                             output = null
-                            ParameterLifecycleTestHook.notifyRenderOutputAdopted(nextRevision)
+                            transaction.lifecycleInstallation?.hooks?.onRenderOutputAdopted?.invoke(nextRevision)
                             maybeCloseParameterGesture(transaction)
                         } else {
                             if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
@@ -6844,10 +6832,10 @@ fun exportPreview() {
                 )
             }
             closeParameterGesture(transaction)
-            ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(startRevision)
+            transaction.lifecycleInstallation?.hooks?.onRollbackAdoptedStartState?.invoke(startRevision)
             return
         }
-        ParameterLifecycleTestHook.notifyTransactionCommitBegan(transaction.id)
+        transaction.lifecycleInstallation?.hooks?.onTransactionCommitBegan?.invoke(transaction.id)
         if (!transaction.historyCommitted) {
             if (!transaction.commit()) return
             val snapshot = transaction.takeOwnedSnapshot()
@@ -6857,7 +6845,7 @@ fun exportPreview() {
         lastSuccessfullyRenderedParams = adoptedParams
         scheduleDraftAutosave()
         maybeCloseParameterGesture(transaction)
-        ParameterLifecycleTestHook.notifyTransactionCommitted(checkNotNull(transaction.adoptedRevision))
+        transaction.lifecycleInstallation?.hooks?.onTransactionCommitted?.invoke(checkNotNull(transaction.adoptedRevision))
     }
 
     private fun takePendingParameterSnapshotForRollback(
@@ -6867,7 +6855,7 @@ fun exportPreview() {
         val snapshot = transaction.takeOwnedSnapshot()
         transaction.historyCommitted = true
         closeParameterGesture(transaction)
-        ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(transaction.start.state.revision)
+        transaction.lifecycleInstallation?.hooks?.onRollbackAdoptedStartState?.invoke(transaction.start.state.revision)
         return snapshot
     }
 
@@ -6888,7 +6876,7 @@ fun exportPreview() {
                 )
             }
             closeParameterGesture(transaction)
-            ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(startRevision)
+            transaction.lifecycleInstallation?.hooks?.onRollbackAdoptedStartState?.invoke(startRevision)
             return
         }
         if (!transaction.historyCommitted && transaction.historySnapshotPublished) {
@@ -6904,7 +6892,7 @@ fun exportPreview() {
         paramUndoWindowJob?.cancel()
         paramUndoWindowJob = null
         transaction.close()
-        ParameterLifecycleTestHook.notifyTransactionClosed(transaction.id)
+        transaction.lifecycleInstallation?.hooks?.onTransactionClosed?.invoke(transaction.id)
     }
 
     internal fun discardPendingParamUndoSnapshot() {
@@ -6961,7 +6949,7 @@ fun exportPreview() {
             transaction.windowExpired = true
             val adoptedParams = transaction.adoptedParams
             if (adoptedParams != null) {
-                ParameterLifecycleTestHook.notifyTransactionCommitBegan(transaction.id)
+                transaction.lifecycleInstallation?.hooks?.onTransactionCommitBegan?.invoke(transaction.id)
                 if (!transaction.historyCommitted) {
                     transaction.commit()
                     val snapshot = transaction.takeOwnedSnapshot()
@@ -6980,7 +6968,7 @@ fun exportPreview() {
                 updateHistoryFlags()
                 if (shouldScheduleDraft) scheduleDraftAutosave()
                 closeParameterGesture(transaction)
-                ParameterLifecycleTestHook.notifyTransactionCommitted(settledRevision)
+                transaction.lifecycleInstallation?.hooks?.onTransactionCommitted?.invoke(settledRevision)
                 return SettlementResult.Committed(settledRevision)
             }
             transaction.rollback()
@@ -6996,7 +6984,7 @@ fun exportPreview() {
                 )
             }
             closeParameterGesture(transaction)
-            ParameterLifecycleTestHook.notifyRollbackAdoptedStartState(startRevision)
+            transaction.lifecycleInstallation?.hooks?.onRollbackAdoptedStartState?.invoke(startRevision)
             return SettlementResult.RolledBack(startRevision)
         } else {
             updateUiStateAndRecycleReplaced {

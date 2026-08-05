@@ -29,8 +29,8 @@ import org.robolectric.shadows.ShadowLog
  * log a "History bitmap release underflow" warning and attempted a second
  * release of the same reservations.
  *
- * Both tests park the publish with [parameterHistoryPublishTestGate]
- * (non-cancellable, mirroring the production race where settlement closes the
+ * Both tests park the publish with [HistoryPublishTestSeam]
+ * (mirroring the production race where settlement closes the
  * transaction while the history job is between taking and publishing the
  * snapshot), close the transaction from the main thread, release the gate, and
  * prove the snapshot was released exactly once: no underflow warning, ledger
@@ -54,8 +54,6 @@ class ParameterHistoryOwnershipProductionTest {
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
-        parameterHistoryPublishTestGate = null
-        parameterHistoryPublishTestGateReached = null
     }
 
     // Settlement rollback closes the transaction while the history job is
@@ -66,9 +64,8 @@ class ParameterHistoryOwnershipProductionTest {
         val sourceFile = draftSourceFile("history-reject-rollback.png")
         val vm = editor(sourceFile.absolutePath)
         val publishGate = CompletableDeferred<Unit>()
-        val publishReached = CompletableDeferred<Unit>()
-        parameterHistoryPublishTestGate = publishGate
-        parameterHistoryPublishTestGateReached = publishReached
+        val publishSeam = HistoryPublishTestSeam(reached = CompletableDeferred(), releaseGate = publishGate)
+        val seamHandle = HistoryPublishTestSeam.install(publishSeam)
         var adopted = 0
         var commitBegan = 0
         var committed = 0
@@ -93,7 +90,7 @@ class ParameterHistoryOwnershipProductionTest {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
             awaitEvent(vm) {
-                publishReached.isCompleted && vm.pendingParamRenderRevision() != null
+                publishSeam.reached.isCompleted && vm.pendingParamRenderRevision() != null
             }
             assertTrue(
                 "history capture reserved the selection mask",
@@ -119,6 +116,7 @@ class ParameterHistoryOwnershipProductionTest {
             assertEquals("transaction stayed closed", 1, closed.size)
         } finally {
             publishGate.complete(Unit)
+            seamHandle.close()
             hooks.close()
             renderer.close()
             sourceFile.delete()
@@ -133,9 +131,8 @@ class ParameterHistoryOwnershipProductionTest {
         val sourceFile = draftSourceFile("history-reject-discard.png")
         val vm = editor(sourceFile.absolutePath)
         val publishGate = CompletableDeferred<Unit>()
-        val publishReached = CompletableDeferred<Unit>()
-        parameterHistoryPublishTestGate = publishGate
-        parameterHistoryPublishTestGateReached = publishReached
+        val publishSeam = HistoryPublishTestSeam(reached = CompletableDeferred(), releaseGate = publishGate)
+        val seamHandle = HistoryPublishTestSeam.install(publishSeam)
         var adopted = 0
         var commitBegan = 0
         var committed = 0
@@ -158,7 +155,7 @@ class ParameterHistoryOwnershipProductionTest {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
             awaitEvent(vm) {
-                publishReached.isCompleted && vm.pendingParamRenderRevision() != null
+                publishSeam.reached.isCompleted && vm.pendingParamRenderRevision() != null
             }
             assertTrue(
                 "history capture reserved the selection mask",
@@ -180,6 +177,7 @@ class ParameterHistoryOwnershipProductionTest {
             assertEquals("rejected publish never reports success", 0, historyPublished)
         } finally {
             publishGate.complete(Unit)
+            seamHandle.close()
             hooks.close()
             renderer.close()
             sourceFile.delete()
