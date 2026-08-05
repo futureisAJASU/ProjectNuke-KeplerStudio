@@ -14,6 +14,7 @@ internal class OwnedEditorViewModelHarness(
     private val sequence = AtomicLong()
     private val files = ArrayDeque<File>()
     private val seamHandles = ArrayDeque<AutoCloseable>()
+    private val preClearActions = ArrayDeque<() -> Unit>()
     private var closed = false
 
     fun createEditor(): EditorViewModel {
@@ -27,8 +28,16 @@ internal class OwnedEditorViewModelHarness(
 
     fun ownSeam(handle: AutoCloseable): AutoCloseable = handle.also { seamHandles.addFirst(it) }
 
+    /** Releases deterministic gates before the terminal ViewModelStore clear. */
+    fun beforeClear(action: () -> Unit) {
+        check(!closed)
+        preClearActions.addFirst(action)
+    }
+
     /** Terminal production ownership boundary used by shutdown tests. */
     fun clearViewModels() {
+        preClearActions.forEach { runCatching { it() } }
+        preClearActions.clear()
         store.clear()
         shadowOf(android.os.Looper.getMainLooper()).idle()
     }

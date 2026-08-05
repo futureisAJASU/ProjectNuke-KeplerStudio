@@ -187,7 +187,11 @@ object RemasterModelSession : ModelRunnerContract {
             val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
             val token = (validation as? ModelLoadResult.Ready)?.runner
                 ?: return@withLock validation.asUnitFailure().also {
-                    if (generation == commandGeneration.get()) statusText = "모델을 불러오지 못했습니다."
+                    closeInstalledRunnerLocked()
+                    isModelLoading = false
+                    isModelLoaded = false
+                    lifecycle = ModelRunnerLifecycle.Failed
+                    statusText = "모델을 불러오지 못했습니다."
                 }
             if (
                 activeModel?.id == "edge_masker" &&
@@ -199,7 +203,13 @@ object RemasterModelSession : ModelRunnerContract {
                 return@withLock ModelLoadResult.Ready(Unit)
             }
             val candidate = OnDeviceRemasterModels.firstOrNull { it.id == "edge_masker" }
-                ?: return@withLock ModelLoadResult.RuntimeUnavailable("Edge Masker runner is not registered")
+                ?: return@withLock ModelLoadResult.RuntimeUnavailable("Edge Masker runner is not registered").also {
+                    closeInstalledRunnerLocked()
+                    isModelLoading = false
+                    isModelLoaded = false
+                    lifecycle = ModelRunnerLifecycle.Failed
+                    statusText = "모델을 불러오지 못했습니다."
+                }
             isModelLoading = true
             isModelLoaded = false
             lifecycle = ModelRunnerLifecycle.Loading
