@@ -546,7 +546,11 @@ class RemasterModelSessionValidationTest {
         })
         testSeam = handleB
         RemasterModelSession.load(context, edgeCandidate())
-        awaitCondition { RemasterModelSession.isModelLoaded }
+        awaitCondition { !RemasterModelSession.isModelLoading }
+        assertTrue(
+            RemasterModelSession.isModelLoaded,
+            "B failed: lifecycle=${RemasterModelSession.lifecycle}, active=${RemasterModelSession.activeModel?.id}, status=${RemasterModelSession.statusText}, registry=${ModelAvailabilityRegistry.state.value}",
+        )
 
         assertEquals(0, factoryACalls.get())
         assertEquals(1, factoryBCalls.get())
@@ -575,7 +579,10 @@ class RemasterModelSessionValidationTest {
             if (predicate()) return
             delay(1)
         }
-        assertTrue(predicate())
+        assertTrue(
+            predicate(),
+            "predicate timed out: lifecycle=${RemasterModelSession.lifecycle}, loading=${RemasterModelSession.isModelLoading}, loaded=${RemasterModelSession.isModelLoaded}, active=${RemasterModelSession.activeModel?.id}, registry=${ModelAvailabilityRegistry.state.value}",
+        )
     }
 
     private suspend fun assertStageFailure(stage: RemasterModelSession.PublicationStage) {

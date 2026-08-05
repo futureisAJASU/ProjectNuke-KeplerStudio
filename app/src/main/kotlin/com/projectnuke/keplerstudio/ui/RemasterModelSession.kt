@@ -74,7 +74,7 @@ object RemasterModelSession : ModelRunnerContract {
         @Volatile private var active = true
 
         fun create(context: Context, assetPath: String): AutoCloseable? {
-            check(active) { "model test owner closed before runner creation" }
+            check(active) { "model test owner $generation closed before runner creation" }
             return factory?.invoke(context, assetPath)
         }
 
@@ -497,10 +497,10 @@ object RemasterModelSession : ModelRunnerContract {
         }
     }
 
-    suspend fun unloadIdleNow(): Boolean =
-        modelMutex.withLock {
-            if (isModelLoading || isInferring) return@withLock false
-            commandGeneration.incrementAndGet()
+    suspend fun unloadIdleNow(): Boolean {
+        val generation = commandGeneration.incrementAndGet()
+        return modelMutex.withLock {
+            if (generation != commandGeneration.get()) return@withLock false
             GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
             lifecycle = ModelRunnerLifecycle.Closing
             val sessionClosePublished = publishSessionClosed()
@@ -517,6 +517,7 @@ object RemasterModelSession : ModelRunnerContract {
             statusText = "로드된 모델이 없습니다."
             true
         }
+    }
 
     private fun publishSessionClosed(): Boolean {
         if (registrySessionGeneration == 0L) return false
