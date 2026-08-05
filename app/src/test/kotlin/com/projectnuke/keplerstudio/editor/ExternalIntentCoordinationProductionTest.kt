@@ -124,16 +124,22 @@ class ExternalIntentCoordinationProductionTest {
                 renderer(it)
             }
         val hooksHandle = ParameterLifecycleTestHook.install(wrappedHooks)
-        awaitReady(vm)
-        vm.updateParams { it.copy(exposure = 0.2f) }
-        awaitEvent(vm) {
-            vm.uiState.value.params.exposure == 0.2f &&
-                !vm.uiState.value.isBusy &&
-                vm.adoptedParamsForTest()?.exposure == 0.2f
+        try {
+            awaitReady(vm)
+            vm.updateParams { it.copy(exposure = 0.2f) }
+            awaitEvent(vm) {
+                vm.uiState.value.params.exposure == 0.2f &&
+                    !vm.uiState.value.isBusy &&
+                    vm.adoptedParamsForTest()?.exposure == 0.2f
+            }
+            assertTrue("open adopted gesture", vm.hasOpenParameterGesture())
+            assertEquals(0, commitBegan.get())
+            return AdoptedSetup(vm, commitBegan, committed, closed, rollbacks, renderCalls, rendererHandle, hooksHandle)
+        } catch (failure: Throwable) {
+            hooksHandle.close()
+            rendererHandle.close()
+            throw failure
         }
-        assertTrue("open adopted gesture", vm.hasOpenParameterGesture())
-        assertEquals(0, commitBegan.get())
-        return AdoptedSetup(vm, commitBegan, committed, closed, rollbacks, renderCalls, rendererHandle, hooksHandle)
     }
 
     // Test 1: engine change settles the adopted transaction exactly once,
