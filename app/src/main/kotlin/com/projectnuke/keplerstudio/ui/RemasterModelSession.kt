@@ -332,6 +332,9 @@ object RemasterModelSession : ModelRunnerContract {
                     isModelLoaded = closeableModel != null
                     isModelLoading = false
                     lifecycle = if (isModelLoaded) ModelRunnerLifecycle.Loaded else ModelRunnerLifecycle.Failed
+                    statusText =
+                        if (isModelLoaded) "${activeModel?.title ?: candidate.title} 모델을 사용할 수 있습니다."
+                        else statusTextFor(candidate, failed)
                     GlobalModelDiagnostics.publish(
                         "RemasterModelSession",
                         if (isModelLoaded) "loaded" else "unloaded",
