@@ -69,6 +69,11 @@ internal data class EditorHistoryEntry(
 
     /** Compressed disk bytes for cold entries. */
     fun coldDiskBytes(): Long = coldPayload?.bytes ?: 0L
+
+    /** Metadata-only snapshots have no bitmap payload and intentionally stay hot. */
+    fun canColdSpill(): Boolean =
+        payloadState == HistoryPayloadState.Hot &&
+            hotSnapshot?.storage == HistorySnapshotStorage.Exact
 }
 
 internal data class HistoryFlags(val canUndo: Boolean, val canRedo: Boolean, val busy: Boolean)
@@ -562,7 +567,7 @@ internal class EditorHistoryCoordinator(
                         superseded = true
                         break
                     }
-                    if (entry.id in protectedSet || entry.payloadState != HistoryPayloadState.Hot) {
+                    if (entry.id in protectedSet || entry.payloadState != HistoryPayloadState.Hot || !entry.canColdSpill()) {
                         newRedo.add(entry)
                         continue
                     }
@@ -602,8 +607,8 @@ internal class EditorHistoryCoordinator(
             // Only strong recovery may discard failed spills; non-strong preserves them as Hot.
             if (!superseded) {
                 val candidates = buildList {
-                    addAll(redo.filter { it.hotSnapshot != null && it.id !in protectedSet })
-                    addAll(undo.toList().dropLast(1).filter { it.hotSnapshot != null && it.id !in protectedSet })
+                    addAll(redo.filter { it.canColdSpill() && it.id !in protectedSet })
+                    addAll(undo.toList().dropLast(1).filter { it.canColdSpill() && it.id !in protectedSet })
                 }
                 for (entry in candidates) {
                     if (!isOperationCurrent(token, generation)) {
@@ -806,7 +811,7 @@ internal class EditorHistoryCoordinator(
         var moved = false
         while (isOperationCurrent(token, generation) && !fitsWith(requiredBytes)) {
             val candidate = (undo + redo).firstOrNull {
-                it.id !in protected && it.payloadState == HistoryPayloadState.Hot && it.hotSnapshot != null
+                it.id !in protected && it.canColdSpill()
             } ?: break
             if (spillEntry(candidate, token, generation) != SpillResult.Success) break
             moved = true
@@ -821,8 +826,8 @@ internal class EditorHistoryCoordinator(
             val recentUndo = undo.lastOrNull()?.id
             val recentRedo = redo.lastOrNull()?.id
             val candidate = (undo + redo).firstOrNull {
-                it.payloadState == HistoryPayloadState.Hot && it.hotSnapshot != null && it.id != recentUndo && it.id != recentRedo
-            } ?: (undo + redo).firstOrNull { it.payloadState == HistoryPayloadState.Hot && it.hotSnapshot != null }
+                it.canColdSpill() && it.id != recentUndo && it.id != recentRedo
+            } ?: (undo + redo).firstOrNull { it.canColdSpill() }
             if (candidate == null || spillEntry(candidate, token, generation) != SpillResult.Success) break
             moved = true
         }
@@ -835,6 +840,10 @@ internal class EditorHistoryCoordinator(
      *  is stale/closed; caller must NOT discard or reclaim — replacement/close owns settlement. */
     private suspend fun spillEntry(entry: EditorHistoryEntry, token: Long, generation: String): SpillResult {
         val snapshot = entry.hotSnapshot ?: return if (entry.coldPayload != null) SpillResult.Success else SpillResult.CurrentFailure
+        // Metadata-only entries own no bitmap payload. Keep their negligible
+        // state hot; otherwise we would publish a manifest the cold loader
+        // correctly rejects for containing zero bitmap payloads.
+        if (snapshot.storage == HistorySnapshotStorage.MetadataOnly) return SpillResult.CurrentFailure
         if (entry.payloadState != HistoryPayloadState.Hot) return SpillResult.CurrentFailure
         entry.payloadState = HistoryPayloadState.Spilling
         if (diagnosticRecoveryMode != null) {
