@@ -549,7 +549,7 @@ class RemasterModelSessionValidationTest {
         })
         testSeam = handleB
         RemasterModelSession.load(context, edgeCandidate())
-        awaitCondition { !RemasterModelSession.isModelLoading }
+        awaitCondition { factoryBCalls.get() == 1 && !RemasterModelSession.isModelLoading }
         assertTrue(
             RemasterModelSession.isModelLoaded,
             "B failed: lifecycle=${RemasterModelSession.lifecycle}, active=${RemasterModelSession.activeModel?.id}, status=${RemasterModelSession.statusText}, registry=${ModelAvailabilityRegistry.state.value}",
