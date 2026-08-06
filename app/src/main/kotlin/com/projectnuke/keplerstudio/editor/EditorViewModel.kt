@@ -5411,10 +5411,12 @@ fun exportPreview() {
         val current = _uiState.value
         val image = current.previewBitmap ?: current.originalPreviewBitmap
         val safeScale = viewport.scale.takeIf { it.isFinite() && it >= 1f } ?: 1f
+        val safeViewportWidth = viewport.viewportWidth.coerceAtLeast(0)
+        val safeViewportHeight = viewport.viewportHeight.coerceAtLeast(0)
         val geometry =
             if (image != null) {
                 PreviewGeometry(
-                    container = IntSize(viewport.viewportWidth, viewport.viewportHeight),
+                    container = IntSize(safeViewportWidth, safeViewportHeight),
                     imageWidth = image.width,
                     imageHeight = image.height,
                     zoom = safeScale,
@@ -5425,8 +5427,8 @@ fun exportPreview() {
             viewport.copy(
                 scale = safeScale,
                 offset = geometry?.clampedPan() ?: androidx.compose.ui.geometry.Offset.Zero,
-                viewportWidth = viewport.viewportWidth.coerceAtLeast(0),
-                viewportHeight = viewport.viewportHeight.coerceAtLeast(0),
+                viewportWidth = safeViewportWidth,
+                viewportHeight = safeViewportHeight,
             )
         updateUiStateAndRecycleReplaced { it.copy(viewport = settled) }
         // TODO v0.2: viewport가 scale 임계값 이상이면 ROI 타일 렌더 Job 발행.

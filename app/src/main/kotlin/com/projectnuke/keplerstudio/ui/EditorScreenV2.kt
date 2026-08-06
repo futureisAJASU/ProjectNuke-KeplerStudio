@@ -209,7 +209,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
         PreviewHistogramMode.entries.firstOrNull { it.name == histogramModeName }
             ?: PreviewHistogramMode.Luminance
     val hideChromeForPreview = selectedTab == EditorDestination.Editor && chromeHidden
-    val chromeTween = tween<Int>(durationMillis = ChromeAnimationMillis, easing = FastOutSlowInEasing)
+    val chromeTween = tween<IntOffset>(durationMillis = ChromeAnimationMillis, easing = FastOutSlowInEasing)
     val alphaTween = tween<Float>(durationMillis = 220, easing = FastOutSlowInEasing)
 
     BackHandler(enabled = selectedTab != EditorDestination.Editor || chromeHidden) {

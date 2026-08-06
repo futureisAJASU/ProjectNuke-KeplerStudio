@@ -170,4 +170,89 @@ class PreviewGeometryTest {
         assertTrue(settled.x in -after.imageRect.width..after.imageRect.width)
         assertTrue(settled.y in -after.imageRect.height..after.imageRect.height)
     }
+
+    @Test
+    fun `updateViewport settlement coerces negative dimensions to zero`() {
+        val settled =
+            settleUpdateViewport(
+                ViewportState(scale = 2f, offset = Offset(40f, -20f), viewportWidth = -8, viewportHeight = -4),
+                imageWidth = 400,
+                imageHeight = 300,
+            )
+        assertEquals(0, settled.viewportWidth)
+        assertEquals(0, settled.viewportHeight)
+    }
+
+    @Test
+    fun `updateViewport settlement yields zero pan for invalid dimensions`() {
+        val settled =
+            settleUpdateViewport(
+                ViewportState(scale = 2f, offset = Offset(120f, -80f), viewportWidth = -1, viewportHeight = 0),
+                imageWidth = 400,
+                imageHeight = 300,
+            )
+        assertEquals(Offset.Zero, settled.offset)
+    }
+
+    @Test
+    fun `updateViewport settlement preserves clamped pan for positive dimensions`() {
+        val input =
+            ViewportState(scale = 2f, offset = Offset(500f, 500f), viewportWidth = 800, viewportHeight = 800)
+        val settled = settleUpdateViewport(input, imageWidth = 400, imageHeight = 400)
+        val expected =
+            PreviewGeometry(
+                container = IntSize(800, 800),
+                imageWidth = 400,
+                imageHeight = 400,
+                zoom = 2f,
+                pan = Offset(500f, 500f),
+            ).clampedPan()
+        assertEquals(expected, settled.offset)
+        assertTrue(settled.offset.x < 500f)
+        assertTrue(settled.offset.y < 500f)
+        assertEquals(800, settled.viewportWidth)
+        assertEquals(800, settled.viewportHeight)
+    }
+
+    @Test
+    fun `updateViewport settlement normalizes non-finite and below-minimum scale to one`() {
+        for (scale in listOf(Float.NaN, Float.POSITIVE_INFINITY, Float.NEGATIVE_INFINITY, 0f, 0.5f, -2f)) {
+            val settled =
+                settleUpdateViewport(
+                    ViewportState(scale = scale, offset = Offset(30f, -12f), viewportWidth = 800, viewportHeight = 600),
+                    imageWidth = 400,
+                    imageHeight = 300,
+                )
+            assertEquals(1f, settled.scale)
+            assertEquals(Offset.Zero, settled.offset)
+        }
+    }
+
+    /**
+     * Mirrors [EditorViewModel.updateViewport] settlement when a preview image is present:
+     * sanitize dimensions first, then build geometry and clamp pan.
+     */
+    private fun settleUpdateViewport(
+        viewport: ViewportState,
+        imageWidth: Int,
+        imageHeight: Int,
+    ): ViewportState {
+        val safeScale = viewport.scale.takeIf { it.isFinite() && it >= 1f } ?: 1f
+        val safeViewportWidth = viewport.viewportWidth.coerceAtLeast(0)
+        val safeViewportHeight = viewport.viewportHeight.coerceAtLeast(0)
+        val geometry =
+            PreviewGeometry(
+                container = IntSize(safeViewportWidth, safeViewportHeight),
+                imageWidth = imageWidth,
+                imageHeight = imageHeight,
+                zoom = safeScale,
+                pan = viewport.offset,
+            )
+        return viewport.copy(
+            scale = safeScale,
+            offset = geometry.clampedPan(),
+            viewportWidth = safeViewportWidth,
+            viewportHeight = safeViewportHeight,
+        )
+    }
 }
