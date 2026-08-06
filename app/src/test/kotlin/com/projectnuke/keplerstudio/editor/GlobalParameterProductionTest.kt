@@ -390,9 +390,9 @@ class GlobalParameterProductionTest {
     private fun await(vm: EditorViewModel, predicate: () -> Boolean): Boolean {
         repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+            yieldToEditorBackgroundForTest()
             if (predicate()) return true
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
         }
         return false
     }

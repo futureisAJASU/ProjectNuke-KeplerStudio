@@ -394,7 +394,10 @@ class RemasterModelSessionValidationTest {
         reached.await()
         RemasterModelSession.load(context, edgeCandidate())
         release.complete(Unit)
-        awaitCondition { RemasterModelSession.installedRunnerForTest() === runnerB }
+        awaitCondition {
+            RemasterModelSession.installedRunnerForTest() === runnerB &&
+                RemasterModelSession.isModelLoaded
+        }
 
         assertEquals(1, runnerA.closeCount)
         assertEquals(0, runnerB.closeCount)
@@ -579,9 +582,9 @@ class RemasterModelSessionValidationTest {
     private suspend fun awaitCondition(predicate: () -> Boolean) {
         repeat(500) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(5, TimeUnit.MILLISECONDS)
+            withContext(Dispatchers.Default) { yield() }
             if (predicate()) return
             delay(1)
-            withContext(Dispatchers.Default) { yield() }
         }
         assertTrue(
             predicate(),
