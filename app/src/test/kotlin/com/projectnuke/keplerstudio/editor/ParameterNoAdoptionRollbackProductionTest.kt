@@ -326,18 +326,19 @@ class ParameterNoAdoptionRollbackProductionTest {
                     onTransactionClosed = { closed += it },
                 )
             )
-        awaitReady(vm)
-        val startParams = vm.uiState.value.params
-        val startPixels = uiPixelColor(vm)
-        val startRevision = vm.uiState.value.revision
-        vm.updateParams { it.copy(exposure = 0.7f) }
-        assertTrue(
-            awaitEvent(vm) {
-                vm.pendingParamRenderRevision() != null && vm.hasOpenParameterGesture()
-            },
-        )
-        assertEquals(0, adopted.get())
-        return NoAdoptionSetup(
+        try {
+            awaitReady(vm)
+            val startParams = vm.uiState.value.params
+            val startPixels = uiPixelColor(vm)
+            val startRevision = vm.uiState.value.revision
+            vm.updateParams { it.copy(exposure = 0.7f) }
+            assertTrue(
+                awaitEvent(vm) {
+                    vm.pendingParamRenderRevision() != null && vm.hasOpenParameterGesture()
+                },
+            )
+            assertEquals(0, adopted.get())
+            return NoAdoptionSetup(
             vm = vm,
             renderer = renderer,
             hooks = hooks,
@@ -353,7 +354,15 @@ class ParameterNoAdoptionRollbackProductionTest {
             committed = committed,
             rollbackRevisions = rollbackRevisions,
             closed = closed,
-        )
+            )
+        } catch (failure: Throwable) {
+            gate1.complete(Unit)
+            gate2.complete(Unit)
+            hooks.close()
+            renderer.close()
+            sourcePath.substringAfterLast('/').let { File(context.cacheDir, it).delete() }
+            throw failure
+        }
     }
 
     private data class NoAdoptionSetup(
@@ -425,6 +434,7 @@ class ParameterNoAdoptionRollbackProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.canEnterEditorAction())
     }
@@ -434,7 +444,7 @@ class ParameterNoAdoptionRollbackProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -447,7 +457,7 @@ class ParameterNoAdoptionRollbackProductionTest {
         repeat(5000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return true
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         return false
     }

@@ -347,7 +347,7 @@ class ExternalIntentCoordinationProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -361,7 +361,7 @@ class ExternalIntentCoordinationProductionTest {
         repeat(5000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return true
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         return false
     }

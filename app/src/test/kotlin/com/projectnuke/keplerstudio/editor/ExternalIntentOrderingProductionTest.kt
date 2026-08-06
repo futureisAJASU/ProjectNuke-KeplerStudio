@@ -211,7 +211,7 @@ class ExternalIntentOrderingProductionTest {
             assertEquals("settlement and rotation each advance the revision", revisionBeforeRotate + 2, vm.uiState.value.revision)
             assertEquals("settlement and rotation each record history", 2, vm.undoEntryCountForTest())
             // settle schedules an autosave (+1), the rotation forces a save (+1)
-            awaitEvent(vm) { validateCurrentDraftGeneration(context) != null }
+            awaitEvent(vm, advanceVirtualTime = false) { validateCurrentDraftGeneration(context) != null }
             assertEquals("rotation forces exactly one Draft capture", 1, draftCaptures.size)
             assertEquals("rotation bumps the Draft epoch", epochBefore + 2L, vm.draftEpochForTest())
             val validated = validateCurrentDraftGeneration(context) ?: error("no validated draft")
@@ -364,6 +364,7 @@ class ExternalIntentOrderingProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.canEnterEditorAction())
     }
@@ -373,7 +374,7 @@ class ExternalIntentOrderingProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -383,17 +384,17 @@ class ExternalIntentOrderingProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         if (!advanceVirtualTime) repeat(400) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         if (!advanceVirtualTime) repeat(5000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(
             "event timeout: busy=${vm.uiState.value.isBusy}, revision=${vm.uiState.value.revision}, " +

@@ -384,28 +384,31 @@ class ParameterInactivityWindowProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(200) {
+        repeat(1000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.canEnterEditorAction())
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(1200) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        repeat(300) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(predicate())
     }

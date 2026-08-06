@@ -3788,17 +3788,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             try {
                                 val snap = transaction.historyHandle?.await()
                                 if (snap != null) {
+                                    var owned: OwnedHistorySnapshot? = OwnedHistorySnapshot(snap)
                                     // The scoped owner gate is cancellable: terminal ViewModel
                                     // settlement must be able to stop publication before the
                                     // history coordinator closes.
-                                    transaction.historyPublishSeam?.awaitRelease()
-                                    if (!transaction.historyHandoff.publish(OwnedHistorySnapshot(snap))) {
-                                        // The rejected handoff already closed the wrapper,
-                                        // which released the snapshot exactly once. Nothing
-                                        // to recycle here.
-                                    } else {
-                                        transaction.historySnapshotPublished = true
-                                        transaction.lifecycleInstallation?.hooks?.onHistoryPublished?.invoke(transaction.id)
+                                    try {
+                                        transaction.historyPublishSeam?.awaitRelease()
+                                        val handoffOwned = checkNotNull(owned)
+                                        owned = null
+                                        if (transaction.historyHandoff.publish(handoffOwned)) {
+                                            transaction.historySnapshotPublished = true
+                                            transaction.lifecycleInstallation?.hooks?.onHistoryPublished?.invoke(transaction.id)
+                                        }
+                                    } finally {
+                                        owned?.close()
                                     }
                                 }
                             } catch (ce: CancellationException) {

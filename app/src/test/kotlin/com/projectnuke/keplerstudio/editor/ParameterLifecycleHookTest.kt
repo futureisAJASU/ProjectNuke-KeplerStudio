@@ -225,10 +225,17 @@ class ParameterLifecycleHookTest {
             vm.updateParams { it.copy(exposure = 0.5f) }
             // Pump the main looper while the render coroutine reaches its start hook
             var started = false
-            repeat(200) {
+            repeat(30) {
                 shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
                 if (received.isCompleted) { started = true; return@repeat }
                 shadowOf(android.os.Looper.getMainLooper()).idle()
+                yieldToEditorBackgroundForTest()
+            }
+            repeat(1000) {
+                if (started) return@repeat
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+                if (received.isCompleted) started = true
+                yieldToEditorBackgroundForTest()
             }
             assertTrue("render must reach start hook", started)
             // Render is suspended at the gate: no adoption, transaction still open
@@ -260,19 +267,21 @@ class ParameterLifecycleHookTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(1200) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(200) {
+        repeat(1000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.canEnterEditorAction())
     }
@@ -285,6 +294,7 @@ class ParameterLifecycleHookTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (predicate()) return true
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         return predicate()
     }

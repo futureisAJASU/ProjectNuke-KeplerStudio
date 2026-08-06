@@ -2,9 +2,18 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import androidx.lifecycle.ViewModelStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import org.robolectric.Shadows.shadowOf
+
+/** Gives Default/IO-owned production work a deterministic scheduler turn while tests pump Main. */
+internal fun yieldToEditorBackgroundForTest() {
+    runBlocking { withContext(Dispatchers.Default) { yield() } }
+}
 
 /** Owns every ViewModel and filesystem resource created by one production test. */
 internal class OwnedEditorViewModelHarness(

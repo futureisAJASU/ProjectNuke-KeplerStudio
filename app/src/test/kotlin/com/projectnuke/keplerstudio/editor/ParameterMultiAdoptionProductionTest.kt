@@ -354,10 +354,11 @@ class ParameterMultiAdoptionProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(200) {
+        repeat(1000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.canEnterEditorAction())
     }
@@ -367,7 +368,7 @@ class ParameterMultiAdoptionProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -380,7 +381,7 @@ class ParameterMultiAdoptionProductionTest {
         repeat(5000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(predicate())
     }

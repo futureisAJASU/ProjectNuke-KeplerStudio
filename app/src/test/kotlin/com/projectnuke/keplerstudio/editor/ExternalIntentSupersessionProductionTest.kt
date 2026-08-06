@@ -681,7 +681,7 @@ class ExternalIntentSupersessionProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
@@ -691,17 +691,17 @@ class ExternalIntentSupersessionProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         if (!advanceVirtualTime) repeat(400) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         if (!advanceVirtualTime) repeat(5000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(
             "event timeout: busy=${vm.uiState.value.isBusy}, revision=${vm.uiState.value.revision}, " +

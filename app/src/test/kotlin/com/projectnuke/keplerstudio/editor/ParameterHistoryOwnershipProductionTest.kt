@@ -95,7 +95,7 @@ class ParameterHistoryOwnershipProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { publishSeam.reached.isCompleted }
+            awaitEvent(vm, advanceVirtualTime = false) { publishSeam.reached.isCompleted }
             assertTrue("render remains pending while history publication is gated", vm.pendingParamRenderRevision() != null)
             assertTrue(
                 "history capture reserved the selection mask",
@@ -159,7 +159,7 @@ class ParameterHistoryOwnershipProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { publishSeam.reached.isCompleted }
+            awaitEvent(vm, advanceVirtualTime = false) { publishSeam.reached.isCompleted }
             assertTrue("render remains pending while history publication is gated", vm.pendingParamRenderRevision() != null)
             assertTrue(
                 "history capture reserved the selection mask",
@@ -303,27 +303,40 @@ class ParameterHistoryOwnershipProductionTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(2000) {
+        repeat(2500) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(200) {
+        repeat(1000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.canEnterEditorAction())
     }
 
-    private suspend fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
+    private suspend fun awaitEvent(
+        vm: EditorViewModel,
+        advanceVirtualTime: Boolean = true,
+        predicate: () -> Boolean,
+    ) {
         repeat(400) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
+            if (advanceVirtualTime || it == 0 && !advanceVirtualTime) {
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(
+                    if (!advanceVirtualTime && it == 0) 150 else 1,
+                    TimeUnit.MILLISECONDS,
+                )
+            } else {
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+            }
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return

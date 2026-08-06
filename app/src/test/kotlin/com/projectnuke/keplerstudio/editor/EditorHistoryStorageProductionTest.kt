@@ -188,12 +188,12 @@ class EditorHistoryStorageProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         repeat(5000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (vm.canEnterEditorAction()) return
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.canEnterEditorAction())
     }

@@ -16,6 +16,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Before
 import org.robolectric.RuntimeEnvironment
@@ -578,6 +581,7 @@ class RemasterModelSessionValidationTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(5, TimeUnit.MILLISECONDS)
             if (predicate()) return
             delay(1)
+            withContext(Dispatchers.Default) { yield() }
         }
         assertTrue(
             predicate(),

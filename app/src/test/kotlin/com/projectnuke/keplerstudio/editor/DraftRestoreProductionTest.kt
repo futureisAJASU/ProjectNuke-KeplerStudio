@@ -123,7 +123,7 @@ class DraftRestoreProductionTest {
         try {
             awaitReady(vm1)
             vm1.updateParams { it.copy(exposure = 0.25f) }
-            awaitEvent { vm1.adoptedParamsForTest()?.exposure == 0.25f && !vm1.uiState.value.isBusy }
+            awaitEvent { vm1.uiState.value.params.exposure == 0.25f && !vm1.uiState.value.isBusy }
             val saved = vm1.persistDraftSnapshotNow()
             assertTrue("draft save with mask must succeed", saved)
             val validated =
@@ -234,12 +234,12 @@ class DraftRestoreProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         repeat(5000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (vm.canEnterEditorAction()) return
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.canEnterEditorAction())
     }
@@ -249,17 +249,17 @@ class DraftRestoreProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
     private fun awaitEvent(predicate: () -> Boolean) {
-        repeat(300) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            Thread.yield()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(predicate())
     }

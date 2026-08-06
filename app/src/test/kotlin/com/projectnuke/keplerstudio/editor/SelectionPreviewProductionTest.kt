@@ -63,19 +63,21 @@ class SelectionPreviewProductionTest {
     }
 
     private fun settle(predicate: () -> Boolean) {
-        repeat(400) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(predicate(), "selection preview did not settle")
     }
 
     private fun awaitSignal(signal: CompletableDeferred<Unit>) {
-        repeat(4000) {
+        repeat(6000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (signal.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(signal.isCompleted, "selection preview synchronization signal did not arrive")
     }

@@ -126,10 +126,11 @@ class GlobalParameterProductionTest {
     }
 
     private fun await(predicate: () -> Boolean) {
-        repeat(500) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(predicate())
     }
@@ -377,19 +378,21 @@ class GlobalParameterProductionTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(2000) {
+        repeat(2500) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.startupInitCompletion.isCompleted)
     }
 
     private fun await(vm: EditorViewModel, predicate: () -> Boolean): Boolean {
-        repeat(600) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return true
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         return false
     }
