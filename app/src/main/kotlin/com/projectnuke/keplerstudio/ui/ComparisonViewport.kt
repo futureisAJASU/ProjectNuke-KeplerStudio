@@ -9,10 +9,14 @@ internal fun clampComparisonOffset(
     viewportSize: IntSize,
     scale: Float,
 ): Offset {
-    if (scale <= 1f || viewportSize.width <= 0 || viewportSize.height <= 0) return Offset.Zero
+    if (!scale.isFinite() || scale <= 1f || viewportSize.width <= 0 || viewportSize.height <= 0) {
+        return Offset.Zero
+    }
     val maxX = max(0f, viewportSize.width * (scale - 1f) * 0.5f)
     val maxY = max(0f, viewportSize.height * (scale - 1f) * 0.5f)
-    return Offset(offset.x.coerceIn(-maxX, maxX), offset.y.coerceIn(-maxY, maxY))
+    val safeX = if (offset.x.isFinite()) offset.x else 0f
+    val safeY = if (offset.y.isFinite()) offset.y else 0f
+    return Offset(safeX.coerceIn(-maxX, maxX), safeY.coerceIn(-maxY, maxY))
 }
 
 internal fun moveComparisonSplit(

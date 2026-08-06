@@ -171,7 +171,7 @@ class EditorViewModelViewportProductionTest {
         height: Int,
         installPreview: Boolean = true,
         installOriginal: Boolean = true,
-    ): Bitmap {
+    ): Unit {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         var ownershipTransferred = false
         try {
@@ -184,7 +184,6 @@ class EditorViewModelViewportProductionTest {
                 )
             }
             ownershipTransferred = true
-            return bitmap
         } finally {
             if (!ownershipTransferred && !bitmap.isRecycled) {
                 bitmap.recycle()

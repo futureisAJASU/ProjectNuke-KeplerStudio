@@ -19,15 +19,26 @@ fun presetColorLookToJson(look: PresetColorLook?): JSONObject? {
 fun presetColorLookFromJson(obj: JSONObject?): PresetColorLook? {
     if (obj == null) return null
     if (obj.optString("type") != "rgb_3d_lut") return null
+    val version = if (obj.has("version")) obj.optInt("version", 1) else 1
+    if (version != 1) return null
     val size = obj.optInt("size", 0)
     val valuesArray = obj.optJSONArray("values") ?: return null
-    if (size < 2 || valuesArray.length() != size * size * size * 3) return null
+    if (size < 2) return null
+    val expectedCount = size.toLong() * size * size * 3
+    if (expectedCount < 0 || valuesArray.length().toLong() != expectedCount) return null
+
+    val strength = obj.optDouble("strength", 0.72)
+    if (!strength.isFinite()) return null
+    val strengthFloat = strength.toFloat().coerceIn(0f, 1f)
+
     val values = FloatArray(valuesArray.length()) { index ->
-        valuesArray.optDouble(index, 0.0).toFloat().coerceIn(0f, 1f)
+        val raw = valuesArray.optDouble(index, 0.0)
+        if (!raw.isFinite()) return null
+        raw.toFloat().coerceIn(0f, 1f)
     }
     return PresetColorLook(
         size = size,
-        strength = obj.optDouble("strength", 0.72).toFloat().coerceIn(0f, 1f),
+        strength = strengthFloat,
         values = values
     )
 }
