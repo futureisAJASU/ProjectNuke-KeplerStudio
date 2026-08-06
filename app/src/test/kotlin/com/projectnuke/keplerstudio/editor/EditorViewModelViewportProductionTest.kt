@@ -34,25 +34,20 @@ class EditorViewModelViewportProductionTest {
     @Test
     fun updateViewportCoercesNegativeDimensionsToZero() {
         val vm = harness.createEditor()
-        val preview = Bitmap.createBitmap(400, 300, Bitmap.Config.ARGB_8888)
-        try {
-            installPreview(vm, preview)
-            vm.updateViewport(
-                ViewportState(
-                    scale = 2f,
-                    offset = Offset(40f, -20f),
-                    viewportWidth = -8,
-                    viewportHeight = -4,
-                ),
-            )
-            val viewport = vm.uiState.value.viewport
-            assertEquals(0, viewport.viewportWidth)
-            assertEquals(0, viewport.viewportHeight)
-            assertEquals(Offset.Zero, viewport.offset)
-            assertEquals(2f, viewport.scale)
-        } finally {
-            if (!preview.isRecycled) preview.recycle()
-        }
+        installOwnedBitmaps(vm, width = 400, height = 300)
+        vm.updateViewport(
+            ViewportState(
+                scale = 2f,
+                offset = Offset(40f, -20f),
+                viewportWidth = -8,
+                viewportHeight = -4,
+            ),
+        )
+        val viewport = vm.uiState.value.viewport
+        assertEquals(0, viewport.viewportWidth)
+        assertEquals(0, viewport.viewportHeight)
+        assertEquals(Offset.Zero, viewport.offset)
+        assertEquals(2f, viewport.scale)
     }
 
     @Test
@@ -68,60 +63,50 @@ class EditorViewModelViewportProductionTest {
             )
         for (scale in scales) {
             val vm = harness.createEditor()
-            val preview = Bitmap.createBitmap(400, 300, Bitmap.Config.ARGB_8888)
-            try {
-                installPreview(vm, preview)
-                vm.updateViewport(
-                    ViewportState(
-                        scale = scale,
-                        offset = Offset(30f, -12f),
-                        viewportWidth = 800,
-                        viewportHeight = 600,
-                    ),
-                )
-                val viewport = vm.uiState.value.viewport
-                assertEquals(1f, viewport.scale)
-                assertEquals(Offset.Zero, viewport.offset)
-                assertEquals(800, viewport.viewportWidth)
-                assertEquals(600, viewport.viewportHeight)
-            } finally {
-                if (!preview.isRecycled) preview.recycle()
-            }
+            installOwnedBitmaps(vm, width = 400, height = 300)
+            vm.updateViewport(
+                ViewportState(
+                    scale = scale,
+                    offset = Offset(30f, -12f),
+                    viewportWidth = 800,
+                    viewportHeight = 600,
+                ),
+            )
+            val viewport = vm.uiState.value.viewport
+            assertEquals(1f, viewport.scale)
+            assertEquals(Offset.Zero, viewport.offset)
+            assertEquals(800, viewport.viewportWidth)
+            assertEquals(600, viewport.viewportHeight)
         }
     }
 
     @Test
     fun updateViewportPreservesClampedPanForPositiveDimensions() {
         val vm = harness.createEditor()
-        val preview = Bitmap.createBitmap(400, 400, Bitmap.Config.ARGB_8888)
-        try {
-            installPreview(vm, preview)
-            vm.updateViewport(
-                ViewportState(
-                    scale = 2f,
-                    offset = Offset(500f, 500f),
-                    viewportWidth = 800,
-                    viewportHeight = 800,
-                ),
-            )
-            val expected =
-                PreviewGeometry(
-                    container = IntSize(800, 800),
-                    imageWidth = 400,
-                    imageHeight = 400,
-                    zoom = 2f,
-                    pan = Offset(500f, 500f),
-                ).clampedPan()
-            val viewport = vm.uiState.value.viewport
-            assertEquals(expected, viewport.offset)
-            assertTrue(viewport.offset.x < 500f)
-            assertTrue(viewport.offset.y < 500f)
-            assertEquals(800, viewport.viewportWidth)
-            assertEquals(800, viewport.viewportHeight)
-            assertEquals(2f, viewport.scale)
-        } finally {
-            if (!preview.isRecycled) preview.recycle()
-        }
+        installOwnedBitmaps(vm, width = 400, height = 400)
+        vm.updateViewport(
+            ViewportState(
+                scale = 2f,
+                offset = Offset(500f, 500f),
+                viewportWidth = 800,
+                viewportHeight = 800,
+            ),
+        )
+        val expected =
+            PreviewGeometry(
+                container = IntSize(800, 800),
+                imageWidth = 400,
+                imageHeight = 400,
+                zoom = 2f,
+                pan = Offset(500f, 500f),
+            ).clampedPan()
+        val viewport = vm.uiState.value.viewport
+        assertEquals(expected, viewport.offset)
+        assertTrue(viewport.offset.x < 500f)
+        assertTrue(viewport.offset.y < 500f)
+        assertEquals(800, viewport.viewportWidth)
+        assertEquals(800, viewport.viewportHeight)
+        assertEquals(2f, viewport.scale)
     }
 
     @Test
@@ -142,14 +127,68 @@ class EditorViewModelViewportProductionTest {
         assertEquals(Offset.Zero, viewport.offset)
     }
 
-    private fun installPreview(vm: EditorViewModel, preview: Bitmap) {
-        vm.updateUiState {
-            it.copy(
-                sourcePath = "viewport-production-test",
-                baseContentToken = "viewport-production-base",
-                previewBitmap = preview,
-                originalPreviewBitmap = preview,
-            )
+    @Test
+    fun updateViewportUsesOriginalWhenPreviewAbsent() {
+        val vm = harness.createEditor()
+        installOwnedBitmaps(
+            vm,
+            width = 400,
+            height = 400,
+            installPreview = false,
+            installOriginal = true,
+        )
+        vm.updateViewport(
+            ViewportState(
+                scale = 2f,
+                offset = Offset(500f, 500f),
+                viewportWidth = 800,
+                viewportHeight = 800,
+            ),
+        )
+        val expected =
+            PreviewGeometry(
+                container = IntSize(800, 800),
+                imageWidth = 400,
+                imageHeight = 400,
+                zoom = 2f,
+                pan = Offset(500f, 500f),
+            ).clampedPan()
+        val viewport = vm.uiState.value.viewport
+        assertEquals(expected, viewport.offset)
+        assertTrue(viewport.offset != Offset(500f, 500f))
+        assertEquals(800, viewport.viewportWidth)
+        assertEquals(800, viewport.viewportHeight)
+        assertEquals(2f, viewport.scale)
+    }
+
+    /**
+     * Creates a Bitmap and transfers ownership into ViewModel state on success.
+     * Recycles only if installation throws before ownership transfer completes.
+     */
+    private fun installOwnedBitmaps(
+        vm: EditorViewModel,
+        width: Int,
+        height: Int,
+        installPreview: Boolean = true,
+        installOriginal: Boolean = true,
+    ): Bitmap {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        var ownershipTransferred = false
+        try {
+            vm.updateUiState {
+                it.copy(
+                    sourcePath = "viewport-production-test",
+                    baseContentToken = "viewport-production-base",
+                    previewBitmap = if (installPreview) bitmap else null,
+                    originalPreviewBitmap = if (installOriginal) bitmap else null,
+                )
+            }
+            ownershipTransferred = true
+            return bitmap
+        } finally {
+            if (!ownershipTransferred && !bitmap.isRecycled) {
+                bitmap.recycle()
+            }
         }
     }
 }
