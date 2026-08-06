@@ -524,45 +524,120 @@ class RemasterModelSessionValidationTest {
 
     @Test
     fun `load A superseded by B uses distinct seam owners`() = runBlocking {
+        // Independent gate: closing A's seam must NOT release A's suspended command.
+        // A's command is only released after B's load() has synchronously incremented
+        // commandGeneration, so A always settles as superseded rather than current.
         val reached = CompletableDeferred<Unit>()
-        val release = CompletableDeferred<Unit>()
+        val releaseA = CompletableDeferred<Unit>()
+        val bLoadInvoked = CompletableDeferred<Unit>()
         val factoryACalls = AtomicInteger()
         val factoryBCalls = AtomicInteger()
+        val runnerB = FakeRunner()
+
         val handleA = RemasterModelSession.installTestSeam(
             factory = { _, _ ->
                 factoryACalls.incrementAndGet()
                 FakeRunner()
             },
+            // No onClose -> release coupling. releaseA is an independent gate.
             beforeCreate = {
                 reached.complete(Unit)
-                release.await()
+                // Wait until B's load() has been invoked (commandGeneration already
+                // incremented) before allowing A to continue past beforeCreate.
+                bLoadInvoked.await()
+                releaseA.await()
             },
-            onClose = { release.complete(Unit) },
         )
         testSeam = handleA
-        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
-        val context = RuntimeEnvironment.getApplication()
-        RemasterModelSession.load(context, edgeCandidate())
-        reached.await()
-        handleA.close()
-        testSeam = null
-        val handleB = RemasterModelSession.installTestSeam(factory = { _, _ ->
-            factoryBCalls.incrementAndGet()
-            FakeRunner()
-        })
-        testSeam = handleB
-        RemasterModelSession.load(context, edgeCandidate())
-        awaitCondition { factoryBCalls.get() == 1 && !RemasterModelSession.isModelLoading }
-        assertTrue(
-            RemasterModelSession.isModelLoaded,
-            "B failed: lifecycle=${RemasterModelSession.lifecycle}, active=${RemasterModelSession.activeModel?.id}, status=${RemasterModelSession.statusText}, registry=${ModelAvailabilityRegistry.state.value}",
-        )
+        var handleAClosed = false
+        try {
+            ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+            val context = RuntimeEnvironment.getApplication()
 
-        assertEquals(0, factoryACalls.get())
-        assertEquals(1, factoryBCalls.get())
-        assertTrue(RemasterModelSession.activeModel?.id == "edge_masker")
-        handleB.close()
-        testSeam = null
+            // Step 1-2: start load A; wait until A is suspended in beforeCreate.
+            RemasterModelSession.load(context, edgeCandidate())
+            reached.await()
+
+            // Step 3: close A's seam without releasing A's command.
+            handleA.close()
+            handleAClosed = true
+            testSeam = null
+
+            // Step 4: install B's seam.
+            val handleB = RemasterModelSession.installTestSeam(factory = { _, _ ->
+                factoryBCalls.incrementAndGet()
+                runnerB
+            })
+            testSeam = handleB
+
+            // Step 5: invoke B's load() — synchronously increments commandGeneration
+            // before returning. A is still suspended in beforeCreate at this point.
+            RemasterModelSession.load(context, edgeCandidate())
+            // Signal that B load() has been invoked; now A may proceed past beforeCreate.
+            bLoadInvoked.complete(Unit)
+            // Release A's gate — A will resume, see commandGeneration > its own, settle superseded.
+            releaseA.complete(Unit)
+
+            // Step 6: await B's complete terminal identity.
+            awaitCondition {
+                RemasterModelSession.installedRunnerForTest() === runnerB &&
+                    RemasterModelSession.isModelLoaded &&
+                    RemasterModelSession.lifecycle == ModelRunnerLifecycle.Loaded &&
+                    RemasterModelSession.activeModel?.id == "edge_masker" &&
+                    ModelAvailabilityRegistry.state.value
+                        .getValue(ModelFeature.SubjectSelection).phase == ModelCapabilityPhase.Ready &&
+                    ModelAvailabilityRegistry.state.value
+                        .getValue(ModelFeature.SubjectSelection).sessionActive
+            }
+
+            // A factory must never have been called (closed seam rejected before factory).
+            assertEquals(0, factoryACalls.get(), "A factory must not be called")
+            // B load command must have been invoked before A was released.
+            assertTrue(bLoadInvoked.isCompleted, "B load was invoked before A was released")
+            // B factory called exactly once.
+            assertEquals(1, factoryBCalls.get(), "B factory must be called exactly once")
+            // B's runner is the installed runner.
+            assertTrue(
+                RemasterModelSession.installedRunnerForTest() === runnerB,
+                "B's runner must be installed",
+            )
+            // B is Loaded.
+            assertTrue(RemasterModelSession.isModelLoaded, "B must be loaded")
+            assertEquals(ModelRunnerLifecycle.Loaded, RemasterModelSession.lifecycle)
+            // Active model is B.
+            assertEquals(
+                "edge_masker",
+                RemasterModelSession.activeModel?.id,
+                "active model must be edge_masker (B)",
+            )
+            // Registry is Ready and session is active.
+            val registryState = ModelAvailabilityRegistry.state.value
+                .getValue(ModelFeature.SubjectSelection)
+            assertEquals(ModelCapabilityPhase.Ready, registryState.phase, "registry phase must be Ready")
+            assertTrue(registryState.sessionActive, "registry session must be active")
+            // A cannot close, clear or replace B: A's installedCommandGeneration was never set
+            // (A was superseded), so unload/close operations from a stale command cannot affect B.
+            assertEquals(
+                0,
+                runnerB.closeCount,
+                "B's runner must not have been closed by A",
+            )
+
+            handleB.close()
+            testSeam = null
+        } finally {
+            // Guarantee gates are always completed so A's coroutine can unblock during teardown.
+            bLoadInvoked.complete(Unit)
+            releaseA.complete(Unit)
+            if (!handleAClosed) {
+                runCatching { handleA.close() }
+                testSeam = null
+            }
+            // handleB cleanup handled in testSeam @After if not already closed.
+        }
+
+        // No seam must remain installed after teardown.
+        assertEquals(0, RemasterModelSession.installedTestSeamCount(), "no seam must remain after test")
     }
 
     private class FakeRunner : AutoCloseable {
