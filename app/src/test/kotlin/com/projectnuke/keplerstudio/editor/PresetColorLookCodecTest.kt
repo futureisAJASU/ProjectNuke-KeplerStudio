@@ -221,6 +221,66 @@ class PresetColorLookCodecTest {
         assertNull(presetColorLookFromJson(validJson().apply { put("size", 3_000_000) }))
     }
 
+    // ---- Size coverage -----------------------------------------------------
+    // These exercise the production strict integer parser through the real
+    // entry point [presetColorLookFromJson]; no size parser is re-implemented here.
+
+    @Test
+    fun sizeMissingRejected() {
+        assertNull(presetColorLookFromJson(validJson().apply { remove("size") }))
+    }
+
+    @Test
+    fun sizeBelowTwoRejected() {
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", 1) }))
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", 0) }))
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", -5) }))
+    }
+
+    @Test
+    fun sizeStringRejected() {
+        // A JSON string "2" must not be coerced to the number 2.
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", "2") }))
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", "garbage") }))
+    }
+
+    @Test
+    fun sizeNullRejected() {
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", JSONObject.NULL) }))
+    }
+
+    @Test
+    fun sizeBooleanRejected() {
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", true) }))
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", false) }))
+    }
+
+        @Test
+    fun sizeFractionalRejected() {
+        // 2.5 has a non-zero fractional part and is not an exact integer.
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", 2.5) }))
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", 3.14) }))
+    }
+
+    @Test
+    fun sizeArrayOrObjectRejected() {
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", JSONArray()) }))
+        assertNull(presetColorLookFromJson(validJson().apply { put("size", JSONObject()) }))
+    }
+
+    @Test
+    fun sizeExactIntegralNumberAccepted() {
+        // A JSON number that is integral (e.g. 2.0) is accepted because it is an exact integer.
+        assertNotNull(
+            presetColorLookFromJson(
+                validJson().apply {
+                    put("size", 2.0)
+                },
+            ),
+        )
+    }
+
+
     // ---- Export/import round trip --------------------------------------------
 
     @Test

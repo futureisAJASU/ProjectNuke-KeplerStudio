@@ -34,10 +34,18 @@ import com.projectnuke.keplerstudio.editor.EditParams
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.PresetApplyResult
 import com.projectnuke.keplerstudio.editor.PresetColorLook
+import com.projectnuke.keplerstudio.editor.Preset
+import com.projectnuke.keplerstudio.editor.PresetImportException
+import com.projectnuke.keplerstudio.editor.PresetImportFailure
+import com.projectnuke.keplerstudio.editor.decodePresetDocument
+import com.projectnuke.keplerstudio.editor.encodePresetDocument
+import com.projectnuke.keplerstudio.editor.loadPresets
+import com.projectnuke.keplerstudio.editor.mergePresets
+import com.projectnuke.keplerstudio.editor.savePresets
+
 import com.projectnuke.keplerstudio.editor.createPresetColorLookFromParams
-import com.projectnuke.keplerstudio.editor.presetColorLookFromJson
 import com.projectnuke.keplerstudio.editor.presetColorLookSummary
-import com.projectnuke.keplerstudio.editor.presetColorLookToJson
+import java.nio.charset.StandardCharsets
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
@@ -47,7 +55,6 @@ import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 
 private val PresetCardBackground = Color(0xFF242424)
@@ -56,14 +63,6 @@ private val PresetTextPrimary = Color(0xFFF2F2F2)
 private val PresetTextSecondary = Color(0xFFC8C8C8)
 private val PresetTextMuted = Color(0xFF8E8E8E)
 private val PresetButtonTextDark = Color(0xFF111111)
-
-private data class StoredPreset(
-    val id: String,
-    val name: String,
-    val params: EditParams,
-    val timestampMillis: Long,
-    val look: PresetColorLook? = null
-)
 
 private data class PresetDocumentIdentity(val sourcePath: String?, val baseToken: String, val revision: Int)
 
@@ -80,12 +79,12 @@ fun PresetToolPanel(
         (editorState.originalPreviewBitmap != null || editorState.previewBitmap != null)
     val scope = rememberCoroutineScope()
     var presetName by remember { mutableStateOf(defaultPresetName()) }
-    var presets by remember { mutableStateOf(emptyList<StoredPreset>()) }
+    var presets by remember { mutableStateOf(emptyList<Preset>()) }
     var statusMessage by remember { mutableStateOf("프리셋 저장, JSON 백업, 통계 기반 추출을 사용할 수 있습니다.") }
     var pendingBeforeUri by remember { mutableStateOf<Uri?>(null) }
     var pendingIdentity by remember { mutableStateOf<PresetDocumentIdentity?>(null) }
 
-fun applyStoredPreset(preset: StoredPreset, message: String): PresetApplyResult {
+fun applyStoredPreset(preset: Preset, message: String): PresetApplyResult {
         val current = editorViewModel.uiState.value
         if (current.sourcePath == null || current.originalPreviewBitmap == null && current.previewBitmap == null ||
             !editorViewModel.canEnterEditorAction()) {
@@ -124,11 +123,21 @@ fun applyStoredPreset(preset: StoredPreset, message: String): PresetApplyResult 
             runCatching {
                 withContext(Dispatchers.IO) { importPresetsFromJson(context, uri) }
             }.onSuccess { imported ->
-                presets = mergePresets(presets, imported).take(40)
+                val merge = mergePresets(presets, imported)
+                presets = merge.presets
                 savePresets(context, presets)
-                statusMessage = "프리셋 ${imported.size}개를 JSON에서 불러왔습니다"
-            }.onFailure {
-                statusMessage = "프리셋 JSON 불러오기에 실패했습니다: ${it.message}"
+                statusMessage = "프리셋 ${merge.importedCount}개를 JSON에서 불러왔습니다"
+            }.onFailure { e ->
+                statusMessage = when (e) {
+                    is PresetImportException -> when (e.failure) {
+                        PresetImportFailure.UnsupportedFormat,
+                        PresetImportFailure.UnsupportedVersion ->
+                            "선택한 파일은 지원하지 않는 프리셋 형식 또는 버전입니다."
+                        PresetImportFailure.MalformedContent ->
+                            "프리셋 파일 내용이 올바르지 않아 가져오지 못했습니다."
+                    }
+                    else -> "프리셋 JSON 불러오기에 실패했습니다: ${e.message}"
+                }
             }
         }
     }
@@ -147,14 +156,14 @@ fun applyStoredPreset(preset: StoredPreset, message: String): PresetApplyResult 
             runCatching {
                 withContext(Dispatchers.IO) { estimatePresetFromBeforeAfter(context, beforeUri, afterUri) }
             }.onSuccess { extracted ->
-                val item = StoredPreset(
+                val item = Preset(
                     id = System.currentTimeMillis().toString(),
                     name = "Pair_${timeTag()}",
                     params = extracted,
                     timestampMillis = System.currentTimeMillis(),
                     look = createPresetColorLookFromParams(extracted, strength = 0.82f)
                 )
-presets = mergePresets(presets, listOf(item)).take(40)
+                presets = mergePresets(presets, listOf(item)).presets
                 savePresets(context, presets)
                 val current = editorViewModel.uiState.value
                 if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
@@ -192,14 +201,14 @@ presets = mergePresets(presets, listOf(item)).take(40)
             runCatching {
                 withContext(Dispatchers.IO) { estimatePresetFromReference(context, uri) }
             }.onSuccess { extracted ->
-                val item = StoredPreset(
+                val item = Preset(
                     id = System.currentTimeMillis().toString(),
                     name = "Reference_${timeTag()}",
                     params = extracted,
                     timestampMillis = System.currentTimeMillis(),
                     look = createPresetColorLookFromParams(extracted, strength = 0.74f)
                 )
-presets = mergePresets(presets, listOf(item)).take(40)
+                presets = mergePresets(presets, listOf(item)).presets
                 savePresets(context, presets)
                 val current = editorViewModel.uiState.value
                 if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
@@ -241,14 +250,14 @@ presets = mergePresets(presets, listOf(item)).take(40)
         ) {
             Button(
                 onClick = {
-                    val item = StoredPreset(
+                    val item = Preset(
                         id = System.currentTimeMillis().toString(),
                         name = presetName.ifBlank { defaultPresetName() },
                         params = params,
                         timestampMillis = System.currentTimeMillis(),
                         look = activeLook ?: createPresetColorLookFromParams(params, strength = 0.60f)
                     )
-                    presets = mergePresets(presets, listOf(item)).take(40)
+                    presets = mergePresets(presets, listOf(item)).presets
                     savePresets(context, presets)
                     presetName = defaultPresetName()
                     statusMessage = "현재 편집값과 색감 룩을 프리셋으로 저장했습니다."
@@ -360,178 +369,21 @@ private fun timeTag(): String = SimpleDateFormat("MMdd_HHmm", Locale.US).format(
 private fun formatPresetTime(timestampMillis: Long): String =
     SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.KOREA).format(Date(timestampMillis))
 
-private fun formatPresetSummary(preset: StoredPreset): String =
+private fun formatPresetSummary(preset: Preset): String =
     "노출 ${preset.params.exposure.toFixed2()} · 대비 ${preset.params.contrast.toFixed2()} · 색온도 ${preset.params.temperature.toFixed2()} · ${presetColorLookSummary(preset.look)}"
 
 private fun Float.toFixed2(): String = String.format(Locale.US, "%.2f", this)
 
-private fun loadPresets(context: Context): List<StoredPreset> {
-    val raw = context.getSharedPreferences(PRESET_PREF_NAME, Context.MODE_PRIVATE).getString(KEY_PRESETS, null)
-        ?: return emptyList()
-    return raw.lines().mapNotNull { decodePreset(it) }
-}
-
-private fun savePresets(context: Context, presets: List<StoredPreset>) {
-    context.getSharedPreferences(PRESET_PREF_NAME, Context.MODE_PRIVATE).edit()
-        .putString(KEY_PRESETS, presets.joinToString("\n") { encodePreset(it) })
-        .apply()
-}
-
-private fun mergePresets(current: List<StoredPreset>, incoming: List<StoredPreset>): List<StoredPreset> {
-    val merged = LinkedHashMap<String, StoredPreset>()
-    (current + incoming).forEach { preset ->
-        merged[preset.name.lowercase(Locale.ROOT)] = preset
-    }
-    return merged.values.sortedByDescending { it.timestampMillis }
-}
-
-private fun encodePreset(item: StoredPreset): String = listOf(
-    item.id,
-    item.name,
-    item.timestampMillis.toString(),
-    item.params.exposure.toString(),
-    item.params.contrast.toString(),
-    item.params.shadows.toString(),
-    item.params.highlights.toString(),
-    item.params.whites.toString(),
-    item.params.blacks.toString(),
-    item.params.temperature.toString(),
-    item.params.tint.toString(),
-    item.params.saturation.toString(),
-    item.params.vibrance.toString(),
-    item.params.clarity.toString(),
-    item.params.dehaze.toString(),
-    item.params.sharpness.toString(),
-    item.params.noiseReduction.toString(),
-    item.params.luminanceNoiseReduction.toString(),
-    item.params.colorNoiseReduction.toString(),
-    item.params.noiseDetailProtection.toString(),
-    Uri.encode(presetColorLookToJson(item.look)?.toString().orEmpty())
-).joinToString("|") { it.replace("|", " ").replace("\n", " ") }
-
-private fun decodePreset(raw: String): StoredPreset? {
-    val p = raw.split("|")
-    if (p.size != 17 && p.size != 18 && p.size != 20 && p.size != 21) return null
-    val legacyNoiseReduction = p[16].toFloatOrNull() ?: 0f
-    val params = EditParams(
-        exposure = p[3].toFloatOrNull() ?: 0f,
-        contrast = p[4].toFloatOrNull() ?: 0f,
-        shadows = p[5].toFloatOrNull() ?: 0f,
-        highlights = p[6].toFloatOrNull() ?: 0f,
-        whites = p[7].toFloatOrNull() ?: 0f,
-        blacks = p[8].toFloatOrNull() ?: 0f,
-        temperature = p[9].toFloatOrNull() ?: 0f,
-        tint = p[10].toFloatOrNull() ?: 0f,
-        saturation = p[11].toFloatOrNull() ?: 0f,
-        vibrance = p[12].toFloatOrNull() ?: 0f,
-        clarity = p[13].toFloatOrNull() ?: 0f,
-        dehaze = p[14].toFloatOrNull() ?: 0f,
-        sharpness = p[15].toFloatOrNull() ?: 0f,
-        noiseReduction = legacyNoiseReduction,
-        luminanceNoiseReduction = p.getOrNull(17)?.toFloatOrNull() ?: legacyNoiseReduction,
-        colorNoiseReduction = p.getOrNull(18)?.toFloatOrNull() ?: legacyNoiseReduction,
-        noiseDetailProtection = p.getOrNull(19)?.toFloatOrNull() ?: 0.50f
-    )
-    return StoredPreset(
-        id = p[0],
-        name = p[1],
-        timestampMillis = p[2].toLongOrNull() ?: return null,
-        params = params,
-        look = p.getOrNull(if (p.size >= 21) 20 else 17)
-            ?.takeIf { it.isNotBlank() }
-            ?.let(Uri::decode)
-            ?.let { runCatching { presetColorLookFromJson(JSONObject(it)) }.getOrNull() }
-            ?: createPresetColorLookFromParams(params, strength = 0.60f)
-    )
-}
-
-private fun exportPresetsToJson(context: Context, uri: Uri, presets: List<StoredPreset>) {
-    val root = JSONObject().apply {
-        put("format", "keplerstudio-presets")
-        put("version", 2)
-        put("exportedAt", System.currentTimeMillis())
-        put("presets", JSONArray().apply {
-            presets.forEach { preset ->
-                put(JSONObject().apply {
-                    put("id", preset.id)
-                    put("name", preset.name)
-                    put("timestampMillis", preset.timestampMillis)
-                    put("params", editParamsToJson(preset.params))
-                    presetColorLookToJson(preset.look)?.let { put("look", it) }
-                })
-            }
-        })
-    }
-
+private fun exportPresetsToJson(context: Context, uri: Uri, presets: List<Preset>) {
+    val root = encodePresetDocument(presets)
     context.contentResolver.openOutputStream(uri)?.use { out ->
-        OutputStreamWriter(out).use { writer -> writer.write(root.toString(2)) }
+        OutputStreamWriter(out, StandardCharsets.UTF_8).use { writer -> writer.write(root.toString(2)) }
     } ?: error("JSON 파일 저장 스트림을 열 수 없습니다")
 }
 
-private fun importPresetsFromJson(context: Context, uri: Uri): List<StoredPreset> {
+private fun importPresetsFromJson(context: Context, uri: Uri): List<Preset> {
     val raw = context.contentResolver.openInputStream(uri)?.use { input ->
-        BufferedReader(InputStreamReader(input)).readText()
+        BufferedReader(InputStreamReader(input, StandardCharsets.UTF_8)).readText()
     } ?: error("JSON 파일을 읽을 수 없습니다")
-
-    val root = JSONObject(raw)
-    val array = root.optJSONArray("presets") ?: JSONArray()
-    val items = mutableListOf<StoredPreset>()
-    for (i in 0 until array.length()) {
-        val obj = array.optJSONObject(i) ?: continue
-        val params = editParamsFromJson(obj.optJSONObject("params") ?: JSONObject())
-        items += StoredPreset(
-            id = obj.optString("id", System.currentTimeMillis().toString()),
-            name = obj.optString("name", "Imported_${i + 1}"),
-            timestampMillis = obj.optLong("timestampMillis", System.currentTimeMillis()),
-            params = params,
-            look = presetColorLookFromJson(obj.optJSONObject("look")) ?: createPresetColorLookFromParams(params, strength = 0.60f)
-        )
-    }
-    return items
+    return decodePresetDocument(JSONObject(raw))
 }
-
-private fun editParamsToJson(params: EditParams): JSONObject = JSONObject().apply {
-    put("exposure", params.exposure)
-    put("contrast", params.contrast)
-    put("shadows", params.shadows)
-    put("highlights", params.highlights)
-    put("whites", params.whites)
-    put("blacks", params.blacks)
-    put("temperature", params.temperature)
-    put("tint", params.tint)
-    put("saturation", params.saturation)
-    put("vibrance", params.vibrance)
-    put("clarity", params.clarity)
-    put("dehaze", params.dehaze)
-    put("sharpness", params.sharpness)
-    put("noiseReduction", params.noiseReduction)
-    put("luminanceNoiseReduction", params.luminanceNoiseReduction)
-    put("colorNoiseReduction", params.colorNoiseReduction)
-    put("noiseDetailProtection", params.noiseDetailProtection)
-}
-
-private fun editParamsFromJson(obj: JSONObject): EditParams {
-    val legacyNoiseReduction = obj.optDouble("noiseReduction", 0.0).toFloat()
-    return EditParams(
-        exposure = obj.optDouble("exposure", 0.0).toFloat(),
-        contrast = obj.optDouble("contrast", 0.0).toFloat(),
-        shadows = obj.optDouble("shadows", 0.0).toFloat(),
-        highlights = obj.optDouble("highlights", 0.0).toFloat(),
-        whites = obj.optDouble("whites", 0.0).toFloat(),
-        blacks = obj.optDouble("blacks", 0.0).toFloat(),
-        temperature = obj.optDouble("temperature", 0.0).toFloat(),
-        tint = obj.optDouble("tint", 0.0).toFloat(),
-        saturation = obj.optDouble("saturation", 0.0).toFloat(),
-        vibrance = obj.optDouble("vibrance", 0.0).toFloat(),
-        clarity = obj.optDouble("clarity", 0.0).toFloat(),
-        dehaze = obj.optDouble("dehaze", 0.0).toFloat(),
-        sharpness = obj.optDouble("sharpness", 0.0).toFloat(),
-        noiseReduction = legacyNoiseReduction,
-        luminanceNoiseReduction = obj.optDouble("luminanceNoiseReduction", legacyNoiseReduction.toDouble()).toFloat(),
-        colorNoiseReduction = obj.optDouble("colorNoiseReduction", legacyNoiseReduction.toDouble()).toFloat(),
-        noiseDetailProtection = obj.optDouble("noiseDetailProtection", 0.50).toFloat()
-    )
-}
-
-private const val PRESET_PREF_NAME = "kepler_studio_presets"
-private const val KEY_PRESETS = "presets"
