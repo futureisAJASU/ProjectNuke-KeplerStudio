@@ -37,11 +37,12 @@ import com.projectnuke.keplerstudio.editor.PresetColorLook
 import com.projectnuke.keplerstudio.editor.Preset
 import com.projectnuke.keplerstudio.editor.PresetImportException
 import com.projectnuke.keplerstudio.editor.PresetImportFailure
-import com.projectnuke.keplerstudio.editor.decodePresetDocument
-import com.projectnuke.keplerstudio.editor.encodePresetDocument
+import com.projectnuke.keplerstudio.editor.decodePresetDocumentText
 import com.projectnuke.keplerstudio.editor.loadPresets
 import com.projectnuke.keplerstudio.editor.mergePresets
+import com.projectnuke.keplerstudio.editor.readPresetDocument
 import com.projectnuke.keplerstudio.editor.savePresets
+import com.projectnuke.keplerstudio.editor.writePresetDocument
 
 import com.projectnuke.keplerstudio.editor.createPresetColorLookFromParams
 import com.projectnuke.keplerstudio.editor.presetColorLookSummary
@@ -375,15 +376,13 @@ private fun formatPresetSummary(preset: Preset): String =
 private fun Float.toFixed2(): String = String.format(Locale.US, "%.2f", this)
 
 private fun exportPresetsToJson(context: Context, uri: Uri, presets: List<Preset>) {
-    val root = encodePresetDocument(presets)
     context.contentResolver.openOutputStream(uri)?.use { out ->
-        OutputStreamWriter(out, StandardCharsets.UTF_8).use { writer -> writer.write(root.toString(2)) }
+        writePresetDocument(out, presets)
     } ?: error("JSON 파일 저장 스트림을 열 수 없습니다")
 }
 
 private fun importPresetsFromJson(context: Context, uri: Uri): List<Preset> {
-    val raw = context.contentResolver.openInputStream(uri)?.use { input ->
-        BufferedReader(InputStreamReader(input, StandardCharsets.UTF_8)).readText()
+    context.contentResolver.openInputStream(uri)?.use { input ->
+        return readPresetDocument(input)
     } ?: error("JSON 파일을 읽을 수 없습니다")
-    return decodePresetDocument(JSONObject(raw))
 }

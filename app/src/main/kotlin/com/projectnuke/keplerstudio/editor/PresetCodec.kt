@@ -2,8 +2,15 @@ package com.projectnuke.keplerstudio.editor
 
 import android.content.Context
 import android.net.Uri
+import java.io.BufferedReader
+import java.io.InputStream
+import java.io.InputStreamReader
+import java.io.OutputStream
+import java.io.OutputStreamWriter
+import java.nio.charset.StandardCharsets
 import java.util.Locale
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 
 /**
@@ -129,7 +136,26 @@ public fun decodePresetDocument(root: JSONObject): List<Preset> {
     return result
 }
 
-//__CONTINUE2__
+/**
+ * Production entry point for raw preset JSON text.
+ *
+ * Parses the raw JSON text, converts any JSON syntax or parse failure into a structured
+ * [PresetImportException] with [PresetImportFailure.MalformedContent], then delegates to
+ * [decodePresetDocument] for schema validation. Actual file-read failures must remain
+ * file-read failures at the caller.
+ */
+public fun decodePresetDocumentText(raw: String): List<Preset> {
+    val root = try {
+        JSONObject(raw)
+    } catch (e: JSONException) {
+        throw PresetImportException(
+            PresetImportFailure.MalformedContent,
+            "Invalid JSON syntax: ${e.message}",
+            e,
+        )
+    }
+    return decodePresetDocument(root)
+}
 
 private fun decodePresetEntry(entry: JSONObject, version: Int): Preset {
     val id = entry.opt("id")
@@ -218,26 +244,48 @@ public fun decodeStoredPreset(raw: String): Preset? {
     val p = raw.split("|")
     if (p.size != 17 && p.size != 18 && p.size != 20 && p.size != 21) return null
 
-    val legacyNoiseReduction = p[16].toFloatOrNull() ?: 0f
+    val hasSplitNoise = p.size == 20 || p.size == 21
+
+    // Every field that is present in the layout must be strictly validated.
+    // 17/18-field records do not contain split-noise indices, so they use migration defaults.
+    // 20/21-field records must provide valid values at those indices.
+    val exposure = strictPipeFloat(p[3], -1f..1f) ?: return null
+    val contrast = strictPipeFloat(p[4], -1f..1f) ?: return null
+    val shadows = strictPipeFloat(p[5], -1f..1f) ?: return null
+    val highlights = strictPipeFloat(p[6], -1f..1f) ?: return null
+    val whites = strictPipeFloat(p[7], -1f..1f) ?: return null
+    val blacks = strictPipeFloat(p[8], -1f..1f) ?: return null
+    val temperature = strictPipeFloat(p[9], -1f..1f) ?: return null
+    val tint = strictPipeFloat(p[10], -1f..1f) ?: return null
+    val saturation = strictPipeFloat(p[11], -1f..1f) ?: return null
+    val vibrance = strictPipeFloat(p[12], -1f..1f) ?: return null
+    val clarity = strictPipeFloat(p[13], -1f..1f) ?: return null
+    val dehaze = strictPipeFloat(p[14], -1f..1f) ?: return null
+    val sharpness = strictPipeFloat(p[15], 0f..1f) ?: return null
+    val noiseReduction = strictPipeFloat(p[16], 0f..1f) ?: return null
+    val luminanceNoiseReduction = if (hasSplitNoise) strictPipeFloat(p[17], 0f..1f) ?: return null else noiseReduction
+    val colorNoiseReduction = if (hasSplitNoise) strictPipeFloat(p[18], 0f..1f) ?: return null else noiseReduction
+    val noiseDetailProtection = if (hasSplitNoise) strictPipeFloat(p[19], 0f..1f) ?: return null else 0.50f
+
     val params =
         EditParams(
-            exposure = p[3].toFloatOrNull() ?: 0f,
-            contrast = p[4].toFloatOrNull() ?: 0f,
-            shadows = p[5].toFloatOrNull() ?: 0f,
-            highlights = p[6].toFloatOrNull() ?: 0f,
-            whites = p[7].toFloatOrNull() ?: 0f,
-            blacks = p[8].toFloatOrNull() ?: 0f,
-            temperature = p[9].toFloatOrNull() ?: 0f,
-            tint = p[10].toFloatOrNull() ?: 0f,
-            saturation = p[11].toFloatOrNull() ?: 0f,
-            vibrance = p[12].toFloatOrNull() ?: 0f,
-            clarity = p[13].toFloatOrNull() ?: 0f,
-            dehaze = p[14].toFloatOrNull() ?: 0f,
-            sharpness = p[15].toFloatOrNull() ?: 0f,
-            noiseReduction = legacyNoiseReduction,
-            luminanceNoiseReduction = p.getOrNull(17)?.toFloatOrNull() ?: legacyNoiseReduction,
-            colorNoiseReduction = p.getOrNull(18)?.toFloatOrNull() ?: legacyNoiseReduction,
-            noiseDetailProtection = p.getOrNull(19)?.toFloatOrNull() ?: 0.50f,
+            exposure = exposure,
+            contrast = contrast,
+            shadows = shadows,
+            highlights = highlights,
+            whites = whites,
+            blacks = blacks,
+            temperature = temperature,
+            tint = tint,
+            saturation = saturation,
+            vibrance = vibrance,
+            clarity = clarity,
+            dehaze = dehaze,
+            sharpness = sharpness,
+            noiseReduction = noiseReduction,
+            luminanceNoiseReduction = luminanceNoiseReduction,
+            colorNoiseReduction = colorNoiseReduction,
+            noiseDetailProtection = noiseDetailProtection,
         )
     val timestamp = p[2].toLongOrNull() ?: return null
 
@@ -247,6 +295,19 @@ public fun decodeStoredPreset(raw: String): Preset? {
             is StoredLookResult.Valid -> result.look
         }
     return Preset(id = p[0], name = p[1], params = params, timestampMillis = timestamp, look = look)
+}
+
+/**
+ * Strictly parses a single pipe-delimited numeric field.
+ *
+ * Returns null if the value is not a finite Float-compatible number, is non-finite, or falls
+ * outside the documented range. A caller must then reject the entire record rather than silently
+ * substituting a default.
+ */
+private fun strictPipeFloat(value: String, range: ClosedFloatingPointRange<Float>): Float? {
+    val f = value.toFloatOrNull() ?: return null
+    if (!f.isFinite()) return null
+    return if (f in range) f else null
 }
 
 private sealed class StoredLookResult {
@@ -350,9 +411,10 @@ private fun strictParam(obj: JSONObject, key: String, range: ClosedFloatingPoint
     if (value !is Number) throw malformed("params.$key")
     val d = value.toDouble()
     if (!d.isFinite()) throw malformed("params.$key")
-    val f = d.toFloat()
-    if (f !in range) throw malformed("params.$key")
-    return f
+    // Reject values that fall outside the documented Double range before narrowing to Float.
+    // A Double slightly beyond the boundary must not round back onto the Float boundary.
+    if (d < range.start.toDouble() || d > range.endInclusive.toDouble()) throw malformed("params.$key")
+    return d.toFloat()
 }
 
 
@@ -440,5 +502,28 @@ internal fun jsonExactLong(value: Any?): Long? {
     return d.toLong()
 }
 
+/**
+ * Writes a preset document to [outputStream] as UTF-8 text.
+ *
+ * Schema encoding is delegated to [encodePresetDocument] and the resulting JSON text is written
+ * with explicit UTF-8 encoding so the byte/stream boundary is directly testable.
+ */
+public fun writePresetDocument(outputStream: OutputStream, presets: List<Preset>) {
+    val root = encodePresetDocument(presets)
+    OutputStreamWriter(outputStream, StandardCharsets.UTF_8).use { writer ->
+        writer.write(root.toString(2))
+    }
+}
 
-
+/**
+ * Reads a preset document from [inputStream] as UTF-8 text.
+ *
+ * Stream decoding is delegated to the structured raw-text decoder so JSON syntax errors are
+ * classified as [PresetImportFailure.MalformedContent].
+ */
+public fun readPresetDocument(inputStream: InputStream): List<Preset> {
+    BufferedReader(InputStreamReader(inputStream, StandardCharsets.UTF_8)).use { reader ->
+        val raw = reader.readText()
+        return decodePresetDocumentText(raw)
+    }
+}

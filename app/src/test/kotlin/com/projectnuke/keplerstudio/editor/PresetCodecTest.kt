@@ -7,6 +7,12 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import com.projectnuke.keplerstudio.editor.decodePresetDocumentText
+import com.projectnuke.keplerstudio.editor.readPresetDocument
+import com.projectnuke.keplerstudio.editor.writePresetDocument
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.nio.charset.StandardCharsets
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -541,8 +547,156 @@ class PresetCodecTest {
         val decoded = decodePresetDocument(encodePresetDocument(listOf(preset)))
         assertEquals("한국어 프리셋 이름", decoded.single().name)
     }
+
+    // ---- Raw JSON text entry point -------------------------------------------
+
+    @Test
+    fun rawTextSyntacticallyInvalidJsonRejectedAsMalformedContent() {
+        val e = assertThrows(PresetImportException::class.java) { decodePresetDocumentText("{invalid") }
+        assertEquals(PresetImportFailure.MalformedContent, e.failure)
+    }
+
+    @Test
+    fun rawTextTruncatedJsonRejectedAsMalformedContent() {
+        val e = assertThrows(PresetImportException::class.java) { decodePresetDocumentText("{\"format\":\"keplerstudio-presets\"") }
+        assertEquals(PresetImportFailure.MalformedContent, e.failure)
+    }
+
+    @Test
+    fun rawTextValidJsonWrongFormatRejectedAsUnsupportedFormat() {
+        val e = assertThrows(PresetImportException::class.java) { decodePresetDocumentText("{\"format\":\"other\",\"version\":1,\"presets\":[]}") }
+        assertEquals(PresetImportFailure.UnsupportedFormat, e.failure)
+    }
+
+    @Test
+    fun rawTextValidJsonUnsupportedVersionRejected() {
+        val e = assertThrows(PresetImportException::class.java) { decodePresetDocumentText("{\"format\":\"keplerstudio-presets\",\"version\":3,\"presets\":[]}") }
+        assertEquals(PresetImportFailure.UnsupportedVersion, e.failure)
+    }
+
+    @Test
+    fun rawTextValidJsonWithMalformedPresetContentsRejected() {
+        val raw = """{"format":"keplerstudio-presets","version":2,"presets":[{"id":"x","name":"n","timestampMillis":1,"params":{"exposure":"garbage"}}]}"""
+        val e = assertThrows(PresetImportException::class.java) { decodePresetDocumentText(raw) }
+        assertEquals(PresetImportFailure.MalformedContent, e.failure)
+    }
+
+    @Test
+    fun rawTextValidCurrentV2DocumentParses() {
+        val raw = """{"format":"keplerstudio-presets","version":2,"presets":[{"id":"x","name":"n","timestampMillis":1,"params":{"exposure":0.1,"contrast":0.2,"shadows":-0.3,"highlights":0.4,"whites":0.5,"blacks":-0.6,"temperature":0.7,"tint":-0.8,"saturation":0.9,"vibrance":-0.1,"clarity":0.2,"dehaze":-0.3,"sharpness":0.5,"noiseReduction":0.25}}]}"""
+        val presets = decodePresetDocumentText(raw)
+        assertEquals(1, presets.size)
+        assertEquals("x", presets[0].id)
+    }
+
+    // ---- Strict pre-Float range validation -----------------------------------
+
+    @Test
+    fun slightlyAboveOneInMinusOneToOneRangeRejectedBeforeFloatNarrowing() {
+        assertMalformed {
+            decodePresetDocument(
+                root().apply {
+                    put(
+                        "presets",
+                        JSONArray().put(entry(params = paramsObj().apply { put("exposure", 1.00000001) })),
+                    )
+                },
+            )
+        }
+    }
+
+    @Test
+    fun slightlyBelowMinusOneInMinusOneToOneRangeRejectedBeforeFloatNarrowing() {
+        assertMalformed {
+            decodePresetDocument(
+                root().apply {
+                    put(
+                        "presets",
+                        JSONArray().put(entry(params = paramsObj().apply { put("exposure", -1.00000001) })),
+                    )
+                },
+            )
+        }
+    }
+
+    @Test
+    fun slightlyAboveOneInZeroToOneRangeRejectedBeforeFloatNarrowing() {
+        assertMalformed {
+            decodePresetDocument(
+                root().apply {
+                    put(
+                        "presets",
+                        JSONArray().put(entry(params = paramsObj().apply { put("sharpness", 1.00000001) })),
+                    )
+                },
+            )
+        }
+    }
+
+    @Test
+    fun slightlyBelowZeroInZeroToOneRangeRejectedBeforeFloatNarrowing() {
+        assertMalformed {
+            decodePresetDocument(
+                root().apply {
+                    put(
+                        "presets",
+                        JSONArray().put(entry(params = paramsObj().apply { put("sharpness", -0.00000001) })),
+                    )
+                },
+            )
+        }
+    }
+
+    // ---- UTF-8 stream boundary -----------------------------------------------
+
+    @Test
+    fun writeAndReadPresetDocumentSurvivesKoreanNameWithNullLook() {
+        val preset =
+            Preset(
+                id = "stream-1",
+                name = "한국어 스트림 프리셋",
+                params = EditParams(),
+                timestampMillis = 7L,
+                look = null,
+            )
+        val out = ByteArrayOutputStream()
+        writePresetDocument(out, listOf(preset))
+        val bytes = out.toByteArray()
+        assertEquals("한국어 스트림 프리셋", String(bytes, StandardCharsets.UTF_8))
+
+        val input = ByteArrayInputStream(bytes)
+        val decoded = readPresetDocument(input)
+        assertEquals(1, decoded.size)
+        assertEquals("한국어 스트림 프리셋", decoded[0].name)
+        assertNull(decoded[0].look)
+    }
+
+    @Test
+    fun writeAndReadPresetDocumentSurvivesKoreanNameWithValidLook() {
+        val lookValues = FloatArray(24) { 0.01f * (it + 1) }
+        val look = PresetColorLook(size = 2, strength = 0.6f, values = lookValues)
+        val preset =
+            Preset(
+                id = "stream-2",
+                name = "한국어 룩 프리셋",
+                params = EditParams(),
+                timestampMillis = 7L,
+                look = look,
+            )
+        val out = ByteArrayOutputStream()
+        writePresetDocument(out, listOf(preset))
+        val bytes = out.toByteArray()
+
+        val input = ByteArrayInputStream(bytes)
+        val decoded = readPresetDocument(input)
+        assertEquals(1, decoded.size)
+        assertEquals("한국어 룩 프리셋", decoded[0].name)
+        val decodedLook = decoded[0].look
+        assertNotNull(decodedLook)
+        assertEquals(look.size, decodedLook.size)
+        assertEquals(look.strength, decodedLook.strength)
+        assertEquals(lookValues.size, decodedLook.values.size)
+        lookValues.forEachIndexed { index, value -> assertEquals(value, decodedLook.values[index]) }
+    }
 }
-
-
-
 

@@ -190,5 +190,102 @@ class PresetPersistenceTest {
         assertEquals("기본", loaded[0].name)
         assertNotNull(loaded[0].look)
     }
+
+    // ---- Corrupted local numeric fields --------------------------------------
+
+    private fun corruptField(base: String, fieldIndex: Int, newValue: String): String {
+        val fields = base.split("|").toMutableList()
+        fields[fieldIndex] = newValue
+        return fields.joinToString("|")
+    }
+
+    @Test
+    fun modern21FieldMalformedTextExposureReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 3, "garbage")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldNanNoiseReductionReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 16, "NaN")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldInfinityContrastReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 4, "Infinity")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldNegativeInfinityTemperatureReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 9, "-Infinity")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldExposureBelowMinusOneReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 3, "-1.1")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldExposureAboveOneReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 3, "1.1")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldSharpnessNegativeReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 15, "-0.1")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldSharpnessAboveOneReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 15, "1.1")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldMalformedLuminanceNoiseReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 17, "garbage")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldMalformedColorNoiseReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 18, "garbage")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun modern21FieldMalformedDetailProtectionReturnsNull() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 19, "garbage")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun legacy17FieldCorruptedNoiseReductionReturnsNullRatherThanZero() {
+        val record = corruptField(body(), 16, "garbage")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun mixedSharedPreferencesSkipsOnlyCorruptedRecord() {
+        val valid1 = body(id = "valid-1", splitNoise = true, look = lookJson())
+        val valid2 = body(id = "valid-2", splitNoise = true, look = lookJson())
+        val corrupt = corruptField(body(id = "corrupt", splitNoise = true, look = lookJson()), 3, "garbage")
+
+        app.getSharedPreferences(PRESET_PREF_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_PRESETS, "$valid1\n$corrupt\n$valid2")
+            .commit()
+
+        val loaded = loadPresets(app)
+        assertEquals(2, loaded.size)
+        assertEquals("valid-1", loaded[0].name)
+        assertEquals("valid-2", loaded[1].name)
+    }
 }
 
