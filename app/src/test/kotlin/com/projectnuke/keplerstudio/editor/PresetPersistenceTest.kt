@@ -272,9 +272,33 @@ class PresetPersistenceTest {
     }
 
     @Test
+    fun regressionPipeFloatExposureSlightlyAboveOneRejected() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 3, "1.00000001")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun regressionPipeFloatExposureSlightlyBelowMinusOneRejected() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 3, "-1.00000001")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun regressionPipeFloatSharpnessSlightlyAboveOneRejected() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 15, "1.00000001")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
+    fun regressionPipeFloatSharpnessSlightlyBelowZeroRejected() {
+        val record = corruptField(body(splitNoise = true, look = lookJson()), 15, "-0.00000001")
+        assertNull(decodeStoredPreset(record))
+    }
+
+    @Test
     fun mixedSharedPreferencesSkipsOnlyCorruptedRecord() {
-        val valid1 = body(id = "valid-1", splitNoise = true, look = lookJson())
-        val valid2 = body(id = "valid-2", splitNoise = true, look = lookJson())
+        val valid1 = body(id = "valid-1", name = "valid-1", splitNoise = true, look = lookJson())
+        val valid2 = body(id = "valid-2", name = "valid-2", splitNoise = true, look = lookJson())
         val corrupt = corruptField(body(id = "corrupt", splitNoise = true, look = lookJson()), 3, "garbage")
 
         app.getSharedPreferences(PRESET_PREF_NAME, Context.MODE_PRIVATE)
@@ -288,4 +312,3 @@ class PresetPersistenceTest {
         assertEquals("valid-2", loaded[1].name)
     }
 }
-

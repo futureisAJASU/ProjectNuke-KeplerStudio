@@ -554,6 +554,7 @@ class PresetCodecTest {
     fun rawTextSyntacticallyInvalidJsonRejectedAsMalformedContent() {
         val e = assertThrows(PresetImportException::class.java) { decodePresetDocumentText("{invalid") }
         assertEquals(PresetImportFailure.MalformedContent, e.failure)
+        assertTrue(e.cause is JSONException)
     }
 
     @Test
@@ -662,7 +663,8 @@ class PresetCodecTest {
         val out = ByteArrayOutputStream()
         writePresetDocument(out, listOf(preset))
         val bytes = out.toByteArray()
-        assertEquals("한국어 스트림 프리셋", String(bytes, StandardCharsets.UTF_8))
+        val jsonText = String(bytes, StandardCharsets.UTF_8)
+        assertTrue(jsonText.contains("한국어 스트림 프리셋"))
 
         val input = ByteArrayInputStream(bytes)
         val decoded = readPresetDocument(input)
@@ -699,4 +701,3 @@ class PresetCodecTest {
         lookValues.forEachIndexed { index, value -> assertEquals(value, decodedLook.values[index]) }
     }
 }
-

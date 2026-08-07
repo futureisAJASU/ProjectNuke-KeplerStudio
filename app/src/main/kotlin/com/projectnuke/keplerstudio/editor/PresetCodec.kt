@@ -45,7 +45,8 @@ public sealed class PresetImportFailure {
 public class PresetImportException(
     public val failure: PresetImportFailure,
     message: String,
-) : Exception(message)
+    cause: Throwable? = null,
+) : Exception(message, cause)
 
 /**
  * Historical compatibility rules for the preset JSON document format:
@@ -305,9 +306,12 @@ public fun decodeStoredPreset(raw: String): Preset? {
  * substituting a default.
  */
 private fun strictPipeFloat(value: String, range: ClosedFloatingPointRange<Float>): Float? {
-    val f = value.toFloatOrNull() ?: return null
-    if (!f.isFinite()) return null
-    return if (f in range) f else null
+    val d = value.toDoubleOrNull() ?: return null
+    if (!d.isFinite()) return null
+    val start = range.start.toDouble()
+    val end = range.endInclusive.toDouble()
+    if (d < start || d > end) return null
+    return d.toFloat()
 }
 
 private sealed class StoredLookResult {

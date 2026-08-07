@@ -37,7 +37,6 @@ import com.projectnuke.keplerstudio.editor.PresetColorLook
 import com.projectnuke.keplerstudio.editor.Preset
 import com.projectnuke.keplerstudio.editor.PresetImportException
 import com.projectnuke.keplerstudio.editor.PresetImportFailure
-import com.projectnuke.keplerstudio.editor.decodePresetDocumentText
 import com.projectnuke.keplerstudio.editor.loadPresets
 import com.projectnuke.keplerstudio.editor.mergePresets
 import com.projectnuke.keplerstudio.editor.readPresetDocument
@@ -46,17 +45,12 @@ import com.projectnuke.keplerstudio.editor.writePresetDocument
 
 import com.projectnuke.keplerstudio.editor.createPresetColorLookFromParams
 import com.projectnuke.keplerstudio.editor.presetColorLookSummary
-import java.nio.charset.StandardCharsets
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 
 private val PresetCardBackground = Color(0xFF242424)
 private val PresetAccent = Color(0xFFE6E6E6)
