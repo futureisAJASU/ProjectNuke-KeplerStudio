@@ -13,6 +13,7 @@ import java.nio.channels.ReadableByteChannel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 import org.tensorflow.lite.Interpreter
@@ -320,6 +321,54 @@ class FlareGuardModelLoaderLifecycleTest {
         return java.io.RandomAccessFile(tempFile, "r").channel.use { channel ->
             channel.map(FileChannel.MapMode.READ_ONLY, 0L, 0L)
         }
+    }
+
+    @Test
+    fun validatedLoadRetrySequence() {
+        val entry = pinnedEntry()
+        GlobalModelDiagnostics.resetForTest(true)
+        val factory =
+            object : FlareGuardLoaderFactory {
+                override fun loadAsset(): MappedByteBuffer = mappedBuffer()
+
+                override fun newInterpreter(model: MappedByteBuffer): Interpreter =
+                    throw IOException("transient stream error")
+            }
+        val first =
+            FlareGuardModelRunner.create(
+                factory = factory,
+                assetOpen = { validStream(entry) },
+                manifestProvider = { entry },
+            )
+        assertIs<ModelLoadResult.LoadFailed>(first)
+        val retryableState = ModelCapabilityState(
+            phase = ModelCapabilityPhase.Failed,
+            assetPresent = true,
+            assetValid = true,
+            runtimeAvailable = true,
+            contractSupported = true,
+            runnerImplemented = true,
+            lastFailure = ModelCapabilityFailure(ModelCapabilityPhase.Failed, "transient load failure"),
+        )
+        assertTrue(retryableState.canAttemptModelUse)
+        assertFalse(retryableState.sessionReady)
+    }
+
+    @Test
+    fun retryBlockedWhenAssetBecomesInvalid() {
+        GlobalModelDiagnostics.resetForTest(true)
+        val entry = pinnedEntry()
+        // Load fails, then asset becomes invalid through newer authoritative probe
+        val failedState = ModelCapabilityState(
+            phase = ModelCapabilityPhase.Failed,
+            assetPresent = true,
+            assetValid = false,
+            runtimeAvailable = true,
+            contractSupported = true,
+            runnerImplemented = true,
+            lastFailure = ModelCapabilityFailure(ModelCapabilityPhase.AssetInvalid, "invalid"),
+        )
+        assertFalse(failedState.canAttemptModelUse)
     }
 
     private object FakeFactory : FlareGuardLoaderFactory {

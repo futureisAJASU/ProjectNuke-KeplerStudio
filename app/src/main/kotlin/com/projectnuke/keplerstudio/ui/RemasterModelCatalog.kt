@@ -132,7 +132,7 @@ private fun manifestAvailabilityLabel(manifest: com.projectnuke.keplerstudio.edi
 internal fun RemasterModelCandidate.canExecuteFromRegistry(
     state: ModelCapabilityState?,
 ): Boolean {
-    if (registryFeature != null && state != null) return state.executable
+    if (registryFeature != null && state != null) return state.canAttemptModelUse
     val manifest = ModelAssetManifest.byId(id) ?: return false
     if (!manifest.inferenceAdapterImplemented) return false
     if (manifest.asset.sha256 == null && manifest.asset.runtimeType != ModelRuntimeType.RuleStatistics) return false

@@ -45,15 +45,14 @@ fun RemasterToolPanel(
     val autoRouter = OnDeviceRemasterModels.first { it.id == "universal_auto_router" }
     val flareGuardCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.FlareGuard]
     val remasterCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.Remaster]
-    val flareMaskerAvailable = flareGuardCapability?.executable == true || flareMasker.canExecuteFromRegistry(flareGuardCapability)
+    val flareMaskerAvailable = flareMasker.canExecuteFromRegistry(flareGuardCapability)
     val flareRestorerAvailable = flareRestorer.canExecuteFromRegistry(null)
-    val edgeAssetAvailable = remasterCapability?.executable == true || edgeMasker.canExecuteFromRegistry(remasterCapability)
+    val edgeAssetAvailable = edgeMasker.canExecuteFromRegistry(remasterCapability)
     val flareMaskerStatusLabel = flareMasker.registryStatus(flareGuardCapability)
     val flareRestorerStatusLabel = flareRestorer.registryStatus(null)
     val edgeMaskerStatusLabel = edgeMasker.registryStatus(remasterCapability)
-    val edgeLoaded = remasterCapability?.phase ==
-        com.projectnuke.keplerstudio.editor.ModelCapabilityPhase.Ready
-    val edgeExecutable = remasterCapability?.executable == true || edgeLoaded
+    val edgeLoaded = remasterCapability?.sessionReady == true
+    val edgeExecutable = edgeMasker.canExecuteFromRegistry(remasterCapability) || remasterCapability?.sessionReady == true
     val edgeLoadingOrInferring = RemasterModelSession.isModelLoading || RemasterModelSession.isInferring
     val hasImage = editorState.previewBitmap != null || editorState.originalPreviewBitmap != null
 

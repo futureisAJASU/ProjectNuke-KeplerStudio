@@ -193,7 +193,7 @@ fun NativeModelToolPanel(editorViewModel: EditorViewModel = viewModel()) {
     val edgeMasker = OnDeviceRemasterModels.first { it.id == "edge_masker" }
     val flareGuardCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.FlareGuard]
     val remasterCapability = modelCapability[com.projectnuke.keplerstudio.editor.ModelFeature.Remaster]
-    val flareMaskerAvailable = flareGuardCapability?.executable == true || flareMasker.canExecuteFromRegistry(flareGuardCapability)
+    val flareMaskerAvailable = flareMasker.canExecuteFromRegistry(flareGuardCapability)
     val flareMaskerStatusLabel = flareMasker.registryStatus(flareGuardCapability)
     val flareRestorerStatusLabel = flareRestorer.registryStatus(null)
     val edgeMaskerStatusLabel = edgeMasker.registryStatus(remasterCapability)

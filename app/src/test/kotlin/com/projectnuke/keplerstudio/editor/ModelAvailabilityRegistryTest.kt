@@ -337,4 +337,272 @@ class ModelAvailabilityRegistryTest {
         assertTrue(closed.factsLoadable)
     }
 
+    @Test
+    fun validatedLoadableCanAttemptModelUse() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertTrue(state.canAttemptModelUse)
+    }
+
+    @Test
+    fun readyLiveSessionReportsSessionReady() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        ModelAvailabilityRegistry.reportSessionReady(listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection))
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertTrue(state.sessionReady)
+        assertTrue(state.canAttemptModelUse)
+    }
+
+    @Test
+    fun unloadedValidFactsRemainsAttemptable() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val sessionGen = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionGeneration
+        ModelAvailabilityRegistry.reportSessionClosed(listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection), sessionGen)
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertTrue(state.phase == ModelCapabilityPhase.Unloaded || state.phase == ModelCapabilityPhase.Loadable)
+        assertTrue(state.canAttemptModelUse)
+        assertFalse(state.sessionReady)
+    }
+
+    @Test
+    fun failedWithValidFactsIsRetryable() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("transient failure"))
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertEquals(ModelCapabilityPhase.Failed, state.phase)
+        assertTrue(state.factsLoadable)
+        assertTrue(state.canAttemptModelUse)
+        assertFalse(state.sessionReady)
+        assertEquals("이전 로드 실패 · 다시 시도 가능", state.statusLabel)
+    }
+
+    @Test
+    fun failedWithIncompleteFactsIsNotRetryable() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.AssetMissing("missing"))
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertEquals(ModelCapabilityPhase.AssetMissing, state.phase)
+        assertFalse(state.canAttemptModelUse)
+    }
+
+    @Test
+    fun assetMissingIsNotRetryable() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.AssetMissing("missing"))
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertFalse(state.canAttemptModelUse)
+    }
+
+    @Test
+    fun assetInvalidIsNotRetryable() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.AssetInvalid("invalid"))
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertFalse(state.canAttemptModelUse)
+    }
+
+    @Test
+    fun runtimeUnavailableIsNotRetryable() {
+        ModelAvailabilityRegistry.reportLoad(ModelFeature.FlareGuard, ModelLoadResult.RuntimeUnavailable("unavailable"))
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.FlareGuard)
+        assertFalse(state.canAttemptModelUse)
+    }
+
+    @Test
+    fun contractUnsupportedIsNotRetryable() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.UnsupportedContract("unsupported"))
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertFalse(state.canAttemptModelUse)
+    }
+
+    @Test
+    fun runnerUnavailableIsNotRetryable() {
+        // Use a state with missing runnerImplemented
+        val observation = ModelCapabilityObservation(
+            publisher = ModelCapabilityPublisher.Probe,
+            generation = 1L,
+            phase = ModelCapabilityPhase.RunnerUnavailable,
+            assetPresent = true,
+            assetValid = true,
+            runtimeAvailable = true,
+            contractSupported = true,
+            runnerImplemented = false,
+        )
+        ModelAvailabilityRegistry.applyForTest(ModelFeature.FlareGuard, observation)
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.FlareGuard)
+        assertEquals(ModelCapabilityPhase.RunnerUnavailable, state.phase)
+        assertFalse(state.canAttemptModelUse)
+    }
+
+    @Test
+    fun loaderGateAllowsRetryableFailed() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("transient"))
+        assertEquals(null, ModelAvailabilityRegistry.loaderRejection(ModelFeature.Remaster))
+    }
+
+    @Test
+    fun validatedTokenCanBeIssuedAfterRetryableFailed() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("transient"))
+        val tokenResult = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.Remaster)
+        assertTrue(tokenResult is ModelLoadResult.Ready)
+    }
+
+    @Test
+    fun validationEpochEnforcedOnRetry() {
+        ModelAvailabilityRegistry.beginProbe()
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val token = (ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.Remaster) as ModelLoadResult.Ready).runner
+        ModelAvailabilityRegistry.beginProbe()
+        assertFalse(ModelAvailabilityRegistry.isCurrent(token))
+    }
+
+    @Test
+    fun newLoadingTransitionDoesNotReportReady() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("failed"))
+        val stateBefore = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertTrue(stateBefore.canAttemptModelUse)
+        assertTrue(stateBefore.factsLoadable)
+        val loadGen = ModelAvailabilityRegistry.reportEdgeLoading()
+        val stateLoading = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertEquals(ModelCapabilityPhase.Loading, stateLoading.phase)
+        assertFalse(stateLoading.sessionReady)
+        assertFalse(stateLoading.canAttemptModelUse)
+    }
+
+    @Test
+    fun retrySuccessClearsPreviousFailureAndBecomesReady() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("first"))
+        val failState = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertEquals(ModelCapabilityPhase.Failed, failState.phase)
+        assertTrue(failState.canAttemptModelUse)
+        assertTrue(failState.factsLoadable)
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val readyState = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertEquals(ModelCapabilityPhase.Loadable, readyState.phase)
+        assertTrue(readyState.factsLoadable)
+        assertEquals(null, readyState.lastFailure)
+    }
+
+    @Test
+    fun repeatedRetryFailureStaysRetryableWhenFactsValid() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("first"))
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.LoadFailed("second"))
+        val state = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        assertEquals(ModelCapabilityPhase.Failed, state.phase)
+        assertTrue(state.factsLoadable)
+        assertTrue(state.canAttemptModelUse)
+    }
+
+    @Test
+    fun lateLoaderFailedCannotDowngradeActiveSessionReady() {
+        val ready =
+            reduceModelCapability(
+                ModelCapabilityState(
+                    phase = ModelCapabilityPhase.Loadable,
+                    assetPresent = true,
+                    assetValid = true,
+                    runtimeAvailable = true,
+                    contractSupported = true,
+                    runnerImplemented = true,
+                    loadGeneration = 12L,
+                ),
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Session,
+                    generation = 21L,
+                    phase = ModelCapabilityPhase.Ready,
+                ),
+                sequence = 1L,
+            )
+        val afterLateFailure =
+            reduceModelCapability(
+                ready,
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Loader,
+                    generation = 14L,
+                    phase = ModelCapabilityPhase.Failed,
+                    failure = ModelCapabilityFailure(ModelCapabilityPhase.Failed, "late loader result"),
+                ),
+                sequence = 2L,
+            )
+        assertEquals(ModelCapabilityPhase.Ready, afterLateFailure.phase)
+        assertTrue(afterLateFailure.sessionActive)
+        assertTrue(afterLateFailure.sessionReady)
+        assertTrue(afterLateFailure.canAttemptModelUse)
+        assertEquals(null, afterLateFailure.lastFailure)
+    }
+
+    @Test
+    fun staleSessionCloseStillCannotCloseNewerSession() {
+        val ready =
+            ModelCapabilityState(
+                phase = ModelCapabilityPhase.Ready,
+                assetPresent = true,
+                assetValid = true,
+                runtimeAvailable = true,
+                contractSupported = true,
+                runnerImplemented = true,
+                sessionGeneration = 9L,
+            )
+        val staleClose =
+            reduceModelCapability(
+                ready,
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Session,
+                    8L,
+                    ModelCapabilityPhase.Unloaded,
+                ),
+                sequence = 2L,
+            )
+        assertEquals(ready, staleClose)
+    }
+
+    @Test
+    fun currentSessionCloseSettlesBackToLoadable() {
+        val ready =
+            reduceModelCapability(
+                ModelCapabilityState(
+                    phase = ModelCapabilityPhase.Loadable,
+                    assetPresent = true,
+                    assetValid = true,
+                    runtimeAvailable = true,
+                    contractSupported = true,
+                    runnerImplemented = true,
+                ),
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Session,
+                    5L,
+                    ModelCapabilityPhase.Ready,
+                ),
+                sequence = 1L,
+            )
+        val sessionGen = ready.sessionGeneration
+        val closed =
+            reduceModelCapability(
+                ready,
+                ModelCapabilityObservation(
+                    publisher = ModelCapabilityPublisher.Session,
+                    sessionGen,
+                    ModelCapabilityPhase.Unloaded,
+                ),
+                sequence = 2L,
+            )
+        assertFalse(closed.sessionActive)
+        assertEquals(ModelCapabilityPhase.Loadable, closed.phase)
+        assertTrue(closed.factsLoadable)
+        assertTrue(closed.canAttemptModelUse)
+        assertFalse(closed.sessionReady)
+    }
+
+    @Test
+    fun edgeMaskerRemasterAndSubjectSelectionSynchronized() {
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val remaster = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        val subject = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection)
+        assertEquals(remaster.phase, subject.phase)
+        assertEquals(remaster.sessionActive, subject.sessionActive)
+        assertEquals(remaster.factsLoadable, subject.factsLoadable)
+        assertEquals(remaster.canAttemptModelUse, subject.canAttemptModelUse)
+    }
 }

@@ -60,6 +60,18 @@ data class ModelCapabilityState(
                 phase == ModelCapabilityPhase.Ready ||
                 (phase == ModelCapabilityPhase.Unloaded && factsLoadable)
 
+    val canAttemptModelUse: Boolean
+        get() = when (phase) {
+            ModelCapabilityPhase.Loadable -> factsLoadable
+            ModelCapabilityPhase.Ready -> sessionActive && factsLoadable
+            ModelCapabilityPhase.Unloaded -> factsLoadable
+            ModelCapabilityPhase.Failed -> factsLoadable
+            else -> false
+        }
+
+    val sessionReady: Boolean
+        get() = phase == ModelCapabilityPhase.Ready && sessionActive
+
     val statusLabel: String
         get() =
             when (phase) {
@@ -73,7 +85,7 @@ data class ModelCapabilityState(
                 ModelCapabilityPhase.Loadable -> "실행 시 로드"
                 ModelCapabilityPhase.Loading -> "로드 중"
                 ModelCapabilityPhase.Ready -> "사용 가능"
-                ModelCapabilityPhase.Failed -> "이전 로드 실패"
+                ModelCapabilityPhase.Failed -> if (factsLoadable) "이전 로드 실패 · 다시 시도 가능" else "이전 로드 실패"
                 ModelCapabilityPhase.Unloaded -> "실행 시 다시 로드"
             }
 }
@@ -83,10 +95,10 @@ data class ModelCapabilitySnapshot(
 ) {
     fun routeAvailability(): RouteModelAvailability =
         RouteModelAvailability(
-            flareGuardModelAvailable = capabilities[ModelFeature.FlareGuard]?.executable == true,
-            remasterModelAvailable = capabilities[ModelFeature.Remaster]?.executable == true,
+            flareGuardModelAvailable = capabilities[ModelFeature.FlareGuard]?.canAttemptModelUse == true,
+            remasterModelAvailable = capabilities[ModelFeature.Remaster]?.canAttemptModelUse == true,
             subjectSelectionModelAvailable =
-                capabilities[ModelFeature.SubjectSelection]?.executable == true,
+                capabilities[ModelFeature.SubjectSelection]?.canAttemptModelUse == true,
         )
 }
 
@@ -274,7 +286,7 @@ object ModelAvailabilityRegistry {
                 ModelLoadResult.RuntimeUnavailable(capability.lastFailure?.detail ?: "model runtime unavailable")
             ModelCapabilityPhase.ContractUnsupported ->
                 ModelLoadResult.UnsupportedContract(capability.lastFailure?.detail ?: "model contract unsupported")
-            ModelCapabilityPhase.Failed -> ModelLoadResult.LoadFailed(capability.lastFailure?.detail ?: "model load failed")
+            ModelCapabilityPhase.Failed -> if (capability.factsLoadable) null else ModelLoadResult.LoadFailed(capability.lastFailure?.detail ?: "model load failed")
             ModelCapabilityPhase.Ready -> null
             ModelCapabilityPhase.Loadable,
             ModelCapabilityPhase.Unloaded -> if (capability.factsLoadable) null
@@ -323,6 +335,7 @@ object ModelAvailabilityRegistry {
                     ModelCapabilityPhase.Loading,
                     ModelCapabilityPhase.Ready,
                     ModelCapabilityPhase.Unloaded,
+                    ModelCapabilityPhase.Failed,
                 ) &&
             capability.observationSequence >= token.validationSequence
     }

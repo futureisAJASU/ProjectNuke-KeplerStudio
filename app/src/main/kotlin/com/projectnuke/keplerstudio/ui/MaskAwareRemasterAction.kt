@@ -66,7 +66,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     val remasterResolution = RouteResolver.resolveRemasterRoute(
         documentEngine,
         remasterOverride,
-        modelAvailable = modelCapability?.executable == true,
+        modelAvailable = modelCapability?.canAttemptModelUse == true,
     )
     val remasterAlgorithm = remasterResolution.actualRoute
     val useModel =
@@ -85,7 +85,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
         } else {
             null
         }
-    if (useModel && modelCapability?.executable != true) {
+    if (useModel && modelCapability?.canAttemptModelUse != true) {
         updateUiState { it.copy(message = "모델 보조 V2를 사용할 수 없습니다. 모델과 런타임 상태를 확인해 주세요.") }
         return
     }

@@ -696,6 +696,67 @@ class RemasterModelSessionValidationTest {
     }
 
     private fun edgeCandidate() = OnDeviceRemasterModels.first { it.id == "edge_masker" }
+
+    @Test
+    fun `edge masker retry after transient failure with shared session`(): Unit = runBlocking {
+        val context = RuntimeEnvironment.getApplication()
+
+        // Seed with valid facts so a later LoadFailed preserves them as retryable.
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+
+        // First attempt fails transiently at RunnerCreated; registry settles to retryable Failed.
+        val firstRunner = FakeRunner()
+        val handleFirst = RemasterModelSession.installTestSeam(
+            factory = { _, _ -> firstRunner },
+            onStage = { stage ->
+                if (stage == RemasterModelSession.PublicationStage.RunnerCreated) {
+                    error("transient failure at RunnerCreated")
+                }
+            },
+        )
+        testSeam = handleFirst
+
+        val firstResult = RemasterModelSession.ensureEdgeLoaded(context)
+        assertTrue(firstResult is ModelLoadResult.LoadFailed)
+        assertEquals(1, firstRunner.closeCount, "first runner should be closed on failure")
+
+        val remasterState = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        val subjectState = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection)
+        assertEquals(ModelCapabilityPhase.Failed, remasterState.phase)
+        assertEquals(ModelCapabilityPhase.Failed, subjectState.phase)
+        assertTrue(remasterState.canAttemptModelUse)
+        assertTrue(subjectState.canAttemptModelUse)
+        assertTrue(remasterState.factsLoadable)
+        assertTrue(subjectState.factsLoadable)
+
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Failed }
+
+        handleFirst.close()
+        testSeam = null
+
+        // Second attempt succeeds with a fresh seam.
+        val secondRunner = FakeRunner()
+        val handleSecond = RemasterModelSession.installTestSeam(
+            factory = { _, _ -> secondRunner },
+            onStage = null,
+        )
+        testSeam = handleSecond
+
+        val secondResult = RemasterModelSession.ensureEdgeLoaded(context)
+        assertTrue(secondResult is ModelLoadResult.Ready)
+
+        val readyRemaster = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        val readySubject = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection)
+        assertEquals(ModelCapabilityPhase.Ready, readyRemaster.phase)
+        assertEquals(ModelCapabilityPhase.Ready, readySubject.phase)
+        assertTrue(readyRemaster.sessionReady)
+        assertTrue(readySubject.sessionReady)
+        assertTrue(readyRemaster.sessionActive)
+        assertTrue(readySubject.sessionActive)
+        assertTrue(readyRemaster.canAttemptModelUse)
+        assertTrue(readySubject.canAttemptModelUse)
+        assertTrue(RemasterModelSession.isModelLoaded)
+    }
 }
 
 private fun ValidatedModelCapabilityToken.copyForTest(
