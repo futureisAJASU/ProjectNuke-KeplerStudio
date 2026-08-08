@@ -24,7 +24,7 @@ class ModelAvailabilityRegistryTest {
         assertTrue(state.assetPresent == true)
         assertTrue(state.assetValid == true)
         assertEquals(ModelCapabilityPhase.RuntimeUnavailable, state.phase)
-        assertFalse(state.executable)
+        assertFalse(state.canAttemptModelUse)
         assertFalse(ModelAvailabilityRegistry.routeAvailability().flareGuardModelAvailable)
     }
 

@@ -15,7 +15,14 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Before
+import org.junit.runner.RunWith
+import android.content.Context
+import org.robolectric.RobolectricTestRunner
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Tensor
@@ -35,10 +42,22 @@ import org.tensorflow.lite.Tensor
  * parser/quant helpers, and the runtime InvalidOutput classification is covered
  * in `ModelRunnerContractTest`. Those do not require a live LiteRT interpreter.
  */
+@RunWith(RobolectricTestRunner::class)
 class FlareGuardModelLoaderLifecycleTest {
+    @Before
+    fun resetRegistry() {
+        ModelAvailabilityRegistry.resetForTest()
+        GlobalModelDiagnostics.resetForTest(true)
+    }
+
+    @After
+    fun cleanup() {
+        ModelAvailabilityRegistry.resetForTest()
+        GlobalModelDiagnostics.resetForTest(true)
+    }
+
     @Test
     fun assetMissingSettlesDiagnosticAndReturnsAssetMissing() {
-        GlobalModelDiagnostics.resetForTest(true)
         val entry = checkNotNull(ModelAssetManifest.byId("flare_masker"))
         val result =
             FlareGuardModelRunner.create(
@@ -52,7 +71,6 @@ class FlareGuardModelLoaderLifecycleTest {
 
     @Test
     fun assetInvalidSettlesDiagnosticAndReturnsAssetInvalid() {
-        GlobalModelDiagnostics.resetForTest(true)
         val entry = pinnedEntry()
         val result =
             FlareGuardModelRunner.create(
@@ -66,7 +84,6 @@ class FlareGuardModelLoaderLifecycleTest {
 
     @Test
     fun runtimeUnavailableSettlesDiagnosticAndClosesInterpreter() {
-        GlobalModelDiagnostics.resetForTest(true)
         val entry = pinnedEntry()
         val factory =
             object : FlareGuardLoaderFactory {
@@ -87,7 +104,6 @@ class FlareGuardModelLoaderLifecycleTest {
 
     @Test
     fun interpreterConstructionFailureSettlesDiagnostic() {
-        GlobalModelDiagnostics.resetForTest(true)
         val entry = pinnedEntry()
         val factory =
             object : FlareGuardLoaderFactory {
@@ -108,7 +124,6 @@ class FlareGuardModelLoaderLifecycleTest {
 
     @Test
     fun ioFailureAfterValidationMapsToLoadFailed() {
-        GlobalModelDiagnostics.resetForTest(true)
         val entry = pinnedEntry()
         val factory =
             object : FlareGuardLoaderFactory {
@@ -129,7 +144,6 @@ class FlareGuardModelLoaderLifecycleTest {
 
     @Test
     fun missingManifestEntrySettlesDiagnosticAsAssetMissing() {
-        GlobalModelDiagnostics.resetForTest(true)
         val result =
             FlareGuardModelRunner.create(
                 factory = FakeFactory,
@@ -142,7 +156,6 @@ class FlareGuardModelLoaderLifecycleTest {
 
     @Test
     fun noClassDefFoundSettlesDiagnosticAsRuntimeUnavailable() {
-        GlobalModelDiagnostics.resetForTest(true)
         val entry = pinnedEntry()
         val factory =
             object : FlareGuardLoaderFactory {
@@ -163,7 +176,6 @@ class FlareGuardModelLoaderLifecycleTest {
 
     @Test
     fun repeatedFailureDoesNotAccumulateGlobalContributors() {
-        GlobalModelDiagnostics.resetForTest(true)
         val entry = pinnedEntry()
         repeat(3) {
             val result =
@@ -242,14 +254,211 @@ class FlareGuardModelLoaderLifecycleTest {
         assertIs<ModelLoadResult.LoadFailed>(ModelLoadResult.LoadFailed("x"))
     }
 
+    /**
+     * Real production-path retry test.
+     *
+     * Drives the actual loadValidated() transaction twice:
+     * 1. First attempt: valid capability -> loadValidated -> transient LoadFailed -> registry Failed+factsLoadable
+     * 2. Second attempt: same valid capability -> loadValidated -> Ready -> registry Loadable
+     *
+     * Uses the internal test seam to inject a factory that fails once then succeeds.
+     */
+    @Test
+    fun retryableLoadValidatedSucceedsOnSecondAttempt() = runBlocking {
+        // Seed valid capability through real Probe
+        ModelAvailabilityRegistry.applyForTest(
+            ModelFeature.FlareGuard,
+            ModelCapabilityObservation(
+                publisher = ModelCapabilityPublisher.Probe,
+                generation = 1L,
+                phase = ModelCapabilityPhase.Loadable,
+                assetPresent = true,
+                assetValid = true,
+                runtimeAvailable = true,
+                contractSupported = true,
+                runnerImplemented = true,
+            ),
+        )
+
+        val context = createTestContext()
+        var attemptCount = 0
+
+        // First attempt: transient failure
+        val firstResult = FlareGuardModelRunner.loadValidated(context) { ctx, token ->
+            attemptCount++
+            if (attemptCount == 1) {
+                ModelLoadResult.LoadFailed("transient stream error")
+            } else {
+                // Should not be called on first attempt
+                error("factory should not be called again on first attempt")
+            }
+        }
+        assertIs<ModelLoadResult.LoadFailed>(firstResult)
+
+        // Verify registry state after first failure
+        var state = ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]!!
+        assertEquals(ModelCapabilityPhase.Failed, state.phase)
+        assertTrue(state.factsLoadable)
+        assertTrue(state.canAttemptModelUse)
+        assertFalse(state.sessionReady)
+
+        // Second attempt: success
+        val mockInterpreter = validInterpreter()
+        val secondResult = FlareGuardModelRunner.loadValidated(context) { ctx, token ->
+            attemptCount++
+            createWithInternal(mockInterpreter)
+        }
+        val ready = assertIs<ModelLoadResult.Ready<FlareGuardModelRunner>>(secondResult)
+
+        // Verify registry state after success
+        state = ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]!!
+        assertEquals(ModelCapabilityPhase.Loadable, state.phase)
+        assertTrue(state.factsLoadable)
+        assertTrue(state.canAttemptModelUse)
+        assertFalse(state.sessionReady) // loader success alone does NOT claim sessionReady
+
+        // Verify exactly two factory invocations
+        assertEquals(2, attemptCount)
+
+        // Verify both tokens used the same validation epoch
+        // (We can't easily verify token internals here, but the fact that
+        // the second loadValidated succeeded proves the token was still current)
+
+        ready.runner.close()
+    }
+
+    /**
+     * Regression test: newer invalid authoritative probe blocks retry before Loading.
+     *
+     * Sequence:
+     * 1. Valid probe -> Loadable
+     * 2. loadValidated fails transiently -> Failed+factsLoadable
+     * 3. Newer probe AssetInvalid
+     * 4. loadValidated called again -> rejected with AssetInvalid, NO Loading published
+     */
+    @Test
+    fun newerInvalidProbeBlocksRetryBeforeLoading() = runBlocking {
+        // Step 1: Valid probe
+        ModelAvailabilityRegistry.applyForTest(
+            ModelFeature.FlareGuard,
+            ModelCapabilityObservation(
+                publisher = ModelCapabilityPublisher.Probe,
+                generation = 1L,
+                phase = ModelCapabilityPhase.Loadable,
+                assetPresent = true,
+                assetValid = true,
+                runtimeAvailable = true,
+                contractSupported = true,
+                runnerImplemented = true,
+            ),
+        )
+
+        val context = createTestContext()
+
+        // Step 2: First load fails transiently
+        val firstResult = FlareGuardModelRunner.loadValidated(context) { _, _ ->
+            ModelLoadResult.LoadFailed("transient")
+        }
+        assertIs<ModelLoadResult.LoadFailed>(firstResult)
+
+        var state = ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]!!
+        assertEquals(ModelCapabilityPhase.Failed, state.phase)
+        assertTrue(state.factsLoadable)
+        assertTrue(state.canAttemptModelUse)
+
+        // Step 3: Newer authoritative probe publishes AssetInvalid
+        ModelAvailabilityRegistry.applyForTest(
+            ModelFeature.FlareGuard,
+            ModelCapabilityObservation(
+                publisher = ModelCapabilityPublisher.Probe,
+                generation = 2L, // newer generation
+                phase = ModelCapabilityPhase.AssetInvalid,
+                assetPresent = true,
+                assetValid = false,
+            ),
+        )
+
+        // Step 4: Retry attempt should be rejected BEFORE Loading
+        val loadGenBefore = ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]!!.loadGeneration
+        val retryResult = FlareGuardModelRunner.loadValidated(context) { _, _ ->
+            error("factory must not be called - retry should be rejected at token validation")
+        }
+        val loadGenAfter = ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]!!.loadGeneration
+
+        // Result should be AssetInvalid (validation rejected)
+        assertIs<ModelLoadResult.AssetInvalid>(retryResult)
+
+        // No new Loading observation should have been published
+        // (loadGeneration should not have incremented for a rejected retry)
+        assertEquals(loadGenBefore, loadGenAfter)
+
+        // Capability should now be structurally unavailable
+        state = ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]!!
+        assertEquals(ModelCapabilityPhase.AssetInvalid, state.phase)
+        assertFalse(state.canAttemptModelUse)
+        assertFalse(state.sessionReady)
+    }
+
+    /**
+     * Regression test: retained token is acquired before Loading and remains valid during runner creation.
+     *
+     * This test would fail if the production order were changed to:
+     *   reportLoading() -> validatedCapabilityToken()
+     *
+     * Required observable behavior:
+     * 1. Valid capability authorizes a token
+     * 2. Production enters Loading
+     * 3. Creator receives that pre-Loading token
+     * 4. Registry.isCurrent(token) is still true during Loading
+     * 5. Runner creation succeeds
+     */
+    @Test
+    fun retainedTokenAcquiredBeforeLoadingRemainsValid() = runBlocking {
+        ModelAvailabilityRegistry.applyForTest(
+            ModelFeature.FlareGuard,
+            ModelCapabilityObservation(
+                publisher = ModelCapabilityPublisher.Probe,
+                generation = 1L,
+                phase = ModelCapabilityPhase.Loadable,
+                assetPresent = true,
+                assetValid = true,
+                runtimeAvailable = true,
+                contractSupported = true,
+                runnerImplemented = true,
+            ),
+        )
+
+        val context = createTestContext()
+        val mockInterpreter = validInterpreter()
+        var capturedToken: ValidatedModelCapabilityToken? = null
+        var tokenWasCurrentDuringCreation = false
+
+        val result = FlareGuardModelRunner.loadValidated(context) { ctx, token ->
+            capturedToken = token
+            // Verify token is still current according to registry during creation
+            tokenWasCurrentDuringCreation = ModelAvailabilityRegistry.isCurrent(token)
+            createWithInternal(mockInterpreter)
+        }
+
+        val ready = assertIs<ModelLoadResult.Ready<FlareGuardModelRunner>>(result)
+
+        // Token was acquired and used
+        assertNotNull(capturedToken)
+        // Token was still current during runner creation (i.e., not invalidated by our own Loading)
+        assertTrue(tokenWasCurrentDuringCreation)
+        // Load succeeded
+        assertNotNull(ready.runner)
+
+        ready.runner.close()
+    }
+
     private fun assertContractFails(value: Float) {
         assertFailsWith<IllegalArgumentException> {
             FlareGuardContract.assertAlphaInContract(value)
         }
     }
 
-    private fun createWith(interpreter: Interpreter): ModelLoadResult<FlareGuardModelRunner> {
-        GlobalModelDiagnostics.resetForTest(true)
+    private fun createWithInternal(interpreter: Interpreter): ModelLoadResult<FlareGuardModelRunner> {
         val entry = pinnedEntry()
         return FlareGuardModelRunner.create(
             factory =
@@ -261,6 +470,14 @@ class FlareGuardModelLoaderLifecycleTest {
             manifestProvider = { entry },
         )
     }
+
+    private fun createWith(interpreter: Interpreter): ModelLoadResult<FlareGuardModelRunner> {
+        GlobalModelDiagnostics.resetForTest(true)
+        return createWithInternal(interpreter)
+    }
+
+    private fun createTestContext(): Context =
+        org.robolectric.RuntimeEnvironment.getApplication()
 
     private fun validInterpreter(): Interpreter {
         val interpreter = mockk<Interpreter>()
@@ -321,54 +538,6 @@ class FlareGuardModelLoaderLifecycleTest {
         return java.io.RandomAccessFile(tempFile, "r").channel.use { channel ->
             channel.map(FileChannel.MapMode.READ_ONLY, 0L, 0L)
         }
-    }
-
-    @Test
-    fun validatedLoadRetrySequence() {
-        val entry = pinnedEntry()
-        GlobalModelDiagnostics.resetForTest(true)
-        val factory =
-            object : FlareGuardLoaderFactory {
-                override fun loadAsset(): MappedByteBuffer = mappedBuffer()
-
-                override fun newInterpreter(model: MappedByteBuffer): Interpreter =
-                    throw IOException("transient stream error")
-            }
-        val first =
-            FlareGuardModelRunner.create(
-                factory = factory,
-                assetOpen = { validStream(entry) },
-                manifestProvider = { entry },
-            )
-        assertIs<ModelLoadResult.LoadFailed>(first)
-        val retryableState = ModelCapabilityState(
-            phase = ModelCapabilityPhase.Failed,
-            assetPresent = true,
-            assetValid = true,
-            runtimeAvailable = true,
-            contractSupported = true,
-            runnerImplemented = true,
-            lastFailure = ModelCapabilityFailure(ModelCapabilityPhase.Failed, "transient load failure"),
-        )
-        assertTrue(retryableState.canAttemptModelUse)
-        assertFalse(retryableState.sessionReady)
-    }
-
-    @Test
-    fun retryBlockedWhenAssetBecomesInvalid() {
-        GlobalModelDiagnostics.resetForTest(true)
-        val entry = pinnedEntry()
-        // Load fails, then asset becomes invalid through newer authoritative probe
-        val failedState = ModelCapabilityState(
-            phase = ModelCapabilityPhase.Failed,
-            assetPresent = true,
-            assetValid = false,
-            runtimeAvailable = true,
-            contractSupported = true,
-            runnerImplemented = true,
-            lastFailure = ModelCapabilityFailure(ModelCapabilityPhase.AssetInvalid, "invalid"),
-        )
-        assertFalse(failedState.canAttemptModelUse)
     }
 
     private object FakeFactory : FlareGuardLoaderFactory {

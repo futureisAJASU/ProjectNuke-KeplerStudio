@@ -488,11 +488,25 @@ class FlareGuardModelRunner private constructor(
         internal fun loadValidated(
             context: Context,
         ): ModelLoadResult<FlareGuardModelRunner> {
+            return loadValidated(context, null)
+        }
+
+        /**
+         * Internal test seam for loadValidated: inject a custom runner factory.
+         * The factory is invoked only at the runner-creation step (step 4).
+         * All registry interactions (token validation, Loading publication, reportLoad)
+         * remain real production behavior.
+         */
+        internal fun loadValidated(
+            context: Context,
+            testSeam: ((Context, ValidatedModelCapabilityToken) -> ModelLoadResult<FlareGuardModelRunner>)? = null,
+        ): ModelLoadResult<FlareGuardModelRunner> {
             val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.FlareGuard)
             val validationToken = (validation as? ModelLoadResult.Ready)?.runner
                 ?: return validation.retypeFailure()
             val loadGeneration = ModelAvailabilityRegistry.reportLoading(ModelFeature.FlareGuard)
-            val result = create(context.applicationContext, validationToken)
+            val result = testSeam?.invoke(context.applicationContext, validationToken)
+                ?: create(context.applicationContext, validationToken)
             ModelAvailabilityRegistry.reportLoad(ModelFeature.FlareGuard, result, loadGeneration)
             return result
         }

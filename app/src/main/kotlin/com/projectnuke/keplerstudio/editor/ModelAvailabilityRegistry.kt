@@ -54,12 +54,6 @@ data class ModelCapabilityState(
             assetPresent == true && assetValid == true && runtimeAvailable == true &&
                 contractSupported == true && runnerImplemented == true
 
-    val executable: Boolean
-        get() =
-            phase == ModelCapabilityPhase.Loadable ||
-                phase == ModelCapabilityPhase.Ready ||
-                (phase == ModelCapabilityPhase.Unloaded && factsLoadable)
-
     val canAttemptModelUse: Boolean
         get() = when (phase) {
             ModelCapabilityPhase.Loadable -> factsLoadable

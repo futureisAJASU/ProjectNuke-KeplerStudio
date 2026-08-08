@@ -91,22 +91,7 @@ internal suspend fun applyFlareGuardModelOrRuleResultV0(
     diagnostics: MemoryTrackerScope? = null,
     operation: ModelOperationContext,
 ): FlareGuardApplyResult {
-    val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.FlareGuard)
-    val validationToken = (validation as? ModelLoadResult.Ready)?.runner
-    val registryLoadGeneration =
-        ModelAvailabilityRegistry.reportLoading(ModelFeature.FlareGuard)
-    val loadResult: ModelLoadResult<FlareGuardModelRunner> =
-        if (validationToken == null) {
-            @Suppress("UNCHECKED_CAST")
-            (validation as ModelLoadResult<FlareGuardModelRunner>)
-        } else {
-            FlareGuardModelRunner.create(context, validationToken)
-        }
-    ModelAvailabilityRegistry.reportLoad(
-        ModelFeature.FlareGuard,
-        loadResult,
-        registryLoadGeneration,
-    )
+    val loadResult = FlareGuardModelRunner.loadValidated(context)
     val runner = (loadResult as? ModelLoadResult.Ready)?.runner
     val loadReason = loadResult.fallbackReason()
     if (runner != null) {
