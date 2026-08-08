@@ -78,17 +78,28 @@ class ExperimentalLabEnablementRegressionTest {
     }
 
     @Test
-    fun unloadedWithValidFactsEnablesModelAssistedOption() {
-        seedCapability(ModelCapabilityPhase.Loadable)
-        // Close session -> Unloaded
+    fun unloadedStateWithValidFactsEnablesModelAssistedOption() {
+        // Actual Unloaded capability: valid probe facts, then Session publisher reports Unloaded
+        // Per reduceModelCapability, when factsLoadable is true, this settles back to Loadable.
+        // The helper should still enable model-assisted because canAttemptModelUse is true for Loadable.
         ModelAvailabilityRegistry.applyForTest(
             ModelFeature.FlareGuard,
             ModelCapabilityObservation(
                 publisher = ModelCapabilityPublisher.Session,
                 generation = 1L,
                 phase = ModelCapabilityPhase.Unloaded,
+                assetPresent = true,
+                assetValid = true,
+                runtimeAvailable = true,
+                contractSupported = true,
+                runnerImplemented = true,
             ),
         )
+        val state = ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]!!
+        // Unloaded with valid facts settles to Loadable
+        assertEquals(ModelCapabilityPhase.Loadable, state.phase)
+        assertTrue(state.factsLoadable)
+        assertTrue(state.canAttemptModelUse)
         assertModelAssistedEnabled(ModelFeature.FlareGuard, true)
     }
 
@@ -111,6 +122,31 @@ class ExperimentalLabEnablementRegressionTest {
             ),
         )
         assertModelAssistedEnabled(ModelFeature.FlareGuard, true)
+    }
+
+    @Test
+    fun failedWithIncompleteFactsDisablesModelAssistedOption() {
+        // Failed phase with incomplete facts (e.g., asset missing or invalid)
+        // canAttemptModelUse must be false because factsLoadable is false
+        ModelAvailabilityRegistry.applyForTest(
+            ModelFeature.FlareGuard,
+            ModelCapabilityObservation(
+                publisher = ModelCapabilityPublisher.Loader,
+                generation = 1L,
+                phase = ModelCapabilityPhase.Failed,
+                assetPresent = true,
+                assetValid = false, // incomplete facts
+                runtimeAvailable = true,
+                contractSupported = true,
+                runnerImplemented = true,
+                failure = ModelCapabilityFailure(ModelCapabilityPhase.Failed, "asset invalid"),
+            ),
+        )
+        val state = ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]!!
+        assertEquals(ModelCapabilityPhase.Failed, state.phase)
+        assertFalse(state.factsLoadable)
+        assertFalse(state.canAttemptModelUse)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, false)
     }
 
     @Test

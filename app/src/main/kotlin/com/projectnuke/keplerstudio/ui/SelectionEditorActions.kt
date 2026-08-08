@@ -65,21 +65,36 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 
 /**
- * Production route resolution for Subject Selection.
+ * Complete production execution decision for Subject Selection.
  *
- * Uses the authoritative [canAttemptModelUse] semantic from the capability state.
- * This helper is consumed by [addSubjectSelectionFromEdgeModel] and tests.
+ * Derives the authoritative model attemptability once from [canAttemptModelUse]
+ * and uses it for both route resolution and the downstream execution gate.
+ * Consumed by [addSubjectSelectionFromEdgeModel] and tests.
  */
-internal fun resolveSubjectSelectionRoute(
+internal data class SubjectSelectionExecutionDecision(
+    val resolution: com.projectnuke.keplerstudio.editor.ResolvedFeatureRoute<SubjectSelectionRoute>,
+    val modelAttemptable: Boolean,
+)
+
+/**
+ * Resolve the complete Subject Selection execution decision.
+ *
+ * Derives modelAttemptable exactly once from capability?.canAttemptModelUse == true
+ * and passes it to RouteResolver for route selection.
+ */
+internal fun resolveSubjectSelectionExecution(
     engine: CorrectionEngine,
     requestedRoute: SubjectSelectionRoute?,
     capability: com.projectnuke.keplerstudio.editor.ModelCapabilityState?,
-): com.projectnuke.keplerstudio.editor.ResolvedFeatureRoute<SubjectSelectionRoute> =
-    RouteResolver.resolveSubjectRoute(
+): SubjectSelectionExecutionDecision {
+    val modelAttemptable = capability?.canAttemptModelUse == true
+    val resolution = RouteResolver.resolveSubjectRoute(
         engine = engine,
         debugOverride = requestedRoute,
-        modelAvailable = capability?.canAttemptModelUse == true,
+        modelAvailable = modelAttemptable,
     )
+    return SubjectSelectionExecutionDecision(resolution, modelAttemptable)
+}
 
 fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     if (!canEnterEditorAction(allowMaskSupersession = true)) return
@@ -95,11 +110,13 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val subjectOverride = ExperimentalLabController.debugOverrides().subjectSelection
     val modelCapability =
         ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]
-    val subjectResolution = resolveSubjectSelectionRoute(
+    val executionDecision = resolveSubjectSelectionExecution(
         documentEngine,
         subjectOverride,
         modelCapability,
     )
+    val subjectResolution = executionDecision.resolution
+    val modelAttemptable = executionDecision.modelAttemptable
     val subjectAlgorithm = subjectResolution.actualRoute
     val useModel =
         when (subjectAlgorithm) {
@@ -129,7 +146,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         }
         return
     }
-    if (useModel && modelCapability?.canAttemptModelUse != true) {
+    if (useModel && !modelAttemptable) {
         startSnapshot.close()
         updateUiState {
             it.copy(

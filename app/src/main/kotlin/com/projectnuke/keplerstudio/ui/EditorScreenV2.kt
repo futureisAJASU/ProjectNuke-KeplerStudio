@@ -1443,8 +1443,8 @@ internal fun V2SettingsScreen(
                 TextButton(onClick = { confirmDestructiveAction = null }) { Text("취소") }
             },
         )
-}
     }
+}
 
 /**
  * Production helper for Experimental Lab model-assisted option enablement.
