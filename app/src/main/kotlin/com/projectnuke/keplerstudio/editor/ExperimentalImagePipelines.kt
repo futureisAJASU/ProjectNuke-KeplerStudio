@@ -1019,15 +1019,7 @@ internal fun applyExperimentalFlareGuardV2(
         if (algorithmMode == FlareGuardRoute.V2ModelAssisted) {
             val loaded =
                 preloadedModel ?: run {
-                    val loadGeneration =
-                        ModelAvailabilityRegistry.reportLoading(ModelFeature.FlareGuard)
-                    FlareGuardModelRunner.create(context).also { result ->
-                        ModelAvailabilityRegistry.reportLoad(
-                            ModelFeature.FlareGuard,
-                            result,
-                            loadGeneration,
-                        )
-                    }
+                    FlareGuardModelRunner.loadValidated(context)
                 }
             when (loaded) {
                 is ModelLoadResult.Ready -> {

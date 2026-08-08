@@ -52,7 +52,8 @@ fun RemasterToolPanel(
     val flareRestorerStatusLabel = flareRestorer.registryStatus(null)
     val edgeMaskerStatusLabel = edgeMasker.registryStatus(remasterCapability)
     val edgeLoaded = remasterCapability?.sessionReady == true
-    val edgeExecutable = edgeMasker.canExecuteFromRegistry(remasterCapability) || remasterCapability?.sessionReady == true
+    val edgeAttemptable = edgeMasker.canExecuteFromRegistry(remasterCapability)
+    val edgeExecutable = edgeAttemptable || edgeLoaded
     val edgeLoadingOrInferring = RemasterModelSession.isModelLoading || RemasterModelSession.isInferring
     val hasImage = editorState.previewBitmap != null || editorState.originalPreviewBitmap != null
 

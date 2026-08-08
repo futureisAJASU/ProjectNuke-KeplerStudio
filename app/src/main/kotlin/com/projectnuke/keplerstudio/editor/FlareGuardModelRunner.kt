@@ -459,8 +459,7 @@ class FlareGuardModelRunner private constructor(
                 )
             }
         }
-    }
-
+}
     companion object {
         private val EMPTY_CONFIDENCE =
             ModelConfidence(0f, 0f, 0f, 0f, 0f, 0f, finalPolicy = 0f)
@@ -473,6 +472,31 @@ class FlareGuardModelRunner private constructor(
                 is IllegalArgumentException -> ModelFailureReason.InvalidInput
                 else -> ModelFailureReason.InferenceFailed
             }
+
+        /**
+         * Production FlareGuard load transaction.
+         *
+         * Correct order:
+         * 1. Acquire validated capability token from registry (validates epoch/facts)
+         * 2. If validation not authorized, return rejection immediately (no Loading published)
+         * 3. Publish Loader Loading
+         * 4. Create runner using the retained token
+         * 5. Report loader result with matching generation
+         *
+         * Caller owns Session Ready publication if load succeeds.
+         */
+        internal fun loadValidated(
+            context: Context,
+        ): ModelLoadResult<FlareGuardModelRunner> {
+            val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.FlareGuard)
+            val validationToken = (validation as? ModelLoadResult.Ready)?.runner
+                ?: return validation.retypeFailure()
+            val loadGeneration = ModelAvailabilityRegistry.reportLoading(ModelFeature.FlareGuard)
+            val result = create(context.applicationContext, validationToken)
+            ModelAvailabilityRegistry.reportLoad(ModelFeature.FlareGuard, result, loadGeneration)
+            return result
+        }
+
         fun create(context: Context): ModelLoadResult<FlareGuardModelRunner> {
             val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.FlareGuard)
             val validationToken = (validation as? ModelLoadResult.Ready)?.runner

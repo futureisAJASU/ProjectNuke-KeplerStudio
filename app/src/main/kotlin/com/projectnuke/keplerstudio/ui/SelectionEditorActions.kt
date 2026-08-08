@@ -80,7 +80,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val subjectResolution = RouteResolver.resolveSubjectRoute(
         documentEngine,
         subjectOverride,
-        modelAvailable = modelCapability?.executable == true,
+        modelAvailable = modelCapability?.canAttemptModelUse == true,
     )
     val subjectAlgorithm = subjectResolution.actualRoute
     val useModel =
@@ -111,7 +111,7 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
         }
         return
     }
-    if (useModel && modelCapability?.executable != true) {
+    if (useModel && modelCapability?.canAttemptModelUse != true) {
         startSnapshot.close()
         updateUiState {
             it.copy(

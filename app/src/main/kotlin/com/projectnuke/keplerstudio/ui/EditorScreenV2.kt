@@ -1469,8 +1469,9 @@ private fun ExperimentalLabSettingsCard(
             overrides,
             capabilitySnapshot.routeAvailability(),
         )
-    val flareModelReady = modelAvailability[ModelFeature.FlareGuard]?.executable == true
-    val edgeModelReady = modelAvailability[ModelFeature.Remaster]?.executable == true
+    val flareModelReady = modelAvailability[ModelFeature.FlareGuard]?.canAttemptModelUse == true
+    val edgeModelReady = modelAvailability[ModelFeature.Remaster]?.canAttemptModelUse == true
+    val subjectModelReady = modelAvailability[ModelFeature.SubjectSelection]?.canAttemptModelUse == true
     V2SettingsCard("실험실") {
         Text(
             "개발 빌드의 현재 세션에서만 적용됩니다. ‘사진 엔진 따르기’는 현재 사진에 지정된 엔진을 사용합니다.",
@@ -1542,7 +1543,7 @@ private fun ExperimentalLabSettingsCard(
                     LabRouteOption(
                         SubjectSelectionRoute.V2ModelAssisted,
                         "모델 보조 V2",
-                        enabled = edgeModelReady,
+                        enabled = subjectModelReady,
                         unavailableReason =
                             modelAvailability[ModelFeature.SubjectSelection]?.statusLabel,
                     ),

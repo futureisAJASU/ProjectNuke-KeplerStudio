@@ -5996,17 +5996,7 @@ fun exportPreview() {
                             )
                         val preloadedModel =
                             if (flareOverride == FlareGuardRoute.V2ModelAssisted) {
-                                val loadGeneration =
-                                    ModelAvailabilityRegistry.reportLoading(
-                                        ModelFeature.FlareGuard
-                                    )
-                                FlareGuardModelRunner.create(appContext).also { loaded ->
-                                    ModelAvailabilityRegistry.reportLoad(
-                                        ModelFeature.FlareGuard,
-                                        loaded,
-                                        loadGeneration,
-                                    )
-                                }
+                                FlareGuardModelRunner.loadValidated(appContext)
                             } else {
                                 null
                             }
