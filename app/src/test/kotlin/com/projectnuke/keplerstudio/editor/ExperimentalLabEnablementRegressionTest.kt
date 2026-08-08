@@ -1,5 +1,6 @@
 package com.projectnuke.keplerstudio.editor
 
+import com.projectnuke.keplerstudio.ui.isModelAssistedOptionEnabled
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -11,6 +12,9 @@ import org.junit.Before
  *
  * Verifies that the Compose panel derives option enablement from the authoritative
  * canAttemptModelUse semantic, not the deprecated executable semantic.
+ *
+ * Uses the production helper [isModelAssistedOptionEnabled] consumed by
+ * [EditorScreenV2.ExperimentalLabSettingsCard].
  */
 class ExperimentalLabEnablementRegressionTest {
 
@@ -41,16 +45,16 @@ class ExperimentalLabEnablementRegressionTest {
         )
     }
 
-    private fun assertFlareModelReady(expected: Boolean) {
-        val capability = ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]!!
-        val modelReady = capability.canAttemptModelUse == true
-        assertEquals(expected, modelReady)
+    private fun assertModelAssistedEnabled(feature: ModelFeature, expected: Boolean) {
+        val capability = ModelAvailabilityRegistry.state.value[feature]!!
+        val enabled = isModelAssistedOptionEnabled(capability)
+        assertEquals(expected, enabled)
     }
 
     @Test
     fun loadableStateEnablesModelAssistedOption() {
         seedCapability(ModelCapabilityPhase.Loadable)
-        assertFlareModelReady(true)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, true)
     }
 
     @Test
@@ -70,7 +74,7 @@ class ExperimentalLabEnablementRegressionTest {
                 runnerImplemented = true,
             ),
         )
-        assertFlareModelReady(true)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, true)
     }
 
     @Test
@@ -85,7 +89,7 @@ class ExperimentalLabEnablementRegressionTest {
                 phase = ModelCapabilityPhase.Unloaded,
             ),
         )
-        assertFlareModelReady(true)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, true)
     }
 
     @Test
@@ -106,7 +110,7 @@ class ExperimentalLabEnablementRegressionTest {
                 failure = ModelCapabilityFailure(ModelCapabilityPhase.Failed, "transient"),
             ),
         )
-        assertFlareModelReady(true)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, true)
     }
 
     @Test
@@ -120,7 +124,7 @@ class ExperimentalLabEnablementRegressionTest {
                 phase = ModelCapabilityPhase.Loading,
             ),
         )
-        assertFlareModelReady(false)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, false)
     }
 
     @Test
@@ -134,7 +138,7 @@ class ExperimentalLabEnablementRegressionTest {
                 assetPresent = false,
             ),
         )
-        assertFlareModelReady(false)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, false)
     }
 
     @Test
@@ -149,7 +153,7 @@ class ExperimentalLabEnablementRegressionTest {
                 assetValid = false,
             ),
         )
-        assertFlareModelReady(false)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, false)
     }
 
     @Test
@@ -168,7 +172,7 @@ class ExperimentalLabEnablementRegressionTest {
                 runnerImplemented = true,
             ),
         )
-        assertFlareModelReady(false)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, false)
     }
 
     @Test
@@ -187,7 +191,7 @@ class ExperimentalLabEnablementRegressionTest {
                 runnerImplemented = true,
             ),
         )
-        assertFlareModelReady(false)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, false)
     }
 
     @Test
@@ -205,6 +209,6 @@ class ExperimentalLabEnablementRegressionTest {
                 runnerImplemented = false,
             ),
         )
-        assertFlareModelReady(false)
+        assertModelAssistedEnabled(ModelFeature.FlareGuard, false)
     }
 }

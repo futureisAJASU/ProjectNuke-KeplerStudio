@@ -1443,8 +1443,18 @@ internal fun V2SettingsScreen(
                 TextButton(onClick = { confirmDestructiveAction = null }) { Text("취소") }
             },
         )
-    }
 }
+    }
+
+/**
+ * Production helper for Experimental Lab model-assisted option enablement.
+ *
+ * Uses the authoritative [canAttemptModelUse] semantic from the capability state.
+ * Consumed by [ExperimentalLabSettingsCard] and regression tests.
+ */
+internal fun isModelAssistedOptionEnabled(
+    capability: com.projectnuke.keplerstudio.editor.ModelCapabilityState?,
+): Boolean = capability?.canAttemptModelUse == true
 
 @Composable
 private fun ExperimentalLabSettingsCard(
@@ -1469,9 +1479,9 @@ private fun ExperimentalLabSettingsCard(
             overrides,
             capabilitySnapshot.routeAvailability(),
         )
-    val flareModelReady = modelAvailability[ModelFeature.FlareGuard]?.canAttemptModelUse == true
-    val edgeModelReady = modelAvailability[ModelFeature.Remaster]?.canAttemptModelUse == true
-    val subjectModelReady = modelAvailability[ModelFeature.SubjectSelection]?.canAttemptModelUse == true
+    val flareModelReady = isModelAssistedOptionEnabled(modelAvailability[ModelFeature.FlareGuard])
+    val edgeModelReady = isModelAssistedOptionEnabled(modelAvailability[ModelFeature.Remaster])
+    val subjectModelReady = isModelAssistedOptionEnabled(modelAvailability[ModelFeature.SubjectSelection])
     V2SettingsCard("실험실") {
         Text(
             "개발 빌드의 현재 세션에서만 적용됩니다. ‘사진 엔진 따르기’는 현재 사진에 지정된 엔진을 사용합니다.",

@@ -27,6 +27,7 @@ import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.FeatureExecutionOutcome
 import com.projectnuke.keplerstudio.editor.FeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.ModelFeature
+import com.projectnuke.keplerstudio.editor.CorrectionEngine
 import com.projectnuke.keplerstudio.editor.RenderParticipation
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
@@ -63,6 +64,23 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 
+/**
+ * Production route resolution for Subject Selection.
+ *
+ * Uses the authoritative [canAttemptModelUse] semantic from the capability state.
+ * This helper is consumed by [addSubjectSelectionFromEdgeModel] and tests.
+ */
+internal fun resolveSubjectSelectionRoute(
+    engine: CorrectionEngine,
+    requestedRoute: SubjectSelectionRoute?,
+    capability: com.projectnuke.keplerstudio.editor.ModelCapabilityState?,
+): com.projectnuke.keplerstudio.editor.ResolvedFeatureRoute<SubjectSelectionRoute> =
+    RouteResolver.resolveSubjectRoute(
+        engine = engine,
+        debugOverride = requestedRoute,
+        modelAvailable = capability?.canAttemptModelUse == true,
+    )
+
 fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     if (!canEnterEditorAction(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
@@ -77,10 +95,10 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
     val subjectOverride = ExperimentalLabController.debugOverrides().subjectSelection
     val modelCapability =
         ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]
-    val subjectResolution = RouteResolver.resolveSubjectRoute(
+    val subjectResolution = resolveSubjectSelectionRoute(
         documentEngine,
         subjectOverride,
-        modelAvailable = modelCapability?.canAttemptModelUse == true,
+        modelCapability,
     )
     val subjectAlgorithm = subjectResolution.actualRoute
     val useModel =

@@ -282,11 +282,14 @@ class FlareGuardModelLoaderLifecycleTest {
 
         val context = createTestContext()
         var attemptCount = 0
+        var firstToken: ValidatedModelCapabilityToken? = null
+        var secondToken: ValidatedModelCapabilityToken? = null
 
         // First attempt: transient failure
         val firstResult = FlareGuardModelRunner.loadValidated(context) { ctx, token ->
             attemptCount++
             if (attemptCount == 1) {
+                firstToken = token
                 ModelLoadResult.LoadFailed("transient stream error")
             } else {
                 // Should not be called on first attempt
@@ -306,6 +309,7 @@ class FlareGuardModelLoaderLifecycleTest {
         val mockInterpreter = validInterpreter()
         val secondResult = FlareGuardModelRunner.loadValidated(context) { ctx, token ->
             attemptCount++
+            secondToken = token
             createWithInternal(mockInterpreter)
         }
         val ready = assertIs<ModelLoadResult.Ready<FlareGuardModelRunner>>(secondResult)
@@ -320,9 +324,20 @@ class FlareGuardModelLoaderLifecycleTest {
         // Verify exactly two factory invocations
         assertEquals(2, attemptCount)
 
-        // Verify both tokens used the same validation epoch
-        // (We can't easily verify token internals here, but the fact that
-        // the second loadValidated succeeded proves the token was still current)
+        // Verify both tokens refer to ModelFeature.FlareGuard
+        assertNotNull(firstToken)
+        assertNotNull(secondToken)
+        assertEquals(ModelFeature.FlareGuard, firstToken?.feature)
+        assertEquals(ModelFeature.FlareGuard, secondToken?.feature)
+
+        // Verify both tokens use the current authoritative validation generation
+        // (no newer Probe occurred between the two attempts)
+        val expectedValidationGen = state.validationEpoch
+        assertEquals(expectedValidationGen, firstToken?.validationGeneration)
+        assertEquals(expectedValidationGen, secondToken?.validationGeneration)
+
+        // The two retries use the same validation generation
+        assertEquals(firstToken?.validationGeneration, secondToken?.validationGeneration)
 
         ready.runner.close()
     }

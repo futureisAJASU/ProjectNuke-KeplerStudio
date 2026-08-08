@@ -52,8 +52,7 @@ fun RemasterToolPanel(
     val flareRestorerStatusLabel = flareRestorer.registryStatus(null)
     val edgeMaskerStatusLabel = edgeMasker.registryStatus(remasterCapability)
     val edgeLoaded = remasterCapability?.sessionReady == true
-    val edgeAttemptable = edgeMasker.canExecuteFromRegistry(remasterCapability)
-    val edgeExecutable = edgeAttemptable || edgeLoaded
+    val edgeAttemptable = remasterCapability?.canAttemptModelUse == true
     val edgeLoadingOrInferring = RemasterModelSession.isModelLoading || RemasterModelSession.isInferring
     val hasImage = editorState.previewBitmap != null || editorState.originalPreviewBitmap != null
 
@@ -178,7 +177,7 @@ fun RemasterToolPanel(
             }
             Button(
                 onClick = { editorViewModel.applyMaskAwareRemaster() },
-                enabled = hasImage && edgeExecutable && !editorState.isBusy && !edgeLoadingOrInferring,
+                enabled = hasImage && edgeAttemptable && !editorState.isBusy && !edgeLoadingOrInferring,
                 colors = ButtonDefaults.buttonColors(containerColor = RemasterAccent, contentColor = RemasterButtonTextDark),
                 modifier = Modifier.padding(top = 6.dp)
             ) {

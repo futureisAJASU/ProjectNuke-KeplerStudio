@@ -1,5 +1,6 @@
 package com.projectnuke.keplerstudio.editor
 
+import com.projectnuke.keplerstudio.ui.resolveSubjectSelectionRoute
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -12,6 +13,9 @@ import org.junit.Before
  *
  * Verifies that a retryable Failed capability preserves the model-assisted route
  * instead of falling back solely because the previous load failed.
+ *
+ * Uses the production helper [resolveSubjectSelectionRoute] consumed by
+ * [SelectionEditorActions.addSubjectSelectionFromEdgeModel].
  */
 class SubjectSelectionRetryRegressionTest {
 
@@ -66,11 +70,11 @@ class SubjectSelectionRetryRegressionTest {
         assertTrue(state.canAttemptModelUse)
         assertFalse(state.sessionReady)
 
-        // Verify route resolution uses canAttemptModelUse
-        val resolution = RouteResolver.resolveSubjectRoute(
-            CorrectionEngine.Engine2,
-            SubjectSelectionRoute.V2ModelAssisted,
-            modelAvailable = true, // canAttemptModelUse == true
+        // Use production route helper (same as SelectionEditorActions.kt)
+        val resolution = resolveSubjectSelectionRoute(
+            engine = CorrectionEngine.Engine2,
+            requestedRoute = SubjectSelectionRoute.V2ModelAssisted,
+            capability = state,
         )
 
         assertEquals(SubjectSelectionRoute.V2ModelAssisted, resolution.actualRoute)
@@ -99,11 +103,82 @@ class SubjectSelectionRetryRegressionTest {
         assertEquals(ModelCapabilityPhase.AssetMissing, state.phase)
         assertFalse(state.canAttemptModelUse)
 
-        // Route resolution should fall back when modelAvailable is false
-        val resolution = RouteResolver.resolveSubjectRoute(
-            CorrectionEngine.Engine2,
-            SubjectSelectionRoute.V2ModelAssisted,
-            modelAvailable = false, // canAttemptModelUse == false
+        // Use production route helper
+        val resolution = resolveSubjectSelectionRoute(
+            engine = CorrectionEngine.Engine2,
+            requestedRoute = SubjectSelectionRoute.V2ModelAssisted,
+            capability = state,
+        )
+
+        assertEquals(SubjectSelectionRoute.V2ManualOrSynthetic, resolution.actualRoute)
+        assertEquals(FallbackReason.ModelUnavailable, resolution.fallbackReason)
+    }
+
+    /**
+     * SubjectSelection capability = AssetInvalid
+     * Requested route = V2ModelAssisted
+     *
+     * Production action MUST reject/fallback because capability is structurally invalid.
+     */
+    @Test
+    fun subjectSelectionAssetInvalidFallsBack() {
+        ModelAvailabilityRegistry.applyForTest(
+            ModelFeature.SubjectSelection,
+            ModelCapabilityObservation(
+                publisher = ModelCapabilityPublisher.Probe,
+                generation = 1L,
+                phase = ModelCapabilityPhase.AssetInvalid,
+                assetPresent = true,
+                assetValid = false,
+            ),
+        )
+
+        val state = ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]!!
+        assertEquals(ModelCapabilityPhase.AssetInvalid, state.phase)
+        assertFalse(state.canAttemptModelUse)
+
+        // Use production route helper
+        val resolution = resolveSubjectSelectionRoute(
+            engine = CorrectionEngine.Engine2,
+            requestedRoute = SubjectSelectionRoute.V2ModelAssisted,
+            capability = state,
+        )
+
+        assertEquals(SubjectSelectionRoute.V2ManualOrSynthetic, resolution.actualRoute)
+        assertEquals(FallbackReason.ModelUnavailable, resolution.fallbackReason)
+    }
+
+    /**
+     * SubjectSelection capability = Loading
+     * Requested route = V2ModelAssisted
+     *
+     * Loading state is not attemptable, should fall back.
+     */
+    @Test
+    fun subjectSelectionLoadingNotAttemptable() {
+        ModelAvailabilityRegistry.applyForTest(
+            ModelFeature.SubjectSelection,
+            ModelCapabilityObservation(
+                publisher = ModelCapabilityPublisher.Loader,
+                generation = 1L,
+                phase = ModelCapabilityPhase.Loading,
+                assetPresent = true,
+                assetValid = true,
+                runtimeAvailable = true,
+                contractSupported = true,
+                runnerImplemented = true,
+            ),
+        )
+
+        val state = ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]!!
+        assertEquals(ModelCapabilityPhase.Loading, state.phase)
+        assertFalse(state.canAttemptModelUse)
+
+        // Use production route helper
+        val resolution = resolveSubjectSelectionRoute(
+            engine = CorrectionEngine.Engine2,
+            requestedRoute = SubjectSelectionRoute.V2ModelAssisted,
+            capability = state,
         )
 
         assertEquals(SubjectSelectionRoute.V2ManualOrSynthetic, resolution.actualRoute)
