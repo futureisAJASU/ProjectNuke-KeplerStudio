@@ -1,6 +1,14 @@
 package com.projectnuke.keplerstudio.editor
 
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+
+internal sealed interface HistoryPrerequisiteOutcome {
+    data object Completed : HistoryPrerequisiteOutcome
+    data object Cancelled : HistoryPrerequisiteOutcome
+    data class Failed(val cause: Throwable?) : HistoryPrerequisiteOutcome
+}
 
 /**
  * Owns the single registered history job visible to editor-action admission.
@@ -13,8 +21,24 @@ internal class HistoryActivityRegistry(
     private val onChanged: () -> Unit = {},
 ) {
     class Registration internal constructor(internal val job: Job) {
-        suspend fun await() {
+        private val outcome = CompletableDeferred<HistoryPrerequisiteOutcome>()
+
+        init {
+            job.invokeOnCompletion { cause ->
+                outcome.complete(
+                    when {
+                        cause == null -> HistoryPrerequisiteOutcome.Completed
+                        cause is CancellationException ->
+                            HistoryPrerequisiteOutcome.Cancelled
+                        else -> HistoryPrerequisiteOutcome.Failed(cause)
+                    }
+                )
+            }
+        }
+
+        suspend fun await(): HistoryPrerequisiteOutcome {
             job.join()
+            return outcome.await()
         }
     }
 

@@ -189,7 +189,8 @@ class EditorActionSettlementProductionTest {
         val vm = setup.vm
         try {
             val revisionBefore = vm.uiState.value.revision
-            assertTrue("combined entry admits after settlement", vm.canEnterEditorAction())
+            assertTrue("explicit settlement admits", vm.settleForEditorAction())
+            assertTrue("combined entry admits after settlement", vm.canEnterEditorActionPure())
 
             assertEquals(1, setup.commitBegan.size)
             assertEquals(1, setup.committed.size)
@@ -200,7 +201,7 @@ class EditorActionSettlementProductionTest {
             assertEquals(1, vm.undoEntryCountForTest())
             assertEquals(revisionBefore + 1, vm.uiState.value.revision)
 
-            assertTrue("second invocation is admitted without new settlement", vm.canEnterEditorAction())
+            assertTrue("second invocation is admitted without new settlement", vm.canEnterEditorActionPure())
             assertEquals(1, setup.commitBegan.size)
             assertEquals(1, setup.closed.size)
             assertEquals(1, vm.undoEntryCountForTest())

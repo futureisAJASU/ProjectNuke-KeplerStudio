@@ -310,6 +310,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var shuttingDown: Boolean = false
     private var cropOperationToken: Long = 0L
     internal var selectionParamTransaction: SelectionParamTransaction? = null
+    private data class PendingSelectionParamStart(
+        val prerequisite: HistoryActivityRegistry.Registration,
+        val documentGeneration: String,
+        val sourcePath: String?,
+        val baseContentToken: String,
+        val revision: Int,
+        val activeLayerId: String?,
+        var job: Job? = null,
+    )
+    private var pendingSelectionParamStart: PendingSelectionParamStart? = null
     private var selectionGestureCounter: Long = 0L
     private var selectionPreviewCounter: Long = 0L
     private var asyncBusyCounter: Long = 0L
@@ -330,6 +340,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var brushStartSnapshot: LeasedEditorSnapshot? = null
     private val pendingBrushPoints = ArrayDeque<Pair<Float, Float>>()
     private var brushSettlementJob: Job? = null
+    private data class PendingBrushStart(
+        val prerequisite: HistoryActivityRegistry.Registration,
+        val documentGeneration: String,
+        val sourcePath: String?,
+        val baseContentToken: String,
+        val revision: Int,
+        val activeLayerId: String,
+        var job: Job? = null,
+    )
+    private var pendingBrushStart: PendingBrushStart? = null
     private data class BrushTransactionIdentity(
         val strokeId: Long,
         val documentGeneration: String,
@@ -2021,6 +2041,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         ) {
             return EditorActionAdmission.AcceptedActionBusy
         }
+        if (pendingBrushStart != null) return EditorActionAdmission.AcceptedActionBusy
+        if (pendingSelectionParamStart != null) return EditorActionAdmission.AcceptedActionBusy
         if (historyActivityBusy()) return EditorActionAdmission.HistoryBusy
         val state = _uiState.value
         if (!state.isBusy || allowMaskSupersession && isBusyOwnedByMaskSupersedable()) {
@@ -2044,6 +2066,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 "\uD3B8\uC9D1 \uC791\uC5C5\uC744 \uC815\uB9AC\uD558\uB294 \uC911\uC785\uB2C8\uB2E4. \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694."
             if (state.message == message) state else state.copy(message = message)
         }
+    }
+
+    private fun reportHistorySettlementFailure() {
+        if (_uiState.value.isBusy) return
+        updateUiState { it.copy(message = "\uD3B8\uC9D1 \uAE30\uB85D\uC744 \uC800\uC7A5\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694.") }
     }
 
     internal fun canEnterEditorActionAfterSettlement(
@@ -2097,7 +2124,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
         val continuationJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
-                prerequisite.await()
+                when (prerequisite.await()) {
+                    HistoryPrerequisiteOutcome.Completed -> Unit
+                    HistoryPrerequisiteOutcome.Cancelled -> return@launch
+                    is HistoryPrerequisiteOutcome.Failed -> {
+                        reportHistorySettlementFailure()
+                        return@launch
+                    }
+                }
                 if (shuttingDown) return@launch
                 val current = _uiState.value
                 if (historyCoordinator.currentGeneration() != identity.generation ||
@@ -2128,6 +2162,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (externalActionContinuation?.isActive == true &&
             externalActionContinuationPhase == ExternalActionContinuationPhase.WaitingForOwnHistory
         ) {
+            reportAcceptedActionBusyAdmission()
+            return EditorActionSettlement.AcceptedActionBusy
+        }
+        if (pendingBrushStart != null) {
+            reportAcceptedActionBusyAdmission()
+            return EditorActionSettlement.AcceptedActionBusy
+        }
+        if (pendingSelectionParamStart != null) {
             reportAcceptedActionBusyAdmission()
             return EditorActionSettlement.AcceptedActionBusy
         }
@@ -2162,12 +2204,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             selectionParamTransaction == null
     }
 
-    internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
-        val settlement = settleEditorAction()
-        if (settlement !is EditorActionSettlement.Ready) return false
-        if (settlement.historyPrerequisite != null) return false
-        return canEnterEditorActionAfterSettlement(allowMaskSupersession)
-    }
+    @Deprecated("Use canEnterEditorActionPure; admission predicates must not settle editor state")
+    internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean =
+        canEnterEditorActionPure(allowMaskSupersession)
 
     /**
      * Settles interactive owners (pending parameter transaction, brush stroke,
@@ -2410,8 +2449,51 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun startSelectionParamGesture(): Boolean {
         if (shuttingDown) return false
-        prepareForMaskInteraction()
-        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return false
+        val settlement = settleEditorAction()
+        if (settlement !is EditorActionSettlement.Ready) return false
+        val prerequisite = settlement.historyPrerequisite
+        if (prerequisite != null) {
+            val state = _uiState.value
+            val pending =
+                PendingSelectionParamStart(
+                    prerequisite = prerequisite,
+                    documentGeneration = historyCoordinator.currentGeneration(),
+                    sourcePath = state.sourcePath,
+                    baseContentToken = state.baseContentToken,
+                    revision = state.revision,
+                    activeLayerId = state.activeSelectionLayerId,
+                )
+            pendingSelectionParamStart = pending
+            val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    when (prerequisite.await()) {
+                        HistoryPrerequisiteOutcome.Completed -> Unit
+                        HistoryPrerequisiteOutcome.Cancelled -> return@launch
+                        is HistoryPrerequisiteOutcome.Failed -> {
+                            reportHistorySettlementFailure()
+                            return@launch
+                        }
+                    }
+                    val current = _uiState.value
+                    if (pendingSelectionParamStart !== pending ||
+                        shuttingDown ||
+                        historyCoordinator.currentGeneration() != pending.documentGeneration ||
+                        current.sourcePath != pending.sourcePath ||
+                        current.baseContentToken != pending.baseContentToken ||
+                        current.revision != pending.revision ||
+                        current.activeSelectionLayerId != pending.activeLayerId
+                    ) return@launch
+                    pendingSelectionParamStart = null
+                    beginSelectionParamGesture()
+                } finally {
+                    if (pendingSelectionParamStart === pending) pendingSelectionParamStart = null
+                }
+            }
+            pending.job = job
+            job.start()
+            return true
+        }
+        if (!canEnterEditorActionPure(allowMaskSupersession = true)) return false
         return beginSelectionParamGesture()
     }
 
@@ -2738,13 +2820,67 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun beginBrushStroke(): Boolean {
         if (shuttingDown) return false
         if (brushTransactionState != BrushTransactionState.Idle) return true
-        prepareForMaskInteraction()
-        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return false
+        val settlement = settleEditorAction()
+        if (settlement !is EditorActionSettlement.Ready) return false
         val state = _uiState.value
         val layerId = state.activeSelectionLayerId ?: return false
         val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
-        if (state.params != lastSuccessfullyRenderedParams || activeParamRenderRevision != null)
+        if (state.params != lastSuccessfullyRenderedParams || activeParamRenderRevision != null) {
             return false
+        }
+        val prerequisite = settlement.historyPrerequisite
+        if (prerequisite != null) {
+            val pending =
+                PendingBrushStart(
+                    prerequisite = prerequisite,
+                    documentGeneration = historyCoordinator.currentGeneration(),
+                    sourcePath = state.sourcePath,
+                    baseContentToken = state.baseContentToken,
+                    revision = state.revision,
+                    activeLayerId = layerId,
+                )
+            pendingBrushStart = pending
+            pendingBrushPoints.clear()
+            brushTransactionState = BrushTransactionState.Preparing
+            val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    when (prerequisite.await()) {
+                        HistoryPrerequisiteOutcome.Completed -> Unit
+                        HistoryPrerequisiteOutcome.Cancelled -> return@launch
+                        is HistoryPrerequisiteOutcome.Failed -> {
+                            reportHistorySettlementFailure()
+                            return@launch
+                        }
+                    }
+                    val current = _uiState.value
+                    val currentLayer = current.selectionLayers.firstOrNull { it.id == layerId }
+                    if (pendingBrushStart !== pending ||
+                        shuttingDown ||
+                        historyCoordinator.currentGeneration() != pending.documentGeneration ||
+                        current.sourcePath != pending.sourcePath ||
+                        current.baseContentToken != pending.baseContentToken ||
+                        current.revision != pending.revision ||
+                        current.activeSelectionLayerId != layerId ||
+                        currentLayer == null
+                    ) return@launch
+                    val queued = pendingBrushPoints.toList()
+                    pendingBrushPoints.clear()
+                    pendingBrushStart = null
+                    brushTransactionState = BrushTransactionState.Idle
+                    if (beginBrushStroke()) queued.forEach { queueBrushPoint(it.first, it.second) }
+                } finally {
+                    if (pendingBrushStart === pending) {
+                        pendingBrushStart = null
+                        pendingBrushPoints.clear()
+                        brushTransactionState = BrushTransactionState.Idle
+                    }
+                }
+            }
+            pending.job = job
+            job.start()
+            return true
+        }
+        if (!canEnterEditorActionPure(allowMaskSupersession = true)) return false
         // Pre-capture bitmap REFERENCES for the rollback snapshot before installing the owned
         // mask. The painter will mutate the owned mask; the references captured here are the
         // originals and remain pristine for rollback. The bitmap copy work runs on Default.
@@ -3146,6 +3282,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (brushTransactionState == BrushTransactionState.Idle ||
             brushTransactionState == BrushTransactionState.Cancelling
         ) return
+        if (pendingBrushStart != null && brushIdentity == null) {
+            pendingBrushStart?.job?.cancel()
+            pendingBrushStart = null
+            pendingBrushPoints.clear()
+            brushTransactionState = BrushTransactionState.Idle
+            return
+        }
         val strokeId = brushIdentity?.strokeId ?: return
         brushTransactionState = BrushTransactionState.Cancelling
         brushSnapshotJob?.cancel()
@@ -7659,6 +7802,8 @@ fun exportPreview() {
     }
 
     private fun prepareForMaskInteraction(): EditorUiState {
+        pendingSelectionParamStart?.job?.cancel()
+        pendingSelectionParamStart = null
         abortPendingParameterEdit()
         if (brushTransactionState != BrushTransactionState.Idle &&
             brushTransactionState != BrushTransactionState.Finishing &&

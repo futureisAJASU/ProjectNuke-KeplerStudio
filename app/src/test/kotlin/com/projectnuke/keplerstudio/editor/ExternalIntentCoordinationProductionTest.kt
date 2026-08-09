@@ -280,12 +280,56 @@ class ExternalIntentCoordinationProductionTest {
                     activeSelectionLayerId = "phase8-mask",
                 )
             }
-            awaitEvent(vm) { vm.canEnterEditorAction() }
+            awaitEvent(vm) { vm.canEnterEditorActionPure() }
             assertTrue("brush stroke accepted", vm.beginBrushStroke())
             setup.assertCommittedExactlyOnce()
             assertEquals("brush paints committed params", 0.2f, vm.uiState.value.params.exposure)
             awaitEvent(vm) { vm.undoEntryCountForTest() == 1 }
         } finally {
+            setup.renderer.close()
+            setup.hooks.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun brushFirstPointerIsRetainedWhileOwnParameterHistorySettles() {
+        val sourceFile = draftSourceFile("intent-brush-gated-source.png")
+        val setup = openAdoptedTransaction(sourceFile.absolutePath)
+        val vm = setup.vm
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        try {
+            vm.updateUiState {
+                it.copy(
+                    selectionLayers =
+                        listOf(
+                            SelectionLayer(
+                                id = "gated-mask",
+                                name = "gated-mask",
+                                kind = SelectionLayerKind.Brush,
+                                bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888),
+                            )
+                        ),
+                    activeSelectionLayerId = "gated-mask",
+                )
+            }
+            assertTrue("first brush start is accepted", vm.beginBrushStroke())
+            assertTrue(vm.hasActiveBrushStroke())
+            assertTrue(vm.isBrushPreparing())
+            vm.paintActiveSelectionAt(4f, 4f)
+            assertTrue(awaitEvent(vm) { gate.reached.isCompleted })
+            assertEquals(1, setup.commitBegan.get())
+            assertEquals(0, vm.uiState.value.selectionLayers.single().bitmap.getPixel(4, 4))
+
+            gate.releaseGate.complete(Unit)
+            assertTrue(awaitEvent(vm) { !vm.isBrushPreparing() })
+            assertTrue(vm.hasActiveBrushStroke())
+            vm.finishBrushStroke()
+            assertTrue(awaitEvent(vm) { !vm.hasActiveBrushStroke() })
+            setup.assertCommittedExactlyOnce()
+        } finally {
+            gate.releaseGate.complete(Unit)
             setup.renderer.close()
             setup.hooks.close()
             sourceFile.delete()
@@ -314,13 +358,49 @@ class ExternalIntentCoordinationProductionTest {
                     activeSelectionLayerId = "phase8-sel",
                 )
             }
-            awaitEvent(vm) { vm.canEnterEditorAction() }
+            awaitEvent(vm) { vm.canEnterEditorActionPure() }
             assertTrue("selection gesture accepted", vm.startSelectionParamGesture())
             setup.assertCommittedExactlyOnce()
             assertTrue("selection transaction open on committed state", vm.currentSelectionParamTransaction() != null)
             assertEquals(0.2f, vm.uiState.value.params.exposure)
             awaitEvent(vm) { vm.undoEntryCountForTest() == 1 }
         } finally {
+            setup.renderer.close()
+            setup.hooks.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun selectionGestureFirstInvocationContinuesAfterOwnParameterHistorySettles() {
+        val sourceFile = draftSourceFile("intent-selection-gated-source.png")
+        val setup = openAdoptedTransaction(sourceFile.absolutePath)
+        val vm = setup.vm
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        try {
+            vm.updateUiState {
+                it.copy(
+                    selectionLayers =
+                        listOf(
+                            SelectionLayer(
+                                id = "gated-selection",
+                                name = "gated-selection",
+                                kind = SelectionLayerKind.Brush,
+                                bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888),
+                            )
+                        ),
+                    activeSelectionLayerId = "gated-selection",
+                )
+            }
+            assertTrue(vm.startSelectionParamGesture())
+            assertTrue(awaitEvent(vm) { gate.reached.isCompleted })
+            assertTrue(vm.currentSelectionParamTransaction() == null)
+            gate.releaseGate.complete(Unit)
+            assertTrue(awaitEvent(vm) { vm.currentSelectionParamTransaction() != null })
+            setup.assertCommittedExactlyOnce()
+        } finally {
+            gate.releaseGate.complete(Unit)
             setup.renderer.close()
             setup.hooks.close()
             sourceFile.delete()
@@ -373,10 +453,10 @@ class ExternalIntentCoordinationProductionTest {
     private fun awaitReady(vm: EditorViewModel) {
         repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
-            if (vm.canEnterEditorAction()) return
+            if (vm.canEnterEditorActionPure()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
         }
-        assertTrue(vm.canEnterEditorAction())
+        assertTrue(vm.canEnterEditorActionPure())
     }
 
     private fun awaitInit(vm: EditorViewModel) {
