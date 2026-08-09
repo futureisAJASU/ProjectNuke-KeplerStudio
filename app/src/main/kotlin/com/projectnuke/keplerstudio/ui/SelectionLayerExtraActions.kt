@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.ui
 import android.graphics.Bitmap
 import com.projectnuke.keplerstudio.editor.LeasedEditorSnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.EditorViewModel.EditorActionSettlement
 import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
@@ -20,7 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.toggleSelectionOverlay() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    if (!canEnterEditorActionPure(allowMaskSupersession = true)) return
     updateUiState {
         it.copy(
             showSelectionOverlay = !it.showSelectionOverlay,
@@ -30,7 +31,9 @@ fun EditorViewModel.toggleSelectionOverlay() {
 }
 
 fun EditorViewModel.duplicateActiveSelectionLayer() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { duplicateActiveSelectionLayer() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure(true)) return
     invalidateSelectionPreview()
     prepareForExternalEdit()
     val startSnapshot = acquireEditorSnapshot("duplicateSelection") ?: return
@@ -201,7 +204,9 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
 }
 
 fun EditorViewModel.createBackgroundSelectionFromActive() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { createBackgroundSelectionFromActive() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure(true)) return
     invalidateSelectionPreview()
     prepareForExternalEdit()
     val startSnapshot = acquireEditorSnapshot("createBackgroundSelection") ?: return

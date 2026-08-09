@@ -20,6 +20,7 @@ import com.projectnuke.keplerstudio.editor.OwnedHandoff
 import com.projectnuke.keplerstudio.editor.OwnedRenderSuccess
 import com.projectnuke.keplerstudio.editor.EditorUiState
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.EditorViewModel.EditorActionSettlement
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
@@ -97,7 +98,9 @@ internal fun resolveSubjectSelectionExecution(
 }
 
 fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { addSubjectSelectionFromEdgeModel() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure(true)) return
     invalidateSelectionPreview()
     prepareForExternalEdit()
     val startSnapshot = acquireEditorSnapshot("subjectSelection") ?: return
@@ -487,13 +490,15 @@ fun EditorViewModel.createBrushSelection() {
 }
 
 fun EditorViewModel.selectSelectionLayer(id: String) {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    if (!canEnterEditorActionPure(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     updateUiState { it.copy(activeSelectionLayerId = id, message = "마스크를 선택했습니다.") }
 }
 
 fun EditorViewModel.deleteActiveSelectionLayer() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { deleteActiveSelectionLayer() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure(true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId = state.activeSelectionLayerId ?: return
@@ -506,7 +511,9 @@ fun EditorViewModel.deleteActiveSelectionLayer() {
 }
 
 fun EditorViewModel.invertActiveSelectionLayer() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { invertActiveSelectionLayer() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure(true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId =
@@ -524,7 +531,9 @@ fun EditorViewModel.invertActiveSelectionLayer() {
 }
 
 fun EditorViewModel.clearActiveSelectionLayer() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { clearActiveSelectionLayer() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure(true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId =
@@ -549,7 +558,7 @@ fun EditorViewModel.clearActiveSelectionLayer() {
 fun EditorViewModel.updateSelectionPaintSettings(
     transform: (SelectionPaintSettings) -> SelectionPaintSettings
 ) {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    if (!canEnterEditorActionPure(allowMaskSupersession = true)) return
     updateUiState { it.copy(selectionPaintSettings = transform(it.selectionPaintSettings)) }
 }
 
@@ -599,7 +608,7 @@ internal fun EditorViewModel.applyPaintSegment(
 }
 
 fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditParams) {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
+    if (!canEnterEditorActionPure(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     val state = prepareForExternalEdit()
     val activeId =

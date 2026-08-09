@@ -450,6 +450,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         ) : SettlementResult()
         data class RolledBack(val startRevision: Int) : SettlementResult()
         data object NoTransaction : SettlementResult()
+        data object HistoryBusy : SettlementResult()
     }
 
     internal class OwnedHistorySnapshot(val snapshot: EditorHistorySnapshot) : AutoCloseable {
@@ -677,6 +678,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val revision: Int,
     )
     private var externalActionContinuation: Job? = null
+
+    internal sealed interface EditorActionSettlement {
+        data class Ready(
+            val historyPrerequisite: HistoryActivityRegistry.Registration?,
+        ) : EditorActionSettlement
+
+        data object InteractiveOwnerStillSettling : EditorActionSettlement
+        data object Closed : EditorActionSettlement
+        data object HistoryBusy : EditorActionSettlement
+    }
     private var memoryRecoveryToken: Long = 0L
     private var pendingMemoryRetry: MemoryRetryDescriptor? = null
     private var memoryRecoveryJob: Job? = null
@@ -714,7 +725,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun createBrushSelectionInternal(allowRecovery: Boolean = true) {
-        if (!canEnterEditorAction(allowMaskSupersession = true)) return
+        val settlement = settleEditorAction()
+        if (continueAfterEditorActionSettlement(settlement) {
+                createBrushSelectionInternal(allowRecovery)
+            }) return
+        if (settlement !is EditorActionSettlement.Ready ||
+            !canEnterEditorActionPure(allowMaskSupersession = true)
+        ) return
         createBrushSelectionAsyncInternal(allowRecovery)
     }
 
@@ -2028,6 +2045,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         settlement: SettlementResult,
         continuation: () -> Unit,
     ): Boolean {
+        if (!settleInteractiveOwnersForEditorAction()) return false
         val prerequisite =
             (settlement as? SettlementResult.Committed)?.historyPrerequisite
                 ?: return false
@@ -2066,8 +2084,76 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    internal fun continueAfterEditorActionSettlement(
+        settlement: EditorActionSettlement,
+        continuation: () -> Unit,
+    ): Boolean {
+        val prerequisite = (settlement as? EditorActionSettlement.Ready)?.historyPrerequisite
+            ?: return false
+        return continueAfterHistoryPrerequisite(prerequisite, continuation)
+    }
+
+    private fun continueAfterHistoryPrerequisite(
+        prerequisite: HistoryActivityRegistry.Registration,
+        continuation: () -> Unit,
+    ): Boolean {
+        if (!historyActivityBusy()) return false
+        if (externalActionContinuation?.isActive == true) return true
+        val state = _uiState.value
+        val identity = ExternalActionDocumentIdentity(
+            generation = historyCoordinator.currentGeneration(),
+            sourcePath = state.sourcePath,
+            baseContentToken = state.baseContentToken,
+            revision = state.revision,
+        )
+        val continuationJob = viewModelScope.launch {
+            try {
+                prerequisite.await()
+                if (shuttingDown) return@launch
+                val current = _uiState.value
+                if (historyCoordinator.currentGeneration() != identity.generation ||
+                    current.sourcePath != identity.sourcePath ||
+                    current.baseContentToken != identity.baseContentToken ||
+                    current.revision != identity.revision ||
+                    historyActivityBusy() || !canEnterEditorActionPure()
+                ) return@launch
+                continuation()
+            } finally {
+                if (externalActionContinuation === coroutineContext[Job]) {
+                    externalActionContinuation = null
+                }
+            }
+        }
+        externalActionContinuation = continuationJob
+        return true
+    }
+
+    internal fun settleEditorAction(): EditorActionSettlement {
+        if (shuttingDown) return EditorActionSettlement.Closed
+        if (historyActivityBusy()) return EditorActionSettlement.HistoryBusy
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (!settleInteractiveOwnersForEditorAction()) {
+            return EditorActionSettlement.InteractiveOwnerStillSettling
+        }
+        return EditorActionSettlement.Ready(
+            (settlement as? SettlementResult.Committed)?.historyPrerequisite,
+        )
+    }
+
+    private fun settleInteractiveOwnersForEditorAction(): Boolean {
+        if (brushTransactionState == BrushTransactionState.Finishing ||
+            brushTransactionState == BrushTransactionState.Cancelling
+        ) return false
+        if (brushTransactionState != BrushTransactionState.Idle) cancelBrushStroke()
+        if (selectionParamTransaction != null) settleSelectionParamTransactionForSupersession()
+        return brushTransactionState == BrushTransactionState.Idle &&
+            selectionParamTransaction == null
+    }
+
     internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
-        if (!settleForEditorAction()) return false
+        val settlement = settleEditorAction()
+        if (settlement !is EditorActionSettlement.Ready) return false
+        if (settlement.historyPrerequisite != null) return false
         return canEnterEditorActionAfterSettlement(allowMaskSupersession)
     }
 
@@ -2080,6 +2166,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     internal fun settleForEditorAction(): Boolean {
         if (shuttingDown) return false
+        if (historyActivityBusy()) return false
         abortPendingParameterEdit()
         // An editor action is an intent to capture a new start state. Settle interactive
         // owners before answering so the caller's first click cannot capture working pixels
@@ -5792,9 +5879,17 @@ fun exportPreview() {
     fun redoEdit() = navigateHistory(undo = false)
 
     private fun navigateHistory(undo: Boolean, expectedTargetId: String? = null) {
-        if (!canEnterEditorAction()) return
+        if (historyActivityBusy()) {
+            reportHistoryBusyAdmission()
+            return
+        }
+        val settlement = settleEditorAction()
+        if (continueAfterEditorActionSettlement(settlement) {
+                navigateHistory(undo, expectedTargetId)
+            }) return
+        if (settlement !is EditorActionSettlement.Ready) return
+        if (!canEnterEditorActionAfterSettlement()) return
         invalidateSelectionPreview()
-        abortPendingParameterEdit()
         invalidateCropOperation()
         val flags = historyCoordinator.flags()
         if ((undo && !flags.canUndo) || (!undo && !flags.canRedo)) {
@@ -7543,6 +7638,7 @@ fun exportPreview() {
     }
 
     internal fun settleParameterTransactionBeforeExternalEdit(): SettlementResult {
+        if (historyActivityBusy()) return SettlementResult.HistoryBusy
         return settleParameterTransaction(SettlementReason.ExternalEdit)
     }
 

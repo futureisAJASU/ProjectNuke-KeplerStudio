@@ -8,6 +8,7 @@ import com.projectnuke.keplerstudio.editor.CropState
 import com.projectnuke.keplerstudio.editor.EditorHistorySnapshot
 import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.EditorViewModel.EditorActionSettlement
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
@@ -37,7 +38,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.setCropAspectRatio(aspectRatio: CropAspectRatio) {
-    if (!canEnterEditorAction()) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { setCropAspectRatio(aspectRatio) }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure()) return
     invalidateCropOperation()
     updateUiState { state ->
         val bitmap = state.previewBitmap ?: state.originalPreviewBitmap
@@ -58,7 +61,9 @@ fun EditorViewModel.setCropAspectRatio(aspectRatio: CropAspectRatio) {
 }
 
 fun EditorViewModel.updateCropRect(left: Float, top: Float, right: Float, bottom: Float) {
-    if (!canEnterEditorAction()) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { updateCropRect(left, top, right, bottom) }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure()) return
     invalidateCropOperation()
     updateUiState {
         it.copy(
@@ -71,7 +76,9 @@ fun EditorViewModel.updateCropRect(left: Float, top: Float, right: Float, bottom
 }
 
 fun EditorViewModel.rotateCropLeft() {
-    if (!canEnterEditorAction()) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { rotateCropLeft() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure()) return
     invalidateCropOperation()
     updateUiState {
         it.copy(
@@ -82,7 +89,9 @@ fun EditorViewModel.rotateCropLeft() {
 }
 
 fun EditorViewModel.rotateCropRight() {
-    if (!canEnterEditorAction()) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { rotateCropRight() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure()) return
     invalidateCropOperation()
     updateUiState {
         it.copy(
@@ -93,7 +102,9 @@ fun EditorViewModel.rotateCropRight() {
 }
 
 fun EditorViewModel.toggleCropFlipHorizontal() {
-    if (!canEnterEditorAction()) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { toggleCropFlipHorizontal() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure()) return
     invalidateCropOperation()
     updateUiState {
         it.copy(cropState = it.cropState.copy(flipHorizontal = !it.cropState.flipHorizontal))
@@ -101,7 +112,9 @@ fun EditorViewModel.toggleCropFlipHorizontal() {
 }
 
 fun EditorViewModel.setStraightenDegrees(value: Float) {
-    if (!canEnterEditorAction()) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { setStraightenDegrees(value) }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure()) return
     invalidateCropOperation()
     updateUiState {
         it.copy(cropState = it.cropState.copy(straightenDegrees = value.coerceIn(-45f, 45f)))
@@ -109,9 +122,9 @@ fun EditorViewModel.setStraightenDegrees(value: Float) {
 }
 
 fun EditorViewModel.autoStraightenCrop() {
-    val settlement = settleParameterTransactionBeforeExternalEdit()
-    if (continueAfterOwnParameterSettlement(settlement) { autoStraightenCrop() }) return
-    if (!canEnterEditorActionAfterSettlement()) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { autoStraightenCrop() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure()) return
     val sourceSnapshot = acquireEditorSnapshot("autoStraightenCrop") ?: return
     val state = sourceSnapshot.state
     val bitmap = sourceSnapshot.previewBitmap ?: sourceSnapshot.originalPreviewBitmap ?: run {
@@ -181,7 +194,9 @@ fun EditorViewModel.autoStraightenCrop() {
 }
 
 fun EditorViewModel.resetCropState() {
-    if (!canEnterEditorAction()) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { resetCropState() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure()) return
     invalidateCropOperation()
     prepareForExternalEdit()
     applyAsyncMetadataEdit("resetCropState") { state ->
