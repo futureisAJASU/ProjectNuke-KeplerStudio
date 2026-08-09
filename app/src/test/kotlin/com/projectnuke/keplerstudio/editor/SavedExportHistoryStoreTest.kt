@@ -273,6 +273,50 @@ class SavedExportHistoryStoreTest {
     }
 
     @Test
+    fun retentionBeforeStartupMaterializesMediaStoreSeedOnce() = blocking {
+        persistence = TestHistoryPersistence(initialized = false, raw = null)
+        val provider = registerMediaRows(listOf(mediaRow(1, "existing.png", exactPath(), 0)))
+        val store = store()
+
+        val retentionMutation = store.setRetention(ExportHistoryRetention.Days7)
+        val startupMutation = store.loadOrRebuildWithMutation()
+
+        assertEquals(listOf("existing.png"), retentionMutation.items.map { it.displayName })
+        assertEquals(listOf("existing.png"), startupMutation.items.map { it.displayName })
+        assertTrue(persistence.state.initialized)
+        assertEquals(ExportHistoryRetention.Days7, persistence.state.retention)
+        assertEquals(1, provider.queryCalls)
+    }
+
+    @Test
+    fun commitBeforeStartupPreservesSeedAndNewExport() = blocking {
+        persistence = TestHistoryPersistence(initialized = false, raw = null)
+        val provider = registerMediaRows(listOf(mediaRow(1, "existing.png", exactPath(), 0)))
+        val store = store()
+
+        store.commit(item("new", now + 1, uriName = "new"))
+        val startupMutation = store.loadOrRebuildWithMutation()
+
+        assertEquals(listOf("new", "existing.png"), startupMutation.items.map { it.displayName })
+        assertTrue(persistence.state.initialized)
+        assertEquals(1, provider.queryCalls)
+    }
+
+    @Test
+    fun explicitClearBeforeStartupRemainsEmptyWithoutRebuild() = blocking {
+        persistence = TestHistoryPersistence(initialized = false, raw = null)
+        val provider = registerMediaRows(listOf(mediaRow(1, "existing.png", exactPath(), 0)))
+        val store = store()
+
+        store.clear()
+        val startupMutation = store.loadOrRebuildWithMutation()
+
+        assertTrue(startupMutation.items.isEmpty())
+        assertTrue(persistence.state.initialized)
+        assertEquals(0, provider.queryCalls)
+    }
+
+    @Test
     fun productionPathContractAcceptsOnlyExactDirectoryAndTrailingSlash() {
         assertFalse(SavedExportHistoryStore.isKeplerStudioExportPath("Pictures/KeplerStudioBackup"))
         assertTrue(SavedExportHistoryStore.isKeplerStudioExportPath("Pictures/KeplerStudio"))
@@ -347,6 +391,7 @@ private class TestMediaProvider(
     val rows: MutableList<SavedExportHistoryStoreTest.MediaRow>,
 ) : ContentProvider() {
     var selection: String? = null
+    var queryCalls = 0
     var deleteCalls = 0
 
     override fun onCreate(): Boolean = true
@@ -358,6 +403,7 @@ private class TestMediaProvider(
         selectionArgs: Array<out String>?,
         sortOrder: String?,
     ): Cursor {
+        queryCalls++
         this.selection = selection
         val columns = projection ?: emptyArray()
         val cursor = MatrixCursor(columns)

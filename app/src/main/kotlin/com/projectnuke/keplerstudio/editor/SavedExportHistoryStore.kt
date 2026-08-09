@@ -41,7 +41,6 @@ internal class PreferencesDataStoreSavedExportHistoryPersistence(
 ) : SavedExportHistoryPersistence {
     constructor(context: Context) : this(context.applicationContext.savedExportHistoryDataStore)
 
-
     override suspend fun readState(): SavedExportPersistedState =
         dataStore.data.first().toState()
 
@@ -194,7 +193,7 @@ internal class SavedExportHistoryStore(
             var previous = emptyList<SavedExport>()
             var pruned = emptyList<SavedExport>()
             updatePersistedState { state ->
-                previous = decodeHistory(state.rawHistory)
+                previous = materializeHistory(state)
                 val next =
                     (listOf(item) + previous.filter { it.uriString != item.uriString })
                         .take(MAX_SAVED_EXPORTS)
@@ -211,7 +210,14 @@ internal class SavedExportHistoryStore(
             )
         }
 
-    /** Clears the saved-export preference; preserves the initialized flag. */
+    private fun isMaterialized(state: SavedExportPersistedState): Boolean =
+        state.initialized || state.rawHistory != null
+
+    private suspend fun materializeHistory(state: SavedExportPersistedState): List<SavedExport> =
+        if (isMaterialized(state)) decodeHistory(state.rawHistory)
+        else withContext(Dispatchers.IO) { rebuildFromMediaStore() }
+
+    /** Clears the saved-export preference and durably marks history initialized. */
     suspend fun clear(): SavedExportHistoryMutation =
         mutationLock.withLock {
             var current = emptyList<SavedExport>()
@@ -233,7 +239,7 @@ internal class SavedExportHistoryStore(
             var current = emptyList<SavedExport>()
             var next = emptyList<SavedExport>()
             updatePersistedState { state ->
-                current = decodeHistory(state.rawHistory)
+                current = materializeHistory(state)
                 next = current.filterNot { it.uriString == uriString }
                 state.copy(rawHistory = encodeHistory(next), initialized = true)
             }
@@ -256,9 +262,9 @@ internal class SavedExportHistoryStore(
             var previous = emptyList<SavedExport>()
             var pruned = emptyList<SavedExport>()
             updatePersistedState { state ->
-                previous = decodeHistory(state.rawHistory)
+                previous = materializeHistory(state)
                 pruned = pruneByRetention(previous, retention)
-                state.copy(rawHistory = encodeHistory(pruned), initialized = state.initialized)
+                state.copy(rawHistory = encodeHistory(pruned), initialized = true)
             }
             val previousUris = previous.mapTo(mutableSetOf()) { it.uriString }
             val nextRevision = revisionCounter.incrementAndGet()
@@ -281,17 +287,6 @@ internal class SavedExportHistoryStore(
      * content. Subsequent startups honor the initialized flag so an
      * intentionally cleared history is not repopulated.
      */
-    private suspend fun loadOrRebuildItems(
-        state: SavedExportPersistedState,
-        retention: ExportHistoryRetention,
-    ): List<SavedExport> {
-        val initialized = state.initialized || state.rawHistory != null
-        val seed =
-            if (initialized) decodeHistory(state.rawHistory)
-            else withContext(Dispatchers.IO) { rebuildFromMediaStore() }
-        return pruneByRetention(seed, retention)
-    }
-
     /**
      * Startup version that bumps the global revision and returns the
      * removed-URI set, so startup initialization can settle thumbnails and UI
@@ -306,9 +301,9 @@ internal class SavedExportHistoryStore(
             var next = emptyList<SavedExport>()
             var settledRetention = ExportHistoryRetention.Never
             updatePersistedState { state ->
-                previous = decodeHistory(state.rawHistory)
+                previous = materializeHistory(state)
                 settledRetention = retention ?: state.retention
-                next = loadOrRebuildItems(state, settledRetention)
+                next = pruneByRetention(previous, settledRetention)
                 state.copy(
                     rawHistory = encodeHistory(next),
                     initialized = true,
@@ -331,9 +326,9 @@ internal class SavedExportHistoryStore(
             var previous = emptyList<SavedExport>()
             var pruned = emptyList<SavedExport>()
             updatePersistedState { state ->
-                previous = decodeHistory(state.rawHistory)
+                previous = materializeHistory(state)
                 pruned = pruneByRetention(previous, retention)
-                state.copy(rawHistory = encodeHistory(pruned), retention = retention)
+                state.copy(rawHistory = encodeHistory(pruned), initialized = true, retention = retention)
             }
             val nextRevision = revisionCounter.incrementAndGet()
             SavedExportHistoryMutation(

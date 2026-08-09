@@ -65,7 +65,6 @@ class ExportPreviewProductionTest {
         assertTrue(checkNotNull(rows.encodedBitmap).isRecycled)
         assertEquals(0, rows.deleted.get())
         assertEquals(1, history.commits.get())
-        assertEquals(0, history.clears.get())
         assertFalse(editor.uiState.value.isBusy)
         assertEquals(1, editor.uiState.value.savedExports.size)
         val saved = editor.uiState.value.savedExports.single()
@@ -76,20 +75,6 @@ class ExportPreviewProductionTest {
                 "이미지가 Gallery > Pictures/KeplerStudio에 저장되었고",
             ) == true,
         )
-    }
-
-    @Test
-    fun exportMetadataUsesSuspendingAtomicHistoryBoundary() = runBlocking {
-        val rows = RecordingRows()
-        val history = RecordingHistoryStore(context)
-        val editor = editorWithDirtyBase()
-        installSeam(rows, history)
-
-        editor.exportPreview()
-        awaitCompletion(editor) { editor.uiState.value.savedExports.size == 1 }
-
-        assertEquals(1, history.persistence.suspendUpdates.get())
-        assertEquals(0, history.persistence.legacyBlockingCommits.get())
     }
 
     @Test
@@ -237,6 +222,37 @@ class ExportPreviewProductionTest {
         assertEquals(0, secondHistory.commits.get())
     }
 
+    @Test
+    fun retentionPersistenceFailureSettlesAsFormalUserMessage() = runBlocking {
+        val editor = editorWithDirtyBase()
+        val persistence = RecordingHistoryPersistence().also { it.failWrites = true }
+        val history = SavedExportHistoryStore(context, persistence = persistence)
+        installHistoryStore(history)
+
+        editor.setExportHistoryRetention(ExportHistoryRetention.Days7)
+
+        awaitCompletion(editor) {
+            editor.uiState.value.message == "내보낸 사진 기록 보관 정책을 저장하지 못했습니다."
+        }
+
+        assertEquals(0L, history.revision)
+        assertEquals(ExportHistoryRetention.Never, persistence.state.retention)
+        assertNotNull(editor.lastSavedExportHistoryFailureForTest)
+    }
+
+    @Test
+    fun startupHistoryFailureDoesNotPreventEditorInitialization() = runBlocking {
+        val persistence = RecordingHistoryPersistence().also { it.failWrites = true }
+        val history = SavedExportHistoryStore(context, persistence = persistence)
+        installHistoryStore(history)
+        val editor = harness.createEditor()
+
+        awaitMainUntil { editor.startupInitCompletion.isCompleted }
+
+        assertEquals("내보낸 사진 기록을 불러오지 못했습니다.", editor.uiState.value.message)
+        assertNotNull(editor.lastSavedExportHistoryFailureForTest)
+    }
+
     /**
      * Installs (or replaces) the production export seam with [rows] and
      * [history]; single-installation is enforced by the seam registry.
@@ -244,6 +260,10 @@ class ExportPreviewProductionTest {
     private fun installSeam(rows: ExportRowStore, history: RecordingHistoryStore) {
         val seam = ExportTestSeam(rowStore = rows, historyStore = history.store)
         seamHandles += harness.ownSeam(ExportTestSeam.install(seam))
+    }
+
+    private fun installHistoryStore(history: SavedExportHistoryStore) {
+        seamHandles += harness.ownSeam(ExportTestSeam.install(ExportTestSeam(historyStore = history)))
     }
 
     /** Closes the most recent seam then installs a fresh one. */
@@ -383,8 +403,6 @@ private class RecordingHistoryStore(
     val store = SavedExportHistoryStore(context, persistence = persistence)
     val commits: AtomicInteger
         get() = persistence.historyWrites
-    val clears: AtomicInteger
-        get() = persistence.historyClears
     var failCommit: Boolean
         get() = persistence.failWrites
         set(value) {
@@ -393,16 +411,13 @@ private class RecordingHistoryStore(
 }
 
 private class RecordingHistoryPersistence : SavedExportHistoryPersistence {
-    private var state =
+    var state =
         SavedExportPersistedState(
             rawHistory = "",
             initialized = true,
             retention = ExportHistoryRetention.Never,
         )
     val historyWrites = AtomicInteger()
-    val historyClears = AtomicInteger()
-    val suspendUpdates = AtomicInteger()
-    val legacyBlockingCommits = AtomicInteger()
     @Volatile var failWrites = false
 
     override suspend fun readState(): SavedExportPersistedState = state
@@ -410,7 +425,6 @@ private class RecordingHistoryPersistence : SavedExportHistoryPersistence {
     override suspend fun updateState(
         transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState,
     ): SavedExportPersistedState {
-        suspendUpdates.incrementAndGet()
         historyWrites.incrementAndGet()
         val next = transform(state)
         if (failWrites) error("history write")

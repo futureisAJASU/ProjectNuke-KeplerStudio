@@ -74,6 +74,29 @@ class SavedExportHistoryMigrationTest {
     }
 
     @Test
+    fun migratedHistoryWithoutInitializedFlagSurvivesMigration() = blocking {
+        legacy
+            .edit()
+            .putString(
+                SavedExportHistoryStore.KEY_SAVED_EXPORTS,
+                "legacy|content://exports/legacy|PNG|2 x 2|1700000000000",
+            )
+            .remove(SavedExportHistoryStore.KEY_SAVED_EXPORTS_INITIALIZED)
+            .putString(
+                SavedExportHistoryStore.KEY_EXPORT_HISTORY_RETENTION,
+                ExportHistoryRetention.Never.name,
+            )
+            .commit()
+        val provider = registerProvider()
+        val store = productionStore(dataStore())
+
+        val mutation = store.loadOrRebuildWithMutation()
+
+        assertEquals(listOf("legacy"), mutation.items.map { it.displayName })
+        assertEquals(0, provider.queryCalls)
+    }
+
+    @Test
     fun noLegacyHistoryRemainsUninitializedAndNormalStartupRebuilds() = blocking {
         val provider = registerProvider()
         val dataStore = dataStore()

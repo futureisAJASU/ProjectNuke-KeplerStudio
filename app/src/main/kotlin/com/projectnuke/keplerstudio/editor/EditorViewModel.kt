@@ -223,6 +223,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      *  diagnostic production tests (never read by production logic). */
     @Volatile internal var lastExportFailureForTest: Throwable? = null
 
+    /** Test-only diagnostic for nonfatal saved-export history failures. */
+    @Volatile internal var lastSavedExportHistoryFailureForTest: Throwable? = null
+
     /** Pure read-only inspection for tests: current export token (drives
      *  stale-export identity checks across ViewModel state changes). */
     internal fun exportTokenForTest(): Long = exportToken
@@ -248,7 +251,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private val savedExportHistoryMutex = Mutex()
     /**
-     * Single production owner of the saved-export history SharedPreferences and
+     * Single production owner of the saved-export history DataStore and
      * the global history-revision arbitration. Replaces the scattered
      * top-level history mutation helpers so the merge algorithm is directly
      * testable. Gallery rows remain owned by the export pipeline's
@@ -1918,10 +1921,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun invalidateRemovedHistoryThumbnails(
         context: Context,
         result: SavedExportHistoryMutation,
+        historyStore: SavedExportHistoryStore = savedExportHistoryStore,
     ) {
         withContext(Dispatchers.IO) {
             savedExportHistoryMutex.withLock {
-                val retained = savedExportHistoryStore.load().map { it.uriString }.toSet()
+                val retained = historyStore.load().map { it.uriString }.toSet()
                 result.removedUris.filterNot(retained::contains).forEach {
                     ThumbnailBitmapCache.invalidate("export:$it")
                 }
@@ -3535,6 +3539,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     init {
         val startupRestoreToken = ++restoreDraftToken
         val startupRevision = _uiState.value.revision
+        val startupHistoryStore =
+            ExportTestSeam.capture()?.historyStore ?: savedExportHistoryStore
         viewModelScope.launch {
             try {
                 val context = getApplication<Application>()
@@ -3548,19 +3554,29 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 }
                 restoreDraftIfAvailable(context, startupRestoreToken, startupRevision)
-                val historyResult =
-                    withContext(Dispatchers.IO) {
-                        savedExportHistoryStore.loadOrRebuildWithMutation()
+                try {
+                    val historyResult =
+                        withContext(Dispatchers.IO) {
+                            startupHistoryStore.loadOrRebuildWithMutation()
+                        }
+                    invalidateRemovedHistoryThumbnails(context, historyResult, startupHistoryStore)
+                    updateUiStateAndRecycleReplaced {
+                        if (historyResult.revision != startupHistoryStore.revision) it
+                        else
+                            it.copy(
+                                savedExports = historyResult.items,
+                                exportHistoryRetention =
+                                    historyResult.retention ?: it.exportHistoryRetention,
+                            )
                     }
-                invalidateRemovedHistoryThumbnails(context, historyResult)
-                updateUiStateAndRecycleReplaced {
-                    if (historyResult.revision != savedExportHistoryStore.revision) it
-                    else
-                        it.copy(
-                            savedExports = historyResult.items,
-                            exportHistoryRetention =
-                                historyResult.retention ?: it.exportHistoryRetention,
-                        )
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (failure: Throwable) {
+                    lastSavedExportHistoryFailureForTest = failure
+                    Log.e("KeplerStudio.History", "saved export history startup failed", failure)
+                    updateUiStateAndRecycleReplaced {
+                        it.copy(message = "내보낸 사진 기록을 불러오지 못했습니다.")
+                    }
                 }
             } finally {
                 startupInitCompletion.complete(Unit)
@@ -4513,22 +4529,33 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setExportHistoryRetention(retention: ExportHistoryRetention) {
         val context = getApplication<Application>()
+        val historyStore = ExportTestSeam.capture()?.historyStore ?: savedExportHistoryStore
         viewModelScope.launch {
-            val result =
-                withContext(Dispatchers.IO) {
-                    savedExportHistoryStore.setRetention(retention)
+            try {
+                val result =
+                    withContext(Dispatchers.IO) {
+                        historyStore.setRetention(retention)
+                    }
+                invalidateRemovedHistoryThumbnails(context, result, historyStore)
+                updateUiStateAndRecycleReplaced {
+                    if (result.revision != historyStore.revision) it
+                    else
+                        it.copy(
+                            exportHistoryRetention = retention,
+                            savedExports = result.items,
+                            message =
+                                if (it.isBusy) it.message
+                                else "내보낸 사진 기록 자동 정리가 ${retention.label}으로 설정되었습니다",
+                        )
                 }
-            invalidateRemovedHistoryThumbnails(context, result)
-            updateUiStateAndRecycleReplaced {
-                if (result.revision != savedExportHistoryStore.revision) it
-                else
-                    it.copy(
-                        exportHistoryRetention = retention,
-                        savedExports = result.items,
-                        message =
-                            if (it.isBusy) it.message
-                            else "내보낸 사진 기록 자동 정리가 ${retention.label}으로 설정되었습니다",
-                    )
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (failure: Throwable) {
+                lastSavedExportHistoryFailureForTest = failure
+                Log.e("KeplerStudio.History", "saved export history retention failed", failure)
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "내보낸 사진 기록 보관 정책을 저장하지 못했습니다.")
+                }
             }
         }
     }
