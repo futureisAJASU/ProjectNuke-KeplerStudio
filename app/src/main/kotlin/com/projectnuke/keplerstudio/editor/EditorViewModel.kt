@@ -3550,8 +3550,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 restoreDraftIfAvailable(context, startupRestoreToken, startupRevision)
                 val historyResult =
                     withContext(Dispatchers.IO) {
-                        val currentRetention = savedExportHistoryStore.loadRetention()
-                        savedExportHistoryStore.loadOrRebuildWithMutation(currentRetention)
+                        savedExportHistoryStore.loadOrRebuildWithMutation()
                     }
                 invalidateRemovedHistoryThumbnails(context, historyResult)
                 updateUiStateAndRecycleReplaced {
@@ -4517,8 +4516,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result =
                 withContext(Dispatchers.IO) {
-                    savedExportHistoryStore.saveRetention(retention)
-                    savedExportHistoryStore.prune(retention)
+                    savedExportHistoryStore.setRetention(retention)
                 }
             invalidateRemovedHistoryThumbnails(context, result)
             updateUiStateAndRecycleReplaced {
@@ -4875,7 +4873,7 @@ fun exportPreview() {
                                     timestampMillis = System.currentTimeMillis(),
                                 )
                             val mutation =
-                                historyStore.commit(savedItem, historyStore.loadRetention())
+                                historyStore.commit(savedItem)
                             invalidateRemovedHistoryThumbnails(context, mutation)
                             mutation
                         }
@@ -4894,7 +4892,7 @@ fun exportPreview() {
                         // window used below cannot make a stale export
                         // impersonate a newer one. Every publish-side branch
                         // re-checks isCurrentExport(exportIdentity).
-                        withContext(NonCancellable + Dispatchers.IO) {
+                        withContext(NonCancellable) {
                             when (outcome) {
                                 is ExportPipelineResult.Published<*> -> {
                                     val mutation =

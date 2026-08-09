@@ -79,6 +79,20 @@ class ExportPreviewProductionTest {
     }
 
     @Test
+    fun exportMetadataUsesSuspendingAtomicHistoryBoundary() = runBlocking {
+        val rows = RecordingRows()
+        val history = RecordingHistoryStore(context)
+        val editor = editorWithDirtyBase()
+        installSeam(rows, history)
+
+        editor.exportPreview()
+        awaitCompletion(editor) { editor.uiState.value.savedExports.size == 1 }
+
+        assertEquals(1, history.persistence.suspendUpdates.get())
+        assertEquals(0, history.persistence.legacyBlockingCommits.get())
+    }
+
+    @Test
     fun encodeFailureLeavesNoPublishAndNoHistory() = runBlocking {
         val rows = RecordingRows().also { it.failEncode = true }
         val history = RecordingHistoryStore(context)
@@ -379,30 +393,28 @@ private class RecordingHistoryStore(
 }
 
 private class RecordingHistoryPersistence : SavedExportHistoryPersistence {
-    private var raw: String? = ""
-    private var initialized = true
+    private var state =
+        SavedExportPersistedState(
+            rawHistory = "",
+            initialized = true,
+            retention = ExportHistoryRetention.Never,
+        )
     val historyWrites = AtomicInteger()
     val historyClears = AtomicInteger()
+    val suspendUpdates = AtomicInteger()
+    val legacyBlockingCommits = AtomicInteger()
     @Volatile var failWrites = false
 
-    override fun readSavedHistoryRaw(): String? = raw
+    override suspend fun readState(): SavedExportPersistedState = state
 
-    override fun readSavedHistoryInitialized(): Boolean = initialized
-
-    override fun writeSavedHistory(raw: String) {
+    override suspend fun updateState(
+        transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState,
+    ): SavedExportPersistedState {
+        suspendUpdates.incrementAndGet()
         historyWrites.incrementAndGet()
+        val next = transform(state)
         if (failWrites) error("history write")
-        this.raw = raw
-        initialized = true
+        state = next
+        return next
     }
-
-    override fun clearSavedHistory() {
-        historyClears.incrementAndGet()
-        this.raw = ""
-        initialized = true
-    }
-
-    override fun readRetentionName(): String? = ExportHistoryRetention.Never.name
-
-    override fun writeRetentionName(name: String) = Unit
 }

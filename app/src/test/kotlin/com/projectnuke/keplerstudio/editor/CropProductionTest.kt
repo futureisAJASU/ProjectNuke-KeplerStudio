@@ -224,6 +224,7 @@ class CropProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }

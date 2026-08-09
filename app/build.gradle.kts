@@ -61,6 +61,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
+    implementation("androidx.datastore:datastore-preferences:1.2.1")
     implementation("androidx.heifwriter:heifwriter:1.0.0")
     implementation("com.google.mediapipe:tasks-vision:0.10.35")
     implementation("org.tensorflow:tensorflow-lite:2.17.0")

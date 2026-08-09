@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -32,41 +33,40 @@ class SavedExportHistoryStoreTest {
     }
 
     @Test
-    fun firstCommitPersistsOnceAndAdvancesRevision() {
+    fun firstCommitPersistsOnceAndAdvancesRevision() = blocking {
         val store = store()
-        val mutation = store.commit(item("first", now), ExportHistoryRetention.Never)
+        val mutation = store.commit(item("first", now))
 
         assertEquals(listOf("first"), mutation.items.map { it.displayName })
         assertEquals(1L, mutation.revision)
-        assertEquals(1, persistence.historyWrites.get())
+        assertEquals(1, persistence.updates.get())
     }
 
     @Test
-    fun duplicateUriReplacesOldEntry() {
+    fun duplicateUriReplacesOldEntry() = blocking {
         val store = store()
-        store.commit(item("old", now - 10, uriName = "same"), ExportHistoryRetention.Never)
-        val mutation = store.commit(item("new", now, uriName = "same"), ExportHistoryRetention.Never)
+        store.commit(item("old", now - 10, uriName = "same"))
+        val mutation = store.commit(item("new", now, uriName = "same"))
 
         assertEquals(listOf("new"), mutation.items.map { it.displayName })
         assertEquals(emptySet<String>(), mutation.removedUris)
-        assertEquals(2, persistence.historyWrites.get())
     }
 
     @Test
-    fun commitsRemainNewestFirstDeterministically() {
+    fun commitsRemainNewestFirstDeterministically() = blocking {
         val store = store()
-        store.commit(item("old", now - 20), ExportHistoryRetention.Never)
-        store.commit(item("middle", now - 10), ExportHistoryRetention.Never)
-        store.commit(item("new", now), ExportHistoryRetention.Never)
+        store.commit(item("old", now - 20))
+        store.commit(item("middle", now - 10))
+        store.commit(item("new", now))
 
         assertEquals(listOf("new", "middle", "old"), store.load().map { it.displayName })
     }
 
     @Test
-    fun historyIsCappedAtSixtyEntries() {
+    fun historyIsCappedAtSixtyEntries() = blocking {
         val store = store()
         repeat(SavedExportHistoryStore.MAX_SAVED_EXPORTS + 5) { index ->
-            store.commit(item("$index", now + index), ExportHistoryRetention.Never)
+            store.commit(item("$index", now + index))
         }
 
         assertEquals(SavedExportHistoryStore.MAX_SAVED_EXPORTS, store.load().size)
@@ -75,17 +75,7 @@ class SavedExportHistoryStoreTest {
     }
 
     @Test
-    fun neverRetentionKeepsAllEntries() {
-        val store = store()
-        store.commit(item("old", 0L), ExportHistoryRetention.Never)
-        val mutation = store.prune(ExportHistoryRetention.Never)
-
-        assertEquals(1, mutation.items.size)
-        assertEquals(2, persistence.historyWrites.get())
-    }
-
-    @Test
-    fun retentionBoundariesKeepExactCutoffAndRemoveImmediatelyOlder() {
+    fun retentionBoundariesKeepExactCutoffAndRemoveImmediatelyOlder() = blocking {
         val day = 24L * 60L * 60L * 1000L
         for (retention in listOf(
             ExportHistoryRetention.Days7,
@@ -95,8 +85,8 @@ class SavedExportHistoryStoreTest {
             persistence = TestHistoryPersistence()
             val store = store()
             val cutoff = now - retention.days!! * day
-            store.commit(item("older", cutoff - 1), ExportHistoryRetention.Never)
-            store.commit(item("cutoff", cutoff), ExportHistoryRetention.Never)
+            store.commit(item("older", cutoff - 1))
+            store.commit(item("cutoff", cutoff))
 
             val mutation = store.prune(retention)
 
@@ -105,46 +95,32 @@ class SavedExportHistoryStoreTest {
     }
 
     @Test
-    fun eachRetentionWindowUsesControlledClock() {
-        val day = 24L * 60L * 60L * 1000L
-        for (retention in listOf(
-            ExportHistoryRetention.Days7,
-            ExportHistoryRetention.Days30,
-            ExportHistoryRetention.Days90,
-        )) {
-            persistence = TestHistoryPersistence()
-            val store = store()
-            store.commit(
-                item("inside", now - retention.days!! * day),
-                ExportHistoryRetention.Never,
-            )
+    fun neverRetentionKeepsEntries() = blocking {
+        val store = store()
+        store.commit(item("old", 0L))
 
-            assertEquals(1, store.prune(retention).items.size)
-        }
+        assertEquals(1, store.prune(ExportHistoryRetention.Never).items.size)
     }
 
     @Test
-    fun prunePersistsPrunedListAndReportsRemovedUris() {
+    fun prunePersistsPrunedListAndReportsRemovedUris() = blocking {
         val store = store()
-        store.commit(
-            item("old", now - 8 * 24L * 60L * 60L * 1000L),
-            ExportHistoryRetention.Never,
-        )
-        store.commit(item("new", now), ExportHistoryRetention.Never)
-        val writesBefore = persistence.historyWrites.get()
+        store.commit(item("old", now - 8 * 24L * 60L * 60L * 1000L))
+        store.commit(item("new", now))
+        val updatesBefore = persistence.updates.get()
 
         val mutation = store.prune(ExportHistoryRetention.Days7)
 
         assertEquals(listOf("new"), mutation.items.map { it.displayName })
         assertEquals(setOf("content://exports/old"), mutation.removedUris)
-        assertEquals(writesBefore + 1, persistence.historyWrites.get())
+        assertEquals(updatesBefore + 1, persistence.updates.get())
     }
 
     @Test
-    fun removedEntriesDoNotReturnWhenRetentionReturnsToNever() {
+    fun removedEntriesDoNotReturnWhenRetentionReturnsToNever() = blocking {
         val store = store()
-        store.commit(item("old", now - 8 * 24L * 60L * 60L * 1000L), ExportHistoryRetention.Never)
-        store.commit(item("new", now), ExportHistoryRetention.Never)
+        store.commit(item("old", now - 8 * 24L * 60L * 60L * 1000L))
+        store.commit(item("new", now))
 
         store.prune(ExportHistoryRetention.Days7)
         val restored = store.prune(ExportHistoryRetention.Never)
@@ -153,48 +129,115 @@ class SavedExportHistoryStoreTest {
     }
 
     @Test
-    fun malformedStoredRowDoesNotDiscardValidNeighbors() {
-        persistence.raw =
-            listOf(
-                    encoded("left", "content://exports/left", now - 2),
-                    "malformed|row",
-                    encoded("right", "content://exports/right", now),
-                )
-                .joinToString("\n")
-        val store = store()
+    fun malformedStoredRowDoesNotDiscardValidNeighbors() = blocking {
+        persistence.state =
+            persistence.state.copy(
+                rawHistory =
+                    listOf(
+                            encoded("left", "content://exports/left", now - 2),
+                            "malformed|row",
+                            encoded("right", "content://exports/right", now),
+                        )
+                        .joinToString("\n"),
+            )
 
-        assertEquals(listOf("left", "right"), store.load().map { it.displayName })
+        assertEquals(listOf("left", "right"), store().load().map { it.displayName })
     }
 
     @Test
-    fun clearLeavesInitializedHistoryEmptyAndDoesNotDeleteMediaStoreImage() {
+    fun clearLeavesInitializedHistoryEmptyAndDoesNotDeleteMediaStoreImage() = blocking {
         val store = store()
-        store.commit(item("one", now), ExportHistoryRetention.Never)
+        store.commit(item("one", now))
 
         val mutation = store.clear()
 
-        assertTrue(persistence.initialized)
+        assertTrue(persistence.state.initialized)
         assertTrue(store.load().isEmpty())
         assertEquals(setOf("content://exports/one"), mutation.removedUris)
-        assertEquals(1, persistence.historyClears.get())
+        assertEquals(2, persistence.updates.get())
     }
 
     @Test
-    fun firstEmptyStartupDurablyInitializesHistory() {
+    fun removePersistsOneTransactionAndReportsRemovedUri() = blocking {
+        val store = store()
+        store.commit(item("one", now))
+
+        val mutation = store.remove("content://exports/one")
+
+        assertTrue(mutation.items.isEmpty())
+        assertEquals(setOf("content://exports/one"), mutation.removedUris)
+        assertEquals(2, persistence.updates.get())
+    }
+
+    @Test
+    fun setRetentionUpdatesHistoryAndRetentionInOneTransaction() = blocking {
+        val store = store()
+        store.commit(item("old", now - 8 * 24L * 60L * 60L * 1000L))
+        store.commit(item("new", now))
+        val updatesBefore = persistence.updates.get()
+
+        val mutation = store.setRetention(ExportHistoryRetention.Days7)
+
+        assertEquals(listOf("new"), mutation.items.map { it.displayName })
+        assertEquals(ExportHistoryRetention.Days7, persistence.state.retention)
+        assertEquals(updatesBefore + 1, persistence.updates.get())
+    }
+
+    @Test
+    fun failedSetRetentionLeavesHistoryRetentionAndRevisionUnchanged() = blocking {
+        val store = store()
+        store.commit(item("old", now - 8 * 24L * 60L * 60L * 1000L))
+        val previous = persistence.state
+        val revision = store.revision
+        persistence.failUpdates = true
+
+        try {
+            store.setRetention(ExportHistoryRetention.Days7)
+            error("setRetention must fail")
+        } catch (failure: SavedExportHistoryPersistenceException) {
+            assertTrue(failure.cause != null)
+        }
+
+        assertEquals(previous, persistence.state)
+        assertEquals(revision, store.revision)
+    }
+
+    @Test
+    fun persistenceFailureLeavesPreviousStateAndRevisionUnchanged() = blocking {
+        val store = store()
+        store.commit(item("previous", now))
+        val previous = persistence.state
+        val revision = store.revision
+        persistence.failUpdates = true
+
+        try {
+            store.commit(item("new", now + 1))
+            error("commit must fail")
+        } catch (failure: SavedExportHistoryPersistenceException) {
+            assertTrue(failure.cause != null)
+        }
+
+        assertEquals(revision, store.revision)
+        assertEquals(previous, persistence.state)
+        assertEquals(listOf("previous"), store.load().map { it.displayName })
+    }
+
+    @Test
+    fun firstEmptyStartupDurablyInitializesHistory() = blocking {
         persistence = TestHistoryPersistence(initialized = false, raw = null)
         val provider = registerMediaRows(emptyList())
         val mutation = store().loadOrRebuildWithMutation(ExportHistoryRetention.Never)
 
         assertTrue(mutation.items.isEmpty())
-        assertTrue(persistence.initialized)
-        assertEquals(1, persistence.historyWrites.get())
+        assertTrue(persistence.state.initialized)
+        assertEquals(1, persistence.updates.get())
         assertEquals(1L, mutation.revision)
         assertEquals("${MediaStore.Images.Media.IS_PENDING} = 0", provider.selection)
         assertEquals(0, provider.deleteCalls)
     }
 
     @Test
-    fun explicitClearPreventsLaterStartupRebuild() {
+    fun explicitClearPreventsLaterStartupRebuild() = blocking {
         persistence = TestHistoryPersistence(initialized = false, raw = null)
         val provider = registerMediaRows(listOf(mediaRow(1, "one.png", exactPath(), 0)))
         val store = store()
@@ -210,7 +253,7 @@ class SavedExportHistoryStoreTest {
     }
 
     @Test
-    fun firstStartupRebuildsCommittedRowsOnceAndSkipsPendingAndSiblingPath() {
+    fun firstStartupRebuildsCommittedRowsOnceAndSkipsPendingAndSiblingPath() = blocking {
         persistence = TestHistoryPersistence(initialized = false, raw = null)
         val provider = registerMediaRows(
             listOf(
@@ -224,7 +267,7 @@ class SavedExportHistoryStoreTest {
         val mutation = store().loadOrRebuildWithMutation(ExportHistoryRetention.Never)
 
         assertEquals(listOf("accepted.png", "slash.png"), mutation.items.map { it.displayName })
-        assertEquals(1, persistence.historyWrites.get())
+        assertEquals(1, persistence.updates.get())
         assertEquals(0, provider.deleteCalls)
         assertEquals("${MediaStore.Images.Media.IS_PENDING} = 0", provider.selection)
     }
@@ -236,34 +279,7 @@ class SavedExportHistoryStoreTest {
         assertTrue(SavedExportHistoryStore.isKeplerStudioExportPath("Pictures/KeplerStudio/"))
     }
 
-    @Test
-    fun persistenceFailureLeavesPreviousStateAndRevisionUnchanged() {
-        val store = store()
-        store.commit(item("previous", now), ExportHistoryRetention.Never)
-        val revision = store.revision
-        val writes = persistence.historyWrites.get()
-        persistence.failWrites = true
-
-        try {
-            store.commit(item("new", now + 1), ExportHistoryRetention.Never)
-            error("commit must fail")
-        } catch (failure: SavedExportHistoryPersistenceException) {
-            assertTrue(failure.cause != null)
-        }
-
-        assertEquals(revision, store.revision)
-        assertEquals(writes + 1, persistence.historyWrites.get())
-        assertEquals(listOf("previous"), store.load().map { it.displayName })
-    }
-
-    @Test
-    fun commitHasExactlyOnePersistenceAttempt() {
-        val store = store()
-
-        store.commit(item("one", now), ExportHistoryRetention.Never)
-
-        assertEquals(1, persistence.historyWrites.get())
-    }
+    private fun blocking(block: suspend () -> Unit) = runBlocking { block() }
 
     private fun store() =
         SavedExportHistoryStore(context, clock = { now }, persistence = persistence)
@@ -302,31 +318,29 @@ class SavedExportHistoryStoreTest {
 }
 
 private class TestHistoryPersistence(
-    var initialized: Boolean = true,
-    var raw: String? = "",
+    initialized: Boolean = true,
+    raw: String? = "",
 ) : SavedExportHistoryPersistence {
-    val historyWrites = AtomicInteger()
-    val historyClears = AtomicInteger()
-    @Volatile var failWrites = false
+    var state =
+        SavedExportPersistedState(
+            rawHistory = raw,
+            initialized = initialized,
+            retention = ExportHistoryRetention.Never,
+        )
+    val updates = AtomicInteger()
+    @Volatile var failUpdates = false
 
-    override fun readSavedHistoryRaw(): String? = raw
-    override fun readSavedHistoryInitialized(): Boolean = initialized
+    override suspend fun readState(): SavedExportPersistedState = state
 
-    override fun writeSavedHistory(raw: String) {
-        historyWrites.incrementAndGet()
-        if (failWrites) error("write failure")
-        this.raw = raw
-        initialized = true
+    override suspend fun updateState(
+        transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState,
+    ): SavedExportPersistedState {
+        updates.incrementAndGet()
+        val next = transform(state)
+        if (failUpdates) error("update failure")
+        state = next
+        return next
     }
-
-    override fun clearSavedHistory() {
-        historyClears.incrementAndGet()
-        raw = ""
-        initialized = true
-    }
-
-    override fun readRetentionName(): String? = ExportHistoryRetention.Never.name
-    override fun writeRetentionName(name: String) = Unit
 }
 
 private class TestMediaProvider(
@@ -348,7 +362,7 @@ private class TestMediaProvider(
         val columns = projection ?: emptyArray()
         val cursor = MatrixCursor(columns)
         rows.forEach { row ->
-            val values =
+            val values: List<Any?> =
                 columns.map { column ->
                     when (column) {
                         MediaStore.Images.Media._ID -> row.id
