@@ -46,7 +46,6 @@ fun EditorViewModel.runAutoRouterV0Analysis() {
 }
 
 fun EditorViewModel.applyFlareGuardV0Preview() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     val context = appContext()
     viewModelScope.launch {
         withContext(Dispatchers.Main) {
@@ -56,7 +55,6 @@ fun EditorViewModel.applyFlareGuardV0Preview() {
 }
 
 fun EditorViewModel.applyDaySunFlareGuardV0Preview() {
-    if (!canEnterEditorAction(allowMaskSupersession = true)) return
     val context = appContext()
     viewModelScope.launch {
         withContext(Dispatchers.Main) {

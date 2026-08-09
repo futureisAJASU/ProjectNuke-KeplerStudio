@@ -81,8 +81,7 @@ fun PresetToolPanel(
 
 fun applyStoredPreset(preset: Preset, message: String): PresetApplyResult {
         val current = editorViewModel.uiState.value
-        if (current.sourcePath == null || current.originalPreviewBitmap == null && current.previewBitmap == null ||
-            !editorViewModel.canEnterEditorAction()) {
+        if (current.sourcePath == null || current.originalPreviewBitmap == null && current.previewBitmap == null) {
             statusMessage = "활성 사진이 없어 프리셋을 적용하지 않았습니다."
             return PresetApplyResult.Rejected
         }
@@ -163,7 +162,7 @@ fun applyStoredPreset(preset: Preset, message: String): PresetApplyResult {
                 val current = editorViewModel.uiState.value
                 if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
                     (current.originalPreviewBitmap != null || current.previewBitmap != null) &&
-                    current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
+                    current.baseContentToken == identity.baseToken && current.revision == identity.revision) {
                     val result = applyStoredPreset(item, "전/후 비교 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
                     if (result == PresetApplyResult.Rejected) {
                         statusMessage = "전/후 비교 프리셋을 저장했지만 적용하지 않았습니다."
@@ -208,7 +207,7 @@ fun applyStoredPreset(preset: Preset, message: String): PresetApplyResult {
                 val current = editorViewModel.uiState.value
                 if (identity?.sourcePath != null && current.sourcePath == identity.sourcePath &&
                     (current.originalPreviewBitmap != null || current.previewBitmap != null) &&
-                    current.baseContentToken == identity.baseToken && current.revision == identity.revision && editorViewModel.canEnterEditorAction()) {
+                    current.baseContentToken == identity.baseToken && current.revision == identity.revision) {
                     val result = applyStoredPreset(item, "레퍼런스 기반 프리셋과 색감 룩을 추출하고 현재 사진에 적용했습니다.")
                     if (result == PresetApplyResult.Rejected) {
                         statusMessage = "레퍼런스 프리셋을 저장했지만 적용하지 않았습니다."

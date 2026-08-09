@@ -169,6 +169,43 @@ class ExternalIntentCoordinationProductionTest {
         }
     }
 
+    @Test
+    fun engineChangeContinuesAfterItsOwnHistoryAdmissionOnFirstInvocation() {
+        val sourceFile = draftSourceFile("intent-engine-gated-source.png")
+        val setup = openAdoptedTransaction(sourceFile.absolutePath)
+        val vm = setup.vm
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        try {
+            vm.applyCorrectionEngineToCurrentDocument(CorrectionEngine.Engine2)
+            assertTrue(
+                "parameter history admission must park before the engine render",
+                awaitEvent(vm) {
+                    gate.reached.isCompleted &&
+                        setup.commitBegan.get() == 1 &&
+                        setup.renderCalls.get() == 1 &&
+                        !vm.uiState.value.isBusy &&
+                        vm.uiState.value.historyBusy
+                },
+            )
+            gate.releaseGate.complete(Unit)
+            assertTrue(
+                awaitEvent(vm) {
+                    setup.renderCalls.get() >= 2 &&
+                        !vm.uiState.value.isBusy &&
+                        !vm.uiState.value.historyBusy &&
+                        vm.uiState.value.correctionEngineState.documentEngine == CorrectionEngine.Engine2
+                },
+            )
+            setup.assertCommittedExactlyOnce()
+            assertEquals(2, vm.undoEntryCountForTest())
+        } finally {
+            setup.renderer.close()
+            setup.hooks.close()
+            sourceFile.delete()
+        }
+    }
+
     // Test 2: preset look settles the adopted transaction exactly once, then
     // the preset applies the new params on top of the committed state.
     @Test

@@ -72,6 +72,8 @@ import org.json.JSONObject
 
 private const val HISTORY_BUSY_MESSAGE =
     "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요."
+private const val HISTORY_MEMORY_MESSAGE =
+    "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다."
 
 internal class PendingHistorySnapshot(
     private val deferred: CompletableDeferred<EditorHistorySnapshot?>,
@@ -442,7 +444,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal sealed class SettlementResult {
-        data class Committed(val adoptedRevision: Int) : SettlementResult()
+        data class Committed(
+            val adoptedRevision: Int,
+            internal val historyPrerequisite: HistoryActivityRegistry.Registration? = null,
+        ) : SettlementResult()
         data class RolledBack(val startRevision: Int) : SettlementResult()
         data object NoTransaction : SettlementResult()
     }
@@ -665,6 +670,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     )
     private var historyNavigationCounter: Long = 0L
     private var activeHistoryNavigation: HistoryNavigationIdentity? = null
+    private data class ExternalActionDocumentIdentity(
+        val generation: String,
+        val sourcePath: String?,
+        val baseContentToken: String,
+        val revision: Int,
+    )
+    private var externalActionContinuation: Job? = null
     private var memoryRecoveryToken: Long = 0L
     private var pendingMemoryRetry: MemoryRetryDescriptor? = null
     private var memoryRecoveryJob: Job? = null
@@ -1261,6 +1273,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun applyCorrectionEngineToCurrentDocument(engine: CorrectionEngine) {
         if (shuttingDown) return
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (continueAfterOwnParameterSettlement(settlement) {
+                applyCorrectionEngineToCurrentDocument(engine)
+            }
+        ) return
         prepareForMaskInteraction()
         if (brushTransactionState != BrushTransactionState.Idle || brushSettlementJob?.isActive == true) {
             updateUiState { it.copy(message = "브러시 작업이 끝난 뒤 다시 시도해 주세요.") }
@@ -1965,6 +1982,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun historyActivityBusyForTest(): Boolean = historyActivityBusy()
 
+    internal fun historyCaptureAvailabilityForTest(requiredBytes: Long): HistoryCaptureAvailability =
+        if (historyActivityBusy()) HistoryCaptureAvailability.HistoryBusy
+        else historyCoordinator.captureAvailability(requiredBytes)
+
     internal fun editorActionAdmissionForTest(
         allowMaskSupersession: Boolean = false,
     ): EditorActionAdmission = editorActionAdmission(allowMaskSupersession)
@@ -1995,6 +2016,54 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val admission = editorActionAdmission(allowMaskSupersession)
         if (admission == EditorActionAdmission.HistoryBusy) reportHistoryBusyAdmission()
         return admission == EditorActionAdmission.Ready
+    }
+
+    /**
+     * Continues only an external intent whose own parameter settlement created
+     * the currently registered history operation.  This is deliberately not a
+     * user-action queue: unrelated history activity is rejected by normal
+     * admission and never reaches this helper.
+     */
+    internal fun continueAfterOwnParameterSettlement(
+        settlement: SettlementResult,
+        continuation: () -> Unit,
+    ): Boolean {
+        val prerequisite =
+            (settlement as? SettlementResult.Committed)?.historyPrerequisite
+                ?: return false
+        if (!historyActivityBusy()) return false
+        if (externalActionContinuation?.isActive == true) return true
+        val state = _uiState.value
+        val identity =
+            ExternalActionDocumentIdentity(
+                generation = historyCoordinator.currentGeneration(),
+                sourcePath = state.sourcePath,
+                baseContentToken = state.baseContentToken,
+                revision = state.revision,
+            )
+        val continuationJob =
+            viewModelScope.launch {
+                try {
+                    prerequisite.await()
+                    if (shuttingDown) return@launch
+                    val current = _uiState.value
+                    val unchanged =
+                        historyCoordinator.currentGeneration() == identity.generation &&
+                            current.sourcePath == identity.sourcePath &&
+                            current.baseContentToken == identity.baseContentToken &&
+                            current.revision == identity.revision
+                    if (!unchanged || historyActivityBusy() || !canEnterEditorActionPure()) {
+                        return@launch
+                    }
+                    continuation()
+                } finally {
+                    if (externalActionContinuation === coroutineContext[Job]) {
+                        externalActionContinuation = null
+                    }
+                }
+            }
+        externalActionContinuation = continuationJob
+        return true
     }
 
     internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
@@ -2755,7 +2824,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             is HistoryCaptureAvailability.MemoryRejected -> {
                 updateUiStateAndRecycleReplaced {
-                    it.copy(message = "硫붾え由ш? 遺議깊븯???섎룎由ш린 湲곕줉????ν븯吏 紐삵뻽?듬땲?? ?몄쭛? 怨꾩냽?????덉뒿?덈떎.")
+                    it.copy(message = HISTORY_MEMORY_MESSAGE)
                 }
                 false
             }
@@ -3409,7 +3478,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    internal fun commitUndoSnapshot(snapshot: EditorHistorySnapshot, clearRedo: Boolean): Boolean {
+    internal fun commitUndoSnapshot(
+        snapshot: EditorHistorySnapshot,
+        clearRedo: Boolean,
+        onRegistered: ((HistoryActivityRegistry.Registration) -> Unit)? = null,
+    ): Boolean {
         if (shuttingDown) {
             snapshot.recycleBitmaps()
             return false
@@ -3426,7 +3499,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val result = historyCoordinator.admitAdoptedSnapshot(snapshot, clearRedo, reserve)
                 if (!result.retained) {
                     updateUiStateAndRecycleReplaced {
-                        it.copy(message = "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
+                        it.copy(message = HISTORY_MEMORY_MESSAGE)
                     }
                 } else if (result.movedToStorage) {
                     updateUiStateAndRecycleReplaced { it.copy(message = "오래된 편집 기록을 저장소로 옮겼습니다.") }
@@ -3442,11 +3515,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         job.invokeOnCompletion {
             if (!started.get() && !snapshot.resourcesReleased) snapshot.recycleBitmaps()
         }
-        if (!historyActivity.register(job)) {
+        val registration = historyActivity.registerHandle(job)
+        if (registration == null) {
             job.cancel()
             if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
             return false
         }
+        onRegistered?.invoke(registration)
         job.start()
         return true
     }
@@ -3746,8 +3821,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun openImage(uri: Uri) {
-        if (!canEnterEditorAction()) return
-        abortPendingParameterEdit()
+        if (shuttingDown) return
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (continueAfterOwnParameterSettlement(settlement) { openImage(uri) }) return
+        if (!settleForEditorAction()) return
+        if (!canEnterEditorActionAfterSettlement()) return
         invalidateSelectionPreview()
         invalidateCropOperation()
         invalidateManagedEdits()
@@ -4153,6 +4231,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun applyAutoEnhance() {
         if (shuttingDown) return
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (continueAfterOwnParameterSettlement(settlement) { applyAutoEnhance() }) return
         prepareForExternalEdit()
         if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
         val current = _uiState.value
@@ -4309,6 +4389,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         message: String,
     ) {
         if (isShuttingDown()) return
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (continueAfterOwnParameterSettlement(settlement) {
+                applyEngineChange(noiseEngine, detailEngine, toneEngine, hazeEngine, message)
+            }
+        ) return
         val current = prepareForExternalEdit()
         if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
         val nextEngines =
@@ -4465,6 +4550,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun resetAdjustments() {
         if (isShuttingDown()) return
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (continueAfterOwnParameterSettlement(settlement) { resetAdjustments() }) return
         prepareForExternalEdit()
         if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
         val startSnapshot = acquireEditorSnapshot("resetAdjustments") ?: return
@@ -4602,6 +4689,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         message: String,
     ): PresetApplyResult {
         if (isShuttingDown()) return PresetApplyResult.Rejected
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (continueAfterOwnParameterSettlement(settlement) {
+                applyPresetLook(params, look, message)
+            }
+        ) return PresetApplyResult.Accepted
         val current = prepareForExternalEdit()
         if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true))
             return PresetApplyResult.Rejected
@@ -5845,7 +5937,9 @@ fun exportPreview() {
         }
     }
 
-    internal fun clearRedoAfterAdoptedEdit() {
+    internal fun clearRedoAfterAdoptedEdit(
+        onRegistered: ((HistoryActivityRegistry.Registration) -> Unit)? = null,
+    ) {
         if (shuttingDown) return
         val job =
             viewModelScope.launch(start = CoroutineStart.LAZY) {
@@ -5855,19 +5949,26 @@ fun exportPreview() {
                     updateHistoryFlags()
                 }
             }
-        if (historyActivity.register(job)) {
+        val registration = historyActivity.registerHandle(job)
+        if (registration != null) {
+            onRegistered?.invoke(registration)
             job.start()
         } else {
             job.cancel()
         }
     }
 
-    internal fun settleAdoptedEditHistory(snapshot: EditorHistorySnapshot?): Boolean {
+    internal fun settleAdoptedEditHistory(
+        snapshot: EditorHistorySnapshot?,
+        onRegistered: ((HistoryActivityRegistry.Registration) -> Unit)? = null,
+    ): Boolean {
         automaticRetryAttempt = null
         strongRetryAttempt = null
-        return if (snapshot != null) commitUndoSnapshot(snapshot, clearRedo = true)
+        return if (snapshot != null) {
+            commitUndoSnapshot(snapshot, clearRedo = true, onRegistered = onRegistered)
+        }
         else {
-            clearRedoAfterAdoptedEdit()
+            clearRedoAfterAdoptedEdit(onRegistered)
             updateUiStateAndRecycleReplaced {
                 it.copy(message = "편집은 적용했지만 메모리가 부족하여 이번 되돌리기 기록은 저장하지 못했습니다.")
             }
@@ -5878,15 +5979,7 @@ fun exportPreview() {
     fun rotatePreview90() {
         if (shuttingDown) return
         val settlement = settleParameterTransactionBeforeExternalEdit()
-        if (settlement is SettlementResult.Committed && historyActivityBusy()) {
-            val settledHistoryJob = historyIoJob
-            viewModelScope.launch {
-                settledHistoryJob?.join()
-                while (!shuttingDown && historyActivityBusy()) yield()
-                if (!shuttingDown) rotatePreview90Async()
-            }
-            return
-        }
+        if (continueAfterOwnParameterSettlement(settlement) { rotatePreview90() }) return
         rotatePreview90Async()
     }
 
@@ -5911,12 +6004,17 @@ fun exportPreview() {
         var rotatedPreview: Bitmap? = null
         var rotatedOriginal: Bitmap? = null
         val rotatedMasks = ArrayList<Bitmap>(start.selectionLayers.size)
-        fun releaseRotated() {
+        fun releaseRotatedOwned() {
             val cleanup = Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
             rotatedPreview?.let(cleanup::add)
             rotatedOriginal?.let(cleanup::add)
             rotatedMasks.forEach(cleanup::add)
             cleanup.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
+            rotatedPreview = null
+            rotatedOriginal = null
+            rotatedMasks.clear()
+        }
+        fun transferRotatedToDocument() {
             rotatedPreview = null
             rotatedOriginal = null
             rotatedMasks.clear()
@@ -5971,7 +6069,7 @@ fun exportPreview() {
                                     message = "\uBBF8\uB9AC\uBDF0\uC744 90\uB3C4 \uD68C\uC804\uD588\uC2B5\uB2C8\uB2E4.",
                                 )
                             }
-                            releaseRotated()
+                            transferRotatedToDocument()
                             val retained = before
                             before = null
                             settleAdoptedEditHistory(retained)
@@ -5998,7 +6096,7 @@ fun exportPreview() {
                     before?.let(::recycleHistorySnapshot)
                     pendingHistory?.close()
                     pendingHistory = null
-                    releaseRotated()
+                    releaseRotatedOwned()
                     start.close()
                 }
             },
@@ -6007,7 +6105,7 @@ fun exportPreview() {
                 {
                     pendingHistory?.close()
                     pendingHistory = null
-                    releaseRotated()
+                    releaseRotatedOwned()
                     start.close()
                 },
                 { start.close() },
@@ -6072,6 +6170,11 @@ fun exportPreview() {
         effect: ActiveQuickEffect,
     ) {
         if (isShuttingDown()) return
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (continueAfterOwnParameterSettlement(settlement) {
+                applyNativeSpecialEffects(title, failureMessage, effect)
+            }
+        ) return
         prepareForExternalEdit()
         if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
         val startSnapshot = acquireEditorSnapshot("nativeSpecialEffects") ?: return
@@ -6224,7 +6327,11 @@ fun exportPreview() {
 
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
         if (shuttingDown) return
-        settleParameterTransactionBeforeExternalEdit()
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (continueAfterOwnParameterSettlement(settlement) {
+                applyFlareGuardAiOrRulePreview(context, mode)
+            }
+        ) return
         if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) {
             return
         }
@@ -7376,6 +7483,7 @@ fun exportPreview() {
             transaction.windowExpired = true
             val adoptedParams = transaction.adoptedParams
             if (adoptedParams != null) {
+                var historyPrerequisite: HistoryActivityRegistry.Registration? = null
                 transaction.lifecycleInstallation?.hooks?.onTransactionCommitBegan?.invoke(transaction.id)
                 if (!transaction.historyCommitted) {
                     transaction.commit()
@@ -7384,7 +7492,9 @@ fun exportPreview() {
                         if (reason == SettlementReason.Shutdown) {
                             recycleHistorySnapshot(snapshot)
                         } else {
-                            settleAdoptedEditHistory(snapshot)
+                            settleAdoptedEditHistory(snapshot) { registration ->
+                                historyPrerequisite = registration
+                            }
                         }
                     }
                     transaction.historyCommitted = true
@@ -7402,7 +7512,7 @@ fun exportPreview() {
                 if (shouldScheduleDraft) scheduleDraftAutosave()
                 closeParameterGesture(transaction)
                 transaction.lifecycleInstallation?.hooks?.onTransactionCommitted?.invoke(settledRevision)
-                return SettlementResult.Committed(settledRevision)
+                return SettlementResult.Committed(settledRevision, historyPrerequisite)
             }
             transaction.rollback()
             val startState = transaction.start.state

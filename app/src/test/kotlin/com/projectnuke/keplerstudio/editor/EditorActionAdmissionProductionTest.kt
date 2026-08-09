@@ -171,6 +171,39 @@ class EditorActionAdmissionProductionTest {
         assertTrue(editor.canApplyCorrectionEngineForUi())
     }
 
+    @Test
+    fun historyCaptureAvailabilitySeparatesBusyFromMemoryRejection() = runBlocking {
+        val editor = editorWithDocument()
+        assertEquals(HistoryCaptureAvailability.Ready, editor.historyCaptureAvailabilityForTest(0L))
+        assertTrue(editor.historyCaptureAvailabilityForTest(Long.MAX_VALUE) is HistoryCaptureAvailability.MemoryRejected)
+
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        editor.applyVignetteCorrection()
+        awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
+        assertEquals(HistoryCaptureAvailability.HistoryBusy, editor.historyCaptureAvailabilityForTest(0L))
+        gate.releaseGate.complete(Unit)
+        awaitMainUntil { !editor.uiState.value.historyBusy }
+    }
+
+    @Test
+    fun successfulRotationKeepsAdoptedBitmapsLive() = runBlocking {
+        val editor = editorWithDocument()
+        val oldPreview = editor.uiState.value.previewBitmap
+        editor.rotatePreview90()
+        awaitMainUntil {
+            !editor.uiState.value.isBusy &&
+                !editor.uiState.value.historyBusy &&
+                editor.undoEntryCountForTest() == 1
+        }
+        val rotated = checkNotNull(editor.uiState.value.previewBitmap)
+        assertTrue(rotated !== oldPreview)
+        assertFalse(rotated.isRecycled)
+        rotated.getPixel(0, 0)
+        assertEquals(8, rotated.width)
+        assertEquals(8, rotated.height)
+    }
+
     private fun editorWithDocument(): EditorViewModel {
         val editor = harness.createEditor()
         awaitMainUntil { editor.startupInitCompletion.isCompleted }

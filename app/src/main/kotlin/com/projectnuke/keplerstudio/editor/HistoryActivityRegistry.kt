@@ -12,6 +12,12 @@ internal class HistoryActivityRegistry(
     private val coordinatorBusy: () -> Boolean,
     private val onChanged: () -> Unit = {},
 ) {
+    class Registration internal constructor(internal val job: Job) {
+        suspend fun await() {
+            job.join()
+        }
+    }
+
     private val lock = Any()
     private var registered: Job? = null
 
@@ -24,6 +30,10 @@ internal class HistoryActivityRegistry(
     }
 
     fun register(job: Job): Boolean {
+        return registerHandle(job) != null
+    }
+
+    fun registerHandle(job: Job): Registration? {
         val accepted = synchronized(lock) {
             val current = registered
             if (current != null && !current.isCompleted && current !== job) {
@@ -33,10 +43,10 @@ internal class HistoryActivityRegistry(
                 true
             }
         }
-        if (!accepted) return false
+        if (!accepted) return null
         job.invokeOnCompletion { clearIfOwned(job) }
         onChanged()
-        return true
+        return Registration(job)
     }
 
     fun clearIfOwned(job: Job) {

@@ -36,7 +36,11 @@ import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyActiveSelectionLocalEditNativeBaked() {
     if (isShuttingDown()) return
-    settleParameterTransactionBeforeExternalEdit()
+    val settlement = settleParameterTransactionBeforeExternalEdit()
+    if (continueAfterOwnParameterSettlement(settlement) {
+            applyActiveSelectionLocalEditNativeBaked()
+        }
+    ) return
     if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
     prepareForExternalEdit()
     val startSnapshot = acquireEditorSnapshot("selectionNativeBake") ?: return

@@ -109,7 +109,9 @@ fun EditorViewModel.setStraightenDegrees(value: Float) {
 }
 
 fun EditorViewModel.autoStraightenCrop() {
-    if (!canEnterEditorAction()) return
+    val settlement = settleParameterTransactionBeforeExternalEdit()
+    if (continueAfterOwnParameterSettlement(settlement) { autoStraightenCrop() }) return
+    if (!canEnterEditorActionAfterSettlement()) return
     val sourceSnapshot = acquireEditorSnapshot("autoStraightenCrop") ?: return
     val state = sourceSnapshot.state
     val bitmap = sourceSnapshot.previewBitmap ?: sourceSnapshot.originalPreviewBitmap ?: run {
@@ -195,7 +197,8 @@ fun EditorViewModel.resetCropState() {
 
 fun EditorViewModel.applyCropTransform() {
     if (isShuttingDown()) return
-    settleParameterTransactionBeforeExternalEdit()
+    val settlement = settleParameterTransactionBeforeExternalEdit()
+    if (continueAfterOwnParameterSettlement(settlement) { applyCropTransform() }) return
     if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
 
     prepareForExternalEdit()

@@ -46,7 +46,11 @@ private fun EditorViewModel.applyFlareRuleFallbackInternal(
     strength: Float,
 ) {
     if (isShuttingDown()) return
-    settleParameterTransactionBeforeExternalEdit()
+    val settlement = settleParameterTransactionBeforeExternalEdit()
+    if (continueAfterOwnParameterSettlement(settlement) {
+            applyFlareRuleFallbackInternal(mode, title, strength)
+        }
+    ) return
     if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
 
     prepareForExternalEdit()

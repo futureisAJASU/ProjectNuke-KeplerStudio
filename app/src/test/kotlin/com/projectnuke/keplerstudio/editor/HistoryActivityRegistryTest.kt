@@ -45,7 +45,9 @@ class HistoryActivityRegistryTest {
         old.complete()
         assertTrue(registry.register(newer))
         assertTrue(registry.isBusy())
-        old.complete()
+        // Simulate the late callback from the old registration after the new
+        // owner has already been installed.
+        registry.clearIfOwned(old)
         assertTrue(registry.isBusy())
         newer.complete()
         assertFalse(registry.isBusy())

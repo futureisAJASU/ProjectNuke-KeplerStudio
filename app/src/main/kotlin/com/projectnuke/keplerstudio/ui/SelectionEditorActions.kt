@@ -622,7 +622,8 @@ fun EditorViewModel.updateActiveSelectionParams(transform: (EditParams) -> EditP
 
 fun EditorViewModel.applyActiveSelectionLocalEdit() {
     if (isShuttingDown()) return
-    settleParameterTransactionBeforeExternalEdit()
+    val settlement = settleParameterTransactionBeforeExternalEdit()
+    if (continueAfterOwnParameterSettlement(settlement) { applyActiveSelectionLocalEdit() }) return
     if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
     invalidateSelectionPreview()
     prepareForExternalEdit()

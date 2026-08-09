@@ -56,7 +56,8 @@ import kotlinx.coroutines.withContext
 
 fun EditorViewModel.applyMaskAwareRemaster() {
     if (isShuttingDown()) return
-    settleParameterTransactionBeforeExternalEdit()
+    val settlement = settleParameterTransactionBeforeExternalEdit()
+    if (continueAfterOwnParameterSettlement(settlement) { applyMaskAwareRemaster() }) return
     if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
     val stateAtEntry = uiState.value
     val documentEngine = stateAtEntry.correctionEngineState.documentEngine
