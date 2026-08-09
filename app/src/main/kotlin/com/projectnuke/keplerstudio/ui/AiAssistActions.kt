@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.ui
 
 import androidx.lifecycle.viewModelScope
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.EditorViewModel.EditorActionSettlement
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.analyzeAutoRouterV0
@@ -10,7 +11,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 fun EditorViewModel.runAutoRouterV0Analysis() {
-    if (!canEnterEditorAction()) return
+    val settlement = settleEditorAction()
+    if (continueAfterEditorActionSettlement(settlement) { runAutoRouterV0Analysis() }) return
+    if (settlement !is EditorActionSettlement.Ready || !canEnterEditorActionPure()) return
     val snapshot = acquireEditorSnapshot("autoRouterAnalysis")
     if (snapshot == null) {
         updateUiState { it.copy(message = "\uC790\uB3D9 \uB77C\uC6B0\uD130 \uBD84\uC11D\uC5D0 \uC0AC\uC6A9\uD560 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.") }

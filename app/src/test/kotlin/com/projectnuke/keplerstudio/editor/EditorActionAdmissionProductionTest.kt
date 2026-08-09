@@ -3,8 +3,11 @@ package com.projectnuke.keplerstudio.editor
 import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
+import com.projectnuke.keplerstudio.ui.runAutoRouterV0Analysis
+import com.projectnuke.keplerstudio.ui.applyCropTransform
 import java.io.ByteArrayInputStream
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -187,6 +190,89 @@ class EditorActionAdmissionProductionTest {
     }
 
     @Test
+    fun undoContinuesTheSameInvocationAfterItsOwnParameterHistorySettles() = runBlocking {
+        val editor = editorWithDocument()
+        val committed = AtomicInteger(0)
+        val hooks = ParameterLifecycleTestHook.install(
+            ParameterLifecycleHooks(onTransactionCommitted = { committed.incrementAndGet() })
+        )
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        try {
+            editor.updateParams { it.copy(exposure = 0.4f) }
+            awaitMainUntil { editor.hasOpenParameterGesture() }
+            editor.undoEdit()
+            awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
+            assertEquals(1, committed.get())
+            assertTrue(editor.hasOpenParameterGesture().not())
+            assertEquals(0.4f, editor.uiState.value.params.exposure)
+
+            gate.releaseGate.complete(Unit)
+            awaitMainUntil {
+                editor.uiState.value.params.exposure == 0f &&
+                    editor.undoEntryCountForTest() == 0 &&
+                    !editor.uiState.value.historyBusy
+            }
+            assertFalse(editor.uiState.value.message.orEmpty().contains("편집 기록을 정리하는 중입니다"))
+        } finally {
+            hooks.close()
+            gate.releaseGate.complete(Unit)
+        }
+    }
+
+    @Test
+    fun rotationContinuesTheSameInvocationAfterItsOwnParameterHistorySettles() = runBlocking {
+        val editor = editorWithDocument()
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        editor.updateParams { it.copy(exposure = 0.4f) }
+        awaitMainUntil { editor.hasOpenParameterGesture() }
+        editor.rotatePreview90()
+        awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
+        assertEquals(8, checkNotNull(editor.uiState.value.previewBitmap).width)
+        gate.releaseGate.complete(Unit)
+        awaitMainUntil {
+            !editor.uiState.value.isBusy &&
+                !editor.uiState.value.historyBusy &&
+                editor.undoEntryCountForTest() == 2
+        }
+        assertEquals(8, checkNotNull(editor.uiState.value.previewBitmap).height)
+    }
+
+    @Test
+    fun autoRouterContinuesTheSameInvocationAfterItsOwnParameterHistorySettles() = runBlocking {
+        val editor = editorWithDocument()
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        editor.updateParams { it.copy(exposure = 0.4f) }
+        awaitMainUntil { editor.hasOpenParameterGesture() }
+        editor.runAutoRouterV0Analysis()
+        awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
+        gate.releaseGate.complete(Unit)
+        awaitMainUntil {
+            editor.uiState.value.message.orEmpty().contains("자동 라우터는 현재 분석 전용입니다") &&
+                editor.undoEntryCountForTest() == 1
+        }
+    }
+
+    @Test
+    fun cropExtensionActionContinuesAfterItsOwnParameterHistorySettles() = runBlocking {
+        val editor = editorWithDocument()
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        editor.updateParams { it.copy(exposure = 0.4f) }
+        awaitMainUntil { editor.hasOpenParameterGesture() }
+        editor.applyCropTransform()
+        awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
+        gate.releaseGate.complete(Unit)
+        awaitMainUntil {
+            !editor.uiState.value.isBusy &&
+                !editor.uiState.value.historyBusy &&
+                editor.undoEntryCountForTest() == 2
+        }
+    }
+
+    @Test
     fun successfulRotationKeepsAdoptedBitmapsLive() = runBlocking {
         val editor = editorWithDocument()
         val oldPreview = editor.uiState.value.previewBitmap
@@ -202,6 +288,7 @@ class EditorActionAdmissionProductionTest {
         rotated.getPixel(0, 0)
         assertEquals(8, rotated.width)
         assertEquals(8, rotated.height)
+        assertEquals(0xffaa0000.toInt(), rotated.getPixel(0, 0))
     }
 
     private fun editorWithDocument(): EditorViewModel {

@@ -678,6 +678,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val revision: Int,
     )
     private var externalActionContinuation: Job? = null
+    private enum class ExternalActionContinuationPhase { WaitingForOwnHistory, Resuming, Closed }
+    private var externalActionContinuationPhase = ExternalActionContinuationPhase.Closed
+    private var externalActionContinuationToken = 0L
 
     internal sealed interface EditorActionSettlement {
         data class Ready(
@@ -687,6 +690,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         data object InteractiveOwnerStillSettling : EditorActionSettlement
         data object Closed : EditorActionSettlement
         data object HistoryBusy : EditorActionSettlement
+        data object AcceptedActionBusy : EditorActionSettlement
     }
     private var memoryRecoveryToken: Long = 0L
     private var pendingMemoryRetry: MemoryRetryDescriptor? = null
@@ -1982,6 +1986,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal enum class EditorActionAdmission {
         Ready,
         HistoryBusy,
+        AcceptedActionBusy,
         EditorBusy,
         Closed,
     }
@@ -2011,6 +2016,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         allowMaskSupersession: Boolean,
     ): EditorActionAdmission {
         if (shuttingDown) return EditorActionAdmission.Closed
+        if (externalActionContinuation?.isActive == true &&
+            externalActionContinuationPhase == ExternalActionContinuationPhase.WaitingForOwnHistory
+        ) {
+            return EditorActionAdmission.AcceptedActionBusy
+        }
         if (historyActivityBusy()) return EditorActionAdmission.HistoryBusy
         val state = _uiState.value
         if (!state.isBusy || allowMaskSupersession && isBusyOwnedByMaskSupersedable()) {
@@ -2027,11 +2037,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun reportAcceptedActionBusyAdmission() {
+        if (_uiState.value.isBusy) return
+        updateUiState { state ->
+            val message =
+                "\uD3B8\uC9D1 \uC791\uC5C5\uC744 \uC815\uB9AC\uD558\uB294 \uC911\uC785\uB2C8\uB2E4. \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694."
+            if (state.message == message) state else state.copy(message = message)
+        }
+    }
+
     internal fun canEnterEditorActionAfterSettlement(
         allowMaskSupersession: Boolean = false,
     ): Boolean {
         val admission = editorActionAdmission(allowMaskSupersession)
         if (admission == EditorActionAdmission.HistoryBusy) reportHistoryBusyAdmission()
+        if (admission == EditorActionAdmission.AcceptedActionBusy) reportAcceptedActionBusyAdmission()
         return admission == EditorActionAdmission.Ready
     }
 
@@ -2048,40 +2068,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (!settleInteractiveOwnersForEditorAction()) return false
         val prerequisite =
             (settlement as? SettlementResult.Committed)?.historyPrerequisite
-                ?: return false
-        if (!historyActivityBusy()) return false
-        if (externalActionContinuation?.isActive == true) return true
-        val state = _uiState.value
-        val identity =
-            ExternalActionDocumentIdentity(
-                generation = historyCoordinator.currentGeneration(),
-                sourcePath = state.sourcePath,
-                baseContentToken = state.baseContentToken,
-                revision = state.revision,
-            )
-        val continuationJob =
-            viewModelScope.launch {
-                try {
-                    prerequisite.await()
-                    if (shuttingDown) return@launch
-                    val current = _uiState.value
-                    val unchanged =
-                        historyCoordinator.currentGeneration() == identity.generation &&
-                            current.sourcePath == identity.sourcePath &&
-                            current.baseContentToken == identity.baseContentToken &&
-                            current.revision == identity.revision
-                    if (!unchanged || historyActivityBusy() || !canEnterEditorActionPure()) {
-                        return@launch
-                    }
-                    continuation()
-                } finally {
-                    if (externalActionContinuation === coroutineContext[Job]) {
-                        externalActionContinuation = null
-                    }
-                }
-            }
-        externalActionContinuation = continuationJob
-        return true
+            ?: return false
+        return continueAfterHistoryPrerequisite(prerequisite, continuation)
     }
 
     internal fun continueAfterEditorActionSettlement(
@@ -2099,6 +2087,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     ): Boolean {
         if (!historyActivityBusy()) return false
         if (externalActionContinuation?.isActive == true) return true
+        val continuationToken = ++externalActionContinuationToken
         val state = _uiState.value
         val identity = ExternalActionDocumentIdentity(
             generation = historyCoordinator.currentGeneration(),
@@ -2106,7 +2095,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             baseContentToken = state.baseContentToken,
             revision = state.revision,
         )
-        val continuationJob = viewModelScope.launch {
+        val continuationJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
                 prerequisite.await()
                 if (shuttingDown) return@launch
@@ -2115,22 +2104,37 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     current.sourcePath != identity.sourcePath ||
                     current.baseContentToken != identity.baseContentToken ||
                     current.revision != identity.revision ||
-                    historyActivityBusy() || !canEnterEditorActionPure()
+                    historyActivityBusy()
                 ) return@launch
+                if (externalActionContinuationToken != continuationToken) return@launch
+                externalActionContinuationPhase = ExternalActionContinuationPhase.Resuming
+                if (!canEnterEditorActionPure()) return@launch
                 continuation()
             } finally {
                 if (externalActionContinuation === coroutineContext[Job]) {
+                    externalActionContinuationPhase = ExternalActionContinuationPhase.Closed
                     externalActionContinuation = null
                 }
             }
         }
+        externalActionContinuationPhase = ExternalActionContinuationPhase.WaitingForOwnHistory
         externalActionContinuation = continuationJob
+        continuationJob.start()
         return true
     }
 
     internal fun settleEditorAction(): EditorActionSettlement {
         if (shuttingDown) return EditorActionSettlement.Closed
-        if (historyActivityBusy()) return EditorActionSettlement.HistoryBusy
+        if (externalActionContinuation?.isActive == true &&
+            externalActionContinuationPhase == ExternalActionContinuationPhase.WaitingForOwnHistory
+        ) {
+            reportAcceptedActionBusyAdmission()
+            return EditorActionSettlement.AcceptedActionBusy
+        }
+        if (historyActivityBusy()) {
+            reportHistoryBusyAdmission()
+            return EditorActionSettlement.HistoryBusy
+        }
         val settlement = settleParameterTransactionBeforeExternalEdit()
         if (!settleInteractiveOwnersForEditorAction()) {
             return EditorActionSettlement.InteractiveOwnerStillSettling
@@ -2143,7 +2147,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun settleInteractiveOwnersForEditorAction(): Boolean {
         if (brushTransactionState == BrushTransactionState.Finishing ||
             brushTransactionState == BrushTransactionState.Cancelling
-        ) return false
+        ) {
+            updateUiState {
+                it.copy(
+                    message =
+                        "\uBE0C\uB7EC\uC2DC \uC791\uC5C5\uC774 \uB9C8\uBB34\uB9AC\uB418\uB294 \uC911\uC785\uB2C8\uB2E4. \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574 \uC8FC\uC138\uC694."
+                )
+            }
+            return false
+        }
         if (brushTransactionState != BrushTransactionState.Idle) cancelBrushStroke()
         if (selectionParamTransaction != null) settleSelectionParamTransactionForSupersession()
         return brushTransactionState == BrushTransactionState.Idle &&
