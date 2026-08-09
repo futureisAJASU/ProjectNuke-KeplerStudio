@@ -162,7 +162,7 @@ class ParameterNoAdoptionRollbackProductionTest {
             assertTrue(
                 awaitEvent(vm) {
                     !vm.uiState.value.isBusy &&
-                        (vm.uiState.value.message?.startsWith("이미지를 열지 못했습니다") == true ||
+                        (vm.uiState.value.message?.contains("세션을 시작하지 못했습니다.") == true ||
                             vm.uiState.value.sourcePath != sourceFile.absolutePath)
                 },
             )

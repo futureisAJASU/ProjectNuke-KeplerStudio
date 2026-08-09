@@ -49,6 +49,7 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -184,6 +185,20 @@ internal class PendingHistorySnapshot(
     }
 }
 
+private data class OpenImageIdentity(
+    val token: Long,
+    val invalidateRevision: Int,
+    val incomingUri: Uri,
+    val owningJob: Job,
+)
+
+private enum class OpenImageFailureStage {
+    Source,
+    Decode,
+    NativeSession,
+    Adoption,
+}
+
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val _uiState =
         MutableStateFlow(
@@ -197,7 +212,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val _brushPreviewEpoch = MutableStateFlow(0L)
     val brushPreviewEpoch: StateFlow<Long> = _brushPreviewEpoch.asStateFlow()
     private var nativeSession: Long = 0L
+    private var nativeSessionRelease: ((Long) -> Unit)? = null
     private var renderJob: Job? = null
+    private var openImageJob: Job? = null
     private val correctionEngineSettings = CorrectionEngineSettings(app.applicationContext)
     @Volatile private var correctionEngineEpoch: Long = 0L
     private var exportJob: Job? = null
@@ -223,6 +240,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      *  diagnostic production tests (never read by production logic). */
     @Volatile internal var lastExportFailureForTest: Throwable? = null
 
+    /** Test-only diagnostics for the external image-open transaction. */
+    @Volatile internal var lastOpenImageFailureForTest: Throwable? = null
+    @Volatile internal var lastOpenImageCleanupFailureForTest: Throwable? = null
+
     /** Test-only diagnostic for nonfatal saved-export history failures. */
     @Volatile internal var lastSavedExportHistoryFailureForTest: Throwable? = null
 
@@ -232,6 +253,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Pure read-only inspection for tests: whether an export coroutine is live. */
     internal fun exportJobActiveForTest(): Boolean = exportJob?.isActive == true
+
+    /** Test-only cancellation of the currently owned external image-open job. */
+    internal fun cancelOpenImageForTest() {
+        openImageJob?.cancel()
+    }
+
+    internal fun openImageJobActiveForTest(): Boolean = openImageJob?.isActive == true
 
     /** Test-only trigger of the production invalidation that cancels the live
      *  export and bumps `exportToken`, equivalent to a document replacement. */
@@ -3603,56 +3631,78 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced {
             it.copy(isBusy = true, revision = invalidateRevision, message = openingMessage)
         }
-        viewModelScope.launch {
+        val operationSeam = OpenImageTestSeam.capture()
+        val launchedOpenJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val identity =
+                OpenImageIdentity(
+                    token = openToken,
+                    invalidateRevision = invalidateRevision,
+                    incomingUri = uri,
+                    owningJob = checkNotNull(currentCoroutineContext()[Job]),
+                )
             var preview: Bitmap? = null
             var createdSession = 0L
-            var sourceFile: File? = null
+            var createdSessionRelease: ((Long) -> Unit)? = null
+            var ownedSource: OwnedIncomingSource? = null
+            var failureStage = OpenImageFailureStage.Source
             val opTracker = beginMemoryTracking("openImage", snapshotState = "decoding")
+            fun cleanupOwnedResources(cause: Throwable?) {
+                preview?.takeUnless(Bitmap::isRecycled)?.recycle()
+                preview = null
+                if (createdSession != 0L) {
+                    releaseNativeSessionHandle(createdSession, createdSessionRelease)
+                    createdSession = 0L
+                    createdSessionRelease = null
+                }
+                ownedSource?.cleanup()?.let { cleanupFailure ->
+                    lastOpenImageCleanupFailureForTest = cleanupFailure
+                    cause?.addSuppressed(cleanupFailure)
+                }
+                ownedSource = null
+            }
             try {
                 val context = getApplication<Application>()
                 withContext(Dispatchers.IO) {
-                    val copiedSource = copyUriToCache(context, uri)
-                    sourceFile = copiedSource
-                    val decoded =
-                        decodeSampledMutableBitmapWithExif(
-                            copiedSource.absolutePath,
-                            maxSide = 2048,
-                            opTracker,
-                        )
-                    preview = decoded
+                    ownedSource =
+                        (operationSeam?.sourceTransactionFactory?.invoke(context, uri)
+                            ?: IncomingSourceTransaction(context)).acquire(uri)
+                    failureStage = OpenImageFailureStage.Decode
+                    preview =
+                        operationSeam?.decode?.invoke(ownedSource!!.file.absolutePath)
+                            ?: decodeSampledMutableBitmapWithExif(
+                                ownedSource!!.file.absolutePath,
+                                maxSide = 2048,
+                                opTracker,
+                            )
                 }
-                if (shuttingDown || openToken != restoreDraftToken) {
-                    preview?.recycle()
-                    preview = null
-                    sourceFile?.delete()
+                if (!isCurrentOpenImage(identity)) {
+                    cleanupOwnedResources(null)
                     return@launch
                 }
                 val decodedPreview = preview!!
-                val openedSource = checkNotNull(sourceFile)
+                val openedSource = checkNotNull(ownedSource).file
                 Log.i(
                     FLARE_GUARD_AI_TAG,
                     "Opened image with EXIF orientation: ${openedSource.name} preview=${decodedPreview.width}x${decodedPreview.height}",
                 )
-                createdSession = nativeCreateSessionOrTest(openedSource.absolutePath)
+                failureStage = OpenImageFailureStage.NativeSession
+                createdSession =
+                    operationSeam?.nativeSessionFactory?.invoke(openedSource.absolutePath)
+                        ?: nativeCreateSessionOrTest(openedSource.absolutePath)
+                createdSessionRelease = operationSeam?.nativeSessionReleaser
+                currentCoroutineContext().ensureActive()
                 tracker.registerNativeSession(
                     handle = createdSession,
                     documentGeneration = historyCoordinator.currentGeneration(),
                     sourceIdentity = decodedPreview.hashCode().toString(),
                     state = "created",
                 )
-                if (
-                    shuttingDown ||
-                        openToken != restoreDraftToken ||
-                        _uiState.value.revision != invalidateRevision
-                ) {
-                    preview?.recycle()
-                    preview = null
-                    sourceFile?.delete()
-                    releaseNativeSessionHandle(createdSession)
-                    createdSession = 0L
+                if (!isCurrentOpenImage(identity)) {
+                    cleanupOwnedResources(null)
                     return@launch
                 }
                 val previousSession = nativeSession
+                val previousSessionRelease = nativeSessionRelease
                 val previousState = _uiState.value
                 val nextState =
                     previousState.copy(
@@ -3690,7 +3740,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         message =
                             "\uC6D0\uBCF8 \uCE90\uC2DC\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4: ${decodedPreview.width}x${decodedPreview.height} preview",
                     )
+                failureStage = OpenImageFailureStage.Adoption
                 nativeSession = createdSession
+                nativeSessionRelease = createdSessionRelease
                 if (
                     !commitUiState(
                         previousState,
@@ -3700,34 +3752,37 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     )
                 ) {
                     nativeSession = previousSession
+                    nativeSessionRelease = previousSessionRelease
                     error("open image adoption superseded")
                 }
+                checkNotNull(ownedSource).transferToDocument()
+                ownedSource = null
                 createdSession = 0L
+                createdSessionRelease = null
                 tracker.updateNativeSession(nativeSession, "active")
                 lastSuccessfullyRenderedParams = EditParams()
                 preview = null
-                releaseNativeSessionHandle(previousSession)
+                releaseNativeSessionHandle(previousSession, previousSessionRelease)
                 deleteOwnedWorkingSource(context, previousState.sourcePath)
                 forceDraftSaveAsync()
             } catch (ce: CancellationException) {
-                preview?.recycle()
-                releaseNativeSessionHandle(createdSession)
-                sourceFile?.delete()
+                cleanupOwnedResources(ce)
+                if (ownsOpenImageSettlement(identity)) {
+                    updateUiStateAndRecycleReplaced { current ->
+                        if (current.isBusy) current.copy(isBusy = false) else current
+                    }
+                }
                 throw ce
             } catch (t: Throwable) {
-                preview?.recycle()
-                releaseNativeSessionHandle(createdSession)
-                sourceFile?.delete()
+                lastOpenImageFailureForTest = t
+                cleanupOwnedResources(t)
                 if (
-                    !shuttingDown &&
-                        openToken == restoreDraftToken &&
-                        _uiState.value.revision == invalidateRevision
+                    isCurrentOpenImage(identity)
                 ) {
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             isBusy = false,
-                            message =
-                                "\uC774\uBBF8\uC9C0\uB97C \uC5F4\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ${t.message}",
+                            message = openImageFailureMessage(failureStage),
                         )
                     }
                     if (t is BitmapAllocationRejectedException) {
@@ -3740,9 +3795,29 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             } finally {
                 opTracker?.end()
+                if (openImageJob === currentCoroutineContext()[Job]) openImageJob = null
             }
         }
+        openImageJob = launchedOpenJob
+        launchedOpenJob.start()
     }
+
+    private fun isCurrentOpenImage(identity: OpenImageIdentity): Boolean =
+        ownsOpenImageSettlement(identity) &&
+            identity.owningJob.isActive
+
+    private fun ownsOpenImageSettlement(identity: OpenImageIdentity): Boolean =
+        !shuttingDown &&
+            identity.token == restoreDraftToken &&
+            _uiState.value.revision == identity.invalidateRevision
+
+    private fun openImageFailureMessage(stage: OpenImageFailureStage): String =
+        when (stage) {
+            OpenImageFailureStage.Source -> "선택한 이미지 파일을 읽지 못했습니다."
+            OpenImageFailureStage.Decode -> "이미지를 디코딩하지 못했습니다."
+            OpenImageFailureStage.NativeSession -> "이미지 처리 세션을 시작하지 못했습니다."
+            OpenImageFailureStage.Adoption -> "이미지를 열지 못했습니다."
+        }
 
     fun updateParams(transform: (EditParams) -> EditParams) {
         if (shuttingDown) return
@@ -6552,10 +6627,12 @@ fun exportPreview() {
                         },
                 )
             val previousSession = nativeSession
+            val previousSessionRelease = nativeSessionRelease
             restorePreviousBaseline = draftPointerBaseline
             draftPointerBaseline = pointer
             restoreBaselineChanged = true
             nativeSession = createdSession
+            nativeSessionRelease = null
             tracker.registerNativeSession(
                 createdSession,
                 historyCoordinator.currentGeneration(),
@@ -6571,6 +6648,7 @@ fun exportPreview() {
                 )
             ) {
                 nativeSession = previousSession
+                nativeSessionRelease = previousSessionRelease
                 draftPointerBaseline = restorePreviousBaseline
                 error("draft generation adoption was not confirmed")
             }
@@ -6581,7 +6659,7 @@ fun exportPreview() {
             ownedMasks.clear()
             ownedWorkingSource = null
             lastSuccessfullyRenderedParams = manifest.params
-            runCatching { releaseNativeSessionHandle(previousSession) }
+            runCatching { releaseNativeSessionHandle(previousSession, previousSessionRelease) }
                 .onFailure { logDraftSaveFailure(it) }
             runCatching { deleteOwnedWorkingSource(context, previousState.sourcePath) }
                 .onFailure { logDraftSaveFailure(it) }
@@ -6875,6 +6953,7 @@ fun exportPreview() {
                 return
             }
             val previousSession = nativeSession
+            val previousSessionRelease = nativeSessionRelease
             val adoptedPreview = preview!!
             val adoptedRendered = rendered!!
             val previousState = _uiState.value
@@ -6915,6 +6994,7 @@ fun exportPreview() {
                         "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4",
                 )
             nativeSession = createdSession
+            nativeSessionRelease = null
             if (
                 !commitUiState(
                     previousState,
@@ -6924,13 +7004,14 @@ fun exportPreview() {
                 )
             ) {
                 nativeSession = previousSession
+                nativeSessionRelease = previousSessionRelease
                 error("legacy draft adoption superseded")
             }
             createdSession = 0L
             preview = null
             rendered = null
             lastSuccessfullyRenderedParams = params
-            releaseNativeSessionHandle(previousSession)
+            releaseNativeSessionHandle(previousSession, previousSessionRelease)
             deleteOwnedWorkingSource(context, previousState.sourcePath)
             forceDraftSaveAsync()
         } catch (ce: CancellationException) {
@@ -7480,17 +7561,25 @@ fun exportPreview() {
         updateHistoryFlags()
     }
 
-    private fun releaseNativeSessionHandle(session: Long) {
+    private fun releaseNativeSessionHandle(
+        session: Long,
+        releaseOverride: ((Long) -> Unit)? = null,
+    ) {
         if (session != 0L) {
             tracker.unregisterNativeSession(session)
-            runCatching { NativePhotoCore.nativeReleaseSession(session) }
+            runCatching {
+                releaseOverride?.invoke(session) ?: NativePhotoCore.nativeReleaseSession(session)
+            }
         }
     }
 
     private fun releaseNativeSession() {
         if (nativeSession != 0L) {
-            releaseNativeSessionHandle(nativeSession)
+            val session = nativeSession
+            val releaseOverride = nativeSessionRelease
             nativeSession = 0L
+            nativeSessionRelease = null
+            releaseNativeSessionHandle(session, releaseOverride)
         }
     }
 
@@ -8476,15 +8565,6 @@ private fun percentileFromHistogram(histogram: IntArray, count: Int, percentile:
         if (accum >= target) return i / 255f
     }
     return 1f
-}
-
-private fun copyUriToCache(context: Context, uri: Uri): File {
-    val outFile = File(context.cacheDir, "source_${System.currentTimeMillis()}.img")
-    context.contentResolver.openInputStream(uri).use { input ->
-        requireNotNull(input) { "input stream is null" }
-        FileOutputStream(outFile).use { output -> input.copyTo(output) }
-    }
-    return outFile
 }
 
 private fun migrateDraftSourceIfNeeded(context: Context, storedSourcePath: String): File? {
@@ -9582,14 +9662,19 @@ private fun copyGenerationSourceToWorkingFile(context: Context, source: File): F
 
 private fun deleteOwnedWorkingSource(context: Context, sourcePath: String?) {
     if (sourcePath == null) return
-    val directory =
+    val filesDirectory =
         runCatching { File(context.filesDir, "editor_sources").canonicalFile }.getOrNull() ?: return
+    val cacheDirectory = runCatching { context.cacheDir.canonicalFile }.getOrNull() ?: return
     val source = runCatching { File(sourcePath).canonicalFile }.getOrNull() ?: return
-    if (
-        source.parentFile == directory &&
+    val ownedDraftSource =
+        source.parentFile == filesDirectory &&
             source.name.startsWith("restored_") &&
             source.extension == "img"
-    ) {
+    val ownedIncomingSource =
+        source.parentFile == cacheDirectory &&
+            source.name.startsWith("source_") &&
+            source.extension == "img"
+    if (ownedDraftSource || ownedIncomingSource) {
         source.delete()
     }
 }
