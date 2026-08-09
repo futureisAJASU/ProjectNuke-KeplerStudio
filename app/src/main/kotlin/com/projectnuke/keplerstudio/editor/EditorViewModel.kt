@@ -4654,6 +4654,7 @@ fun exportPreview() {
         }
         invalidateExport()
         val token = exportToken
+        val exportSeam = ExportTestSeam.capture()
         val fileName = "KeplerStudio_${exportTimestamp()}.${exportFormat.extension}"
         updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = exportBusyMessage) }
         val exportHandoff =
@@ -4728,9 +4729,6 @@ fun exportPreview() {
                             revision = exportRevision,
                             owningJob = exportCoroutine,
                         )
-                    // The export test seam is captured at operation creation so
-                    // a late old operation cannot consume a later test's seam.
-                    val exportSeam = ExportTestSeam.capture()
                     try {
                         val context = getApplication<Application>()
                         val rows: ExportRowStore =
@@ -4943,7 +4941,7 @@ fun exportPreview() {
                                             current.copy(
                                                 isBusy = false,
                                                 message =
-                                                    "내보내기에 실패했습니다: ${failure.message ?: ""}",
+                                                    "이미지를 내보내지 못했습니다.",
                                             )
                                         }
                                         if (isAllocationFailure) {
@@ -4962,7 +4960,7 @@ fun exportPreview() {
                                             current.copy(
                                                 isBusy = false,
                                                 message =
-                                                    "내보내기에 실패했고 임시 파일 삭제도 실패했습니다: ${outcome.cleanupFailure.message ?: ""}",
+                                                    "이미지를 내보내지 못했으며 임시 파일을 정리하지 못했습니다.",
                                             )
                                         }
                                     }
@@ -5002,7 +5000,7 @@ fun exportPreview() {
                             updateUiStateAndRecycleReplaced { current ->
                                 current.copy(
                                     isBusy = false,
-                                    message = "내보내기에 실패했습니다: ${t.message ?: ""}",
+                                    message = "이미지를 내보내지 못했습니다.",
                                 )
                             }
                         } else if (exportJob === exportCoroutine) {

@@ -6,6 +6,71 @@ import android.os.Build
 import android.provider.MediaStore
 import java.util.concurrent.atomic.AtomicLong
 
+/** The only persistence boundary used by [SavedExportHistoryStore]. */
+internal interface SavedExportHistoryPersistence {
+    fun readSavedHistoryRaw(): String?
+    fun readSavedHistoryInitialized(): Boolean
+    fun writeSavedHistory(raw: String)
+    fun clearSavedHistory()
+    fun readRetentionName(): String?
+    fun writeRetentionName(name: String)
+}
+
+/** SharedPreferences implementation of the history persistence boundary. */
+private class SharedPreferencesSavedExportHistoryPersistence(
+    context: Context,
+) : SavedExportHistoryPersistence {
+    private val prefs =
+        context.applicationContext.getSharedPreferences(
+            SavedExportHistoryStore.PREF_NAME,
+            Context.MODE_PRIVATE,
+        )
+
+    override fun readSavedHistoryRaw(): String? =
+        prefs.getString(SavedExportHistoryStore.KEY_SAVED_EXPORTS, null)
+
+    override fun readSavedHistoryInitialized(): Boolean =
+        prefs.getBoolean(SavedExportHistoryStore.KEY_SAVED_EXPORTS_INITIALIZED, false)
+
+    override fun writeSavedHistory(raw: String) {
+        if (
+            !prefs
+                .edit()
+                .putString(SavedExportHistoryStore.KEY_SAVED_EXPORTS, raw)
+                .putBoolean(SavedExportHistoryStore.KEY_SAVED_EXPORTS_INITIALIZED, true)
+                .commit()
+        ) {
+            error("failed to persist saved export history")
+        }
+    }
+
+    override fun clearSavedHistory() {
+        if (
+            !prefs
+                .edit()
+                .putString(SavedExportHistoryStore.KEY_SAVED_EXPORTS, "")
+                .putBoolean(SavedExportHistoryStore.KEY_SAVED_EXPORTS_INITIALIZED, true)
+                .commit()
+        ) {
+            error("failed to clear saved export history")
+        }
+    }
+
+    override fun readRetentionName(): String? =
+        prefs.getString(SavedExportHistoryStore.KEY_EXPORT_HISTORY_RETENTION, null)
+
+    override fun writeRetentionName(name: String) {
+        if (
+            !prefs
+                .edit()
+                .putString(SavedExportHistoryStore.KEY_EXPORT_HISTORY_RETENTION, name)
+                .commit()
+        ) {
+            error("failed to persist export history retention")
+        }
+    }
+}
+
 /**
  * Exception thrown when saved-export history persistence fails after a
  * published image. Carrying the original cause lets the UI report a truthful
@@ -42,20 +107,21 @@ internal data class SavedExportHistoryMutation(
  * The store deliberately does NOT delete MediaStore content. Gallery rows are
  * the publication commit point owned by the export pipeline.
  *
- * Public members are `open` strictly so the production export test seam can
- * inject a thin test fake that observes/fails a single mutation; the merge
- * algorithm itself is never reimplemented in tests.
+ * The persistence adapter is injectable so tests can observe or fail one
+ * exact write without replacing this store's merge algorithm.
  */
-internal open class SavedExportHistoryStore(
+internal class SavedExportHistoryStore(
     context: Context,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val persistence: SavedExportHistoryPersistence =
+        SharedPreferencesSavedExportHistoryPersistence(context),
 ) {
     private val appContext = context.applicationContext
     private val mutationLock = Any()
     private val revisionCounter = AtomicLong(0L)
 
     /** Current global history revision (monotonic across all mutations). */
-    open val revision: Long get() = revisionCounter.get()
+    val revision: Long get() = revisionCounter.get()
 
     /**
      * Records [item] and applies retention, returning the committed list and
@@ -65,7 +131,7 @@ internal open class SavedExportHistoryStore(
      * "newest-first, one per URI" contract. The 60-entry maximum is enforced
      * before retention pruning so retention never expands the list.
      */
-    open fun commit(
+    fun commit(
         item: SavedExport,
         retention: ExportHistoryRetention,
     ): SavedExportHistoryMutation = synchronized(mutationLock) {
@@ -75,7 +141,7 @@ internal open class SavedExportHistoryStore(
             (listOf(item) + previous.filter { it.uriString != item.uriString })
                 .take(MAX_SAVED_EXPORTS)
         val pruned = pruneByRetention(next, retention)
-        requireCommit(pruned)
+        persist(pruned)
         val nextRevision = revisionCounter.incrementAndGet()
         val nextUris = pruned.mapTo(mutableSetOf()) { it.uriString }
         SavedExportHistoryMutation(
@@ -86,9 +152,9 @@ internal open class SavedExportHistoryStore(
     }
 
     /** Clears the saved-export preference; preserves the initialized flag. */
-    open fun clear(): SavedExportHistoryMutation = synchronized(mutationLock) {
+    fun clear(): SavedExportHistoryMutation = synchronized(mutationLock) {
         val current = load()
-        requireClear()
+        persistClear()
         val nextRevision = revisionCounter.incrementAndGet()
         SavedExportHistoryMutation(
             revision = nextRevision,
@@ -98,10 +164,10 @@ internal open class SavedExportHistoryStore(
     }
 
     /** Removes a single URI from the saved-export preference. */
-    open fun remove(uriString: String): SavedExportHistoryMutation = synchronized(mutationLock) {
+    fun remove(uriString: String): SavedExportHistoryMutation = synchronized(mutationLock) {
         val current = load()
         val next = current.filterNot { it.uriString == uriString }
-        requireCommit(next)
+        persist(next)
         val nextRevision = revisionCounter.incrementAndGet()
         val removed = if (next.size != current.size) setOf(uriString) else emptySet()
         SavedExportHistoryMutation(
@@ -116,11 +182,12 @@ internal open class SavedExportHistoryStore(
      * retention setter so a tightened window drops stale entries
      * atomically with a single revision bump.
      */
-    open fun prune(retention: ExportHistoryRetention): SavedExportHistoryMutation =
+    fun prune(retention: ExportHistoryRetention): SavedExportHistoryMutation =
         synchronized(mutationLock) {
             val previous = load()
             val previousUris = previous.mapTo(mutableSetOf()) { it.uriString }
             val pruned = pruneByRetention(previous, retention)
+            persist(pruned)
             val nextRevision = revisionCounter.incrementAndGet()
             val nextUris = pruned.mapTo(mutableSetOf()) { it.uriString }
             SavedExportHistoryMutation(
@@ -132,9 +199,8 @@ internal open class SavedExportHistoryStore(
         }
 
     /** Loads the current committed history from preferences. */
-    open fun load(): List<SavedExport> {
-        val prefs = appContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val raw = prefs.getString(KEY_SAVED_EXPORTS, null) ?: return emptyList()
+    fun load(): List<SavedExport> {
+        val raw = persistence.readSavedHistoryRaw() ?: return emptyList()
         return raw.lines().mapNotNull { decodeSavedExport(it) }
     }
 
@@ -145,11 +211,18 @@ internal open class SavedExportHistoryStore(
      * content. Subsequent startups honor the initialized flag so an
      * intentionally cleared history is not repopulated.
      */
-    open fun loadOrRebuild(retention: ExportHistoryRetention): List<SavedExport> {
-        val prefs = appContext.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+    fun loadOrRebuild(retention: ExportHistoryRetention): List<SavedExport> {
         val initialized =
-            prefs.getBoolean(KEY_SAVED_EXPORTS_INITIALIZED, false) ||
-                prefs.contains(KEY_SAVED_EXPORTS)
+            persistence.readSavedHistoryInitialized() || persistence.readSavedHistoryRaw() != null
+        val seed = if (initialized) load() else rebuildFromMediaStore()
+        val pruned = pruneByRetention(seed, retention)
+        persist(pruned)
+        return pruned
+    }
+
+    private fun loadOrRebuildItems(retention: ExportHistoryRetention): List<SavedExport> {
+        val initialized =
+            persistence.readSavedHistoryInitialized() || persistence.readSavedHistoryRaw() != null
         val seed = if (initialized) load() else rebuildFromMediaStore()
         return pruneByRetention(seed, retention)
     }
@@ -160,12 +233,13 @@ internal open class SavedExportHistoryStore(
      * atomically with the same global-revision arbitration as ordinary
      * mutations.
      */
-    open fun loadOrRebuildWithMutation(
+    fun loadOrRebuildWithMutation(
         retention: ExportHistoryRetention,
     ): SavedExportHistoryMutation = synchronized(mutationLock) {
         val previous = load()
         val previousUris = previous.mapTo(mutableSetOf()) { it.uriString }
-        val next = loadOrRebuild(retention)
+        val next = loadOrRebuildItems(retention)
+        persist(next)
         val nextRevision = revisionCounter.incrementAndGet()
         val nextUris = next.mapTo(mutableSetOf()) { it.uriString }
         SavedExportHistoryMutation(
@@ -177,23 +251,14 @@ internal open class SavedExportHistoryStore(
     }
 
     /** Persists the retention choice. */
-    open fun saveRetention(retention: ExportHistoryRetention) {
-        if (!appContext
-                .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(KEY_EXPORT_HISTORY_RETENTION, retention.name)
-                .commit()
-        ) {
-            error("failed to persist export history retention")
-        }
+    fun saveRetention(retention: ExportHistoryRetention) {
+        persistence.writeRetentionName(retention.name)
     }
 
     /** Loads the persisted retention choice. */
-    open fun loadRetention(): ExportHistoryRetention =
+    fun loadRetention(): ExportHistoryRetention =
         enumValueOrDefault(
-            appContext
-                .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                .getString(KEY_EXPORT_HISTORY_RETENTION, null),
+            persistence.readRetentionName(),
             ExportHistoryRetention.Never,
         )
 
@@ -211,7 +276,7 @@ internal open class SavedExportHistoryStore(
      * The rebuild never deletes gallery content and caps the result at
      * [MAX_SAVED_EXPORTS] entries, newest first.
      */
-    open fun rebuildFromMediaStore(): List<SavedExport> {
+    fun rebuildFromMediaStore(): List<SavedExport> {
         val projection =
             buildList {
                 add(MediaStore.Images.Media._ID)
@@ -286,7 +351,6 @@ internal open class SavedExportHistoryStore(
                         )
                 }
             }
-        if (items.isNotEmpty()) requireCommit(items)
         return items
     }
 
@@ -302,33 +366,28 @@ internal open class SavedExportHistoryStore(
                 val cutoff = clock() - days * 24L * 60L * 60L * 1000L
                 items.filter { it.timestampMillis >= cutoff }
             }
-        requireCommit(pruned)
         return pruned
     }
 
-    private fun requireCommit(items: List<SavedExport>) {
-        check(
-            appContext
-                .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(KEY_SAVED_EXPORTS, items.joinToString("\n") { encodeSavedExport(it) })
-                .putBoolean(KEY_SAVED_EXPORTS_INITIALIZED, true)
-                .commit()
-        ) {
-            "failed to persist saved export history"
+    private fun persist(items: List<SavedExport>) {
+        try {
+            persistence.writeSavedHistory(items.joinToString("\n") { encodeSavedExport(it) })
+        } catch (failure: Throwable) {
+            throw SavedExportHistoryPersistenceException(
+                "failed to persist saved export history",
+                failure,
+            )
         }
     }
 
-    private fun requireClear() {
-        check(
-            appContext
-                .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                .edit()
-                .putString(KEY_SAVED_EXPORTS, "")
-                .putBoolean(KEY_SAVED_EXPORTS_INITIALIZED, true)
-                .commit()
-        ) {
-            "failed to clear saved export history"
+    private fun persistClear() {
+        try {
+            persistence.clearSavedHistory()
+        } catch (failure: Throwable) {
+            throw SavedExportHistoryPersistenceException(
+                "failed to clear saved export history",
+                failure,
+            )
         }
     }
 

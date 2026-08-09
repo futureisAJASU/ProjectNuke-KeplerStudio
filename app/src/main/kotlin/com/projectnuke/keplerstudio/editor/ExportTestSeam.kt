@@ -25,7 +25,6 @@ package com.projectnuke.keplerstudio.editor
  * count must return to zero.
  */
 internal class ExportTestSeam(
-    internal val ownerToken: Any = Any(),
     internal val rowStore: ExportRowStore? = null,
     internal val historyStore: SavedExportHistoryStore? = null,
 ) {

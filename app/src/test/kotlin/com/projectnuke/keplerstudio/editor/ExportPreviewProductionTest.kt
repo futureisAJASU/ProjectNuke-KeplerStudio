@@ -10,7 +10,6 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -63,6 +62,7 @@ class ExportPreviewProductionTest {
         assertEquals(1, rows.inserted.get())
         assertEquals(1, rows.encoded.get())
         assertEquals(1, rows.published.get())
+        assertTrue(checkNotNull(rows.encodedBitmap).isRecycled)
         assertEquals(0, rows.deleted.get())
         assertEquals(1, history.commits.get())
         assertEquals(0, history.clears.get())
@@ -79,20 +79,6 @@ class ExportPreviewProductionTest {
     }
 
     @Test
-    fun exportDiag() = runBlocking {
-        // Reserved hook for ad-hoc inspection during further pipeline work;
-        // performs the real exportPreview() once and asserts success.
-        val rows = RecordingRows()
-        val history = RecordingHistoryStore(context)
-        val editor = editorWithDirtyBase()
-        installSeam(rows, history)
-        editor.exportPreview()
-        awaitCompletion(editor) { editor.uiState.value.savedExports.size == 1 }
-        assertEquals(1, rows.published.get())
-        assertEquals(1, editor.uiState.value.savedExports.size)
-    }
-
-    @Test
     fun encodeFailureLeavesNoPublishAndNoHistory() = runBlocking {
         val rows = RecordingRows().also { it.failEncode = true }
         val history = RecordingHistoryStore(context)
@@ -106,12 +92,13 @@ class ExportPreviewProductionTest {
         assertEquals(1, rows.deleteAttempts.get())
         assertEquals(1, rows.deleted.get())
         assertEquals(0, rows.published.get())
+        assertTrue(checkNotNull(rows.encodedBitmap).isRecycled)
         assertEquals(0, history.commits.get())
         assertEquals(0, editor.uiState.value.savedExports.size)
         assertFalse(editor.uiState.value.isBusy)
         val msg = editor.uiState.value.message
         assertNotNull(msg)
-        assertTrue("$msg", msg!!.startsWith("내보내기에 실패했습니다"))
+        assertEquals("이미지를 내보내지 못했습니다.", msg)
     }
 
     @Test
@@ -137,6 +124,7 @@ class ExportPreviewProductionTest {
         assertEquals(1, rows.deleted.get())
         assertEquals(0, history.commits.get())
         assertEquals(0, editor.uiState.value.savedExports.size)
+        assertTrue(checkNotNull(rows.encodedBitmap).isRecycled)
         assertFalse(editor.uiState.value.isBusy)
     }
 
@@ -186,52 +174,66 @@ class ExportPreviewProductionTest {
     }
 
     @Test
-    fun newerExportPreventsStaleOldCompletionFromSettling() = runBlocking {
-        val oldRows = RecordingRows().also { it.enableEncodingGate() }
-        val oldHistory = RecordingHistoryStore(context)
+    fun secondExportWhileBusyIsIgnored() = runBlocking {
+        val rows = RecordingRows().also { it.enableEncodingGate() }
+        val history = RecordingHistoryStore(context)
         val editor = editorWithDirtyBase()
-        installSeam(oldRows, oldHistory)
+        installSeam(rows, history)
         editor.exportPreview()
-        awaitMainUntil { oldRows.encodeStarted.isCompleted }
+        awaitMainUntil { rows.encodeStarted.isCompleted }
 
-        val newerRows = RecordingRows()
-        val newerHistory = RecordingHistoryStore(context)
-        replaceSeam(newerRows, newerHistory)
-
-        // Launching the newer export bumps the export token (and cancels the
-        // old export job) via invalidateExport(), so the old identity is no
-        // longer current and its pending row must be cleaned up.
         editor.exportPreview()
-        awaitCompletion(editor) { editor.uiState.value.savedExports.size == 1 }
 
-        assertEquals(1, newerRows.published.get())
-        assertEquals(1, newerHistory.commits.get())
-        assertEquals(1, editor.uiState.value.savedExports.size)
+        assertEquals(1, rows.inserted.get())
+        assertEquals(0, rows.encoded.get())
+        assertEquals(0, rows.published.get())
+        assertTrue(editor.uiState.value.isBusy)
 
-        // Release the old completion; it became stale before its commit.
-        oldRows.releaseEncoding()
-        awaitCompletion(editor) { true }
+        rows.releaseEncoding()
+        awaitCompletion(editor) { !editor.uiState.value.isBusy }
 
-        assertEquals(1, oldRows.inserted.get())
-        assertEquals(0, oldRows.published.get())
-        assertEquals(1, oldRows.deleted.get())
-        assertEquals(0, oldHistory.commits.get())
-        assertEquals(1, editor.uiState.value.savedExports.size)
+        assertEquals(1, rows.encoded.get())
+        assertEquals(1, rows.published.get())
+        assertEquals(1, history.commits.get())
         assertFalse(editor.uiState.value.isBusy)
-        assertNull(oldRows.lastPublishedUri)
+    }
+
+    @Test
+    fun exportCapturesSeamBeforeChildStarts() = runBlocking {
+        val firstRows = RecordingRows().also { it.enableEncodingGate() }
+        val firstHistory = RecordingHistoryStore(context)
+        val secondRows = RecordingRows()
+        val secondHistory = RecordingHistoryStore(context)
+        val editor = editorWithDirtyBase()
+        installSeam(firstRows, firstHistory)
+
+        editor.exportPreview()
+        replaceSeam(secondRows, secondHistory)
+        awaitMainUntil {
+            firstRows.encodeStarted.isCompleted || secondRows.encodeStarted.isCompleted
+        }
+
+        assertTrue(firstRows.encodeStarted.isCompleted)
+        assertFalse(secondRows.encodeStarted.isCompleted)
+        firstRows.releaseEncoding()
+        awaitCompletion(editor) { !editor.uiState.value.isBusy }
+        assertEquals(1, firstRows.published.get())
+        assertEquals(1, firstHistory.commits.get())
+        assertEquals(0, secondRows.inserted.get())
+        assertEquals(0, secondHistory.commits.get())
     }
 
     /**
      * Installs (or replaces) the production export seam with [rows] and
      * [history]; single-installation is enforced by the seam registry.
      */
-    private fun installSeam(rows: ExportRowStore, history: SavedExportHistoryStore) {
-        val seam = ExportTestSeam(rowStore = rows, historyStore = history)
+    private fun installSeam(rows: ExportRowStore, history: RecordingHistoryStore) {
+        val seam = ExportTestSeam(rowStore = rows, historyStore = history.store)
         seamHandles += harness.ownSeam(ExportTestSeam.install(seam))
     }
 
     /** Closes the most recent seam then installs a fresh one. */
-    private fun replaceSeam(rows: ExportRowStore, history: SavedExportHistoryStore) {
+    private fun replaceSeam(rows: ExportRowStore, history: RecordingHistoryStore) {
         seamHandles.removeLast()?.close()
         installSeam(rows, history)
     }
@@ -321,6 +323,7 @@ private class RecordingRows : ExportRowStore {
     @Volatile var failEncode = false
     @Volatile var failPublish = false
     @Volatile var failDelete = false
+    var encodedBitmap: Bitmap? = null
     var lastPublishedUri: Uri? = null
 
     fun enableEncodingGate() {
@@ -340,6 +343,7 @@ private class RecordingRows : ExportRowStore {
     override suspend fun encode(uri: Uri, bitmap: Bitmap, format: ExportFormat) {
         encodeStarted.complete(Unit)
         gate?.await()
+        encodedBitmap = bitmap
         if (failEncode) error("encode")
         encoded.incrementAndGet()
     }
@@ -357,56 +361,48 @@ private class RecordingRows : ExportRowStore {
     }
 }
 
-/**
- * Counts commits and clears and can be made to fail the next commit, while
- * delegating persistence to a real [SavedExportHistoryStore] backed by the
- * test application prefs. This lets production tests assert history
- * persistence without reimplementing the merge algorithm themselves.
- */
+/** Wraps the real store and exposes only persistence observations to tests. */
 private class RecordingHistoryStore(
     context: android.content.Context,
-) : SavedExportHistoryStore(context) {
-    private val deps = SavedExportHistoryStore(context.applicationContext)
-    val commits = AtomicInteger()
-    val clears = AtomicInteger()
-    @Volatile var failCommit = false
+) {
+    val persistence = RecordingHistoryPersistence()
+    val store = SavedExportHistoryStore(context, persistence = persistence)
+    val commits: AtomicInteger
+        get() = persistence.historyWrites
+    val clears: AtomicInteger
+        get() = persistence.historyClears
+    var failCommit: Boolean
+        get() = persistence.failWrites
+        set(value) {
+            persistence.failWrites = value
+        }
+}
 
-    override fun commit(
-        item: SavedExport,
-        retention: ExportHistoryRetention,
-    ): SavedExportHistoryMutation {
-        commits.incrementAndGet()
-        if (failCommit) throw RuntimeException("history write")
-        return deps.commit(item, retention)
+private class RecordingHistoryPersistence : SavedExportHistoryPersistence {
+    private var raw: String? = ""
+    private var initialized = true
+    val historyWrites = AtomicInteger()
+    val historyClears = AtomicInteger()
+    @Volatile var failWrites = false
+
+    override fun readSavedHistoryRaw(): String? = raw
+
+    override fun readSavedHistoryInitialized(): Boolean = initialized
+
+    override fun writeSavedHistory(raw: String) {
+        historyWrites.incrementAndGet()
+        if (failWrites) error("history write")
+        this.raw = raw
+        initialized = true
     }
 
-    override fun clear(): SavedExportHistoryMutation {
-        clears.incrementAndGet()
-        return deps.clear()
+    override fun clearSavedHistory() {
+        historyClears.incrementAndGet()
+        this.raw = ""
+        initialized = true
     }
 
-    override fun remove(uriString: String): SavedExportHistoryMutation = deps.remove(uriString)
+    override fun readRetentionName(): String? = ExportHistoryRetention.Never.name
 
-    override fun load(): List<SavedExport> = deps.load()
-
-    override fun loadOrRebuild(retention: ExportHistoryRetention): List<SavedExport> =
-        deps.loadOrRebuild(retention)
-
-    override fun loadOrRebuildWithMutation(
-        retention: ExportHistoryRetention,
-    ): SavedExportHistoryMutation = deps.loadOrRebuildWithMutation(retention)
-
-    override fun saveRetention(retention: ExportHistoryRetention) {
-        deps.saveRetention(retention)
-    }
-
-    override fun loadRetention(): ExportHistoryRetention = deps.loadRetention()
-
-    override fun rebuildFromMediaStore(): List<SavedExport> = deps.rebuildFromMediaStore()
-
-    override fun prune(retention: ExportHistoryRetention): SavedExportHistoryMutation =
-        deps.prune(retention)
-
-    override val revision: Long
-        get() = deps.revision
+    override fun writeRetentionName(name: String) = Unit
 }

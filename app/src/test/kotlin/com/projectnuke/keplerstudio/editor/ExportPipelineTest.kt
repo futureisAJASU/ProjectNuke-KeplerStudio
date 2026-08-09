@@ -4,7 +4,9 @@ import android.graphics.Bitmap
 import android.net.Uri
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runCurrent
@@ -92,6 +94,41 @@ class ExportPipelineTest {
     }
 
     @Test
+    fun cancellationCleanupDebtIsSuppressedOnOriginalCancellation() = runTest {
+        val rows = FakeRows().also {
+            it.encodeGate = CompletableDeferred()
+            it.failDelete = true
+        }
+        var reportedCleanupFailure: Throwable? = null
+        val deferred =
+            async {
+                executeExportPipeline(
+                    request("cancel-debt"),
+                    rows,
+                    isCurrent = { true },
+                    render = { bitmap() },
+                    persistMetadata = { _, _, _ -> Unit },
+                    onCancellationCleanupFailure = { reportedCleanupFailure = it },
+                )
+            }
+        rows.encodeStarted.await()
+
+        val original = CancellationException("test cancellation")
+        deferred.cancel(original)
+        val thrown =
+            try {
+                deferred.await()
+                error("cancellation must propagate")
+            } catch (failure: CancellationException) {
+                failure
+            }
+
+        assertTrue(reportedCleanupFailure is IllegalStateException)
+        assertEquals(2, rows.deleteAttempts.get())
+        assertEquals(0, rows.published.get())
+    }
+
+    @Test
     fun renderFailureNeverCreatesPendingRow() = runTest {
         val rows = FakeRows()
 
@@ -126,6 +163,56 @@ class ExportPipelineTest {
         assertEquals(1, rows.deleted.get())
         assertEquals(0, rows.published.get())
         assertTrue(rendered.isRecycled)
+    }
+
+    @Test
+    fun cleanupFailureIsReturnedAfterExactlyTwoDeleteAttempts() = runTest {
+        val rows = FakeRows().also {
+            it.failEncode = true
+            it.deleteFailuresRemaining = 2
+        }
+        val rendered = bitmap()
+        val metadataCalls = AtomicInteger()
+
+        val result =
+            executeExportPipeline(
+                request(),
+                rows,
+                isCurrent = { true },
+                render = { rendered },
+                persistMetadata = { _, _, _ -> metadataCalls.incrementAndGet() },
+            )
+
+        assertTrue(result is ExportPipelineResult.CleanupFailed)
+        val cleanup = result as ExportPipelineResult.CleanupFailed
+        assertEquals(Uri.parse("content://exports/export.png"), cleanup.uri)
+        assertTrue(cleanup.cleanupFailure is IllegalStateException)
+        assertEquals(2, rows.deleteAttempts.get())
+        assertEquals(0, rows.published.get())
+        assertEquals(0, metadataCalls.get())
+        assertTrue(rendered.isRecycled)
+    }
+
+    @Test
+    fun cleanupFailureRecoveryPreservesOriginalFailedResult() = runTest {
+        val rows = FakeRows().also {
+            it.failEncode = true
+            it.deleteFailuresRemaining = 1
+        }
+
+        val result =
+            executeExportPipeline(
+                request(),
+                rows,
+                isCurrent = { true },
+                render = { bitmap() },
+                persistMetadata = { _, _, _ -> Unit },
+            )
+
+        assertTrue(result is ExportPipelineResult.Failed)
+        assertEquals(2, rows.deleteAttempts.get())
+        assertEquals(1, rows.deleted.get())
+        assertEquals(0, rows.published.get())
     }
 
     @Test
@@ -286,6 +373,7 @@ class ExportPipelineTest {
         var failEncode = false
         var failPublish = false
         var failDelete = false
+        var deleteFailuresRemaining = 0
         var afterEncode: () -> Unit = {}
 
         override suspend fun insertPending(request: ExportRowRequest): Uri {
@@ -310,7 +398,10 @@ class ExportPipelineTest {
 
         override suspend fun delete(uri: Uri) {
             deleteAttempts.incrementAndGet()
-            if (failDelete) error("delete")
+            if (failDelete || deleteFailuresRemaining > 0) {
+                if (deleteFailuresRemaining > 0) deleteFailuresRemaining--
+                error("delete")
+            }
             deleted.incrementAndGet()
         }
     }

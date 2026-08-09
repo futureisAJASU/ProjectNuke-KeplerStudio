@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import android.graphics.Bitmap
 import android.net.Uri
+import android.util.Log
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -153,11 +154,15 @@ internal suspend fun <T> executeExportPipeline(
     isCurrent: () -> Boolean,
     render: suspend () -> Bitmap?,
     persistMetadata: suspend (uri: Uri, width: Int, height: Int) -> T,
+    onCancellationCleanupFailure: (Throwable) -> Unit = { failure ->
+        Log.e("KeplerStudio.Export", "cancelled export cleanup failed", failure)
+    },
 ): ExportPipelineResult<T> {
     var rendered: Bitmap? = null
     val transaction = ExportRowTransaction(rows)
     var intended: ExportPipelineResult<T> = ExportPipelineResult.Stale
     var cancelled = false
+    var cancellationCause: CancellationException? = null
     try {
         coroutineContext.ensureActive()
         if (!isCurrent()) return ExportPipelineResult.Stale.also { intended = it }
@@ -203,6 +208,7 @@ internal suspend fun <T> executeExportPipeline(
         return published
     } catch (cancellation: CancellationException) {
         cancelled = true
+        cancellationCause = cancellation
         throw cancellation
     } catch (failure: Throwable) {
         intended = ExportPipelineResult.Failed(failure)
@@ -230,10 +236,12 @@ internal suspend fun <T> executeExportPipeline(
         rendered?.takeUnless(Bitmap::isRecycled)?.recycle()
         // Surface an unreadable pending row that could not be removed for a
         // stale or failed (non-cancelled) outcome; never override a published
-        // image and never swallow a CancellationException. On the cancellation
-        // path the deterministic bounded retry above is the only cleanup owner
-        // satisfied here; a persisting cleanup debt on a cancelled export is
-        // surfaced only through logs/diagnostics, never by swallowing cancel.
+        // image and never swallow a CancellationException. Preserve cancelled
+        // cleanup debt on the original exception for structured diagnostics.
+        if (cancelled && cleanupFailure != null) {
+            cancellationCause?.addSuppressed(cleanupFailure)
+            onCancellationCleanupFailure(cleanupFailure)
+        }
         if (pendingUriForReport != null && cleanupFailure != null && !cancelled) {
             when (intended) {
                 is ExportPipelineResult.Stale,
