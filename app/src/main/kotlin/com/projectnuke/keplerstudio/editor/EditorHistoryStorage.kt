@@ -78,6 +78,12 @@ internal data class EditorHistoryEntry(
 
 internal data class HistoryFlags(val canUndo: Boolean, val canRedo: Boolean, val busy: Boolean)
 
+internal sealed interface HistoryCaptureAvailability {
+    data object Ready : HistoryCaptureAvailability
+    data object HistoryBusy : HistoryCaptureAvailability
+    data class MemoryRejected(val requiredBytes: Long) : HistoryCaptureAvailability
+}
+
 internal data class HistoryAdmissionResult(
     val retained: Boolean,
     val movedToStorage: Boolean,
@@ -156,6 +162,7 @@ internal class EditorHistoryCoordinator(
     private var closed = false
     @Volatile private var visibleFlags = HistoryFlags(false, false, true)
     private var idleSignal = CompletableDeferred<Unit>()
+    internal var onFlagsChanged: (() -> Unit)? = null
 
     init {
         val initialGeneration = documentGeneration
@@ -244,7 +251,15 @@ internal class EditorHistoryCoordinator(
     internal fun redoEntryCountForTest(): Int = redo.size
 
     fun canCapture(requiredBytes: Long): Boolean {
-        return !visibleFlags.busy && requiredBytes >= 0L && BitmapMemoryBudget.canAllocate(requiredBytes)
+        return captureAvailability(requiredBytes) is HistoryCaptureAvailability.Ready
+    }
+
+    fun captureAvailability(requiredBytes: Long): HistoryCaptureAvailability {
+        if (visibleFlags.busy) return HistoryCaptureAvailability.HistoryBusy
+        if (requiredBytes < 0L || !BitmapMemoryBudget.canAllocate(requiredBytes)) {
+            return HistoryCaptureAvailability.MemoryRejected(requiredBytes)
+        }
+        return HistoryCaptureAvailability.Ready
     }
 
     suspend fun admitAdoptedSnapshot(
@@ -1028,6 +1043,7 @@ internal class EditorHistoryCoordinator(
 
     private fun publishState() {
         visibleFlags = HistoryFlags(undo.isNotEmpty(), redo.isNotEmpty(), operationBusy)
+        onFlagsChanged?.invoke()
         reportHistoryMetrics()
     }
 

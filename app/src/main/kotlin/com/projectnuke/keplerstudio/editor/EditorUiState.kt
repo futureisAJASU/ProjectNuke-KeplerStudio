@@ -39,6 +39,7 @@ data class EditorUiState(
     val activeQuickEffects: List<ActiveQuickEffect> = emptyList(),
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
+    val historyBusy: Boolean = false,
     val flareGuardRuntimeStatus: String? = null,
     val algorithmContracts: AlgorithmContractSet = AlgorithmContractSet(),
     val baseProvenance: BaseProvenanceChain = BaseProvenanceChain(),

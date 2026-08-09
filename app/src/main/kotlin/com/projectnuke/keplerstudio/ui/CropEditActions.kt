@@ -196,7 +196,7 @@ fun EditorViewModel.resetCropState() {
 fun EditorViewModel.applyCropTransform() {
     if (isShuttingDown()) return
     settleParameterTransactionBeforeExternalEdit()
-    if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+    if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
 
     prepareForExternalEdit()
     val startSnapshot = acquireEditorSnapshot("cropApply") ?: return

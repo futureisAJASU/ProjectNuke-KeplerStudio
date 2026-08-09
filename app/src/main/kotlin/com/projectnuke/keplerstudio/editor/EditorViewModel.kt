@@ -67,7 +67,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.json.JSONObject
+
+private const val HISTORY_BUSY_MESSAGE =
+    "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요."
 
 internal class PendingHistorySnapshot(
     private val deferred: CompletableDeferred<EditorHistorySnapshot?>,
@@ -636,6 +640,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal val tracker: TrackerDiagnostics = DebugMemoryTracker.diagnostics(trackerSession)
     internal val historyCoordinator =
         EditorHistoryCoordinator(app.applicationContext, viewModelScope, trackerSession)
+    private val historyActivity =
+        HistoryActivityRegistry(
+            coordinatorBusy = { historyCoordinator.flags().busy },
+            onChanged = { updateHistoryFlags() },
+        )
+        .also { historyCoordinator.onFlagsChanged = { updateHistoryFlags() } }
     private val uiStateOwnership: UiStateOwnershipReconciler? =
         trackerSession?.let(::UiStateOwnershipReconciler)
     internal val bitmapLeaseLedger = BitmapLeaseLedger()
@@ -645,7 +655,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             layerBudget = { BitmapMemoryBudget.maxSelectionMaskLayers() },
             pinBitmap = { bitmap -> bitmapLeaseLedger.pinBitmap(bitmap) },
         )
-    private var historyIoJob: Job? = null
+    private val historyIoJob: Job?
+        get() = historyActivity.job
+    private data class HistoryNavigationIdentity(
+        val token: Long,
+        val generation: String,
+        val sourcePath: String?,
+        val baseContentToken: String,
+    )
+    private var historyNavigationCounter: Long = 0L
+    private var activeHistoryNavigation: HistoryNavigationIdentity? = null
     private var memoryRecoveryToken: Long = 0L
     private var pendingMemoryRetry: MemoryRetryDescriptor? = null
     private var memoryRecoveryJob: Job? = null
@@ -995,7 +1014,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         managedEdits.clearCompleted()
         draftSaveJob = clearCompleted(draftSaveJob)
         transactionFinishJob = clearCompleted(transactionFinishJob)
-        historyIoJob = clearCompleted(historyIoJob)
+        historyActivity.clearCompleted()
         if (ThumbnailBitmapCache.evictUnleased() > 0L) reclaimedResources = true
         if (RemasterModelSession.unloadIdleNow()) reclaimedResources = true
         if (
@@ -1225,6 +1244,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         !shuttingDown && managedEdits.isCurrent(token) && _uiState.value.revision == revision
 
     /** Changes the persisted default only; the current document is unchanged until explicitly applied. */
+    internal fun canApplyCorrectionEngineForUi(): Boolean {
+        val state = _uiState.value
+        return state.correctionEngineState.previewResultClass != PreviewResultClass.NoDocument &&
+            !state.correctionEngineState.isSwitching &&
+            canEnterEditorActionPure()
+    }
+
     fun setDefaultCorrectionEngine(engine: CorrectionEngine) {
         if (shuttingDown || engine == _uiState.value.correctionEngineState.defaultEngine) return
         correctionEngineSettings.write(engine)
@@ -1240,6 +1266,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             updateUiState { it.copy(message = "브러시 작업이 끝난 뒤 다시 시도해 주세요.") }
             return
         }
+        if (!canEnterEditorActionAfterSettlement()) return
         invalidateSelectionPreview()
         invalidateCropOperation()
         correctionEngineEpoch += 1L
@@ -1918,9 +1945,61 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
+    internal enum class EditorActionAdmission {
+        Ready,
+        HistoryBusy,
+        EditorBusy,
+        Closed,
+    }
+
+    private fun historyActivityBusy(): Boolean = historyActivity.isBusy()
+
+    private fun ownsHistoryNavigation(identity: HistoryNavigationIdentity): Boolean {
+        val state = _uiState.value
+        return !shuttingDown &&
+            activeHistoryNavigation === identity &&
+            currentDocumentGeneration() == identity.generation &&
+            state.sourcePath == identity.sourcePath &&
+            state.baseContentToken == identity.baseContentToken
+    }
+
+    internal fun historyActivityBusyForTest(): Boolean = historyActivityBusy()
+
+    internal fun editorActionAdmissionForTest(
+        allowMaskSupersession: Boolean = false,
+    ): EditorActionAdmission = editorActionAdmission(allowMaskSupersession)
+
+    private fun editorActionAdmission(
+        allowMaskSupersession: Boolean,
+    ): EditorActionAdmission {
+        if (shuttingDown) return EditorActionAdmission.Closed
+        if (historyActivityBusy()) return EditorActionAdmission.HistoryBusy
+        val state = _uiState.value
+        if (!state.isBusy || allowMaskSupersession && isBusyOwnedByMaskSupersedable()) {
+            return EditorActionAdmission.Ready
+        }
+        return EditorActionAdmission.EditorBusy
+    }
+
+    private fun reportHistoryBusyAdmission() {
+        if (_uiState.value.isBusy) return
+        updateUiState { state ->
+            if (state.message == HISTORY_BUSY_MESSAGE) state
+            else state.copy(message = HISTORY_BUSY_MESSAGE)
+        }
+    }
+
+    internal fun canEnterEditorActionAfterSettlement(
+        allowMaskSupersession: Boolean = false,
+    ): Boolean {
+        val admission = editorActionAdmission(allowMaskSupersession)
+        if (admission == EditorActionAdmission.HistoryBusy) reportHistoryBusyAdmission()
+        return admission == EditorActionAdmission.Ready
+    }
+
     internal fun canEnterEditorAction(allowMaskSupersession: Boolean = false): Boolean {
         if (!settleForEditorAction()) return false
-        return canEnterEditorActionPure(allowMaskSupersession)
+        return canEnterEditorActionAfterSettlement(allowMaskSupersession)
     }
 
     /**
@@ -1955,10 +2034,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * [settleForEditorAction] first.
      */
     internal fun canEnterEditorActionPure(allowMaskSupersession: Boolean = false): Boolean {
-        if (shuttingDown) return false
-        if (historyCoordinator.flags().busy) return false
-        val state = _uiState.value
-        return !state.isBusy || allowMaskSupersession && isBusyOwnedByMaskSupersedable()
+        return editorActionAdmission(allowMaskSupersession) == EditorActionAdmission.Ready
     }
 
     private suspend fun invalidateRemovedHistoryThumbnails(
@@ -2167,7 +2243,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun startSelectionParamGesture(): Boolean {
         if (shuttingDown) return false
         prepareForMaskInteraction()
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
+        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return false
         return beginSelectionParamGesture()
     }
 
@@ -2495,8 +2571,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (shuttingDown) return false
         if (brushTransactionState != BrushTransactionState.Idle) return true
         prepareForMaskInteraction()
-        if (historyCoordinator.flags().busy) return false
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return false
+        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return false
         val state = _uiState.value
         val layerId = state.activeSelectionLayerId ?: return false
         val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
@@ -2667,6 +2742,42 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * the state was mutated). Used by [beginBrushStroke] so the rollback target reflects the
      * pre-paint bitmaps. Runs bitmap copies on the calling dispatcher (typically Default).
      */
+    private fun historyCaptureAvailable(requiredBytes: Long): Boolean {
+        if (historyActivityBusy()) {
+            reportHistoryBusyAdmission()
+            return false
+        }
+        return when (val availability = historyCoordinator.captureAvailability(requiredBytes)) {
+            HistoryCaptureAvailability.Ready -> true
+            HistoryCaptureAvailability.HistoryBusy -> {
+                reportHistoryBusyAdmission()
+                false
+            }
+            is HistoryCaptureAvailability.MemoryRejected -> {
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "硫붾え由ш? 遺議깊븯???섎룎由ш린 湲곕줉????ν븯吏 紐삵뻽?듬땲?? ?몄쭛? 怨꾩냽?????덉뒿?덈떎.")
+                }
+                false
+            }
+        }
+    }
+
+    private suspend fun awaitHistoryCaptureAvailability(requiredBytes: Long): Boolean {
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            if (historyActivityBusy()) {
+                yield()
+                continue
+            }
+            when (historyCoordinator.captureAvailability(requiredBytes)) {
+                HistoryCaptureAvailability.Ready -> return true
+                HistoryCaptureAvailability.HistoryBusy -> yield()
+                is HistoryCaptureAvailability.MemoryRejected ->
+                    return historyCaptureAvailable(requiredBytes)
+            }
+        }
+    }
+
     private suspend fun captureHistorySnapshotFromRefs(
         state: EditorUiState,
         previewRef: Bitmap?,
@@ -2687,12 +2798,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 0L
             }
-        if (!historyCoordinator.canCapture(required)) {
-            withContext(Dispatchers.Main) {
-                updateUiStateAndRecycleReplaced {
-                    it.copy(message = "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
-                }
-            }
+        if (!awaitHistoryCaptureAvailability(required)) {
             return null
         }
         val reservations = ArrayList<MaskReservation>(state.selectionLayers.size)
@@ -3264,10 +3370,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             else HistorySnapshotStorage.Exact
         val required =
             if (effectiveStorage == HistorySnapshotStorage.Exact) state.historyBitmapBytes() else 0L
-        if (!historyCoordinator.canCapture(required)) {
-            updateUiStateAndRecycleReplaced {
-                it.copy(message = "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
-            }
+        if (!historyCaptureAvailable(required)) {
             return null
         }
         return runCatching {
@@ -3313,27 +3416,38 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val reserve = _uiState.value.historyBitmapBytes()
         val started = java.util.concurrent.atomic.AtomicBoolean(false)
+        val historyPublishSeam = HistoryAdmissionTestSeam.capture()
         snapshot.claimCoordinatorOwnership()
         val job =
-            viewModelScope.launch {
+            viewModelScope.launch(start = CoroutineStart.LAZY) {
                 started.set(true)
-                val result = historyCoordinator.admitAdoptedSnapshot(snapshot, clearRedo, reserve)
-                if (historyIoJob === currentCoroutineContext()[Job]) historyIoJob = null
-                updateHistoryFlags()
+                try {
+                    historyPublishSeam?.awaitBeforeCoordinatorAdmission()
+                    val result = historyCoordinator.admitAdoptedSnapshot(snapshot, clearRedo, reserve)
                 if (!result.retained) {
                     updateUiStateAndRecycleReplaced {
                         it.copy(message = "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다.")
                     }
                 } else if (result.movedToStorage) {
                     updateUiStateAndRecycleReplaced { it.copy(message = "오래된 편집 기록을 저장소로 옮겼습니다.") }
+                    }
+                } catch (cancelled: CancellationException) {
+                    if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
+                    throw failure
                 }
             }
-        historyIoJob = job
         job.invokeOnCompletion {
-            if (!started.get()) snapshot.recycleBitmaps()
-            if (historyIoJob === job) historyIoJob = null
+            if (!started.get() && !snapshot.resourcesReleased) snapshot.recycleBitmaps()
         }
-        if (job.isCompleted && historyIoJob === job) historyIoJob = null
+        if (!historyActivity.register(job)) {
+            job.cancel()
+            if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
+            return false
+        }
+        job.start()
         return true
     }
 
@@ -3841,7 +3955,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun updateParams(transform: (EditParams) -> EditParams) {
         if (shuttingDown) return
         prepareForGlobalParamEdit()
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+        val parameterAdmission = editorActionAdmission(allowMaskSupersession = true)
+        if (
+            parameterAdmission != EditorActionAdmission.Ready &&
+                !(parameterAdmission == EditorActionAdmission.HistoryBusy && parameterGesture != null)
+        ) {
+            if (parameterAdmission == EditorActionAdmission.HistoryBusy) reportHistoryBusyAdmission()
+            return
+        }
         val next = transform(_uiState.value.params)
         if (next == _uiState.value.params) return
         val transaction =
@@ -4033,7 +4154,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun applyAutoEnhance() {
         if (shuttingDown) return
         prepareForExternalEdit()
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
@@ -4189,7 +4310,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     ) {
         if (isShuttingDown()) return
         val current = prepareForExternalEdit()
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
         val nextEngines =
             EngineSelection(
                     noiseEngine = noiseEngine ?: current.noiseEngine,
@@ -4345,7 +4466,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     fun resetAdjustments() {
         if (isShuttingDown()) return
         prepareForExternalEdit()
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
         val startSnapshot = acquireEditorSnapshot("resetAdjustments") ?: return
         val current = startSnapshot.state
         val sourcePath = current.sourcePath
@@ -4482,7 +4603,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     ): PresetApplyResult {
         if (isShuttingDown()) return PresetApplyResult.Rejected
         val current = prepareForExternalEdit()
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable())
+        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true))
             return PresetApplyResult.Rejected
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
@@ -5580,12 +5701,6 @@ fun exportPreview() {
 
     private fun navigateHistory(undo: Boolean, expectedTargetId: String? = null) {
         if (!canEnterEditorAction()) return
-        if (historyCoordinator.flags().busy || historyIoJob?.isActive == true) {
-            updateUiStateAndRecycleReplaced {
-                it.copy(message = "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요.")
-            }
-            return
-        }
         invalidateSelectionPreview()
         abortPendingParameterEdit()
         invalidateCropOperation()
@@ -5598,6 +5713,15 @@ fun exportPreview() {
         }
         renderJob?.cancel()
         invalidateExport()
+        val historyNavigationSeam = HistoryNavigationTestSeam.capture()
+        val navigationIdentity =
+            HistoryNavigationIdentity(
+                token = ++historyNavigationCounter,
+                generation = currentDocumentGeneration(),
+                sourcePath = _uiState.value.sourcePath,
+                baseContentToken = _uiState.value.baseContentToken,
+            )
+        activeHistoryNavigation = navigationIdentity
         updateUiStateAndRecycleReplaced {
             it.copy(isBusy = true, message = "저장된 편집 기록을 불러오는 중입니다.")
         }
@@ -5608,8 +5732,9 @@ fun exportPreview() {
                 transientReserveBytes = _uiState.value.historyBitmapBytes(),
             )
         val navJob =
-            viewModelScope.launch {
+            viewModelScope.launch(start = CoroutineStart.LAZY) {
                 try {
+                    historyNavigationSeam?.awaitBeforeCoordinatorNavigation()
                     val result =
                         historyCoordinator.navigate(
                             undoDirection = undo,
@@ -5641,6 +5766,7 @@ fun exportPreview() {
                                 )
                             },
                         )
+                    if (!ownsHistoryNavigation(navigationIdentity)) return@launch
                     when (result) {
                         is HistoryNavigationResult.Adopted -> {
                             scheduleDraftAutosave()
@@ -5689,10 +5815,12 @@ fun exportPreview() {
                             }
                     }
                 } catch (ce: CancellationException) {
-                    if (!shuttingDown) updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
+                    if (ownsHistoryNavigation(navigationIdentity)) {
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
+                    }
                     throw ce
                 } catch (_: Throwable) {
-                    if (!shuttingDown)
+                    if (ownsHistoryNavigation(navigationIdentity))
                         updateUiStateAndRecycleReplaced {
                             it.copy(
                                 isBusy = false,
@@ -5700,30 +5828,38 @@ fun exportPreview() {
                             )
                         }
                 } finally {
-                    if (historyIoJob === currentCoroutineContext()[Job]) historyIoJob = null
+                    if (activeHistoryNavigation === navigationIdentity) activeHistoryNavigation = null
                     updateHistoryFlags()
                     navTracker?.end()
                 }
             }
-        historyIoJob = navJob
-        navJob.invokeOnCompletion {
+        if (historyActivity.register(navJob)) {
+            navJob.start()
+        } else {
+            navJob.cancel()
             navTracker?.end()
-            if (historyIoJob === navJob) historyIoJob = null
+            if (activeHistoryNavigation === navigationIdentity) {
+                activeHistoryNavigation = null
+                updateUiState { it.copy(isBusy = false) }
+            }
         }
-        if (navJob.isCompleted && historyIoJob === navJob) historyIoJob = null
     }
 
     internal fun clearRedoAfterAdoptedEdit() {
         if (shuttingDown) return
         val job =
-            viewModelScope.launch {
-                historyCoordinator.clearRedoAfterAdoptedEdit()
-                if (historyIoJob === currentCoroutineContext()[Job]) historyIoJob = null
-                updateHistoryFlags()
+            viewModelScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    historyCoordinator.clearRedoAfterAdoptedEdit()
+                } finally {
+                    updateHistoryFlags()
+                }
             }
-        historyIoJob = job
-        job.invokeOnCompletion { if (historyIoJob === job) historyIoJob = null }
-        if (job.isCompleted && historyIoJob === job) historyIoJob = null
+        if (historyActivity.register(job)) {
+            job.start()
+        } else {
+            job.cancel()
+        }
     }
 
     internal fun settleAdoptedEditHistory(snapshot: EditorHistorySnapshot?): Boolean {
@@ -5741,12 +5877,21 @@ fun exportPreview() {
 
     fun rotatePreview90() {
         if (shuttingDown) return
+        val settlement = settleParameterTransactionBeforeExternalEdit()
+        if (settlement is SettlementResult.Committed && historyActivityBusy()) {
+            val settledHistoryJob = historyIoJob
+            viewModelScope.launch {
+                settledHistoryJob?.join()
+                while (!shuttingDown && historyActivityBusy()) yield()
+                if (!shuttingDown) rotatePreview90Async()
+            }
+            return
+        }
         rotatePreview90Async()
     }
 
     private fun rotatePreview90Async() {
-        settleParameterTransactionBeforeExternalEdit()
-        if (uiState.value.isBusy) return
+        if (!canEnterEditorActionAfterSettlement()) return
         invalidateSelectionPreview()
         invalidateManagedEdits()
         renderJob?.cancel()
@@ -5759,94 +5904,122 @@ fun exportPreview() {
             updateUiState { it.copy(message = "\uD68C\uC804\uD560 \uC774\uBBF8\uC9C0\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4.") }
             return
         }
-        val pendingHistory = prepareHistorySnapshot("rotatePreview90", start)
-        updateUiState { it.copy(isBusy = true) }
-        viewModelScope.launch(Dispatchers.Default) {
-            var before: EditorHistorySnapshot? = null
-            var rotatedPreview: Bitmap? = null
-            var rotatedOriginal: Bitmap? = null
-            val rotatedMasks = ArrayList<Bitmap>(start.selectionLayers.size)
-            try {
-                before = pendingHistory.await()
-                rotatedPreview = rotateBitmap90(preview)
-                rotatedOriginal = when {
-                    start.originalPreviewBitmap == null -> null
-                    start.originalPreviewBitmap === preview -> rotatedPreview
-                    else -> rotateBitmap90(start.originalPreviewBitmap)
-                }
-                start.selectionLayers.forEach { rotatedMasks += rotateBitmap90(it.bitmap) }
-                val nextCrop =
-                    state.cropState.copy(
-                        cropLeft = 1f - state.cropState.cropBottom,
-                        cropTop = state.cropState.cropLeft,
-                        cropRight = 1f - state.cropState.cropTop,
-                        cropBottom = state.cropState.cropRight,
-                        aspectRatio = state.cropState.aspectRatio.rotatedForQuarterTurn(),
-                        rotationDegrees = state.cropState.rotationDegrees,
-                    ).normalized()
-                withContext(Dispatchers.Main) {
-                    val current = uiState.value
-                    val currentIdentity =
-                        !shuttingDown &&
+        var pendingHistory: PendingHistorySnapshot? = prepareHistorySnapshot("rotatePreview90", start)
+        val nextRevision = state.revision + 1
+        val rotationSeam = RotationTestSeam.capture()
+        var operationToken: Long? = null
+        var rotatedPreview: Bitmap? = null
+        var rotatedOriginal: Bitmap? = null
+        val rotatedMasks = ArrayList<Bitmap>(start.selectionLayers.size)
+        fun releaseRotated() {
+            val cleanup = Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
+            rotatedPreview?.let(cleanup::add)
+            rotatedOriginal?.let(cleanup::add)
+            rotatedMasks.forEach(cleanup::add)
+            cleanup.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
+            rotatedPreview = null
+            rotatedOriginal = null
+            rotatedMasks.clear()
+        }
+        updateUiState { it.copy(isBusy = true, revision = nextRevision) }
+        launchManagedEditWithPreparedResources(
+            { token ->
+                operationToken = token
+                var before: EditorHistorySnapshot? = null
+                try {
+                    before = pendingHistory?.await()
+                    pendingHistory = null
+                    rotatedPreview = rotateBitmap90(preview)
+                    rotatedOriginal = when {
+                        start.originalPreviewBitmap == null -> null
+                        start.originalPreviewBitmap === preview -> rotatedPreview
+                        else -> rotateBitmap90(start.originalPreviewBitmap)
+                    }
+                    start.selectionLayers.forEach { rotatedMasks += rotateBitmap90(it.bitmap) }
+                    val nextCrop =
+                        state.cropState.copy(
+                            cropLeft = 1f - state.cropState.cropBottom,
+                            cropTop = state.cropState.cropLeft,
+                            cropRight = 1f - state.cropState.cropTop,
+                            cropBottom = state.cropState.cropRight,
+                            aspectRatio = state.cropState.aspectRatio.rotatedForQuarterTurn(),
+                            rotationDegrees = state.cropState.rotationDegrees,
+                        ).normalized()
+                    rotationSeam?.awaitBeforeAdoption()
+                    withContext(Dispatchers.Main) {
+                        val current = uiState.value
+                        val currentIdentity =
                             current.sourcePath == start.identity.sourcePath &&
-                            current.baseContentToken == start.identity.baseContentToken &&
-                            current.revision == start.identity.revision &&
-                            currentDocumentGeneration() == start.identity.generation
-                    if (currentIdentity && before != null) {
-                        val nextPreview = checkNotNull(rotatedPreview)
-                        val nextOriginal = rotatedOriginal
-                        val nextMasks = rotatedMasks.toList()
-                        updateUiStateAndRecycleReplaced { live ->
-                            live.copy(
-                                previewBitmap = nextPreview,
-                                originalPreviewBitmap = nextOriginal,
-                                selectionLayers =
-                                    live.selectionLayers.mapIndexed { index, layer ->
-                                        layer.copy(bitmap = nextMasks[index])
-                                    },
-                                cropState = nextCrop,
-                                baseBitmapDirty = true,
-                                baseContentToken = newBaseContentToken(),
-                                revision = live.revision + 1,
+                                current.baseContentToken == start.identity.baseContentToken &&
+                                currentDocumentGeneration() == start.identity.generation
+                        if (isManagedEditCurrent(token, nextRevision) && currentIdentity && before != null) {
+                            val nextPreview = checkNotNull(rotatedPreview)
+                            val nextOriginal = rotatedOriginal
+                            val nextMasks = rotatedMasks.toList()
+                            updateUiStateAndRecycleReplaced { live ->
+                                live.copy(
+                                    previewBitmap = nextPreview,
+                                    originalPreviewBitmap = nextOriginal,
+                                    selectionLayers =
+                                        live.selectionLayers.mapIndexed { index, layer ->
+                                            layer.copy(bitmap = nextMasks[index])
+                                        },
+                                    cropState = nextCrop,
+                                    baseBitmapDirty = true,
+                                    baseContentToken = newBaseContentToken(),
+                                    isBusy = false,
+                                    message = "\uBBF8\uB9AC\uBDF0\uC744 90\uB3C4 \uD68C\uC804\uD588\uC2B5\uB2C8\uB2E4.",
+                                )
+                            }
+                            releaseRotated()
+                            val retained = before
+                            before = null
+                            settleAdoptedEditHistory(retained)
+                            forceDraftSaveAsync()
+                        } else if (isManagedEditTokenCurrent(token)) {
+                            updateUiState { it.copy(isBusy = false) }
+                        }
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    if (isManagedEditTokenCurrent(token)) {
+                        updateUiState {
+                            it.copy(
                                 isBusy = false,
-                                message = "\uBBF8\uB9AC\uBDF0\uC744 90\uB3C4 \uD68C\uC804\uD588\uC2B5\uB2C8\uB2E4.",
+                                message = "\uBBF8\uB9AC\uBDF0 \uD68C\uC804\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.",
                             )
                         }
-                        rotatedPreview = null
-                        rotatedOriginal = null
-                        rotatedMasks.clear()
-                        val retained = before
-                        before = null
-                        settleAdoptedEditHistory(retained)
-                        forceDraftSaveAsync()
-                    } else if (current.sourcePath == start.identity.sourcePath &&
-                        current.baseContentToken == start.identity.baseContentToken) {
-                        updateUiState { it.copy(isBusy = false) }
-                    }
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (failure: Throwable) {
-                withContext(Dispatchers.Main) {
-                    if (uiState.value.sourcePath == start.identity.sourcePath &&
-                        uiState.value.baseContentToken == start.identity.baseContentToken) {
-                        updateUiState { it.copy(isBusy = false, message = "\uBBF8\uB9AC\uBDF0 \uD68C\uC804\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4.") }
                         if (failure is BitmapAllocationRejectedException) {
                             requestAllocationRecovery(MemoryRetryAction.RotatePreview, failure.requiredBytes)
                         }
                     }
+                } finally {
+                    before?.let(::recycleHistorySnapshot)
+                    pendingHistory?.close()
+                    pendingHistory = null
+                    releaseRotated()
+                    start.close()
                 }
-            } finally {
-                before?.let(::recycleHistorySnapshot)
-                pendingHistory.close()
-                val cleanup = Collections.newSetFromMap(IdentityHashMap<Bitmap, Boolean>())
-                rotatedPreview?.let(cleanup::add)
-                rotatedOriginal?.let(cleanup::add)
-                rotatedMasks.forEach(cleanup::add)
-                cleanup.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
-                start.close()
-            }
-        }
+            },
+            PreparedResourceHandoff.create(
+                "rotatePreview90",
+                {
+                    pendingHistory?.close()
+                    pendingHistory = null
+                    releaseRotated()
+                    start.close()
+                },
+                { start.close() },
+                {},
+                {
+                    val token = operationToken
+                    if (token != null && isManagedEditTokenCurrent(token)) {
+                        updateUiState { it.copy(isBusy = false) }
+                    }
+                },
+            ),
+        )
     }
 
     fun applySpotCleanup() {
@@ -5900,7 +6073,7 @@ fun exportPreview() {
     ) {
         if (isShuttingDown()) return
         prepareForExternalEdit()
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) return
+        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) return
         val startSnapshot = acquireEditorSnapshot("nativeSpecialEffects") ?: return
         val current = startSnapshot.state
         val baseOriginal = startSnapshot.originalPreviewBitmap ?: startSnapshot.previewBitmap
@@ -6052,7 +6225,7 @@ fun exportPreview() {
     fun applyFlareGuardAiOrRulePreview(context: Context, mode: FlareGuardMode) {
         if (shuttingDown) return
         settleParameterTransactionBeforeExternalEdit()
-        if (uiState.value.isBusy && !isBusyOwnedByMaskSupersedable()) {
+        if (!canEnterEditorActionAfterSettlement(allowMaskSupersession = true)) {
             return
         }
         prepareForExternalEdit()
@@ -7567,7 +7740,11 @@ fun exportPreview() {
     private fun updateHistoryFlags() {
         val flags = historyCoordinator.flags()
         updateUiStateAndRecycleReplaced {
-            it.copy(canUndo = flags.canUndo, canRedo = flags.canRedo)
+            it.copy(
+                canUndo = flags.canUndo,
+                canRedo = flags.canRedo,
+                historyBusy = historyActivity.isBusy(),
+            )
         }
     }
 
@@ -7575,8 +7752,9 @@ fun exportPreview() {
         automaticRetryAttempt = null
         strongRetryAttempt = null
         pendingMemoryRetry = null
-        historyIoJob?.cancel()
-        historyIoJob = null
+        activeHistoryNavigation = null
+        historyNavigationCounter += 1L
+        historyActivity.cancel()
         discardPendingParamUndoSnapshot()
         historyCoordinator.replaceDocument()
         tracker.activateDocument(
@@ -7617,6 +7795,8 @@ fun exportPreview() {
         // cancels owned jobs, and releases memory/history ownership. It does not
         // claim that filesystem persistence can be completed here.
         shuttingDown = true
+        activeHistoryNavigation = null
+        historyNavigationCounter += 1L
         settleParameterTransaction(SettlementReason.Shutdown)
         brushSnapshotJob?.cancel()
         brushSettlementJob?.cancel()
@@ -7659,7 +7839,7 @@ fun exportPreview() {
         // The model session is process-global but editor-owned; ensure editor teardown
         // invalidates its command generation and settles the registry out of Ready.
         RemasterModelSession.unload()
-        historyIoJob?.cancel()
+        historyActivity.cancel()
         discardPendingParamUndoSnapshot()
         historyCoordinator.close()
         uiStateOwnership?.releaseAll()

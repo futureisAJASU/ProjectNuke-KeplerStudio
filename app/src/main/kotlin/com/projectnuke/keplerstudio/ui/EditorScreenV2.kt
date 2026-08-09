@@ -326,6 +326,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         toneEngine = state.toneEngine,
                         hazeEngine = state.hazeEngine,
                         correctionEngineState = state.correctionEngineState,
+                        documentActionAvailable = viewModel.canApplyCorrectionEngineForUi(),
                         maintenanceBusy = state.maintenanceBusy,
                         comparisonBusy = state.comparisonBusy,
                         onRetentionSelected = viewModel::setExportHistoryRetention,
@@ -1228,6 +1229,7 @@ internal fun V2SettingsScreen(
     toneEngine: ToneEngine,
     hazeEngine: DehazeEngine,
     correctionEngineState: CorrectionEngineState,
+    documentActionAvailable: Boolean,
     maintenanceBusy: Boolean,
     comparisonBusy: Boolean,
     onRetentionSelected: (ExportHistoryRetention) -> Unit,
@@ -1323,7 +1325,7 @@ internal fun V2SettingsScreen(
                 }
             }
             val hasDocument = correctionEngineState.previewResultClass != PreviewResultClass.NoDocument
-            val engineActionEnabled = hasDocument && !correctionEngineState.isSwitching
+            val engineActionEnabled = hasDocument && documentActionAvailable
             if (docEngine == CorrectionEngine.Engine1) {
                 Button(
                     onClick = { onApplyCorrectionEngine(CorrectionEngine.Engine2) },
