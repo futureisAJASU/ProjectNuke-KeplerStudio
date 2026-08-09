@@ -26,8 +26,13 @@ internal interface ExportRowStore {
 /**
  * Exact owner of one pending MediaStore row.
  *
- * Publication is the only commit state. A failed rollback remains retryable, while repeated
- * settlement after publish or successful deletion is a no-op.
+ * Publication is the only commit state. A failed rollback remains retryable
+ * and idempotent: repeated settlement after publish or after a successful
+ * delete is a no-op, while a pending row whose delete failed can be retried by
+ * a later owner any number of times. The production pipeline performs a
+ * deterministic bounded same-operation retry (one extra attempt in its final
+ * settlement path) and, if cleanup still fails, surfaces the failure
+ * structurally instead of leaving an undocumented global finalizer assumption.
  */
 internal class ExportRowTransaction(
     private val rows: ExportRowStore,
@@ -77,7 +82,9 @@ internal class ExportRowTransaction(
                 state = State.Settled
                 null
             } catch (failure: Throwable) {
-                // Keep Pending so a later lifecycle finalizer can retry.
+                // Keep Pending so a later bounded retry by the same owner can
+                // attempt cleanup again; settlement is idempotent once it
+                // succeeds or the row is published.
                 failure
             }
         }
@@ -106,14 +113,39 @@ internal sealed class ExportPipelineResult<out T> {
 
     data class Failed(val failure: Throwable) : ExportPipelineResult<Nothing>()
     data object Stale : ExportPipelineResult<Nothing>()
+
+    /**
+     * The export reached a terminal outcome but an unreadable pending row
+     * could not be removed after a deterministic bounded retry. The image was
+     * NOT published. surfaced to diagnostics so the caller can report a
+     * factual cleanup-debt failure instead of leaving an undocumented owner.
+     */
+    data class CleanupFailed(
+        val uri: Uri,
+        val width: Int,
+        val height: Int,
+        val cleanupFailure: Throwable,
+    ) : ExportPipelineResult<Nothing>()
 }
 
 /**
  * Failure-atomic export transaction.
  *
- * The rendered Bitmap and pending row have one owner here. Before publication, every stale,
- * failed, or cancelled path deletes the row. Publication is the commit point: metadata failure
- * is reported without deleting an already-visible image.
+ * The rendered Bitmap and pending row have one owner here. Before
+ * publication, every stale, failed, or cancelled path deletes the row.
+ * Publication is the commit point: metadata failure is reported without
+ * deleting an already-visible image, and rows are never deleted after a
+ * successful publication.
+ *
+ * The final settlement path performs a deterministic bounded same-operation
+ * retry (one extra cleanup attempt) when the first delete of an unreadable
+ * pending row fails. If cleanup still fails, the result is downgraded to
+ * [ExportPipelineResult.CleanupFailed] for stale/failed outcomes, surfacing
+ * the debt to diagnostics instead of relying on a later finalizer.
+ *
+ * Cancellation is always rethrown per structured-concurrency rules; any
+ * pending row remaining during cancellation still receives the bounded
+ * cleanup attempt before the cancel propagates.
  */
 internal suspend fun <T> executeExportPipeline(
     request: ExportRowRequest,
@@ -124,25 +156,28 @@ internal suspend fun <T> executeExportPipeline(
 ): ExportPipelineResult<T> {
     var rendered: Bitmap? = null
     val transaction = ExportRowTransaction(rows)
+    var intended: ExportPipelineResult<T> = ExportPipelineResult.Stale
+    var cancelled = false
     try {
         coroutineContext.ensureActive()
-        if (!isCurrent()) return ExportPipelineResult.Stale
-        rendered = render() ?: return ExportPipelineResult.Stale
+        if (!isCurrent()) return ExportPipelineResult.Stale.also { intended = it }
+        rendered = render()
+            ?: return ExportPipelineResult.Stale.also { intended = it }
         coroutineContext.ensureActive()
-        if (!isCurrent()) return ExportPipelineResult.Stale
+        if (!isCurrent()) return ExportPipelineResult.Stale.also { intended = it }
 
         val pending = transaction.insert(request)
         coroutineContext.ensureActive()
-        if (!isCurrent()) return ExportPipelineResult.Stale
+        if (!isCurrent()) return ExportPipelineResult.Stale.also { intended = it }
 
         transaction.encode(checkNotNull(rendered), request.format)
         coroutineContext.ensureActive()
-        if (!isCurrent()) return ExportPipelineResult.Stale
+        if (!isCurrent()) return ExportPipelineResult.Stale.also { intended = it }
 
         val uri = pending
         val width = checkNotNull(rendered).width
         val height = checkNotNull(rendered).height
-        return withContext(NonCancellable) {
+        val published = withContext(NonCancellable) {
             if (!isCurrent()) {
                 ExportPipelineResult.Stale
             } else {
@@ -164,16 +199,55 @@ internal suspend fun <T> executeExportPipeline(
                 }
             }
         }
-    } catch (cancelled: CancellationException) {
-        throw cancelled
+        intended = published
+        return published
+    } catch (cancellation: CancellationException) {
+        cancelled = true
+        throw cancellation
     } catch (failure: Throwable) {
-        return ExportPipelineResult.Failed(failure)
+        intended = ExportPipelineResult.Failed(failure)
+        return intended
     } finally {
-        withContext(NonCancellable) {
-            if (!transaction.isPublished()) {
-                transaction.rollbackNoThrow()
+        val cleanupFailure =
+            withContext(NonCancellable) {
+                if (transaction.isPublished()) {
+                    null
+                } else {
+                    var failure: Throwable? = transaction.rollbackNoThrow()
+                    if (failure != null) {
+                        // Deterministic bounded same-operation retry: one extra
+                        // attempt while the owner still exists, no sleeps.
+                        val retry = transaction.rollbackNoThrow()
+                        if (retry == null) failure = null
+                    }
+                    failure
+                }
+            }
+        val pendingUriForReport =
+            if (cleanupFailure != null && !cancelled) transaction.pendingUriOrNull() else null
+        val renderedWidth = rendered?.width ?: 0
+        val renderedHeight = rendered?.height ?: 0
+        rendered?.takeUnless(Bitmap::isRecycled)?.recycle()
+        // Surface an unreadable pending row that could not be removed for a
+        // stale or failed (non-cancelled) outcome; never override a published
+        // image and never swallow a CancellationException. On the cancellation
+        // path the deterministic bounded retry above is the only cleanup owner
+        // satisfied here; a persisting cleanup debt on a cancelled export is
+        // surfaced only through logs/diagnostics, never by swallowing cancel.
+        if (pendingUriForReport != null && cleanupFailure != null && !cancelled) {
+            when (intended) {
+                is ExportPipelineResult.Stale,
+                is ExportPipelineResult.Failed,
+                -> {
+                    return@executeExportPipeline ExportPipelineResult.CleanupFailed(
+                        uri = pendingUriForReport,
+                        width = renderedWidth,
+                        height = renderedHeight,
+                        cleanupFailure = cleanupFailure,
+                    )
+                }
+                else -> {}
             }
         }
-        rendered?.takeUnless(Bitmap::isRecycled)?.recycle()
     }
 }

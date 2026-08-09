@@ -219,6 +219,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun hasActiveViewModelJobsForTest(): Boolean =
         viewModelScope.coroutineContext[Job]?.children?.any { it.isActive } == true
 
+    /** Test-only capture of the most recent export coroutine exception for
+     *  diagnostic production tests (never read by production logic). */
+    @Volatile internal var lastExportFailureForTest: Throwable? = null
+
+    /** Pure read-only inspection for tests: current export token (drives
+     *  stale-export identity checks across ViewModel state changes). */
+    internal fun exportTokenForTest(): Long = exportToken
+
+    /** Pure read-only inspection for tests: whether an export coroutine is live. */
+    internal fun exportJobActiveForTest(): Boolean = exportJob?.isActive == true
+
+    /** Test-only trigger of the production invalidation that cancels the live
+     *  export and bumps `exportToken`, equivalent to a document replacement. */
+    internal fun invalidateExportForTest() = invalidateExport()
+
+    /** Pure read-only inspection for tests: global saved-export history revision. */
+    internal val savedExportHistoryRevisionForTest: Long
+        get() = savedExportHistoryStore.revision
+
     /**
      * Completes when the startup init coroutine (engine prefs, Draft restore,
      * export-history rebuild) has fully finished. Tests await this before
@@ -228,7 +247,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal val startupInitCompletion = CompletableDeferred<Unit>()
 
     private val savedExportHistoryMutex = Mutex()
-    @Volatile private var savedExportHistoryRevision: Long = 0L
+    /**
+     * Single production owner of the saved-export history SharedPreferences and
+     * the global history-revision arbitration. Replaces the scattered
+     * top-level history mutation helpers so the merge algorithm is directly
+     * testable. Gallery rows remain owned by the export pipeline's
+     * publication commit point; this store only touches the app-history pref.
+     */
+    private val savedExportHistoryStore: SavedExportHistoryStore =
+        SavedExportHistoryStore(getApplication<Application>())
     /** Invalidates every queued draft save/restore when the document changes. */
     private var draftOperationEpoch: Long = 0L
     @Volatile
@@ -1890,11 +1917,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun invalidateRemovedHistoryThumbnails(
         context: Context,
-        result: SavedExportHistoryResult,
+        result: SavedExportHistoryMutation,
     ) {
         withContext(Dispatchers.IO) {
             savedExportHistoryMutex.withLock {
-                val retained = loadSavedExportsFromPrefs(context).map { it.uriString }.toSet()
+                val retained = savedExportHistoryStore.load().map { it.uriString }.toSet()
                 result.removedUris.filterNot(retained::contains).forEach {
                     ThumbnailBitmapCache.invalidate("export:$it")
                 }
@@ -1902,32 +1929,27 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun isCurrentExport(
-        token: Long,
-        sourcePath: String,
-        baseToken: String,
-        revision: Int,
-    ): Boolean {
-        val job = currentCoroutineContext()[Job] ?: return false
-        if (!job.isActive || exportJob !== job || exportToken != token || shuttingDown) return false
+    /**
+     * Unified export-identity predicate. The owning [ExportIdentity.owningJob]
+     * is captured at operation creation and compared to the registered export
+     * job, so a transient `NonCancellable` context swap inside the pipeline
+     * cannot make a stale export impersonate a newer one, and a newer export
+     * bumping `exportToken` immediately invalidates every older identity.
+     */
+    private fun isCurrentExport(identity: ExportIdentity): Boolean {
+        val owningJob = identity.owningJob
+        if (
+            !owningJob.isActive ||
+                exportJob !== owningJob ||
+                exportToken != identity.token ||
+                shuttingDown
+        ) {
+            return false
+        }
         val state = _uiState.value
-        return state.sourcePath == sourcePath &&
-            state.baseContentToken == baseToken &&
-            state.revision == revision
-    }
-
-    private fun isCurrentExportIdentity(
-        token: Long,
-        sourcePath: String,
-        baseToken: String,
-        revision: Int,
-        job: Job,
-    ): Boolean {
-        if (!job.isActive || exportJob !== job || exportToken != token || shuttingDown) return false
-        val state = _uiState.value
-        return state.sourcePath == sourcePath &&
-            state.baseContentToken == baseToken &&
-            state.revision == revision
+        return state.sourcePath == identity.sourcePath &&
+            state.baseContentToken == identity.baseToken &&
+            state.revision == identity.revision
     }
 
     internal fun beginCropOperation(): Long = ++cropOperationToken
@@ -3528,29 +3550,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 restoreDraftIfAvailable(context, startupRestoreToken, startupRevision)
                 val historyResult =
                     withContext(Dispatchers.IO) {
-                        savedExportHistoryMutex.withLock {
-                            val currentRetention = loadExportHistoryRetention(context)
-                            val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                            val previous =
-                                if (
-                                    prefs.getBoolean(KEY_SAVED_EXPORTS_INITIALIZED, false) ||
-                                        prefs.contains(KEY_SAVED_EXPORTS)
-                                ) {
-                                    loadSavedExportsFromPrefs(context)
-                                } else emptyList()
-                            val next = loadOrRebuildSavedExportHistory(context, currentRetention)
-                            SavedExportHistoryResult(
-                                ++savedExportHistoryRevision,
-                                next,
-                                previous.map { it.uriString }.toSet() -
-                                    next.map { it.uriString }.toSet(),
-                                retention = currentRetention,
-                            )
-                        }
+                        val currentRetention = savedExportHistoryStore.loadRetention()
+                        savedExportHistoryStore.loadOrRebuildWithMutation(currentRetention)
                     }
                 invalidateRemovedHistoryThumbnails(context, historyResult)
                 updateUiStateAndRecycleReplaced {
-                    if (historyResult.revision != savedExportHistoryRevision) it
+                    if (historyResult.revision != savedExportHistoryStore.revision) it
                     else
                         it.copy(
                             savedExports = historyResult.items,
@@ -4512,21 +4517,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result =
                 withContext(Dispatchers.IO) {
-                    savedExportHistoryMutex.withLock {
-                        saveExportHistoryRetention(context, retention)
-                        val current = loadSavedExportsFromPrefs(context)
-                        val pruned = pruneSavedExportsIfNeeded(context, current, retention)
-                        SavedExportHistoryResult(
-                            ++savedExportHistoryRevision,
-                            pruned,
-                            (current.map { it.uriString }.toSet() -
-                                pruned.map { it.uriString }.toSet()),
-                        )
-                    }
+                    savedExportHistoryStore.saveRetention(retention)
+                    savedExportHistoryStore.prune(retention)
                 }
             invalidateRemovedHistoryThumbnails(context, result)
             updateUiStateAndRecycleReplaced {
-                if (result.revision != savedExportHistoryRevision) it
+                if (result.revision != savedExportHistoryStore.revision) it
                 else
                     it.copy(
                         exportHistoryRetention = retention,
@@ -4712,285 +4708,322 @@ fun exportPreview() {
                     }
                     exportPrepareTracker?.end()
                     exportPrepareTracker = null
+                    // The owning coroutine Job is captured here, before the
+                    // pipeline starts, so the single ExportIdentity remains
+                    // stable for the entire handoff and survives the
+                    // NonCancellable window the pipeline enters at publish.
                     val exportCoroutine = currentCoroutineContext()[Job] ?: return@launch
-                    var ownedExportResult: Bitmap? = null
-                    var pendingUri: Uri? = null
-                    var rowTransaction: ExportRowTransaction? = null
-                    var published = false
-                    var historySaved = false
-                    var historyError: Throwable? = null
-                    var persistedHistory: List<SavedExport> = emptyList()
-                    var persistedHistoryRevision = Long.MIN_VALUE
+                    // Register this export's owning Job on the path now so the
+                    // first identity check inside `executeExportPipeline` is
+                    // evaluated against the authoritative (and active) owner
+                    // even when the coroutine dispatcher runs the body's first
+                    // synchronous segment before `viewModelScope.launch`
+                    // returns to its caller.
+                    exportJob = exportCoroutine
+                    val exportIdentity =
+                        ExportIdentity(
+                            token = token,
+                            sourcePath = sourcePath,
+                            baseToken = exportBaseToken,
+                            revision = exportRevision,
+                            owningJob = exportCoroutine,
+                        )
+                    // The export test seam is captured at operation creation so
+                    // a late old operation cannot consume a later test's seam.
+                    val exportSeam = ExportTestSeam.capture()
                     try {
                         val context = getApplication<Application>()
-                        withContext(Dispatchers.Default) {
-                            if (
-                                isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)
-                            ) {
-                                val rendered =
-                                    if (exportDirty) {
-                                        renderEditedExportFromBitmap(
-                                            ownedBaseBitmap =
-                                                checkNotNull(ownedDirtyBase).also {
-                                                    ownedDirtyBase = null
-                                                },
-                                            resolution = exportResolution,
-                                            selectionLayers =
-                                                ownedLayersForExport.also {
-                                                    ownedLayersForExport = emptyList()
-                                                },
-                                            diagnostics = exportTracker,
-                                            requestFactory = { base, layers ->
-                                                exportActualRoute?.let { actualRoute ->
-                                                    RenderRequest(
-                                                        operation = RenderOperation.ExportDirty,
-                                                        basePreview = base,
-                                                        params = exportParams,
-                                                        engines = exportEngines,
-                                                        assignedDocumentEngine =
-                                                            exportDocumentEngine,
-                                                        identity =
-                                                            RenderIdentity(
-                                                                exportDocumentGeneration,
-                                                                exportBaseToken,
-                                                                exportRevision + 1,
-                                                            ),
-                                                        storedRequestedRoute =
-                                                            exportRequestedRoute ?: actualRoute,
-                                                        exactRoute = actualRoute,
-                                                        storedDecision = exportDecision,
-                                                        storedAlgorithmVersion =
-                                                            exportAlgorithmVersion,
-                                                        storedParticipation =
-                                                            exportParticipation,
-                                                        fallbackPolicy = FallbackPolicy.NoFallback,
-                                                        look = exportLook,
-                                                        quickEffects = exportQuickEffects,
-                                                        selectionLayers = layers,
-                                                        diagnostics = exportTracker,
-                                                    )
-                                                }
-                                            },
-                                        )
-                                    } else {
-                                        renderEditedExport(
-                                            sourcePath = sourcePath,
-                                            resolution = exportResolution,
-                                            selectionLayers =
-                                                ownedLayersForExport.also {
-                                                    ownedLayersForExport = emptyList()
-                                                },
-                                            diagnostics = exportTracker,
-                                            requestFactory = { base, layers ->
-                                                exportActualRoute?.let { actualRoute ->
-                                                    RenderRequest(
-                                                        operation = RenderOperation.ExportClean,
-                                                        basePreview = base,
-                                                        params = exportParams,
-                                                        engines = exportEngines,
-                                                        assignedDocumentEngine =
-                                                            exportDocumentEngine,
-                                                        identity =
-                                                            RenderIdentity(
-                                                                exportDocumentGeneration,
-                                                                exportBaseToken,
-                                                                exportRevision + 1,
-                                                            ),
-                                                        storedRequestedRoute =
-                                                            exportRequestedRoute ?: actualRoute,
-                                                        exactRoute = actualRoute,
-                                                        storedDecision = exportDecision,
-                                                        storedAlgorithmVersion =
-                                                            exportAlgorithmVersion,
-                                                        storedParticipation =
-                                                            exportParticipation,
-                                                        fallbackPolicy = FallbackPolicy.NoFallback,
-                                                        look = exportLook,
-                                                        quickEffects = exportQuickEffects,
-                                                        selectionLayers = layers,
-                                                        diagnostics = exportTracker,
-                                                    )
-                                                }
-                                            },
-                                        )
-                                    }
-                                ownedExportResult = rendered
-                                rendered
-                            } else {
+                        val rows: ExportRowStore =
+                            exportSeam?.rowStore ?: AndroidExportRowStore(context)
+                        val historyStore: SavedExportHistoryStore =
+                            exportSeam?.historyStore ?: savedExportHistoryStore
+                        val exportedResolutionLabel = { width: Int, height: Int ->
+                            "$width x $height"
+                        }
+                        val pipelineRequest = ExportRowRequest(fileName, exportFormat)
+
+                        // The render callback hands `ownedDirtyBase` and the
+                        // selection-layer Bitmaps to the existing renderer
+                        // contracts (exactly-once ownership) and returns the
+                        // rendered Bitmap, which becomes pipeline-owned. If the
+                        // export is already stale at render entry, the
+                        // prepared resources stay caller-owned (the outer
+                        // finally settles them) and the render returns null so
+                        // the pipeline creates no pending row.
+                        val renderCallback: suspend () -> Bitmap? = {
+                            if (!isCurrentExport(exportIdentity)) {
                                 null
-                            }
-                        }
-                        val exportResult =
-                            ownedExportResult
-                                ?: run {
-                                    return@launch
-                                }
-                        markMemoryRetrySucceeded(MemoryRetryAction.ExportPreview)
-                        val exportedResolutionLabel = "${exportResult.width}x${exportResult.height}"
-                        pendingUri =
-                            withContext(Dispatchers.IO) {
-                                if (
-                                    !isCurrentExport(
-                                        token,
-                                        sourcePath,
-                                        exportBaseToken,
-                                        exportRevision,
-                                    )
-                                ) {
-                                    return@withContext null
-                                }
-                                val rows = AndroidExportRowStore(context)
-                                val transaction = ExportRowTransaction(rows)
-                                rowTransaction = transaction
-                                transaction.insert(ExportRowRequest(fileName, exportFormat)).also {
-                                    pendingUri = it
-                                    transaction.encode(exportResult, exportFormat)
-                                }
-                            }
-                        if (pendingUri == null) {
-                            return@launch
-                        }
-                        if (!isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)) {
-                            // Before commit, a stale export must remain invisible and be removed.
-                            withContext(NonCancellable + Dispatchers.IO) {
-                                rowTransaction?.rollbackNoThrow()
-                            }
-                            return@launch
-                        }
-                        val savedItem =
-                            SavedExport(
-                                displayName = fileName,
-                                uriString = pendingUri!!.toString(),
-                                formatLabel = exportFormat.label,
-                                resolutionLabel = exportedResolutionLabel,
-                                timestampMillis = System.currentTimeMillis(),
-                            )
-                        withContext(NonCancellable + Dispatchers.IO) {
-                            if (
-                                !isCurrentExportIdentity(
-                                    token,
-                                    sourcePath,
-                                    exportBaseToken,
-                                    exportRevision,
-                                    exportCoroutine,
-                                )
-                            ) {
-                                rowTransaction?.rollbackNoThrow()
-                                return@withContext
-                            }
-                            checkNotNull(rowTransaction).publish()
-                            published = true
-                            try {
-                                val historyResult =
-                                    savedExportHistoryMutex.withLock {
-                                        val previous = loadSavedExportsFromPrefs(context)
-                                        val next =
-                                            rememberSavedExport(
-                                                context,
-                                                savedItem,
-                                                loadExportHistoryRetention(context),
+                            } else {
+                                withContext(Dispatchers.Default) {
+                                    val rendered =
+                                        if (exportDirty) {
+                                            renderEditedExportFromBitmap(
+                                                ownedBaseBitmap =
+                                                    checkNotNull(ownedDirtyBase).also {
+                                                        ownedDirtyBase = null
+                                                    },
+                                                resolution = exportResolution,
+                                                selectionLayers =
+                                                    ownedLayersForExport.also {
+                                                        ownedLayersForExport = emptyList()
+                                                    },
+                                                diagnostics = exportTracker,
+                                                requestFactory = { base, layers ->
+                                                    exportActualRoute?.let { actualRoute ->
+                                                        RenderRequest(
+                                                            operation =
+                                                                RenderOperation.ExportDirty,
+                                                            basePreview = base,
+                                                            params = exportParams,
+                                                            engines = exportEngines,
+                                                            assignedDocumentEngine =
+                                                                exportDocumentEngine,
+                                                            identity =
+                                                                RenderIdentity(
+                                                                    exportDocumentGeneration,
+                                                                    exportBaseToken,
+                                                                    exportRevision + 1,
+                                                                ),
+                                                            storedRequestedRoute =
+                                                                exportRequestedRoute
+                                                                    ?: actualRoute,
+                                                            exactRoute = actualRoute,
+                                                            storedDecision = exportDecision,
+                                                            storedAlgorithmVersion =
+                                                                exportAlgorithmVersion,
+                                                            storedParticipation =
+                                                                exportParticipation,
+                                                            fallbackPolicy =
+                                                                FallbackPolicy.NoFallback,
+                                                            look = exportLook,
+                                                            quickEffects = exportQuickEffects,
+                                                            selectionLayers = layers,
+                                                            diagnostics = exportTracker,
+                                                        )
+                                                    }
+                                                },
                                             )
-                                        SavedExportHistoryResult(
-                                            ++savedExportHistoryRevision,
-                                            next,
-                                            previous.map { it.uriString }.toSet() -
-                                                next.map { it.uriString }.toSet(),
-                                        )
-                                    }
-                                persistedHistory = historyResult.items
-                                persistedHistoryRevision = historyResult.revision
-                                invalidateRemovedHistoryThumbnails(context, historyResult)
-                                historySaved = true
-                            } catch (t: Throwable) {
-                                historyError = t
+                                        } else {
+                                            renderEditedExport(
+                                                sourcePath = sourcePath,
+                                                resolution = exportResolution,
+                                                selectionLayers =
+                                                    ownedLayersForExport.also {
+                                                        ownedLayersForExport = emptyList()
+                                                    },
+                                                diagnostics = exportTracker,
+                                                requestFactory = { base, layers ->
+                                                    exportActualRoute?.let { actualRoute ->
+                                                        RenderRequest(
+                                                            operation =
+                                                                RenderOperation.ExportClean,
+                                                            basePreview = base,
+                                                            params = exportParams,
+                                                            engines = exportEngines,
+                                                            assignedDocumentEngine =
+                                                                exportDocumentEngine,
+                                                            identity =
+                                                                RenderIdentity(
+                                                                    exportDocumentGeneration,
+                                                                    exportBaseToken,
+                                                                    exportRevision + 1,
+                                                                ),
+                                                            storedRequestedRoute =
+                                                                exportRequestedRoute
+                                                                    ?: actualRoute,
+                                                            exactRoute = actualRoute,
+                                                            storedDecision = exportDecision,
+                                                            storedAlgorithmVersion =
+                                                                exportAlgorithmVersion,
+                                                            storedParticipation =
+                                                                exportParticipation,
+                                                            fallbackPolicy =
+                                                                FallbackPolicy.NoFallback,
+                                                            look = exportLook,
+                                                            quickEffects = exportQuickEffects,
+                                                            selectionLayers = layers,
+                                                            diagnostics = exportTracker,
+                                                        )
+                                                    }
+                                                },
+                                            )
+                                        }
+                                    markMemoryRetrySucceeded(MemoryRetryAction.ExportPreview)
+                                    rendered
+                                }
                             }
-                            if (!shuttingDown && historySaved) {
-                                updateUiStateAndRecycleReplaced { current ->
-                                    val merged =
-                                        if (persistedHistoryRevision == savedExportHistoryRevision)
-                                            persistedHistory
-                                        else current.savedExports
-                                    if (
-                                        isCurrentExportIdentity(
-                                            token,
-                                            sourcePath,
-                                            exportBaseToken,
-                                            exportRevision,
-                                            exportCoroutine,
-                                        )
-                                    ) {
-                                        current.copy(
-                                            isBusy = false,
-                                            savedExports = merged,
-                                            message =
-                                                "이미지가 Gallery > Pictures/KeplerStudio에 저장되었고, 앱 내 내보낸 사진 기록에도 추가되었습니다.",
-                                        )
-                                    } else {
-                                        current.copy(savedExports = merged)
+                        }
+
+                        // persistMetadata runs inside the pipeline's
+                        // NonCancellable window, after publication: the gallery
+                        // row is already committed. It commits the saved-export
+                        // history atomically through the history store and
+                        // invalidates any thumbnails that fell out of history.
+                        // A throw here is converted by the pipeline into
+                        // PublishedWithMetadataFailure so the visible image is
+                        // never deleted on a history failure. The returned
+                        // mutation is consumed by the UI settlement below.
+                        val persistMetadata: suspend (
+                            Uri,
+                            Int,
+                            Int,
+                        ) -> SavedExportHistoryMutation = { publishedUri, width, height ->
+                            val savedItem =
+                                SavedExport(
+                                    displayName = fileName,
+                                    uriString = publishedUri.toString(),
+                                    formatLabel = exportFormat.label,
+                                    resolutionLabel = exportedResolutionLabel(width, height),
+                                    timestampMillis = System.currentTimeMillis(),
+                                )
+                            val mutation =
+                                historyStore.commit(savedItem, historyStore.loadRetention())
+                            invalidateRemovedHistoryThumbnails(context, mutation)
+                            mutation
+                        }
+
+                        val outcome =
+                            executeExportPipeline(
+                                request = pipelineRequest,
+                                rows = rows,
+                                isCurrent = { isCurrentExport(exportIdentity) },
+                                render = renderCallback,
+                                persistMetadata = persistMetadata,
+                            )
+
+                        // Final UI settlement runs with the export identity's
+                        // owning Job captured at creation, so the NonCancellable
+                        // window used below cannot make a stale export
+                        // impersonate a newer one. Every publish-side branch
+                        // re-checks isCurrentExport(exportIdentity).
+                        withContext(NonCancellable + Dispatchers.IO) {
+                            when (outcome) {
+                                is ExportPipelineResult.Published<*> -> {
+                                    val mutation =
+                                        outcome.metadata as SavedExportHistoryMutation
+                                    val currentRevision = historyStore.revision
+                                    updateUiStateAndRecycleReplaced { current ->
+                                        val merged =
+                                            if (mutation.revision == currentRevision) {
+                                                mutation.items
+                                            } else {
+                                                current.savedExports
+                                            }
+                                        if (isCurrentExport(exportIdentity)) {
+                                            current.copy(
+                                                isBusy = false,
+                                                savedExports = merged,
+                                                message =
+                                                    "이미지가 Gallery > Pictures/KeplerStudio에 저장되었고, 앱 내 내보낸 사진 기록에도 추가되었습니다.",
+                                            )
+                                        } else {
+                                            current.copy(savedExports = merged)
+                                        }
                                     }
                                 }
-                            } else if (
-                                !shuttingDown &&
-                                    published &&
-                                    isCurrentExportIdentity(
-                                        token,
-                                        sourcePath,
-                                        exportBaseToken,
-                                        exportRevision,
-                                        exportCoroutine,
-                                    )
-                            ) {
-                                val errorMsg = historyError?.message ?: "unknown"
-                                updateUiStateAndRecycleReplaced { current ->
-                                    current.copy(
-                                        isBusy = false,
-                                        message =
-                                            "갤러리 파일은 저장되었지만 앱 내 내보낸 사진 기록 저장에 실패했습니다: $errorMsg",
-                                    )
+                                is ExportPipelineResult.PublishedWithMetadataFailure -> {
+                                    lastExportFailureForTest = outcome.failure
+                                    if (isCurrentExport(exportIdentity)) {
+                                        updateUiStateAndRecycleReplaced { current ->
+                                            current.copy(
+                                                isBusy = false,
+                                                message =
+                                                    "이미지는 갤러리에 저장되었지만 앱 내 내보낸 사진 기록을 저장하지 못했습니다.",
+                                            )
+                                        }
+                                    }
+                                }
+                                is ExportPipelineResult.Failed -> {
+                                    lastExportFailureForTest = outcome.failure
+                                    if (isCurrentExport(exportIdentity)) {
+                                        val failure = outcome.failure
+                                        val isAllocationFailure =
+                                            failure is BitmapAllocationRejectedException
+                                        updateUiStateAndRecycleReplaced { current ->
+                                            current.copy(
+                                                isBusy = false,
+                                                message =
+                                                    "내보내기에 실패했습니다: ${failure.message ?: ""}",
+                                            )
+                                        }
+                                        if (isAllocationFailure) {
+                                            requestAllocationRecovery(
+                                                MemoryRetryAction.ExportPreview,
+                                                (failure as BitmapAllocationRejectedException)
+                                                    .requiredBytes,
+                                            )
+                                        }
+                                    }
+                                }
+                                is ExportPipelineResult.CleanupFailed -> {
+                                    lastExportFailureForTest = outcome.cleanupFailure
+                                    if (isCurrentExport(exportIdentity)) {
+                                        updateUiStateAndRecycleReplaced { current ->
+                                            current.copy(
+                                                isBusy = false,
+                                                message =
+                                                    "내보내기에 실패했고 임시 파일 삭제도 실패했습니다: ${outcome.cleanupFailure.message ?: ""}",
+                                            )
+                                        }
+                                    }
+                                }
+                                is ExportPipelineResult.Stale -> {
+                                    lastExportFailureForTest =
+                                        IllegalStateException("stale")
+                                    // When the export identity is stale but the
+                                    // token hasn't been superseded by a newer
+                                    // export (revision-only mutation), this
+                                    // stale owner must clear its own busy state
+                                    // — no newer owner exists to take it over.
+                                    if (exportIdentity.token == exportToken) {
+                                        updateUiStateAndRecycleReplaced { current ->
+                                            current.copy(isBusy = false)
+                                        }
+                                    }
                                 }
                             }
                         }
                     } catch (ce: kotlinx.coroutines.CancellationException) {
-                        if (!published) {
-                            rowTransaction?.let { transaction ->
-                                withContext(NonCancellable + Dispatchers.IO) {
-                                    transaction.rollbackNoThrow()
-                                }
+                        // A cancelled export that hasn't been superseded by a
+                        // newer owner must clear its busy state.
+                        if (exportJob === exportCoroutine) {
+                            updateUiStateAndRecycleReplaced { current ->
+                                current.copy(isBusy = false)
                             }
                         }
                         throw ce
                     } catch (t: Throwable) {
-                        if (!published)
-                            rowTransaction?.let { transaction ->
-                                withContext(NonCancellable + Dispatchers.IO) {
-                                    transaction.rollbackNoThrow()
-                                }
-                            }
-                        if (
-                            !published &&
-                                isCurrentExport(token, sourcePath, exportBaseToken, exportRevision)
-                        ) {
-                            updateUiStateAndRecycleReplaced {
-                                it.copy(
+                        // A pre-publish throw from render preparation is the
+                        // only non-pipeline exception path. Pipeline-render
+                        // exceptions surface as ExportPipelineResult.Failed;
+                        // reaching here implies a transfer/Settlement failure.
+                        lastExportFailureForTest = t
+                        if (isCurrentExport(exportIdentity)) {
+                            updateUiStateAndRecycleReplaced { current ->
+                                current.copy(
                                     isBusy = false,
-                                    message =
-                                        "\uB0B4\uBCF4\uB0B4\uAE30\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4: ${t.message}",
+                                    message = "내보내기에 실패했습니다: ${t.message ?: ""}",
                                 )
                             }
-                            if (t is BitmapAllocationRejectedException)
-                                requestAllocationRecovery(
-                                    MemoryRetryAction.ExportPreview,
-                                    t.requiredBytes,
-                                )
+                        } else if (exportJob === exportCoroutine) {
+                            // The owning export was cancelled/stale without a
+                            // newer owner taking over; this owner must clear busy.
+                            updateUiStateAndRecycleReplaced { current ->
+                                current.copy(isBusy = false)
+                            }
+                        }
+                        if (t is BitmapAllocationRejectedException) {
+                            requestAllocationRecovery(
+                                MemoryRetryAction.ExportPreview,
+                                t.requiredBytes,
+                            )
                         }
                     } finally {
-                        if (!published) {
-                            withContext(NonCancellable + Dispatchers.IO) {
-                                rowTransaction?.rollbackNoThrow()
-                            }
-                        }
+                        // The pipeline recycles the rendered export Bitmap that
+                        // render() returned; the ViewModel must not recycle it
+                        // again. Only prepared resources that were never
+                        // handed to the render path remain caller-owned here.
                         val owned = identityBitmapSet()
-                        ownedExportResult?.let(owned::add)
                         ownedDirtyBase?.let(owned::add)
                         ownedLayersForExport.forEach { owned.add(it.bitmap) }
                         owned.forEach { if (!it.isRecycled) it.recycle() }
@@ -5334,19 +5367,11 @@ fun exportPreview() {
             try {
                 val result =
                     withContext(Dispatchers.IO) {
-                        savedExportHistoryMutex.withLock {
-                            val current = loadSavedExportsFromPrefs(context)
-                            clearSavedExportsPrefs(context)
-                            SavedExportHistoryResult(
-                                ++savedExportHistoryRevision,
-                                emptyList(),
-                                current.map { it.uriString }.toSet(),
-                            )
-                        }
+                        savedExportHistoryStore.clear()
                     }
                 invalidateRemovedHistoryThumbnails(context, result)
                 updateUiStateAndRecycleReplaced {
-                    if (result.revision != savedExportHistoryRevision) it
+                    if (result.revision != savedExportHistoryStore.revision) it
                     else
                         it.copy(
                             savedExports = result.items,
@@ -5373,20 +5398,11 @@ fun exportPreview() {
             try {
                 val result =
                     withContext(Dispatchers.IO) {
-                        savedExportHistoryMutex.withLock {
-                            val current = loadSavedExportsFromPrefs(context)
-                            val next = current.filterNot { it.uriString == uriString }
-                            saveSavedExportsToPrefs(context, next)
-                            SavedExportHistoryResult(
-                                ++savedExportHistoryRevision,
-                                next,
-                                if (next.size != current.size) setOf(uriString) else emptySet(),
-                            )
-                        }
+                        savedExportHistoryStore.remove(uriString)
                     }
                 invalidateRemovedHistoryThumbnails(context, result)
                 updateUiStateAndRecycleReplaced {
-                    if (result.revision != savedExportHistoryRevision) it
+                    if (result.revision != savedExportHistoryStore.revision) it
                     else
                         it.copy(
                             savedExports = result.items,
@@ -9363,13 +9379,6 @@ private data class DraftRestoreSnapshot(
     val recovery: DraftRecoveryResolution,
 )
 
-private data class SavedExportHistoryResult(
-    val revision: Long,
-    val items: List<SavedExport>,
-    val removedUris: Set<String> = emptySet(),
-    val retention: ExportHistoryRetention? = null,
-)
-
 private data class DraftPointerSnapshot(val generationId: String?)
 
 private sealed class GenerationRestoreOutcome {
@@ -10009,185 +10018,6 @@ private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: Stri
     return removed
 }
 
-private fun rememberSavedExport(
-    context: Context,
-    item: SavedExport,
-    retention: ExportHistoryRetention,
-): List<SavedExport> {
-    val next =
-        (listOf(item) +
-                loadSavedExportsFromPrefs(context).filter { it.uriString != item.uriString })
-            .take(60)
-    return pruneSavedExportsIfNeeded(context, next, retention)
-}
-
-private fun pruneSavedExportsIfNeeded(
-    context: Context,
-    items: List<SavedExport>,
-    retention: ExportHistoryRetention,
-): List<SavedExport> {
-    val days = retention.days
-    val pruned =
-        if (days == null) {
-            items
-        } else {
-            val cutoff = System.currentTimeMillis() - days * 24L * 60L * 60L * 1000L
-            items.filter { it.timestampMillis >= cutoff }
-        }
-    saveSavedExportsToPrefs(context, pruned)
-    return pruned
-}
-
-private fun saveSavedExportsToPrefs(context: Context, items: List<SavedExport>) {
-    check(
-        context
-            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_SAVED_EXPORTS, items.joinToString("\n") { encodeSavedExport(it) })
-            .putBoolean(KEY_SAVED_EXPORTS_INITIALIZED, true)
-            .commit()
-    ) {
-        "failed to persist saved export history"
-    }
-}
-
-private fun clearSavedExportsPrefs(context: Context) {
-    check(
-        context
-            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_SAVED_EXPORTS, "")
-            .putBoolean(KEY_SAVED_EXPORTS_INITIALIZED, true)
-            .commit()
-    ) {
-        "failed to clear saved export history"
-    }
-}
-
-private fun loadOrRebuildSavedExportHistory(
-    context: Context,
-    retention: ExportHistoryRetention,
-): List<SavedExport> {
-    val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-    val initialized =
-        prefs.getBoolean(KEY_SAVED_EXPORTS_INITIALIZED, false) || prefs.contains(KEY_SAVED_EXPORTS)
-    val seed =
-        if (initialized) loadSavedExportsFromPrefs(context)
-        else rebuildSavedExportsFromMediaStore(context)
-    return pruneSavedExportsIfNeeded(context, seed, retention)
-}
-
-private fun loadSavedExportsFromPrefs(context: Context): List<SavedExport> {
-    val raw =
-        context
-            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getString(KEY_SAVED_EXPORTS, null) ?: return emptyList()
-    return raw.lines().mapNotNull { decodeSavedExport(it) }
-}
-
-private fun rebuildSavedExportsFromMediaStore(context: Context): List<SavedExport> {
-    val projection =
-        buildList {
-                add(MediaStore.Images.Media._ID)
-                add(MediaStore.Images.Media.DISPLAY_NAME)
-                add(MediaStore.Images.Media.MIME_TYPE)
-                add(MediaStore.Images.Media.WIDTH)
-                add(MediaStore.Images.Media.HEIGHT)
-                add(MediaStore.Images.Media.DATE_ADDED)
-                add(MediaStore.Images.Media.RELATIVE_PATH)
-            }
-            .toTypedArray()
-    val items = mutableListOf<SavedExport>()
-    context.contentResolver
-        .query(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            null,
-            null,
-            "${MediaStore.Images.Media.DATE_ADDED} DESC",
-        )
-        ?.use { cursor ->
-            val idIndex = cursor.getColumnIndex(MediaStore.Images.Media._ID)
-            val nameIndex = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
-            val mimeIndex = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
-            val widthIndex = cursor.getColumnIndex(MediaStore.Images.Media.WIDTH)
-            val heightIndex = cursor.getColumnIndex(MediaStore.Images.Media.HEIGHT)
-            val dateAddedIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATE_ADDED)
-            val relativePathIndex = cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
-            if (idIndex < 0 || nameIndex < 0 || mimeIndex < 0 || dateAddedIndex < 0) return@use
-            while (cursor.moveToNext() && items.size < 60) {
-                val displayName = cursor.getString(nameIndex).orEmpty()
-                val inKeplerStudio =
-                    relativePathIndex >= 0 &&
-                        cursor
-                            .getString(relativePathIndex)
-                            .orEmpty()
-                            .startsWith("${Environment.DIRECTORY_PICTURES}/KeplerStudio")
-                if (!inKeplerStudio) continue
-                val id = cursor.getLong(idIndex)
-                val safeDisplayName = displayName.ifBlank { "KeplerStudio_$id" }
-                val mimeType = cursor.getString(mimeIndex).orEmpty()
-                val width = if (widthIndex >= 0) cursor.getInt(widthIndex) else 0
-                val height = if (heightIndex >= 0) cursor.getInt(heightIndex) else 0
-                val dateAddedSeconds = cursor.getLong(dateAddedIndex)
-                items +=
-                    SavedExport(
-                        displayName = safeDisplayName,
-                        uriString =
-                            Uri.withAppendedPath(
-                                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                                    id.toString(),
-                                )
-                                .toString(),
-                        formatLabel = mimeTypeToExportLabel(mimeType, safeDisplayName),
-                        resolutionLabel =
-                            if (width > 0 && height > 0) "${width}x${height}" else "원본",
-                        timestampMillis =
-                            if (dateAddedSeconds > 0L) dateAddedSeconds * 1000L
-                            else System.currentTimeMillis(),
-                    )
-            }
-        }
-    if (items.isNotEmpty()) saveSavedExportsToPrefs(context, items)
-    return items
-}
-
-private fun mimeTypeToExportLabel(mimeType: String, displayName: String): String =
-    when {
-        mimeType.equals("image/jpeg", ignoreCase = true) -> "JPEG"
-        mimeType.equals("image/png", ignoreCase = true) -> "PNG"
-        mimeType.equals("image/webp", ignoreCase = true) -> "WebP"
-        mimeType.equals("image/heic", ignoreCase = true) ||
-            mimeType.equals("image/heif", ignoreCase = true) -> "HEIF"
-        displayName.endsWith(".jpg", ignoreCase = true) ||
-            displayName.endsWith(".jpeg", ignoreCase = true) -> "JPEG"
-        displayName.endsWith(".png", ignoreCase = true) -> "PNG"
-        displayName.endsWith(".webp", ignoreCase = true) -> "WebP"
-        displayName.endsWith(".heic", ignoreCase = true) ||
-            displayName.endsWith(".heif", ignoreCase = true) -> "HEIF"
-        else -> "사진"
-    }
-
-private fun saveExportHistoryRetention(context: Context, retention: ExportHistoryRetention) {
-    check(
-        context
-            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_EXPORT_HISTORY_RETENTION, retention.name)
-            .commit()
-    ) {
-        "failed to persist export history retention"
-    }
-}
-
-private fun loadExportHistoryRetention(context: Context): ExportHistoryRetention =
-    enumValueOrDefault(
-        context
-            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .getString(KEY_EXPORT_HISTORY_RETENTION, null),
-        ExportHistoryRetention.Never,
-    )
-
 private fun saveEngineSelection(context: Context, engines: EngineSelection) {
     context
         .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -10238,28 +10068,6 @@ private fun EngineSelection.coerceImplemented(): EngineSelection =
             hazeEngine.takeIf { it in IMPLEMENTED_DEHAZE_ENGINES } ?: DehazeEngine.FastContrast,
     )
 
-private fun encodeSavedExport(item: SavedExport): String =
-    listOf(
-            item.displayName,
-            item.uriString,
-            item.formatLabel,
-            item.resolutionLabel,
-            item.timestampMillis.toString(),
-        )
-        .joinToString("|") { it.replace("|", " ").replace("\n", " ") }
-
-private fun decodeSavedExport(raw: String): SavedExport? {
-    val parts = raw.split("|")
-    if (parts.size != 5) return null
-    return SavedExport(
-        displayName = parts[0],
-        uriString = parts[1],
-        formatLabel = parts[2],
-        resolutionLabel = parts[3],
-        timestampMillis = parts[4].toLongOrNull() ?: return null,
-    )
-}
-
 private inline fun <reified T : Enum<T>> enumValueOrDefault(name: String?, default: T): T =
     runCatching { enumValueOf<T>(name ?: return default) }.getOrDefault(default)
 
@@ -10271,9 +10079,6 @@ private const val EXPORT_MAX_SIDE = 8192
 private const val DRAFT_SOURCE_FILE_NAME = "source.img"
 private const val DRAFT_THUMBNAIL_FILE_NAME = "thumbnail.jpg"
 private const val PREF_NAME = "kepler_studio_editor"
-private const val KEY_SAVED_EXPORTS = "saved_exports"
-private const val KEY_SAVED_EXPORTS_INITIALIZED = "saved_exports_initialized"
-private const val KEY_EXPORT_HISTORY_RETENTION = "export_history_retention"
 private const val KEY_NOISE_ENGINE = "noise_engine"
 private const val KEY_DETAIL_ENGINE = "detail_engine"
 private const val KEY_TONE_ENGINE = "tone_engine"
