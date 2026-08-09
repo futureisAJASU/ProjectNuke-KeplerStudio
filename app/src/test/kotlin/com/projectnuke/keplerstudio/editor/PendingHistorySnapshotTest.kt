@@ -125,4 +125,29 @@ class PendingHistorySnapshotTest {
         assertFailsWith<IllegalStateException> { pending.await() }
         pending.close()
     }
+
+    @Test
+    fun `owned exact snapshot take transfers once and close does not recycle`() {
+        val bitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        val value = snapshot(bitmap)
+        val owner = EditorViewModel.OwnedHistorySnapshot(value)
+
+        assertSame(value, owner.take())
+        assertNull(owner.take())
+        owner.close()
+
+        assertFalse(bitmap.isRecycled)
+        value.recycleBitmaps()
+    }
+
+    @Test
+    fun `owned exact snapshot close recycles an untransferred result`() {
+        val bitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+        val owner = EditorViewModel.OwnedHistorySnapshot(snapshot(bitmap))
+
+        owner.close()
+        owner.close()
+
+        assertTrue(bitmap.isRecycled)
+    }
 }

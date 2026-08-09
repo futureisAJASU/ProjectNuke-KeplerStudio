@@ -71,6 +71,7 @@ import org.json.JSONObject
 
 internal class PendingHistorySnapshot(
     private val deferred: CompletableDeferred<EditorHistorySnapshot?>,
+    private val onCompletedForTest: ((EditorHistorySnapshot?) -> Unit)? = null,
 ) : AutoCloseable {
     private enum class Terminal {
         Pending,
@@ -103,17 +104,18 @@ internal class PendingHistorySnapshot(
     }
 
     internal fun complete(value: EditorHistorySnapshot?) {
-        val recycleNow = synchronized(this) {
+        val completion = synchronized(this) {
             if (terminal != Terminal.Pending) {
-                value
+                false to value
             } else {
                 completedResult = value
                 terminal = Terminal.CompletedUnclaimed
                 deferred.complete(value)
-                null
+                true to null
             }
         }
-        recycleNow?.recycleBitmaps()
+        if (completion.first) onCompletedForTest?.invoke(value)
+        completion.second?.recycleBitmaps()
     }
 
     internal fun fail(error: Throwable) {
@@ -257,6 +259,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Test-only cancellation of the currently owned external image-open job. */
     internal fun cancelOpenImageForTest() {
         openImageJob?.cancel()
+    }
+
+    /** Test-only cancellation of the currently owned managed render. */
+    internal fun cancelCurrentRenderForTest() {
+        renderJob?.cancel()
     }
 
     internal fun openImageJobActiveForTest(): Boolean = openImageJob?.isActive == true
@@ -437,7 +444,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal class OwnedHistorySnapshot(val snapshot: EditorHistorySnapshot) : AutoCloseable {
-        override fun close() { snapshot.recycleBitmaps() }
+        private val ownership = AtomicBoolean(true)
+
+        /** Transfers the snapshot to the history coordinator exactly once. */
+        fun take(): EditorHistorySnapshot? =
+            if (ownership.compareAndSet(true, false)) snapshot else null
+
+        override fun close() {
+            if (ownership.compareAndSet(true, false)) snapshot.recycleBitmaps()
+        }
     }
 
     private class ParameterGestureTransaction(
@@ -2740,7 +2755,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         leased: LeasedEditorSnapshot,
         storage: HistorySnapshotStorage = HistorySnapshotStorage.Exact,
     ): PendingHistorySnapshot {
-        val pending = PendingHistorySnapshot(CompletableDeferred())
+        val pending =
+            PendingHistorySnapshot(
+                CompletableDeferred(),
+                onCompletedForTest = HistorySnapshotTestSeam.capture()?.onCompleted,
+            )
         val producerLease = leased.retain("history-producer:$tag")
         if (producerLease == null) {
             pending.complete(null)
@@ -4345,6 +4364,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         var pendingHistory: PendingHistorySnapshot? =
             prepareHistorySnapshot("resetAdjustments", startSnapshot)
+        val resetDecodeSeam = ResetAdjustmentsTestSeam.capture()
         val nextRevision = startRevision + 1
         renderJob?.cancel()
         invalidateExport()
@@ -4353,13 +4373,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(isBusy = true, revision = nextRevision, message = "초기화하는 중입니다")
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
-            var undoSnapshot: EditorHistorySnapshot? =
-                pendingHistory?.await()
+            var undoSnapshotOwned: OwnedHistorySnapshot? = null
+            val undoSnapshot = pendingHistory?.await()
             pendingHistory = null
+            undoSnapshotOwned = undoSnapshot?.let(::OwnedHistorySnapshot)
             try {
                 withContext(Dispatchers.IO) {
                     val result =
-                        decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048, resetTracker)
+                        resetDecodeSeam?.decode?.invoke(sourcePath)
+                            ?: decodeSampledMutableBitmapWithExif(
+                                sourcePath,
+                                maxSide = 2048,
+                                resetTracker,
+                            )
                     decoded = result
                 }
                 val identityUnchanged =
@@ -4394,8 +4420,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                     decoded = null
-                    settleAdoptedEditHistory(undoSnapshot)
-                    undoSnapshot = null
+                    settleAdoptedEditHistory(undoSnapshotOwned?.take())
                     forceDraftSaveAsync()
                 } else if (isManagedEditTokenCurrent(operationToken)) {
                     updateUiState { it.copy(isBusy = false) }
@@ -4421,12 +4446,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                     updateUiStateAndRecycleReplaced {
-                        it.copy(isBusy = false, message = "초기화에 실패했습니다: ${t.message}")
+                        it.copy(isBusy = false, message = "초기화에 실패했습니다.")
                     }
                 } else if (isManagedEditTokenCurrent(operationToken)) {
                     updateUiState { it.copy(isBusy = false) }
                 }
             } finally {
+                undoSnapshotOwned?.close()
                 decoded?.takeIf { !it.isRecycled }?.recycle()
                 startSnapshot.close()
             }
@@ -5905,9 +5931,10 @@ fun exportPreview() {
             it.copy(isBusy = true, revision = nextRevision, message = "$title 적용 중입니다.")
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
-            var undoSnapshot: EditorHistorySnapshot? =
-                pendingHistory?.await()
+            var undoSnapshotOwned: OwnedHistorySnapshot? = null
+            val undoSnapshot = pendingHistory?.await()
             pendingHistory = null
+            undoSnapshotOwned = undoSnapshot?.let(::OwnedHistorySnapshot)
             var renderedPreview: Bitmap? = null
             var renderSuccess: RenderResult.Success? = null
             val effectsTracker =
@@ -5966,8 +5993,7 @@ fun exportPreview() {
                         )
                     }
                     renderedPreview = null
-                    settleAdoptedEditHistory(undoSnapshot)
-                    undoSnapshot = null
+                    settleAdoptedEditHistory(undoSnapshotOwned?.take())
                     forceDraftSaveAsync()
                 } else if (isManagedEditTokenCurrent(operationToken)) {
                     updateUiState { it.copy(isBusy = false) }
@@ -6000,6 +6026,7 @@ fun exportPreview() {
                     updateUiState { it.copy(isBusy = false) }
                 }
             } finally {
+                undoSnapshotOwned?.close()
                 renderedPreview?.takeIf { !it.isRecycled }?.recycle()
                 ownedBase?.takeIf { !it.isRecycled }?.recycle()
                 effectsTracker?.end()
