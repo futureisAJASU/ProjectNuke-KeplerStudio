@@ -50,14 +50,18 @@ import kotlinx.coroutines.withContext
  *    stale-result discard.
  */
 fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> EditParams) {
-    val transaction = currentSelectionParamTransaction() ?: return
+    val transaction = currentSelectionParamTransaction()
     val current = uiState.value
-    if (transaction.settled || transaction.committed) return
-    if (current.baseContentToken != transaction.baseContentToken) return
-    if (current.activeSelectionLayerId != transaction.activeSelectionLayerId) return
+    val pendingStart = pendingSelectionParamStart()
+    if (transaction != null) {
+        if (transaction.settled || transaction.committed) return
+        if (current.baseContentToken != transaction.baseContentToken) return
+        if (current.activeSelectionLayerId != transaction.activeSelectionLayerId) return
+    }
     if (hasActiveBrushStroke()) return
     val activeId = current.activeSelectionLayerId ?: return
-    if (transaction.activeSelectionLayerId != activeId) return
+    if (transaction != null && transaction.activeSelectionLayerId != activeId) return
+    if (pendingStart != null && pendingStart.activeLayerId != activeId) return
 
     // --- Lightweight preview state update on Main (no Bitmap copy) ---
     // Only the in-state layer's EditParams reference is replaced; the bitmap object identity
@@ -89,7 +93,15 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
         )
     }
 
-    val previewToken = beginSelectionPreview(transaction)
+    // Route updates through pending gesture when transaction hasn't started yet.
+    if (pendingStart != null && transaction == null) {
+        pendingStart.pendingLocalParams = nextLayers.firstOrNull { it.id == activeId }?.localParams
+        pendingStart.terminalFinish = true
+        pendingStart.revision = nextRevision
+        return
+    }
+
+    val previewToken = beginSelectionPreview(transaction ?: return)
     SelectionPreviewPreparationGateway.notePrepareIntention()
 
     val previewJob = viewModelScope.launch {

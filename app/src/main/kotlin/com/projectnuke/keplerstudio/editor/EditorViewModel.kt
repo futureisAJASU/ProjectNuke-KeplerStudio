@@ -310,14 +310,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var shuttingDown: Boolean = false
     private var cropOperationToken: Long = 0L
     internal var selectionParamTransaction: SelectionParamTransaction? = null
-    private data class PendingSelectionParamStart(
+    internal data class PendingSelectionParamStart(
         val prerequisite: HistoryActivityRegistry.Registration,
         val documentGeneration: String,
         val sourcePath: String?,
         val baseContentToken: String,
-        val revision: Int,
+        var revision: Int,
         val activeLayerId: String?,
         var job: Job? = null,
+        var terminalFinish: Boolean = false,
+        var pendingLocalParams: EditParams? = null,
     )
     private var pendingSelectionParamStart: PendingSelectionParamStart? = null
     private var selectionGestureCounter: Long = 0L
@@ -340,6 +342,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var brushStartSnapshot: LeasedEditorSnapshot? = null
     private val pendingBrushPoints = ArrayDeque<Pair<Float, Float>>()
     private var brushSettlementJob: Job? = null
+    private enum class PendingBrushTerminal { Finish, Cancel }
     private data class PendingBrushStart(
         val prerequisite: HistoryActivityRegistry.Registration,
         val documentGeneration: String,
@@ -348,6 +351,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val revision: Int,
         val activeLayerId: String,
         var job: Job? = null,
+        var terminalIntent: PendingBrushTerminal? = null,
     )
     private var pendingBrushStart: PendingBrushStart? = null
     private data class BrushTransactionIdentity(
@@ -2484,8 +2488,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         current.revision != pending.revision ||
                         current.activeSelectionLayerId != pending.activeLayerId
                     ) return@launch
+                    val queuedParams = pending.pendingLocalParams
+                    val shouldFinish = pending.terminalFinish
                     pendingSelectionParamStart = null
-                    beginSelectionParamGesture()
+                    if (queuedParams != null) {
+                        val activeLayerId = pending.activeLayerId ?: return@launch
+                        val updatedLayers = current.selectionLayers.map { layer ->
+                            if (layer.id == activeLayerId) layer.copy(localParams = queuedParams) else layer
+                        }
+                        updateUiState { it.copy(selectionLayers = updatedLayers) }
+                    }
+                    if (beginSelectionParamGesture()) {
+                        if (shouldFinish) finishSelectionParamGesture()
+                    }
                 } finally {
                     if (pendingSelectionParamStart === pending) pendingSelectionParamStart = null
                 }
@@ -2520,6 +2535,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun currentSelectionParamTransaction(): SelectionParamTransaction? =
         synchronized(selectionTransactionGate) { selectionParamTransaction }
 
+    internal fun pendingSelectionParamStart(): PendingSelectionParamStart? = pendingSelectionParamStart
+
     internal fun bindSelectionPreviewJob(
         transaction: SelectionParamTransaction,
         job: Job,
@@ -2544,6 +2561,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun finishSelectionParamGesture() {
+        val pending = pendingSelectionParamStart
+        if (pending != null && selectionParamTransaction == null) {
+            pending.terminalFinish = true
+            return
+        }
         val transaction = selectionParamTransaction ?: return
         if (transactionFinishJob?.isActive == true && transaction.finished != true) return
         val job =
@@ -2866,9 +2888,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     ) return@launch
                     val queued = pendingBrushPoints.toList()
                     pendingBrushPoints.clear()
+                    val terminal = pending.terminalIntent
                     pendingBrushStart = null
                     brushTransactionState = BrushTransactionState.Idle
-                    if (beginBrushStroke()) queued.forEach { queueBrushPoint(it.first, it.second) }
+                    when (terminal) {
+                        PendingBrushTerminal.Cancel -> return@launch
+                        PendingBrushTerminal.Finish -> {
+                            if (beginBrushStroke()) {
+                                queued.forEach { queueBrushPoint(it.first, it.second) }
+                                finishBrushStroke()
+                            }
+                            return@launch
+                        }
+                        else -> {
+                            if (beginBrushStroke()) queued.forEach { queueBrushPoint(it.first, it.second) }
+                        }
+                    }
                 } finally {
                     if (pendingBrushStart === pending) {
                         pendingBrushStart = null
@@ -2904,17 +2939,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         brushStartSnapshot = leased
         brushMaskReservation = reservation
-        /*
-            runCatching { layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true) }
-                .getOrElse { failure ->
-                    if (failure is BitmapAllocationRejectedException) {
-                        updateUiStateAndRecycleReplaced {
-                            it.copy(message = "메모리가 부족하여 브러시 작업을 시작하지 못했습니다.")
-                        }
-                    }
-                    return false
-                }
-        */
         // Tag the owned working mask with a named owner so the selection-mask ledger can
         // identify brush-strokes in flight and defer recycling until the stroke ends.
         brushLayerId = layerId
@@ -2940,14 +2964,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             )
         brushIdentity = transactionIdentity
         brushWorkingMask = null
-        /* updateUiState { current ->
-            current.copy(
-                selectionLayers =
-                    current.selectionLayers.map { item ->
-                        if (item.id == layerId) item.copy(bitmap = ownedMask) else item
-                    }
-            )
-        } */
         // Defer the full Exact history snapshot bitmap copies to a worker — copying
         // previewBitmap + originalPreviewBitmap + every layer bitmap on Main blocks the
         // gesture thread. Finish/cancel await this job before touching brushingSnapshot.
@@ -3273,7 +3289,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (brushTransactionState == BrushTransactionState.Idle ||
             brushTransactionState == BrushTransactionState.Finishing ||
             brushTransactionState == BrushTransactionState.Cancelling
-        ) return
+        ) {
+            // Allow deferred finish through pending prerequisite
+            if (pendingBrushStart != null && brushIdentity == null) {
+                pendingBrushStart?.terminalIntent = PendingBrushTerminal.Finish
+                return
+            }
+            return
+        }
+        if (pendingBrushStart != null && brushIdentity == null) {
+            pendingBrushStart?.terminalIntent = PendingBrushTerminal.Finish
+            return
+        }
         val strokeId = brushIdentity?.strokeId ?: return
         brushTransactionState = BrushTransactionState.Finishing
         settleBrushStroke(strokeId)
@@ -3284,10 +3311,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             brushTransactionState == BrushTransactionState.Cancelling
         ) return
         if (pendingBrushStart != null && brushIdentity == null) {
-            pendingBrushStart?.job?.cancel()
-            pendingBrushStart = null
-            pendingBrushPoints.clear()
-            brushTransactionState = BrushTransactionState.Idle
+            pendingBrushStart?.terminalIntent = PendingBrushTerminal.Cancel
             return
         }
         val strokeId = brushIdentity?.strokeId ?: return
@@ -8929,7 +8953,11 @@ internal fun Bitmap.copyOrThrow(
     val required = BitmapMemoryBudget.bytes(width, height, config)
     if (!BitmapMemoryBudget.canAllocate(required)) throw BitmapAllocationRejectedException(required)
     return try {
-        copy(config, mutable) ?: throw IllegalStateException("bitmap copy failed")
+        if (BitmapCopyTestSeam.isCustomCopyEnabled()) {
+            BitmapCopyTestSeam.copyOwned(this, config, mutable)
+        } else {
+            copy(config, mutable) ?: throw IllegalStateException("bitmap copy failed")
+        }
     } catch (_: OutOfMemoryError) {
         throw BitmapAllocationRejectedException(required)
     }

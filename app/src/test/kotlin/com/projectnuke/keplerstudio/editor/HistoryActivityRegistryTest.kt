@@ -66,6 +66,24 @@ class HistoryActivityRegistryTest {
     }
 
     @Test
+    fun prereqFailureOutcomeIsNonFatalAndDoesNotDeadlockRegistry() {
+        runBlocking {
+        val registry = HistoryActivityRegistry(coordinatorBusy = { false })
+        val scope = CoroutineScope(SupervisorJob())
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            throw IllegalStateException("simulated failure")
+        }
+        assertTrue(registry.register(job))
+        job.start()
+        val outcome = registry.registerHandle(job)?.await() ?: error("missing outcome")
+        assertTrue(outcome is HistoryPrerequisiteOutcome.Failed)
+        assertTrue((outcome as HistoryPrerequisiteOutcome.Failed).cause is IllegalStateException)
+        assertFalse(registry.isBusy())
+        scope.coroutineContext[Job]?.cancel()
+        }
+    }
+
+    @Test
     fun shutdownCancellationClearsRegisteredActivity() {
         val registry = HistoryActivityRegistry(coordinatorBusy = { false })
         val job = Job()
