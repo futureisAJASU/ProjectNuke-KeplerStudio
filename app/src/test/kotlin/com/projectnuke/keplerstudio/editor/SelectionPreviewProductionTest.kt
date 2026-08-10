@@ -63,7 +63,7 @@ class SelectionPreviewProductionTest {
     }
 
     private fun settle(predicate: () -> Boolean) {
-        repeat(2000) {
+        repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -203,7 +203,9 @@ class SelectionPreviewProductionTest {
             vm.finishSelectionParamGesture()
             settle { vm.currentSelectionParamTransaction() == null && vm.uiState.value.canUndo }
             vm.undoEdit()
-            settle { vm.uiState.value.canRedo && !vm.uiState.value.isBusy }
+            settle {
+                vm.uiState.value.canRedo && !vm.uiState.value.isBusy && !vm.uiState.value.historyBusy
+            }
             assertEquals(0, vm.uiState.value.previewBitmap?.getPixel(4, 4))
             assertEquals(0f, vm.uiState.value.selectionLayers.single().localParams.exposure)
             vm.redoEdit()

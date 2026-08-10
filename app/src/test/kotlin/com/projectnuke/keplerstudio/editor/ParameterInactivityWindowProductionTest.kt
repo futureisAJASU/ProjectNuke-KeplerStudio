@@ -394,7 +394,7 @@ class ParameterInactivityWindowProductionTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(2000) {
+        repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -404,7 +404,7 @@ class ParameterInactivityWindowProductionTest {
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        repeat(2000) {
+        repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()

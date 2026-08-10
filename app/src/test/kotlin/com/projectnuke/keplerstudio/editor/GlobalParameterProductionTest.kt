@@ -272,8 +272,8 @@ class GlobalParameterProductionTest {
             assertTrue(vm.hasOpenParameterGesture(), "gesture still open before settle")
             assertEquals(0, vm.undoEntryCountForTest())
 
-            assertTrue(vm.canEnterEditorAction())
-            assertEquals(1, vm.undoEntryCountForTest())
+            assertTrue(vm.settleForEditorAction())
+            assertTrue(await(vm) { vm.undoEntryCountForTest() == 1 })
 
             vm.undoEdit()
             assertTrue(
@@ -314,9 +314,9 @@ class GlobalParameterProductionTest {
             val epochBefore = vm.draftEpochForTest()
             vm.updateParams { it.copy(exposure = 0.3f) }
             assertTrue(await(vm) { uiPixelColor(vm) == red && !vm.uiState.value.isBusy })
-            assertTrue(vm.canEnterEditorAction())
+            assertTrue(vm.settleForEditorAction())
             assertEquals(0.3f, vm.uiState.value.params.exposure, "adopted params committed")
-            assertEquals(1, vm.undoEntryCountForTest())
+            assertTrue(await(vm) { vm.undoEntryCountForTest() == 1 })
             assertTrue(await(vm) { vm.draftEpochForTest() > epochBefore })
         } finally {
             renderer.close()

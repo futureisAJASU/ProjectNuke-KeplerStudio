@@ -147,7 +147,7 @@ class EditorViewModelBrushTransactionTest {
         awaitEditorReady(vm)
 
         assertTrue(vm.beginSelectionParamGesture())
-        assertTrue(vm.canEnterEditorAction())
+        assertTrue(vm.settleForEditorAction())
         vm.acquireEditorSnapshot("settled")?.close()
 
         settle(vm) { vm.currentSelectionParamTransaction() == null }

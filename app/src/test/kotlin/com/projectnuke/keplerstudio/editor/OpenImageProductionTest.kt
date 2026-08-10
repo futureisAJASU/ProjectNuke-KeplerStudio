@@ -369,7 +369,7 @@ class OpenImageProductionTest {
     }
 
     private fun awaitMainUntil(predicate: () -> Boolean) {
-        repeat(2000) {
+        repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()

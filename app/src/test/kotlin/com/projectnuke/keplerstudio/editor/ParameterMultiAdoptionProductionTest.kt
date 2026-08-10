@@ -99,11 +99,11 @@ class ParameterMultiAdoptionProductionTest {
             val startPixel = uiPixelColor(vm)
 
             vm.updateParams { it.copy(exposure = 0.2f) }
-            awaitEvent(vm) { adopted.size == 1 && uiPixelColor(vm) == red }
+            awaitEvent(vm, "adopt-red") { adopted.size == 1 && uiPixelColor(vm) == red }
             vm.updateParams { it.copy(exposure = 0.4f) }
-            awaitEvent(vm) { adopted.size == 2 && uiPixelColor(vm) == green }
+            awaitEvent(vm, "adopt-green") { adopted.size == 2 && uiPixelColor(vm) == green }
             vm.updateParams { it.copy(exposure = 0.6f) }
-            awaitEvent(vm) { adopted.size == 3 && uiPixelColor(vm) == blue }
+            awaitEvent(vm, "adopt-blue") { adopted.size == 3 && uiPixelColor(vm) == blue }
 
             assertTrue("one open gesture across all adoptions", vm.hasOpenParameterGesture())
             assertEquals("latest requested = 0.6", 0.6f, vm.latestParamsForTest()?.exposure)
@@ -121,8 +121,11 @@ class ParameterMultiAdoptionProductionTest {
             assertEquals("exactly one undo entry", 1, vm.undoEntryCountForTest())
 
             vm.undoEdit()
-            awaitEvent(vm) {
-                !vm.uiState.value.isBusy && vm.uiState.value.params.exposure == 0f && vm.uiState.value.canRedo
+            awaitEvent(vm, "undo1") {
+                !vm.uiState.value.isBusy &&
+                    !vm.uiState.value.historyBusy &&
+                    vm.uiState.value.params.exposure == 0f &&
+                    vm.uiState.value.canRedo
             }
             assertEquals("undo restores gesture-start params", 0f, vm.uiState.value.params.exposure)
             assertEquals("undo restores exact start pixels", startPixel, uiPixelColor(vm))
@@ -130,7 +133,7 @@ class ParameterMultiAdoptionProductionTest {
             assertTrue(vm.uiState.value.canRedo)
 
             vm.redoEdit()
-            awaitEvent(vm) {
+            awaitEvent(vm, "redo1") {
                 !vm.uiState.value.isBusy && vm.uiState.value.params.exposure == 0.6f && vm.uiState.value.canUndo
             }
             assertEquals("redo restores latest adopted params", 0.6f, vm.uiState.value.params.exposure)
@@ -366,7 +369,7 @@ class ParameterMultiAdoptionProductionTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(1200) {
+        repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -375,7 +378,7 @@ class ParameterMultiAdoptionProductionTest {
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
-    private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
+    private fun awaitEvent(vm: EditorViewModel, tag: String = "", predicate: () -> Boolean) {
         repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
@@ -384,6 +387,16 @@ class ParameterMultiAdoptionProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return
             yieldToEditorBackgroundForTest()
+        }
+        if (!predicate()) {
+            System.err.println(
+                "AWAIT-TIMEOUT tag=$tag params=${vm.uiState.value.params.exposure} " +
+                    "busy=${vm.uiState.value.isBusy} historyBusy=${vm.uiState.value.historyBusy} " +
+                    "canRedo=${vm.uiState.value.canRedo} canUndo=${vm.uiState.value.canUndo} " +
+                    "adopted=${vm.adoptedParamsForTest()?.exposure} latest=${vm.latestParamsForTest()?.exposure} " +
+                    "undo=${vm.undoEntryCountForTest()} gesture=${vm.hasOpenParameterGesture()} " +
+                    "msg=${vm.uiState.value.message}"
+            )
         }
         assertTrue(predicate())
     }

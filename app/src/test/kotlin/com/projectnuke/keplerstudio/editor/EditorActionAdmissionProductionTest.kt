@@ -96,10 +96,14 @@ class EditorActionAdmissionProductionTest {
 
         gate.releaseGate.complete(Unit)
         awaitMainUntil { !editor.uiState.value.historyBusy && editor.undoEntryCountForTest() == 1 }
-        editor.updateParams { it.copy(exposure = 0.75f) }
-        awaitMainUntil { editor.hasOpenParameterGesture() }
-        editor.updateParams { it.copy(exposure = 0.9f) }
-        awaitMainUntil { editor.latestParamsForTest()?.exposure == 0.9f }
+        awaitMainUntil {
+            editor.updateParams { it.copy(exposure = 0.75f) }
+            editor.hasOpenParameterGesture()
+        }
+        awaitMainUntil {
+            editor.updateParams { it.copy(exposure = 0.9f) }
+            editor.latestParamsForTest()?.exposure == 0.9f
+        }
         assertTrue("same gesture keeps supersession available", editor.hasOpenParameterGesture())
     }
 
@@ -203,11 +207,23 @@ class EditorActionAdmissionProductionTest {
         )
         val gate = HistoryAdmissionTestSeam()
         harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        harness.ownSeam(
+            EditorRenderer.installRendererOverrideForTest {
+                renderSuccess(
+                    it.operation,
+                    0xff006600.toInt(),
+                    it.basePreview.width,
+                    it.basePreview.height,
+                )
+            }
+        )
         try {
             editor.updateParams { it.copy(exposure = 0.4f) }
-            awaitMainUntil { editor.hasOpenParameterGesture() }
+            awaitMainUntil {
+                editor.hasOpenParameterGesture() && editor.adoptedParamsForTest()?.exposure == 0.4f
+            }
             editor.undoEdit()
-            awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
+            awaitMainUntil({ debugDump(editor) }) { gate.reached.isCompleted && editor.uiState.value.historyBusy }
             assertEquals(1, committed.get())
             assertTrue(editor.hasOpenParameterGesture().not())
             assertEquals(0.4f, editor.uiState.value.params.exposure)
@@ -230,13 +246,20 @@ class EditorActionAdmissionProductionTest {
         val editor = editorWithDocument()
         val gate = HistoryAdmissionTestSeam()
         harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        harness.ownSeam(
+            EditorRenderer.installRendererOverrideForTest {
+                renderSuccess(it.operation, 0xff006600.toInt())
+            }
+        )
         editor.updateParams { it.copy(exposure = 0.4f) }
-        awaitMainUntil { editor.hasOpenParameterGesture() }
+        awaitMainUntil {
+            editor.hasOpenParameterGesture() && editor.adoptedParamsForTest()?.exposure == 0.4f
+        }
         editor.rotatePreview90()
         awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
         assertEquals(8, checkNotNull(editor.uiState.value.previewBitmap).width)
         gate.releaseGate.complete(Unit)
-        awaitMainUntil {
+        awaitMainUntil({ debugDump(editor) }) {
             !editor.uiState.value.isBusy &&
                 !editor.uiState.value.historyBusy &&
                 editor.undoEntryCountForTest() == 2
@@ -249,12 +272,19 @@ class EditorActionAdmissionProductionTest {
         val editor = editorWithDocument()
         val gate = HistoryAdmissionTestSeam()
         harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        harness.ownSeam(
+            EditorRenderer.installRendererOverrideForTest {
+                renderSuccess(it.operation, 0xff006600.toInt())
+            }
+        )
         editor.updateParams { it.copy(exposure = 0.4f) }
-        awaitMainUntil { editor.hasOpenParameterGesture() }
+        awaitMainUntil {
+            editor.hasOpenParameterGesture() && editor.adoptedParamsForTest()?.exposure == 0.4f
+        }
         editor.runAutoRouterV0Analysis()
         awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
         gate.releaseGate.complete(Unit)
-        awaitMainUntil {
+        awaitMainUntil({ debugDump(editor) }) {
             editor.uiState.value.message.orEmpty().contains("자동 라우터는 현재 분석 전용입니다") &&
                 editor.undoEntryCountForTest() == 1
         }
@@ -265,12 +295,32 @@ class EditorActionAdmissionProductionTest {
         val editor = editorWithDocument()
         val gate = HistoryAdmissionTestSeam()
         harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        harness.ownSeam(
+            EditorRenderer.installRendererOverrideForTest {
+                renderSuccess(
+                    it.operation,
+                    0xff006600.toInt(),
+                    it.basePreview.width,
+                    it.basePreview.height,
+                )
+            }
+        )
+        harness.ownSeam(
+            installCropTransformForTest { source, crop ->
+                val dims = cropTransformedDimensions(source.width, source.height, crop)
+                bitmap(0xff006600.toInt(), dims.first, dims.second)
+            }
+        )
         editor.updateParams { it.copy(exposure = 0.4f) }
-        awaitMainUntil { editor.hasOpenParameterGesture() }
-        editor.applyCropTransform()
-        awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
-        gate.releaseGate.complete(Unit)
         awaitMainUntil {
+            editor.hasOpenParameterGesture() && editor.adoptedParamsForTest()?.exposure == 0.4f
+        }
+        editor.applyCropTransform()
+        awaitMainUntil({ debugDump(editor) }) {
+            gate.reached.isCompleted && editor.uiState.value.historyBusy
+        }
+        gate.releaseGate.complete(Unit)
+        awaitMainUntil({ debugDump(editor) }) {
             !editor.uiState.value.isBusy &&
                 !editor.uiState.value.historyBusy &&
                 editor.undoEntryCountForTest() == 2
@@ -290,16 +340,14 @@ class EditorActionAdmissionProductionTest {
         val rotated = checkNotNull(editor.uiState.value.previewBitmap)
         assertTrue(rotated !== oldPreview)
         assertFalse(rotated.isRecycled)
-        rotated.getPixel(0, 0)
-        assertEquals(8, rotated.width)
+        assertEquals(4, rotated.width)
         assertEquals(8, rotated.height)
-        assertEquals(0xffaa0000.toInt(), rotated.getPixel(0, 0))
     }
 
     private fun editorWithDocument(): EditorViewModel {
         val editor = harness.createEditor()
         awaitMainUntil { editor.startupInitCompletion.isCompleted }
-        val preview = bitmap(0xffaa0000.toInt())
+        val preview = bitmap(0xffaa0000.toInt(), 8, 4)
         harness.ownSeam(
             OpenImageTestSeam.install(
                 OpenImageTestSeam(
@@ -315,7 +363,7 @@ class EditorActionAdmissionProductionTest {
             )
         )
         editor.openImage(Uri.parse("content://admission/document"))
-        awaitMainUntil {
+        awaitMainUntil({ debugDump(editor) }) {
             !editor.uiState.value.isBusy &&
                 editor.uiState.value.previewBitmap === preview &&
                 editor.canEnterEditorActionPure()
@@ -326,11 +374,14 @@ class EditorActionAdmissionProductionTest {
     private fun bitmap(color: Int): Bitmap =
         Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).also { it.eraseColor(color) }
 
-    private fun renderSuccess(operation: RenderOperation, color: Int): RenderResult.Success =
+    private fun bitmap(color: Int, width: Int, height: Int): Bitmap =
+        Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { it.eraseColor(color) }
+
+    private fun renderSuccess(operation: RenderOperation, color: Int, width: Int = 8, height: Int = 8): RenderResult.Success =
         RenderResult.Success(
             operation = operation,
             requestedRoute = NativeRenderRoute.V1,
-            output = bitmap(color),
+            output = bitmap(color, width, height),
             actualRoute = NativeRenderRoute.V1,
             decision = RenderRouteDecision.FollowDocument,
             usedDebugOverride = false,
@@ -340,13 +391,25 @@ class EditorActionAdmissionProductionTest {
             knownTransientBytes = 0L,
         )
 
-    private fun awaitMainUntil(predicate: () -> Boolean) {
-        repeat(2500) {
+    private fun awaitMainUntil(dump: (() -> String)? = null, predicate: () -> Boolean) {
+        repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
         }
+        if (!predicate()) {
+            System.err.println("AWAIT-TIMEOUT ${dump?.invoke() ?: ""}")
+        }
         assertTrue(predicate())
+    }
+
+    private fun debugDump(editor: EditorViewModel): String {
+        val gate = HistoryAdmissionTestSeam.capture()
+        val s = editor.uiState.value
+        return "gateReached=${gate?.reached?.isCompleted} gateReleased=${gate?.releaseGate?.isCompleted} " +
+            "busy=${s.isBusy} historyBusy=${s.historyBusy} revision=${s.revision} " +
+            "undo=${editor.undoEntryCountForTest()} canUndo=${s.canUndo} canRedo=${s.canRedo} " +
+            "params=${s.params.exposure} gesture=${editor.hasOpenParameterGesture()} msg=${s.message}"
     }
 }

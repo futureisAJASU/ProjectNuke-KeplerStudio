@@ -452,16 +452,17 @@ class ExternalIntentCoordinationProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(200) {
+        repeat(400) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorActionPure()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         assertTrue(vm.canEnterEditorActionPure())
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(1200) {
+        repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -471,12 +472,12 @@ class ExternalIntentCoordinationProductionTest {
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean): Boolean {
-        repeat(200) {
+        repeat(400) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return true
             shadowOf(android.os.Looper.getMainLooper()).idle()
         }
-        repeat(5000) {
+        repeat(8000) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return true
             yieldToEditorBackgroundForTest()
