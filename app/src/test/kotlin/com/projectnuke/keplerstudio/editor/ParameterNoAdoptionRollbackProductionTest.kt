@@ -55,7 +55,10 @@ class ParameterNoAdoptionRollbackProductionTest {
         val setup = openNoAdoptionGesture(sourceFile.absolutePath)
         val vm = setup.vm
         try {
-            assertTrue("editor action must be accepted from settled state", vm.canEnterEditorAction())
+            assertTrue(
+                "editor action must settle the open transaction",
+                vm.settleForEditorAction(),
+            )
             assertRolledBackExactState(setup)
             assertFalse("busy must clear", vm.uiState.value.isBusy)
             assertRollbackSignals(setup)
@@ -200,7 +203,7 @@ class ParameterNoAdoptionRollbackProductionTest {
                     activeSelectionLayerId = "phase9-mask",
                 )
             }
-            awaitEvent(vm) { vm.canEnterEditorAction() }
+            awaitEvent(vm) { vm.canEnterEditorActionPure() }
             assertTrue("brush stroke must be accepted", vm.beginBrushStroke())
             assertRollbackSignals(setup)
             assertEquals("brush paints rolled-back start params", setup.startParams, vm.uiState.value.params)
@@ -235,7 +238,7 @@ class ParameterNoAdoptionRollbackProductionTest {
                     activeSelectionLayerId = "phase9-sel",
                 )
             }
-            awaitEvent(vm) { vm.canEnterEditorAction() }
+            awaitEvent(vm) { vm.canEnterEditorActionPure() }
             assertTrue("selection gesture must be accepted", vm.startSelectionParamGesture())
             assertRollbackSignals(setup)
             assertEquals("selection opens on rolled-back start params", setup.startParams, vm.uiState.value.params)
@@ -432,11 +435,11 @@ class ParameterNoAdoptionRollbackProductionTest {
     private fun awaitReady(vm: EditorViewModel) {
         repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
-            if (vm.canEnterEditorAction()) return
+            if (vm.canEnterEditorActionPure()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
         }
-        assertTrue(vm.canEnterEditorAction())
+        assertTrue(vm.canEnterEditorActionPure())
     }
 
     private fun awaitInit(vm: EditorViewModel) {

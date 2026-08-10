@@ -177,6 +177,11 @@ class EditorActionAdmissionProductionTest {
     @Test
     fun historyCaptureAvailabilitySeparatesBusyFromMemoryRejection() = runBlocking {
         val editor = editorWithDocument()
+        harness.ownSeam(
+            EditorRenderer.installRendererOverrideForTest {
+                renderSuccess(it.operation, 0xff006600.toInt())
+            }
+        )
         assertEquals(HistoryCaptureAvailability.Ready, editor.historyCaptureAvailabilityForTest(0L))
         assertTrue(editor.historyCaptureAvailabilityForTest(Long.MAX_VALUE) is HistoryCaptureAvailability.MemoryRejected)
 
@@ -313,7 +318,7 @@ class EditorActionAdmissionProductionTest {
         awaitMainUntil {
             !editor.uiState.value.isBusy &&
                 editor.uiState.value.previewBitmap === preview &&
-                editor.canEnterEditorAction()
+                editor.canEnterEditorActionPure()
         }
         return editor
     }

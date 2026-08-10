@@ -53,6 +53,13 @@ internal class HistoryActivityRegistry(
         return registeredBusy || coordinatorBusy()
     }
 
+    fun isBusyExcluding(registration: Registration): Boolean {
+        val registeredBusy = synchronized(lock) {
+            registered?.let { it !== registration.job && !it.isCompleted } == true
+        }
+        return registeredBusy || coordinatorBusy()
+    }
+
     fun register(job: Job): Boolean {
         return registerHandle(job) != null
     }

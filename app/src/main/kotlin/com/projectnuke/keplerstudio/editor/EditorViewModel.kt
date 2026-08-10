@@ -2124,7 +2124,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
         val continuationJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
-                when (prerequisite.await()) {
+                val prerequisiteOutcome = prerequisite.await()
+                when (prerequisiteOutcome) {
                     HistoryPrerequisiteOutcome.Completed -> Unit
                     HistoryPrerequisiteOutcome.Cancelled -> return@launch
                     is HistoryPrerequisiteOutcome.Failed -> {
@@ -2138,7 +2139,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     current.sourcePath != identity.sourcePath ||
                     current.baseContentToken != identity.baseContentToken ||
                     current.revision != identity.revision ||
-                    historyActivityBusy()
+                    historyActivity.isBusyExcluding(prerequisite)
                 ) return@launch
                 if (externalActionContinuationToken != continuationToken) return@launch
                 externalActionContinuationPhase = ExternalActionContinuationPhase.Resuming

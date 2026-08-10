@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
+import com.projectnuke.keplerstudio.ui.paintActiveSelectionAt
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

@@ -216,12 +216,14 @@ class ParameterMultiAdoptionProductionTest {
             assertEquals(0.2f, vm.uiState.value.params.exposure)
             assertEquals("exactly one undo entry", 1, vm.undoEntryCountForTest())
 
+            awaitEvent(vm) { !vm.uiState.value.historyBusy }
             vm.undoEdit()
             awaitEvent(vm) {
                 !vm.uiState.value.isBusy && vm.uiState.value.params.exposure == 0f && vm.uiState.value.canRedo
             }
             assertEquals(startPixel, uiPixelColor(vm))
 
+            awaitEvent(vm) { !vm.uiState.value.historyBusy }
             vm.redoEdit()
             awaitEvent(vm) {
                 !vm.uiState.value.isBusy && vm.uiState.value.params.exposure == 0.2f && vm.uiState.value.canUndo
@@ -356,11 +358,11 @@ class ParameterMultiAdoptionProductionTest {
     private fun awaitReady(vm: EditorViewModel) {
         repeat(1000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
-            if (vm.canEnterEditorAction()) return
+            if (vm.canEnterEditorActionPure()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
         }
-        assertTrue(vm.canEnterEditorAction())
+        assertTrue(vm.canEnterEditorActionPure())
     }
 
     private fun awaitInit(vm: EditorViewModel) {
