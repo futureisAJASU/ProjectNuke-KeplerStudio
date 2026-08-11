@@ -22,12 +22,17 @@ class EditorViewModelBrushTransactionTest {
     private lateinit var harness: OwnedEditorViewModelHarness
 
     @Before
-    fun setUpHarness() { harness = OwnedEditorViewModelHarness(RuntimeEnvironment.getApplication() as Application) }
+    fun setUpHarness() {
+        harness = OwnedEditorViewModelHarness(
+            RuntimeEnvironment.getApplication() as Application,
+            installBitmapCopySeam = true,
+        )
+    }
 
     @After
     fun closeHarness() { harness.close() }
 
-    private fun viewModel(): EditorViewModel {
+    private fun viewModel(includeSelectionLayer: Boolean = true): EditorViewModel {
         val vm = harness.createEditor()
         val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         val layerBitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
@@ -38,25 +43,33 @@ class EditorViewModelBrushTransactionTest {
                 previewBitmap = bitmap,
                 originalPreviewBitmap = bitmap,
                 selectionLayers =
-                    listOf(SelectionLayer("mask", "mask", SelectionLayerKind.Brush, layerBitmap)),
-                activeSelectionLayerId = "mask",
+                    if (includeSelectionLayer) {
+                        listOf(SelectionLayer("mask", "mask", SelectionLayerKind.Brush, layerBitmap))
+                    } else {
+                        emptyList()
+                    },
+                activeSelectionLayerId = if (includeSelectionLayer) "mask" else null,
             )
         }
+        awaitEditorReady(vm)
         return vm
     }
 
     private fun settle(vm: EditorViewModel, predicate: () -> Boolean) {
         repeat(2000) {
-            shadowOf(android.os.Looper.getMainLooper()).idle()
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, java.util.concurrent.TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
         }
-        assertTrue(predicate(), "brush transaction did not settle")
+        assertTrue(
+            predicate(),
+            "brush transaction did not settle: state=${vm.uiState.value} pendingRender=${vm.pendingParamRenderRevision()} adopted=${vm.adoptedParamsForTest()} pending=${vm.hasPendingBrushStartForTest()} points=${vm.pendingBrushPointCountForTest()} active=${vm.hasActiveBrushStroke()} preparing=${vm.isBrushPreparing()} historyBusy=${vm.uiState.value.historyBusy}",
+        )
     }
 
     private fun awaitEditorReady(vm: EditorViewModel) {
-        settle(vm) { vm.canEnterEditorAction() }
+        settle(vm) { vm.startupInitCompletion.isCompleted && vm.canEnterEditorAction() }
     }
 
     @Test
@@ -86,6 +99,102 @@ class EditorViewModelBrushTransactionTest {
         assertEquals(1, vm.uiState.value.revision, "message=${vm.uiState.value.message}")
         settle(vm) { vm.uiState.value.canUndo }
         assertTrue(vm.uiState.value.canUndo)
+    }
+
+    @Test
+    fun `finish before history release replays queued brush point and closes stroke`() {
+        val vm = viewModel(includeSelectionLayer = false)
+        val renderer = installDeterministicRenderer()
+        try {
+            awaitEditorReady(vm)
+            vm.updateParams { it.copy(exposure = 0.2f) }
+            settle(vm) {
+                vm.hasOpenParameterGesture() &&
+                    vm.adoptedParamsForTest()?.exposure == 0.2f &&
+                    vm.pendingParamRenderRevision() == null
+            }
+            vm.updateUiState {
+                it.copy(
+                    selectionLayers =
+                        listOf(
+                            SelectionLayer(
+                                "mask",
+                                "mask",
+                                SelectionLayerKind.Brush,
+                                Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888),
+                            )
+                        ),
+                    activeSelectionLayerId = "mask",
+                )
+            }
+            val gate = HistoryAdmissionTestSeam()
+            harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+            assertTrue(vm.beginBrushStroke())
+            settle(vm) { gate.reached.isCompleted && vm.hasPendingBrushStartForTest() && vm.isBrushPreparing() }
+            vm.paintActiveSelectionAt(16f, 16f)
+            vm.finishBrushStroke()
+
+            assertTrue(vm.isBrushPreparing())
+            assertTrue(vm.hasPendingBrushStartForTest())
+            assertEquals(1, vm.pendingBrushPointCountForTest())
+            assertTrue(vm.pendingBrushFinishRequestedForTest())
+
+            gate.releaseSuccess()
+            settle(vm) { !vm.hasActiveBrushStroke() && !vm.hasPendingBrushStartForTest() }
+            assertEquals(0, vm.pendingBrushPointCountForTest())
+            assertTrue(vm.uiState.value.canUndo)
+            assertTrue(vm.uiState.value.selectionLayers.single().bitmap.getPixel(16, 16) != 0)
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun `cancel before history release closes pending brush immediately without cancelling prerequisite`() {
+        val vm = viewModel(includeSelectionLayer = false)
+        val renderer = installDeterministicRenderer()
+        try {
+            awaitEditorReady(vm)
+            vm.updateParams { it.copy(exposure = 0.2f) }
+            settle(vm) {
+                vm.hasOpenParameterGesture() &&
+                    vm.adoptedParamsForTest()?.exposure == 0.2f &&
+                    vm.pendingParamRenderRevision() == null
+            }
+            vm.updateUiState {
+                it.copy(
+                    selectionLayers =
+                        listOf(
+                            SelectionLayer(
+                                "mask",
+                                "mask",
+                                SelectionLayerKind.Brush,
+                                Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888),
+                            )
+                        ),
+                    activeSelectionLayerId = "mask",
+                )
+            }
+            val gate = HistoryAdmissionTestSeam()
+            harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+            assertTrue(vm.beginBrushStroke())
+            settle(vm) { gate.reached.isCompleted && vm.hasPendingBrushStartForTest() && vm.isBrushPreparing() }
+            vm.paintActiveSelectionAt(16f, 16f)
+            vm.cancelBrushStroke()
+
+            assertFalse(vm.hasPendingBrushStartForTest())
+            assertFalse(vm.isBrushPreparing())
+            assertFalse(vm.hasActiveBrushStroke())
+            assertEquals(0, vm.pendingBrushPointCountForTest())
+            assertEquals(0, vm.uiState.value.selectionLayers.single().bitmap.getPixel(16, 16))
+
+            gate.releaseSuccess()
+            settle(vm) { !vm.uiState.value.historyBusy && !vm.hasActiveBrushStroke() }
+            assertFalse(vm.hasPendingBrushStartForTest())
+            assertEquals(0, vm.pendingBrushPointCountForTest())
+        } finally {
+            renderer.close()
+        }
     }
 
     @Test
@@ -185,4 +294,20 @@ class EditorViewModelBrushTransactionTest {
         assertEquals(0, vm.uiState.value.revision)
         assertTrue(vm.uiState.value.selectionLayers.isNotEmpty())
     }
+
+    private fun installDeterministicRenderer(): AutoCloseable =
+        EditorRenderer.installRendererOverrideForTest { request ->
+            RenderResult.Success(
+                operation = RenderOperation.NativePreview,
+                requestedRoute = NativeRenderRoute.V1,
+                output = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888),
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
 }

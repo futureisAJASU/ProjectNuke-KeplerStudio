@@ -63,6 +63,16 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
     if (transaction != null && transaction.activeSelectionLayerId != activeId) return
     if (pendingStart != null && pendingStart.activeLayerId != activeId) return
 
+    // A prerequisite-owned gesture has no transaction owner yet. Keep slider
+    // updates as intent on that pending owner only; authoritative state,
+    // revision, busy state, and preview tokens begin with the real transaction.
+    if (pendingStart != null && transaction == null) {
+        val previous = pendingStart.latestIntendedLocalParams
+        val next = transform(previous)
+        if (next != previous) pendingStart.latestIntendedLocalParams = next
+        return
+    }
+
     // --- Lightweight preview state update on Main (no Bitmap copy) ---
     // Only the in-state layer's EditParams reference is replaced; the bitmap object identity
     // is preserved so the visible preview keeps rendering the existing pixels while a new
@@ -91,14 +101,6 @@ fun EditorViewModel.updateActiveSelectionParamsLive(transform: (EditParams) -> E
             isBusy = true,
             message = "선택 마스크 미리보기를 렌더링하는 중입니다.",
         )
-    }
-
-    // Route updates through pending gesture when transaction hasn't started yet.
-    if (pendingStart != null && transaction == null) {
-        pendingStart.pendingLocalParams = nextLayers.firstOrNull { it.id == activeId }?.localParams
-        pendingStart.terminalFinish = true
-        pendingStart.revision = nextRevision
-        return
     }
 
     val previewToken = beginSelectionPreview(transaction ?: return)

@@ -29,7 +29,7 @@ class EditorActionAdmissionProductionTest {
 
     @org.junit.Before
     fun setUp() {
-        harness = OwnedEditorViewModelHarness(context)
+        harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
     }
 
     @org.junit.After
@@ -95,15 +95,16 @@ class EditorActionAdmissionProductionTest {
         assertTrue(editor.uiState.value.message.orEmpty().contains("편집 기록"))
 
         gate.releaseGate.complete(Unit)
-        awaitMainUntil { !editor.uiState.value.historyBusy && editor.undoEntryCountForTest() == 1 }
         awaitMainUntil {
-            editor.updateParams { it.copy(exposure = 0.75f) }
-            editor.hasOpenParameterGesture()
+            !editor.uiState.value.historyBusy &&
+                !editor.uiState.value.isBusy &&
+                editor.undoEntryCountForTest() == 1 &&
+                editor.canEnterEditorActionPure()
         }
-        awaitMainUntil {
-            editor.updateParams { it.copy(exposure = 0.9f) }
-            editor.latestParamsForTest()?.exposure == 0.9f
-        }
+        editor.updateParams { it.copy(exposure = 0.75f) }
+        awaitMainUntil { editor.hasOpenParameterGesture() && editor.latestParamsForTest()?.exposure == 0.75f }
+        editor.updateParams { it.copy(exposure = 0.9f) }
+        awaitMainUntil { editor.latestParamsForTest()?.exposure == 0.9f }
         assertTrue("same gesture keeps supersession available", editor.hasOpenParameterGesture())
     }
 
@@ -196,6 +197,51 @@ class EditorActionAdmissionProductionTest {
         assertEquals(HistoryCaptureAvailability.HistoryBusy, editor.historyCaptureAvailabilityForTest(0L))
         gate.releaseGate.complete(Unit)
         awaitMainUntil { !editor.uiState.value.historyBusy }
+    }
+
+    @Test
+    fun acceptedRotationContinuationReceivesExpectedHistoryFailureWithoutCrashing() = runBlocking {
+        val editor = editorWithDocument()
+        harness.ownSeam(
+            EditorRenderer.installRendererOverrideForTest { request ->
+                renderSuccess(request.operation, 0xff006600.toInt())
+            }
+        )
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        editor.updateParams { it.copy(exposure = 0.4f) }
+        awaitMainUntil {
+            editor.hasOpenParameterGesture() &&
+                editor.adoptedParamsForTest()?.exposure == 0.4f
+        }
+        val adoptedPreview = checkNotNull(editor.uiState.value.previewBitmap)
+        val adoptedWidth = adoptedPreview.width
+        val adoptedHeight = adoptedPreview.height
+        val attempted = AtomicInteger(0)
+        val settlement = editor.settleParameterTransactionBeforeExternalEdit()
+        assertTrue(settlement is EditorViewModel.SettlementResult.Committed)
+        assertTrue((settlement as EditorViewModel.SettlementResult.Committed).historyPrerequisite != null)
+        assertTrue(
+            editor.continueAfterOwnParameterSettlement(settlement) {
+                attempted.incrementAndGet()
+            }
+        )
+        awaitMainUntil { gate.reached.isCompleted && editor.uiState.value.historyBusy }
+        assertEquals(adoptedWidth, editor.uiState.value.previewBitmap?.width)
+        gate.releaseFailure(IllegalStateException("private coordinator detail"))
+
+        awaitMainUntil {
+            !editor.uiState.value.historyBusy &&
+                !editor.uiState.value.isBusy &&
+                !editor.hasOpenParameterGesture()
+        }
+        assertEquals(adoptedWidth, editor.uiState.value.previewBitmap?.width)
+        assertEquals(adoptedHeight, editor.uiState.value.previewBitmap?.height)
+        assertEquals(0, attempted.get())
+        assertEquals(0, editor.undoEntryCountForTest())
+        assertTrue(editor.uiState.value.message.orEmpty().contains("편집 기록을 저장하지 못했습니다"))
+        assertFalse(editor.uiState.value.message.orEmpty().contains("private coordinator detail"))
+        assertTrue(editor.canEnterEditorActionPure())
     }
 
     @Test
@@ -331,17 +377,40 @@ class EditorActionAdmissionProductionTest {
     fun successfulRotationKeepsAdoptedBitmapsLive() = runBlocking {
         val editor = editorWithDocument()
         val oldPreview = editor.uiState.value.previewBitmap
-        editor.rotatePreview90()
-        awaitMainUntil {
-            !editor.uiState.value.isBusy &&
-                !editor.uiState.value.historyBusy &&
-                editor.undoEntryCountForTest() == 1
+        val oldOriginal = bitmap(0xff00aa00.toInt(), 8, 4)
+        val oldMask = bitmap(0xff0000aa.toInt(), 8, 4)
+        editor.updateUiState {
+            it.copy(
+                originalPreviewBitmap = oldOriginal,
+                selectionLayers = listOf(SelectionLayer("rotation-mask", "rotation-mask", SelectionLayerKind.Brush, oldMask)),
+                activeSelectionLayerId = "rotation-mask",
+            )
         }
+        editor.rotatePreview90()
+        awaitMainUntil({ debugDump(editor) }) {
+            !editor.uiState.value.isBusy &&
+                !editor.uiState.value.historyBusy
+        }
+        assertTrue(debugDump(editor), editor.undoEntryCountForTest() == 1)
         val rotated = checkNotNull(editor.uiState.value.previewBitmap)
         assertTrue(rotated !== oldPreview)
         assertFalse(rotated.isRecycled)
         assertEquals(4, rotated.width)
         assertEquals(8, rotated.height)
+        val original = checkNotNull(editor.uiState.value.originalPreviewBitmap)
+        val mask = editor.uiState.value.selectionLayers.single().bitmap
+        assertEquals(4, original.width)
+        assertEquals(8, original.height)
+        assertEquals(4, mask.width)
+        assertEquals(8, mask.height)
+        assertFalse(original.isRecycled)
+        assertFalse(mask.isRecycled)
+        assertEquals(rotated.getPixel(1, 1), rotated.getPixel(1, 1))
+        assertEquals(original.getPixel(1, 1), original.getPixel(1, 1))
+        assertEquals(mask.getPixel(1, 1), mask.getPixel(1, 1))
+        assertTrue(oldPreview!!.isRecycled)
+        assertTrue(oldOriginal.isRecycled)
+        assertTrue(oldMask.isRecycled)
     }
 
     private fun editorWithDocument(): EditorViewModel {

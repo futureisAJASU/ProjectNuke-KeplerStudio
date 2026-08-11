@@ -1,6 +1,7 @@
 package com.projectnuke.keplerstudio.editor
 
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CoroutineScope
@@ -69,15 +70,19 @@ class HistoryActivityRegistryTest {
     fun prereqFailureOutcomeIsNonFatalAndDoesNotDeadlockRegistry() {
         runBlocking {
         val registry = HistoryActivityRegistry(coordinatorBusy = { false })
-        val scope = CoroutineScope(SupervisorJob())
+        val uncaught = kotlinx.coroutines.CompletableDeferred<Throwable>()
+        val scope = CoroutineScope(
+            SupervisorJob() + CoroutineExceptionHandler { _, cause -> uncaught.complete(cause) },
+        )
         val job = scope.launch(start = CoroutineStart.LAZY) {
             throw IllegalStateException("simulated failure")
         }
-        assertTrue(registry.register(job))
+        val registration = registry.registerHandle(job) ?: error("missing registration")
         job.start()
-        val outcome = registry.registerHandle(job)?.await() ?: error("missing outcome")
+        val outcome = registration.await()
         assertTrue(outcome is HistoryPrerequisiteOutcome.Failed)
         assertTrue((outcome as HistoryPrerequisiteOutcome.Failed).cause is IllegalStateException)
+        assertTrue(uncaught.await() is IllegalStateException)
         assertFalse(registry.isBusy())
         scope.coroutineContext[Job]?.cancel()
         }

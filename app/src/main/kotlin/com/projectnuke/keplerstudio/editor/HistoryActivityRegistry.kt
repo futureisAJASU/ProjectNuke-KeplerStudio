@@ -36,6 +36,10 @@ internal class HistoryActivityRegistry(
             }
         }
 
+        internal fun fail(cause: Throwable) {
+            outcome.complete(HistoryPrerequisiteOutcome.Failed(cause))
+        }
+
         suspend fun await(): HistoryPrerequisiteOutcome {
             job.join()
             return outcome.await()

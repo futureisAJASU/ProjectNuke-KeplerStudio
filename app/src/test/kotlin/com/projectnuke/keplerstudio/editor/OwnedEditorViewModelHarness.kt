@@ -18,6 +18,7 @@ internal fun yieldToEditorBackgroundForTest() {
 /** Owns every ViewModel and filesystem resource created by one production test. */
 internal class OwnedEditorViewModelHarness(
     private val application: Application,
+    installBitmapCopySeam: Boolean = false,
 ) : AutoCloseable {
     init {
         // Keep startup initialization deterministic for owned tests.  An
@@ -37,6 +38,10 @@ internal class OwnedEditorViewModelHarness(
     private val seamHandles = ArrayDeque<AutoCloseable>()
     private val preClearActions = ArrayDeque<() -> Unit>()
     private var closed = false
+
+    init {
+        if (installBitmapCopySeam) seamHandles.addFirst(BitmapCopyTestSeam.install())
+    }
 
     fun createEditor(): EditorViewModel {
         check(!closed)
@@ -86,6 +91,8 @@ internal class OwnedEditorViewModelHarness(
             runCatching { check(HistoryPublishTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(HistoryAdmissionTestSeam.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
+            runCatching { check(BitmapCopyTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(HistoryNavigationTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }

@@ -2,14 +2,29 @@ package com.projectnuke.keplerstudio.editor
 
 import kotlinx.coroutines.CompletableDeferred
 
+internal class HistoryAdmissionExpectedFailure(
+    val expectedCause: Throwable,
+) : RuntimeException("expected history admission failure", expectedCause)
+
 /** Parks a production history job after registration and before coordinator admission. */
 internal class HistoryAdmissionTestSeam(
     internal val reached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val releaseGate: CompletableDeferred<Unit> = CompletableDeferred(),
 ) {
+    @Volatile private var failure: Throwable? = null
     internal suspend fun awaitBeforeCoordinatorAdmission() {
         reached.complete(Unit)
         releaseGate.await()
+        failure?.let { throw HistoryAdmissionExpectedFailure(it) }
+    }
+
+    internal fun releaseSuccess() {
+        releaseGate.complete(Unit)
+    }
+
+    internal fun releaseFailure(cause: Throwable) {
+        failure = cause
+        releaseGate.complete(Unit)
     }
 
     internal companion object Registry {

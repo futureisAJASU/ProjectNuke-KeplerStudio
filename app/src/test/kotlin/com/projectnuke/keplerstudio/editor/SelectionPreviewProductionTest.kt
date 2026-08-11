@@ -6,7 +6,9 @@ import com.projectnuke.keplerstudio.ui.updateActiveSelectionParamsLive
 import com.projectnuke.keplerstudio.ui.resetSelectionPreviewInstrumentationForTest
 import com.projectnuke.keplerstudio.ui.selectionPreviewCopyCount
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -29,7 +31,10 @@ class SelectionPreviewProductionTest {
 
     @Before
     fun setUpHarness() {
-        harness = OwnedEditorViewModelHarness(RuntimeEnvironment.getApplication() as Application)
+        harness = OwnedEditorViewModelHarness(
+            RuntimeEnvironment.getApplication() as Application,
+            installBitmapCopySeam = true,
+        )
     }
     @After
     fun tearDown() {
@@ -37,7 +42,7 @@ class SelectionPreviewProductionTest {
         SelectionPreviewPreparationGateway.resetForTest()
     }
 
-    private fun viewModel(): EditorViewModel {
+    private fun viewModel(includeSelectionLayer: Boolean = true): EditorViewModel {
         val vm = harness.createEditor()
         val base = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         val mask = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
@@ -48,17 +53,22 @@ class SelectionPreviewProductionTest {
                 previewBitmap = base,
                 originalPreviewBitmap = base,
                 selectionLayers =
-                    listOf(
-                        SelectionLayer(
-                            id = "mask",
-                            name = "mask",
-                            kind = SelectionLayerKind.Brush,
-                            bitmap = mask,
+                    if (includeSelectionLayer) {
+                        listOf(
+                            SelectionLayer(
+                                id = "mask",
+                                name = "mask",
+                                kind = SelectionLayerKind.Brush,
+                                bitmap = mask,
+                            )
                         )
-                    ),
-                activeSelectionLayerId = "mask",
+                    } else {
+                        emptyList()
+                    },
+                activeSelectionLayerId = if (includeSelectionLayer) "mask" else null,
             )
         }
+        settle { vm.startupInitCompletion.isCompleted && vm.canEnterEditorAction() }
         return vm
     }
 
@@ -175,7 +185,12 @@ class SelectionPreviewProductionTest {
             assertEquals(RenderOperation.SelectionLivePreview, request.operation)
             rendererCalls.incrementAndGet()
             RenderResult.Success(
-                operation = request.operation,
+                operation =
+                    if (request.operation == RenderOperation.SelectionLivePreview) {
+                        RenderOperation.SelectionLivePreview
+                    } else {
+                        RenderOperation.NativePreview
+                    },
                 requestedRoute = NativeRenderRoute.V1,
                 output = rendered,
                 actualRoute = NativeRenderRoute.V1,
@@ -188,7 +203,7 @@ class SelectionPreviewProductionTest {
             )
         }
         try {
-            settle { vm.canEnterEditorAction() }
+            settle { vm.startupInitCompletion.isCompleted && vm.canEnterEditorAction() }
             assertTrue(vm.beginSelectionParamGesture())
             vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.25f) }
             val transaction = assertNotNull(vm.currentSelectionParamTransaction())
@@ -229,7 +244,7 @@ class SelectionPreviewProductionTest {
             )
         }
         try {
-            settle { vm.canEnterEditorAction() }
+            settle { vm.startupInitCompletion.isCompleted && vm.canEnterEditorAction() }
             assertTrue(vm.beginSelectionParamGesture())
             vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.5f) }
             settle { vm.currentSelectionParamTransaction() == null && !vm.uiState.value.isBusy }
@@ -338,6 +353,197 @@ class SelectionPreviewProductionTest {
             renderer.close()
             previewHooks.close()
             SelectionPreviewPreparationGateway.resetForTest()
+        }
+    }
+
+    @Test
+    fun pendingSelectionReplaysLatestValueOnlyAfterTransactionStarts() {
+        val rendered = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888).also { it.eraseColor(0xff224466.toInt()) }
+        val selectionRendered = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888).also { it.eraseColor(0xff6688aa.toInt()) }
+        val renderer = EditorRenderer.installRendererOverrideForTest { request ->
+            RenderResult.Success(
+                operation = request.operation,
+                requestedRoute = NativeRenderRoute.V1,
+                output = if (request.operation == RenderOperation.SelectionLivePreview) selectionRendered else rendered,
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
+        val vm = viewModel(includeSelectionLayer = false)
+        try {
+            settle { vm.startupInitCompletion.isCompleted && vm.canEnterEditorAction() }
+            vm.updateParams { it.copy(exposure = 0.2f) }
+            settle {
+                vm.hasOpenParameterGesture() &&
+                    vm.adoptedParamsForTest()?.exposure == 0.2f &&
+                    vm.pendingParamRenderRevision() == null
+            }
+            val gate = HistoryAdmissionTestSeam()
+            val gateHandle = HistoryAdmissionTestSeam.install(gate)
+            harness.ownSeam(gateHandle)
+            installSelectionLayer(vm)
+
+            assertTrue(vm.startSelectionParamGesture())
+            settle { gate.reached.isCompleted && vm.pendingSelectionParamStart() != null }
+            assertNull(vm.currentSelectionParamTransaction())
+
+            val before = vm.uiState.value
+            val beforeLocal = before.selectionLayers.single().localParams
+            val beforeRevision = vm.uiState.value.revision
+            vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.35f) }
+            vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.55f) }
+            vm.finishSelectionParamGesture()
+
+            val pending = assertNotNull(vm.pendingSelectionParamStart())
+            assertEquals(beforeLocal, vm.uiState.value.selectionLayers.single().localParams)
+            assertEquals(beforeRevision, vm.uiState.value.revision)
+            assertFalse(vm.uiState.value.isBusy)
+            assertEquals(0.55f, pending.latestIntendedLocalParams.exposure)
+            assertTrue(pending.terminalFinish)
+
+            gate.releaseSuccess()
+            settle {
+                val transaction = vm.currentSelectionParamTransaction()
+                transaction != null && transaction.startState.selectionLayers.single().localParams == beforeLocal
+            }
+            settle { vm.uiState.value.previewBitmap === selectionRendered }
+            settle {
+                vm.currentSelectionParamTransaction() == null &&
+                    !vm.uiState.value.isBusy &&
+                    vm.uiState.value.canUndo
+            }
+            assertEquals(0.55f, vm.uiState.value.selectionLayers.single().localParams.exposure)
+            assertEquals(2, vm.undoEntryCountForTest(), "one global and one selection edit")
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun pendingSelectionFailureDiscardsIntentWithoutStateMutation() {
+        val renderer = installDeterministicRenderer(0xff224466.toInt())
+        val vm = viewModel(includeSelectionLayer = false)
+        try {
+            settle { vm.canEnterEditorAction() }
+            vm.updateParams { it.copy(exposure = 0.2f) }
+            settle {
+                vm.hasOpenParameterGesture() &&
+                    vm.adoptedParamsForTest()?.exposure == 0.2f &&
+                    vm.pendingParamRenderRevision() == null
+            }
+            val gate = HistoryAdmissionTestSeam()
+            val gateHandle = HistoryAdmissionTestSeam.install(gate)
+            harness.ownSeam(gateHandle)
+            installSelectionLayer(vm)
+            assertTrue(vm.startSelectionParamGesture())
+            settle { gate.reached.isCompleted && vm.pendingSelectionParamStart() != null }
+            val before = vm.uiState.value
+            vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.8f) }
+            vm.finishSelectionParamGesture()
+            gate.releaseFailure(IllegalStateException("expected storage failure"))
+            settle { vm.pendingSelectionParamStart() == null && !vm.uiState.value.historyBusy }
+
+            assertNull(vm.currentSelectionParamTransaction())
+            assertEquals(before.selectionLayers.single().localParams, vm.uiState.value.selectionLayers.single().localParams)
+            assertEquals(before.revision, vm.uiState.value.revision)
+            assertFalse(vm.uiState.value.isBusy)
+            assertEquals(0, vm.undoEntryCountForTest())
+            assertFalse(vm.uiState.value.message.orEmpty().contains("expected storage failure"))
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun pendingSelectionCancellationAndStaleIdentityCannotReplay() {
+        val renderer = installDeterministicRenderer(0xff224466.toInt())
+        val vm = viewModel(includeSelectionLayer = false)
+        try {
+            settle { vm.canEnterEditorAction() }
+            vm.updateParams { it.copy(exposure = 0.2f) }
+            settle {
+                vm.hasOpenParameterGesture() &&
+                    vm.adoptedParamsForTest()?.exposure == 0.2f &&
+                    vm.pendingParamRenderRevision() == null
+            }
+            val gate = HistoryAdmissionTestSeam()
+            val gateHandle = HistoryAdmissionTestSeam.install(gate)
+            harness.ownSeam(gateHandle)
+            installSelectionLayer(vm)
+            assertTrue(vm.startSelectionParamGesture())
+            settle { gate.reached.isCompleted && vm.pendingSelectionParamStart() != null }
+            val before = vm.uiState.value
+            vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.8f) }
+            vm.pendingSelectionParamStart()!!.prerequisite.job.cancel()
+            settle { vm.pendingSelectionParamStart() == null }
+            assertEquals(before.selectionLayers.single().localParams, vm.uiState.value.selectionLayers.single().localParams)
+            assertEquals(before.revision, vm.uiState.value.revision)
+
+            gate.releaseSuccess()
+            gateHandle.close()
+            vm.updateParams { it.copy(exposure = 0.3f) }
+            settle {
+                vm.hasOpenParameterGesture() &&
+                    vm.adoptedParamsForTest()?.exposure == 0.3f &&
+                    vm.pendingParamRenderRevision() == null
+            }
+            val replacementGate = HistoryAdmissionTestSeam()
+            harness.ownSeam(HistoryAdmissionTestSeam.install(replacementGate))
+            assertTrue(vm.startSelectionParamGesture())
+            settle { vm.pendingSelectionParamStart() != null }
+            val replacementMask = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+            vm.updateUiState {
+                it.copy(
+                    baseContentToken = "replacement-base",
+                    selectionLayers = listOf(SelectionLayer("replacement", "replacement", SelectionLayerKind.Brush, replacementMask)),
+                    activeSelectionLayerId = "replacement",
+                )
+            }
+            replacementGate.releaseSuccess()
+            settle { vm.pendingSelectionParamStart() == null }
+            assertNull(vm.currentSelectionParamTransaction())
+            assertEquals(0f, vm.uiState.value.selectionLayers.single().localParams.exposure)
+            assertFalse(vm.uiState.value.isBusy)
+        } finally {
+            renderer.close()
+        }
+    }
+
+    private fun installDeterministicRenderer(color: Int): AutoCloseable =
+        EditorRenderer.installRendererOverrideForTest { request ->
+            RenderResult.Success(
+                operation = request.operation,
+                requestedRoute = NativeRenderRoute.V1,
+                output = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888).also { it.eraseColor(color) },
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
+
+    private fun installSelectionLayer(vm: EditorViewModel) {
+        vm.updateUiState {
+            it.copy(
+                selectionLayers =
+                    listOf(
+                        SelectionLayer(
+                            id = "mask",
+                            name = "mask",
+                            kind = SelectionLayerKind.Brush,
+                            bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888),
+                        )
+                    ),
+                activeSelectionLayerId = "mask",
+            )
         }
     }
 }

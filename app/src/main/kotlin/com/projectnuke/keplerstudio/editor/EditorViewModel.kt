@@ -33,6 +33,7 @@ import com.projectnuke.keplerstudio.ui.createBackgroundSelectionFromActive
 import com.projectnuke.keplerstudio.ui.duplicateActiveSelectionLayer
 import com.projectnuke.keplerstudio.ui.normalizeBrushMaskStorage
 import com.projectnuke.keplerstudio.ui.paintActiveSelectionAt
+import com.projectnuke.keplerstudio.ui.updateActiveSelectionParamsLive
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -315,11 +316,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val documentGeneration: String,
         val sourcePath: String?,
         val baseContentToken: String,
-        var revision: Int,
+        val startingDocumentRevision: Int,
         val activeLayerId: String?,
+        val capturedStartingLocalParams: EditParams,
+        var latestIntendedLocalParams: EditParams,
         var job: Job? = null,
         var terminalFinish: Boolean = false,
-        var pendingLocalParams: EditParams? = null,
+        var closed: Boolean = false,
     )
     private var pendingSelectionParamStart: PendingSelectionParamStart? = null
     private var selectionGestureCounter: Long = 0L
@@ -352,6 +355,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val activeLayerId: String,
         var job: Job? = null,
         var terminalIntent: PendingBrushTerminal? = null,
+        var closed: Boolean = false,
     )
     private var pendingBrushStart: PendingBrushStart? = null
     private data class BrushTransactionIdentity(
@@ -2459,14 +2463,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val prerequisite = settlement.historyPrerequisite
         if (prerequisite != null) {
             val state = _uiState.value
+            val activeLayer =
+                state.activeSelectionLayerId?.let { activeId ->
+                    state.selectionLayers.firstOrNull { it.id == activeId }
+                } ?: return false
             val pending =
                 PendingSelectionParamStart(
                     prerequisite = prerequisite,
                     documentGeneration = historyCoordinator.currentGeneration(),
                     sourcePath = state.sourcePath,
                     baseContentToken = state.baseContentToken,
-                    revision = state.revision,
-                    activeLayerId = state.activeSelectionLayerId,
+                    startingDocumentRevision = state.revision,
+                    activeLayerId = activeLayer.id,
+                    capturedStartingLocalParams = activeLayer.localParams,
+                    latestIntendedLocalParams = activeLayer.localParams,
                 )
             pendingSelectionParamStart = pending
             val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
@@ -2481,27 +2491,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     val current = _uiState.value
                     if (pendingSelectionParamStart !== pending ||
+                        pending.closed ||
                         shuttingDown ||
                         historyCoordinator.currentGeneration() != pending.documentGeneration ||
                         current.sourcePath != pending.sourcePath ||
                         current.baseContentToken != pending.baseContentToken ||
-                        current.revision != pending.revision ||
+                        current.revision != pending.startingDocumentRevision ||
                         current.activeSelectionLayerId != pending.activeLayerId
                     ) return@launch
-                    val queuedParams = pending.pendingLocalParams
+                    val queuedParams = pending.latestIntendedLocalParams
                     val shouldFinish = pending.terminalFinish
+                    pending.closed = true
                     pendingSelectionParamStart = null
-                    if (queuedParams != null) {
-                        val activeLayerId = pending.activeLayerId ?: return@launch
-                        val updatedLayers = current.selectionLayers.map { layer ->
-                            if (layer.id == activeLayerId) layer.copy(localParams = queuedParams) else layer
-                        }
-                        updateUiState { it.copy(selectionLayers = updatedLayers) }
-                    }
                     if (beginSelectionParamGesture()) {
+                        updateActiveSelectionParamsLive { queuedParams }
                         if (shouldFinish) finishSelectionParamGesture()
                     }
                 } finally {
+                    pending.closed = true
                     if (pendingSelectionParamStart === pending) pendingSelectionParamStart = null
                 }
             }
@@ -2878,6 +2885,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val current = _uiState.value
                     val currentLayer = current.selectionLayers.firstOrNull { it.id == layerId }
                     if (pendingBrushStart !== pending ||
+                        pending.closed ||
                         shuttingDown ||
                         historyCoordinator.currentGeneration() != pending.documentGeneration ||
                         current.sourcePath != pending.sourcePath ||
@@ -2889,6 +2897,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val queued = pendingBrushPoints.toList()
                     pendingBrushPoints.clear()
                     val terminal = pending.terminalIntent
+                    pending.closed = true
                     pendingBrushStart = null
                     brushTransactionState = BrushTransactionState.Idle
                     when (terminal) {
@@ -2905,6 +2914,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 } finally {
+                    pending.closed = true
                     if (pendingBrushStart === pending) {
                         pendingBrushStart = null
                         pendingBrushPoints.clear()
@@ -3246,6 +3256,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun isBrushPreparing(): Boolean = brushTransactionState == BrushTransactionState.Preparing
 
+    internal fun hasPendingBrushStartForTest(): Boolean = pendingBrushStart != null
+
+    internal fun pendingBrushPointCountForTest(): Int = pendingBrushPoints.size
+
+    internal fun pendingBrushFinishRequestedForTest(): Boolean =
+        pendingBrushStart?.terminalIntent == PendingBrushTerminal.Finish
+
     internal fun queueBrushPoint(x: Float, y: Float) {
         if (brushTransactionState != BrushTransactionState.Preparing) return
         if (pendingBrushPoints.size >= 128) pendingBrushPoints.removeFirst()
@@ -3311,7 +3328,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             brushTransactionState == BrushTransactionState.Cancelling
         ) return
         if (pendingBrushStart != null && brushIdentity == null) {
-            pendingBrushStart?.terminalIntent = PendingBrushTerminal.Cancel
+            val pending = pendingBrushStart ?: return
+            pending.terminalIntent = PendingBrushTerminal.Cancel
+            pending.closed = true
+            pending.job?.cancel()
+            pendingBrushStart = null
+            pendingBrushPoints.clear()
+            brushTransactionState = BrushTransactionState.Idle
             return
         }
         val strokeId = brushIdentity?.strokeId ?: return
@@ -3757,6 +3780,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val reserve = _uiState.value.historyBitmapBytes()
         val started = java.util.concurrent.atomic.AtomicBoolean(false)
         val historyPublishSeam = HistoryAdmissionTestSeam.capture()
+        var registration: HistoryActivityRegistry.Registration? = null
         snapshot.claimCoordinatorOwnership()
         val job =
             viewModelScope.launch(start = CoroutineStart.LAZY) {
@@ -3774,6 +3798,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 } catch (cancelled: CancellationException) {
                     if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
                     throw cancelled
+                } catch (expected: HistoryAdmissionExpectedFailure) {
+                    if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
+                    registration?.fail(expected.expectedCause)
+                    reportHistorySettlementFailure()
                 } catch (failure: Throwable) {
                     if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
                     throw failure
@@ -3782,13 +3810,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         job.invokeOnCompletion {
             if (!started.get() && !snapshot.resourcesReleased) snapshot.recycleBitmaps()
         }
-        val registration = historyActivity.registerHandle(job)
-        if (registration == null) {
+        val acceptedRegistration = historyActivity.registerHandle(job)
+        registration = acceptedRegistration
+        if (acceptedRegistration == null) {
             job.cancel()
             if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
             return false
         }
-        onRegistered?.invoke(registration)
+        onRegistered?.invoke(acceptedRegistration)
         job.start()
         return true
     }
