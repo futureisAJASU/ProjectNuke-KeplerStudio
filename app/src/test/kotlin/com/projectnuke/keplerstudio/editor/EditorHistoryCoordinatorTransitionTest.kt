@@ -408,6 +408,436 @@ class EditorHistoryCoordinatorTransitionTest {
     }
 
     @Test
+    fun coldTargetSpillFailureIsStorageUnavailableNotMemoryRejected() = testScope.runTest {
+        ramBudget = 64L
+        val target = bitmap(1, 1, 0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        ramBudget = 8L
+        val current = bitmap(0xffa0b0c0.toInt())
+        assertTrue(
+            coordinator.navigate(
+                undoDirection = true,
+                currentCaptureBytes = 16L,
+                captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+                materialize = { value, transfer -> value.also(transfer) },
+                adopt = { it.releaseBitmapOwnership(); true },
+            ) is HistoryNavigationResult.Adopted,
+        )
+        ramBudget = 64L
+        val spillable = bitmap(0xffb0c0d0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(spillable), false, 0L)
+        ramBudget = 8L
+        storage.failPublish = true
+        val redoCurrent = bitmap(1, 1, 0xffc0d0e0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = false,
+            currentCaptureBytes = BitmapMemoryBudget.bytes(redoCurrent),
+            captureCurrent = { storageKind, _ -> snapshot(redoCurrent, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { it.releaseBitmapOwnership(); true },
+        )
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.StorageUnavailable,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertTrue(coordinator.flags().canRedo)
+        assertTrue(coordinator.flags().canUndo)
+        redoCurrent.recycle()
+    }
+
+    @Test
+    fun coldTargetSpillBudgetIsStorageBudgetNotMemoryRejected() = testScope.runTest {
+        ramBudget = 64L
+        val target = bitmap(1, 1, 0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        ramBudget = 8L
+        val current = bitmap(0xffa0b0c0.toInt())
+        assertTrue(
+            coordinator.navigate(
+                undoDirection = true,
+                currentCaptureBytes = 16L,
+                captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+                materialize = { value, transfer -> value.also(transfer) },
+                adopt = { it.releaseBitmapOwnership(); true },
+            ) is HistoryNavigationResult.Adopted,
+        )
+        ramBudget = 64L
+        coordinator.admitAdoptedSnapshot(snapshot(bitmap(0xffb0c0d0.toInt())), false, 0L)
+        advanceUntilIdle()
+        ramBudget = 8L
+        storage.insufficientStorage = true
+        val redoCurrent = bitmap(1, 1, 0xffc0d0e0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = false,
+            currentCaptureBytes = BitmapMemoryBudget.bytes(redoCurrent),
+            captureCurrent = { storageKind, _ -> snapshot(redoCurrent, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { it.releaseBitmapOwnership(); true },
+        )
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.StorageBudget,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertTrue(coordinator.flags().canRedo)
+        redoCurrent.recycle()
+    }
+
+    @Test
+    fun pureNavigationMemoryRejectionIsTheOnlyMemoryRecoveryOutcome() = testScope.runTest {
+        ramBudget = 8L
+        val target = bitmap(0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = Long.MAX_VALUE,
+            captureCurrent = { _, _ -> error("capture must not run") },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { error("adopt must not run") },
+        )
+
+        assertTrue(result is HistoryNavigationResult.MemoryRejected)
+        assertTrue(coordinator.flags().canUndo)
+        assertTrue(target.isRecycled)
+    }
+
+    @Test
+    fun oversizedCurrentStateStorageFailureLeavesTargetAndStacksUnchanged() = testScope.runTest {
+        ramBudget = 8L
+        val target = bitmap(1, 1, 0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        storage.failPublish = true
+        val current = bitmap(0xffa0b0c0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+            captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { error("target must not be adopted") },
+        )
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.CurrentStateStorageUnavailable,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertEquals(1, coordinator.undoEntryCountForTest())
+        assertEquals(0, coordinator.redoEntryCountForTest())
+        assertFalse(target.isRecycled)
+        assertTrue(current.isRecycled)
+    }
+
+    @Test
+    fun oversizedCurrentStateStorageBudgetLeavesTargetAndStacksUnchanged() = testScope.runTest {
+        ramBudget = 8L
+        val target = bitmap(1, 1, 0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        storage.insufficientStorage = true
+        val current = bitmap(0xffa0b0c0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+            captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { error("target must not be adopted") },
+        )
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.CurrentStateStorageBudget,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertEquals(1, coordinator.undoEntryCountForTest())
+        assertEquals(0, coordinator.redoEntryCountForTest())
+        assertFalse(target.isRecycled)
+        assertTrue(current.isRecycled)
+    }
+
+    @Test
+    fun oversizedCurrentStateIsDirectColdAndReportsCurrentMovement() = testScope.runTest {
+        ramBudget = 8L
+        val target = bitmap(1, 1, 0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        val current = bitmap(0xffa0b0c0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+            captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { it.releaseBitmapOwnership(); true },
+        )
+
+        assertEquals(
+            HistoryStorageMovement.AdmittedSnapshotStoredCold,
+            (result as HistoryNavigationResult.Adopted).storageMovement,
+        )
+        assertTrue(current.isRecycled)
+        assertEquals(1, coordinator.redoEntryCountForTest())
+        assertEquals(1, storage.records.size)
+        target.recycle()
+    }
+
+    @Test
+    fun navigationExistingSpillIsReportedWithoutCurrentColdMovement() = testScope.runTest {
+        ramBudget = 64L
+        val older = bitmap(0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(older), false, 0L)
+        val target = bitmap(1, 1, 0xffa0b0c0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        ramBudget = 8L
+        val current = bitmap(1, 1, 0xffb0c0d0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+            captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { it.releaseBitmapOwnership(); true },
+        )
+
+        assertEquals(
+            HistoryStorageMovement.ExistingEntriesSpilled,
+            (result as HistoryNavigationResult.Adopted).storageMovement,
+        )
+        assertTrue(older.isRecycled)
+        assertTrue(coordinator.flags().canRedo)
+        target.recycle()
+    }
+
+    @Test
+    fun navigationExistingSpillAndCurrentColdMovementAreReportedAsBoth() = testScope.runTest {
+        ramBudget = 64L
+        val older = bitmap(0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(older), false, 0L)
+        val target = bitmap(1, 1, 0xffa0b0c0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        ramBudget = 8L
+        val current = bitmap(0xffb0c0d0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+            captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { it.releaseBitmapOwnership(); true },
+        )
+
+        assertEquals(
+            HistoryStorageMovement.Both,
+            (result as HistoryNavigationResult.Adopted).storageMovement,
+        )
+        assertTrue(older.isRecycled)
+        assertTrue(current.isRecycled)
+        target.recycle()
+    }
+
+    @Test
+    fun currentColdPayloadIsDeletedWhenLaterAdoptionIsRejected() = testScope.runTest {
+        ramBudget = 8L
+        val target = bitmap(1, 1, 0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        val current = bitmap(0xffa0b0c0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+            captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { false },
+        )
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.AdoptionRejected,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertEquals(0, storage.records.size)
+        assertTrue(storage.deletedPayloads.get() >= 1)
+        assertTrue(current.isRecycled)
+        assertFalse(target.isRecycled)
+        assertEquals(1, coordinator.undoEntryCountForTest())
+        assertEquals(0, coordinator.redoEntryCountForTest())
+    }
+
+    @Test
+    fun supersessionDuringColdTargetSpillReturnsSupersededAndDoesNotAdopt() = testScope.runTest {
+        ramBudget = 64L
+        val target = bitmap(1, 1, 0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        ramBudget = 8L
+        val current = bitmap(0xffa0b0c0.toInt())
+        assertTrue(
+            coordinator.navigate(
+                undoDirection = true,
+                currentCaptureBytes = 16L,
+                captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+                materialize = { value, transfer -> value.also(transfer) },
+                adopt = { it.releaseBitmapOwnership(); true },
+            ) is HistoryNavigationResult.Adopted,
+        )
+        ramBudget = 64L
+        coordinator.admitAdoptedSnapshot(snapshot(bitmap(0xffb0c0d0.toInt())), false, 0L)
+        advanceUntilIdle()
+        ramBudget = 8L
+        storage.publishStarted = CompletableDeferred()
+        storage.publishGate = CompletableDeferred()
+        val redoCurrent = bitmap(1, 1, 0xffc0d0e0.toInt())
+        val result = CompletableDeferred<HistoryNavigationResult>()
+        launch {
+            result.complete(
+                coordinator.navigate(
+                    undoDirection = false,
+                    currentCaptureBytes = BitmapMemoryBudget.bytes(redoCurrent),
+                    captureCurrent = { storageKind, _ -> snapshot(redoCurrent, storageKind) },
+                    materialize = { value, transfer -> value.also(transfer) },
+                    adopt = { it.releaseBitmapOwnership(); true },
+                ),
+            )
+        }
+        storage.publishStarted.await()
+        coordinator.replaceDocument()
+        storage.publishGate?.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.Superseded,
+            (result.await() as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertEquals(0, coordinator.undoEntryCountForTest())
+        assertEquals(0, coordinator.redoEntryCountForTest())
+        redoCurrent.recycle()
+    }
+
+    @Test
+    fun supersessionDuringCurrentDirectColdPublicationDeletesTemporaryPayload() = testScope.runTest {
+        ramBudget = 8L
+        val target = bitmap(1, 1, 0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        storage.publishStarted = CompletableDeferred()
+        storage.publishGate = CompletableDeferred()
+        val current = bitmap(0xffa0b0c0.toInt())
+        val result = CompletableDeferred<HistoryNavigationResult>()
+        launch {
+            result.complete(
+                coordinator.navigate(
+                    undoDirection = true,
+                    currentCaptureBytes = BitmapMemoryBudget.bytes(current),
+                    captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+                    materialize = { value, transfer -> value.also(transfer) },
+                    adopt = { it.releaseBitmapOwnership(); true },
+                ),
+            )
+        }
+        storage.publishStarted.await()
+        coordinator.replaceDocument()
+        storage.publishGate?.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.Superseded,
+            (result.await() as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertEquals(0, storage.records.size)
+        assertTrue(current.isRecycled)
+    }
+
+    @Test
+    fun targetMetadataFailureIsUnavailableNotMemoryRejected() = testScope.runTest {
+        ramBudget = 8L
+        val target = bitmap(0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        ramBudget = 64L
+        storage.requiredBytesNull = true
+        val current = bitmap(0xffa0b0c0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = 16L,
+            captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { error("target must not be adopted") },
+        )
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.TargetUnavailable,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertTrue(coordinator.flags().canUndo)
+        current.recycle()
+    }
+
+    @Test
+    fun targetLoadFailureIsCorruptAndDoesNotConsumeTarget() = testScope.runTest {
+        ramBudget = 8L
+        val target = bitmap(0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        ramBudget = 64L
+        storage.failLoad = true
+        val current = bitmap(0xffa0b0c0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = 16L,
+            captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+            materialize = { value, transfer -> value.also(transfer) },
+            adopt = { error("target must not be adopted") },
+        )
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.TargetCorrupt,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertTrue(coordinator.flags().canUndo)
+        current.recycle()
+    }
+
+    @Test
+    fun materializationFailureIsDistinctFromTargetStorageFailure() = testScope.runTest {
+        val target = bitmap(0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        val current = bitmap(0xffa0b0c0.toInt())
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = 16L,
+            captureCurrent = { storageKind, _ -> snapshot(current, storageKind) },
+            materialize = { _, _ -> null },
+            adopt = { error("target must not be adopted") },
+        )
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.MaterializationFailed,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
+        assertTrue(coordinator.flags().canUndo)
+        current.recycle()
+    }
+
+    @Test
+    fun closedCoordinatorReportsClosedForNavigation() = testScope.runTest {
+        val target = bitmap(0xff90a0b0.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(target), true, 0L)
+        coordinator.close()
+        advanceUntilIdle()
+
+        val result = coordinator.navigate(
+            undoDirection = true,
+            currentCaptureBytes = 0L,
+            captureCurrent = { _, _ -> error("capture must not run") },
+            materialize = { _, _ -> error("materialize must not run") },
+            adopt = { error("adopt must not run") },
+        )
+
+        assertEquals(
+            HistoryNavigationNotCompletedReason.Closed,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
+    }
+
+    @Test
     fun metadataOnlyUndoMaterializesAndTransfersRenderedBitmap() = testScope.runTest {
         coordinator.admitAdoptedSnapshot(snapshot(null, HistorySnapshotStorage.MetadataOnly), true, 0L)
         val rendered = bitmap(0xffb0c0d0.toInt())
@@ -449,7 +879,10 @@ class EditorHistoryCoordinatorTransitionTest {
                 adopt = { false },
             )
 
-        assertTrue(result is HistoryNavigationResult.Failed)
+        assertEquals(
+            HistoryNavigationNotCompletedReason.AdoptionRejected,
+            (result as HistoryNavigationResult.NotCompleted).reason,
+        )
         assertTrue(coordinator.flags().canUndo)
         assertTrue(current.isRecycled)
         assertFalse(target.isRecycled)
@@ -706,6 +1139,9 @@ class EditorHistoryCoordinatorTransitionTest {
     private fun bitmap(color: Int): Bitmap =
         Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).also { it.eraseColor(color) }
 
+    private fun bitmap(width: Int, height: Int, color: Int): Bitmap =
+        Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { it.eraseColor(color) }
+
     private fun snapshot(
         bitmap: Bitmap?,
         storage: HistorySnapshotStorage =
@@ -754,10 +1190,12 @@ class EditorHistoryCoordinatorTransitionTest {
     private inner class DeterministicHistoryStorage(context: Context) : HistoryStorageBackend {
         private val root = File(context.cacheDir, "history-matrix-${System.nanoTime()}")
         val records = LinkedHashMap<String, StorageRecord>()
-        val publishStarted = CompletableDeferred<Unit>()
+        var publishStarted = CompletableDeferred<Unit>()
         var publishGate: CompletableDeferred<Unit>? = null
         var failPublish = false
         var insufficientStorage = false
+        var requiredBytesNull = false
+        var failLoad = false
         var throwOnDeleteEntries = false
         val loads = AtomicInteger()
         val preflightCalls = AtomicInteger()
@@ -805,6 +1243,7 @@ class EditorHistoryCoordinatorTransitionTest {
             expectedGeneration: String,
             register: (EditorHistorySnapshot) -> Unit,
         ): EditorHistorySnapshot? {
+            if (failLoad) return null
             val record = records[entry.id] ?: return null
             if (record.generation != expectedGeneration) return null
             loads.incrementAndGet()
@@ -838,7 +1277,11 @@ class EditorHistoryCoordinatorTransitionTest {
         override suspend fun requiredBitmapBytes(
             entry: EditorHistoryEntry,
             expectedGeneration: String,
-        ): Long? = records[entry.id]?.takeIf { it.generation == expectedGeneration }?.bytes
+        ): Long? = if (requiredBytesNull) {
+            null
+        } else {
+            records[entry.id]?.takeIf { it.generation == expectedGeneration }?.bytes
+        }
 
         override suspend fun deleteEntries(entries: Collection<EditorHistoryEntry>): DeletionResult {
             if (throwOnDeleteEntries) error("delete entries")

@@ -151,9 +151,34 @@ internal sealed class HistoryNavigationResult {
         val storageMovement: HistoryStorageMovement,
     ) : HistoryNavigationResult()
     data class Unavailable(val flags: HistoryFlags) : HistoryNavigationResult()
-    data class Failed(val flags: HistoryFlags) : HistoryNavigationResult()
+    data class NotCompleted(
+        val reason: HistoryNavigationNotCompletedReason,
+        val flags: HistoryFlags,
+    ) : HistoryNavigationResult()
     data class MemoryRejected(val requiredBytes: Long, val flags: HistoryFlags) : HistoryNavigationResult()
     data class Busy(val flags: HistoryFlags) : HistoryNavigationResult()
+}
+
+internal enum class HistoryNavigationNotCompletedReason {
+    TargetUnavailable,
+    TargetCorrupt,
+    StorageUnavailable,
+    StorageBudget,
+    CurrentStateStorageUnavailable,
+    CurrentStateStorageBudget,
+    Superseded,
+    CurrentStateCaptureFailed,
+    MaterializationFailed,
+    AdoptionRejected,
+    Closed,
+}
+
+internal sealed interface CurrentNavigationSnapshotAdmission {
+    data class Hot(val entry: EditorHistoryEntry) : CurrentNavigationSnapshotAdmission
+    data class Cold(val entry: EditorHistoryEntry) : CurrentNavigationSnapshotAdmission
+    data class NotRetained(
+        val reason: HistoryNavigationNotCompletedReason,
+    ) : CurrentNavigationSnapshotAdmission
 }
 
 /**
@@ -450,39 +475,59 @@ internal class EditorHistoryCoordinator(
     }
 
     /**
-     * Admit an oversized current-state snapshot directly to cold storage during navigation.
-     * The snapshot is published to disk, its bitmaps recycled, and a Cold entry is returned.
-     * Returns null if publication fails or operation becomes stale.
+     * Admit the current-state snapshot to the destination history branch during navigation.
+     * The result is structured because a rejected publication is not a memory rejection.
      */
     suspend fun admitOversizedCurrentSnapshot(
         snapshot: EditorHistorySnapshot,
         token: Long,
         generation: String
-    ): EditorHistoryEntry? {
+    ): CurrentNavigationSnapshotAdmission {
         checkMainOwner()
-        if (snapshot.coordinatorGeneration != generation) {
+        if (snapshot.coordinatorGeneration != generation || !isOperationCurrent(token, generation)) {
             snapshot.recycleBitmaps()
-            return null
+            return CurrentNavigationSnapshotAdmission.NotRetained(
+                HistoryNavigationNotCompletedReason.Superseded,
+            )
         }
         val snapshotBytes = snapshot.bitmapBytes()
         if (snapshotBytes <= historyRamBudgetBytes()) {
-            return null // not oversized
+            return CurrentNavigationSnapshotAdmission.Hot(
+                EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot),
+            )
         }
         val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
         diagnosticOperationKind = TrackerSession.HistoryOperationKind.DirectToCold
         publishState()
         val published = storage.publish(entry, snapshot)
-        if (published !is HistoryPublishResult.Success || !isOperationCurrent(token, generation)) {
+        if (!isOperationCurrent(token, generation)) {
             if (published is HistoryPublishResult.Success) settleColdPayloads(listOf(published.payload))
             if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
-            return null
+            return CurrentNavigationSnapshotAdmission.NotRetained(
+                HistoryNavigationNotCompletedReason.Superseded,
+            )
         }
-        entry.coldPayload = published.payload
+        when (published) {
+            HistoryPublishResult.InsufficientStorage -> {
+                if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
+                return CurrentNavigationSnapshotAdmission.NotRetained(
+                    HistoryNavigationNotCompletedReason.CurrentStateStorageBudget,
+                )
+            }
+            is HistoryPublishResult.Failed -> {
+                if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
+                return CurrentNavigationSnapshotAdmission.NotRetained(
+                    HistoryNavigationNotCompletedReason.CurrentStateStorageUnavailable,
+                )
+            }
+            is HistoryPublishResult.Success -> Unit
+        }
+        entry.coldPayload = (published as HistoryPublishResult.Success).payload
         entry.hotSnapshot = null
         entry.payloadState = HistoryPayloadState.Cold
         snapshot.transferDiagnosticsToCoordinator()
         snapshot.recycleBitmaps()
-        return entry
+        return CurrentNavigationSnapshotAdmission.Cold(entry)
     }
 
     suspend fun clearRedoAfterAdoptedEdit(): HistoryFlags {
@@ -513,6 +558,7 @@ internal class EditorHistoryCoordinator(
         adopt: (EditorHistorySnapshot) -> Boolean
     ): HistoryNavigationResult {
         checkMainOwner()
+        if (closed) return HistoryNavigationResult.NotCompleted(HistoryNavigationNotCompletedReason.Closed, visibleFlags.copy(busy = false))
         if (operationBusy) return HistoryNavigationResult.Busy(visibleFlags)
         val source = if (undoDirection) undo else redo
         if (source.isEmpty()) return HistoryNavigationResult.Unavailable(visibleFlags)
@@ -536,9 +582,18 @@ internal class EditorHistoryCoordinator(
             target.payloadState = if (loadedFromDisk) HistoryPayloadState.Loading else HistoryPayloadState.Adopting
             if (loadedFromDisk) {
                 val required = storage.requiredBitmapBytes(target, generation)
-                    ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                    ?: return HistoryNavigationResult.NotCompleted(
+                        HistoryNavigationNotCompletedReason.TargetUnavailable,
+                        visibleFlags.copy(busy = false),
+                    )
                 val transientRequired = BitmapMemoryBudget.saturatingAdd(required, currentCaptureBytes)
-                spillUntilFits(currentCaptureBytes, setOf(target.id), token, generation)
+                val targetSpill = spillUntilFits(currentCaptureBytes, setOf(target.id), token, generation)
+                targetSpill.terminalReason?.let { reason ->
+                    return HistoryNavigationResult.NotCompleted(
+                        navigationReason(reason, currentState = false),
+                        visibleFlags.copy(busy = false),
+                    )
+                }
                 if (!BitmapMemoryBudget.canAllocate(transientRequired)) {
                     return HistoryNavigationResult.MemoryRejected(transientRequired, visibleFlags.copy(busy = false))
                 }
@@ -552,25 +607,46 @@ internal class EditorHistoryCoordinator(
                     }
                 }
             } else target.hotSnapshot
-            val baseTarget = loaded ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+            val baseTarget = loaded ?: return HistoryNavigationResult.NotCompleted(
+                HistoryNavigationNotCompletedReason.TargetCorrupt,
+                visibleFlags.copy(busy = false),
+            )
             if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target) {
-                return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                return HistoryNavigationResult.NotCompleted(
+                    HistoryNavigationNotCompletedReason.Superseded,
+                    visibleFlags.copy(busy = false),
+                )
             }
             materialized = materialize(baseTarget) { materialized = it }
-                ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                ?: return HistoryNavigationResult.NotCompleted(
+                    HistoryNavigationNotCompletedReason.MaterializationFailed,
+                    visibleFlags.copy(busy = false),
+                )
             if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target) {
-                return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                return HistoryNavigationResult.NotCompleted(
+                    HistoryNavigationNotCompletedReason.Superseded,
+                    visibleFlags.copy(busy = false),
+                )
             }
             val targetForAdoption = checkNotNull(materialized)
             diagnosticOperationKind = TrackerSession.HistoryOperationKind.Adopting
             publishState()
             currentSnapshot = captureCurrent(targetForAdoption.storage, targetForAdoption.baseContentToken)
-                ?: return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                ?: return HistoryNavigationResult.NotCompleted(
+                    HistoryNavigationNotCompletedReason.CurrentStateCaptureFailed,
+                    visibleFlags.copy(busy = false),
+                )
 
             val targetResidentBytes = target.hotResidentBytes()
             val projectedRequired = (currentSnapshot!!.bitmapBytes() - targetResidentBytes).coerceAtLeast(0L)
             val protected = setOf(target.id)
             val spill = spillUntilFits(projectedRequired, protected, token, generation)
+            spill.terminalReason?.let { reason ->
+                return HistoryNavigationResult.NotCompleted(
+                    navigationReason(reason, currentState = true),
+                    visibleFlags.copy(busy = false),
+                )
+            }
             var storageMovement = if (spill.moved) {
                 HistoryStorageMovement.ExistingEntriesSpilled
             } else {
@@ -580,12 +656,22 @@ internal class EditorHistoryCoordinator(
             // Handle oversized current snapshot: publish directly to cold storage
             val currentSnapshotBytes = currentSnapshot!!.bitmapBytes()
             if (currentSnapshotBytes > historyRamBudgetBytes()) {
-                currentEntry = admitOversizedCurrentSnapshot(currentSnapshot, token, generation)
-                if (currentEntry == null) {
-                    return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                when (val currentAdmission = admitOversizedCurrentSnapshot(currentSnapshot, token, generation)) {
+                    is CurrentNavigationSnapshotAdmission.Hot -> {
+                        currentEntry = currentAdmission.entry
+                    }
+                    is CurrentNavigationSnapshotAdmission.Cold -> {
+                        currentEntry = currentAdmission.entry
+                        currentSnapshot = null // ownership transferred to cold storage
+                        storageMovement = storageMovement.plus(HistoryStorageMovement.AdmittedSnapshotStoredCold)
+                    }
+                    is CurrentNavigationSnapshotAdmission.NotRetained -> {
+                        return HistoryNavigationResult.NotCompleted(
+                            currentAdmission.reason,
+                            visibleFlags.copy(busy = false),
+                        )
+                    }
                 }
-                currentSnapshot = null // ownership transferred to cold storage
-                storageMovement = storageMovement.plus(HistoryStorageMovement.AdmittedSnapshotStoredCold)
             }
 
             // For oversized current snapshot, we only need target bytes to fit in hot (which they do, since target was hot)
@@ -597,11 +683,24 @@ internal class EditorHistoryCoordinator(
                 fitsAfterReplacingTarget(currentSnapshot!!, target)
             }
 
-            if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target || !fitsBudget) {
+            if (!isOperationCurrent(token, generation) || source.lastOrNull() !== target) {
                 currentEntry?.let { entry ->
                     entry.coldPayload?.let { settleColdPayloads(listOf(it)) }
                 }
-                return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                return HistoryNavigationResult.NotCompleted(
+                    HistoryNavigationNotCompletedReason.Superseded,
+                    visibleFlags.copy(busy = false),
+                )
+            }
+            if (!fitsBudget) {
+                val requiredBytes = BitmapMemoryBudget.saturatingAdd(
+                    (hotBytes() - target.hotResidentBytes()).coerceAtLeast(0L),
+                    currentSnapshot?.bitmapBytes() ?: 0L,
+                )
+                return HistoryNavigationResult.MemoryRejected(
+                    requiredBytes,
+                    visibleFlags.copy(busy = false),
+                )
             }
 
             val nextUndo = ArrayDeque(undo)
@@ -626,7 +725,10 @@ internal class EditorHistoryCoordinator(
                 diagnosticTransferredHotEntryId = null
                 if (loadedFromDisk) activeColdLoadDecodedBytes = targetForAdoption.bitmapBytes()
                 publishState()
-                return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
+                return HistoryNavigationResult.NotCompleted(
+                    HistoryNavigationNotCompletedReason.AdoptionRejected,
+                    visibleFlags.copy(busy = false),
+                )
             }
             // UI reconciliation has acquired the destination edges; the materialized local
             // snapshot must no longer contribute a second ledger owner.
@@ -670,6 +772,23 @@ internal class EditorHistoryCoordinator(
             finishOperation(token)
             if (adopted) scheduleMaintenance(maintenanceReserve)
         }
+    }
+
+    private fun navigationReason(
+        reason: HistoryAdmissionNotRetainedReason,
+        currentState: Boolean,
+    ): HistoryNavigationNotCompletedReason = when (reason) {
+        HistoryAdmissionNotRetainedReason.StorageUnavailable ->
+            if (currentState) HistoryNavigationNotCompletedReason.CurrentStateStorageUnavailable
+            else HistoryNavigationNotCompletedReason.StorageUnavailable
+        HistoryAdmissionNotRetainedReason.StorageBudget ->
+            if (currentState) HistoryNavigationNotCompletedReason.CurrentStateStorageBudget
+            else HistoryNavigationNotCompletedReason.StorageBudget
+        HistoryAdmissionNotRetainedReason.Superseded -> HistoryNavigationNotCompletedReason.Superseded
+        HistoryAdmissionNotRetainedReason.Closed -> HistoryNavigationNotCompletedReason.Closed
+        HistoryAdmissionNotRetainedReason.MemoryCapacity ->
+            if (currentState) HistoryNavigationNotCompletedReason.CurrentStateStorageUnavailable
+            else HistoryNavigationNotCompletedReason.StorageUnavailable
     }
 
     internal data class RecoverResult(

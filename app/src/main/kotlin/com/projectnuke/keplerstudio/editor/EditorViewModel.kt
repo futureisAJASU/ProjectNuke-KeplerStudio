@@ -6198,13 +6198,13 @@ fun exportPreview() {
                                         if (undo) "되돌리기 편집 기록이 없습니다." else "다시 실행할 편집 기록이 없습니다.",
                                 )
                             }
-                        is HistoryNavigationResult.Busy ->
+                        is HistoryNavigationResult.Busy,
+                        is HistoryNavigationResult.NotCompleted -> {
+                            val message = historyNavigationMessage(historyNavigationFeedback(result))
                             updateUiStateAndRecycleReplaced {
-                                it.copy(
-                                    isBusy = false,
-                                    message = "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요.",
-                                )
+                                it.copy(isBusy = false, message = message ?: it.message)
                             }
+                        }
                         is HistoryNavigationResult.MemoryRejected -> {
                             updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
                             val targetId = historyCoordinator.navigationTargetId(undo)
@@ -6220,13 +6220,6 @@ fun exportPreview() {
                                 )
                             }
                         }
-                        is HistoryNavigationResult.Failed ->
-                            updateUiStateAndRecycleReplaced {
-                                it.copy(
-                                    isBusy = false,
-                                    message = "저장된 편집 기록을 불러오지 못했습니다. 현재 편집과 기록은 유지됩니다.",
-                                )
-                            }
                     }
                 } catch (ce: CancellationException) {
                     if (ownsHistoryNavigation(navigationIdentity)) {
