@@ -92,6 +92,8 @@ internal class OwnedEditorViewModelHarness(
                 .onFailure { failure = failure ?: it }
             runCatching { check(HistoryAdmissionTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
+            runCatching { check(HistoryStorageBackendTestSeam.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
             runCatching { check(BitmapCopyTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(HistoryNavigationTestSeam.installedForTestCount() == 0) }

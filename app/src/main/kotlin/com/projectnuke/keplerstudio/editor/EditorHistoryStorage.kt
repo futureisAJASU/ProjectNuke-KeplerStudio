@@ -29,8 +29,55 @@ internal enum class HistorySnapshotStorage { Exact, MetadataOnly }
 
 internal enum class HistoryPayloadState { Hot, Cold, Loading, Spilling, Adopting, Discarded }
 
-internal enum class SpillResult { Success, CurrentFailure, Superseded }
+internal enum class HistoryAdmissionNotRetainedReason {
+    MemoryCapacity,
+    StorageUnavailable,
+    StorageBudget,
+    Superseded,
+    Closed,
+}
+
+internal enum class HistoryStorageMovement {
+    None,
+    ExistingEntriesSpilled,
+    AdmittedSnapshotStoredCold,
+    Both;
+
+    internal fun plus(other: HistoryStorageMovement): HistoryStorageMovement = when {
+        this == None -> other
+        other == None -> this
+        this == other -> this
+        else -> Both
+    }
+}
+
+internal sealed interface SpillResult {
+    data object Success : SpillResult
+    data class CurrentFailure(val reason: HistoryAdmissionNotRetainedReason) : SpillResult
+    data object Superseded : SpillResult
+}
+
+internal data class SpillUntilFitsResult(
+    val moved: Boolean,
+    val terminalReason: HistoryAdmissionNotRetainedReason? = null,
+)
+
+internal data class RebalanceResult(
+    val spilledEntryIds: Set<String>,
+) {
+    val moved: Boolean get() = spilledEntryIds.isNotEmpty()
+}
+
+internal sealed interface HistoryPublishResult {
+    data class Success(val payload: ColdHistoryPayload) : HistoryPublishResult
+    data object InsufficientStorage : HistoryPublishResult
+    data class Failed(val cause: Throwable) : HistoryPublishResult
+}
 internal enum class TrimResult { Satisfied, Superseded }
+
+private class HistoryStorageWriteFailure(message: String) : java.io.IOException(message)
+
+private class HistoryStorageInvariantViolation(message: String) : IllegalStateException(message)
 
 internal data class ColdHistoryPayload(
     val directory: File,
@@ -84,14 +131,25 @@ internal sealed interface HistoryCaptureAvailability {
     data class MemoryRejected(val requiredBytes: Long) : HistoryCaptureAvailability
 }
 
-internal data class HistoryAdmissionResult(
-    val retained: Boolean,
-    val movedToStorage: Boolean,
+internal sealed interface HistoryAdmissionOutcome {
     val flags: HistoryFlags
-)
+
+    data class Retained(
+        override val flags: HistoryFlags,
+        val storageMovement: HistoryStorageMovement,
+    ) : HistoryAdmissionOutcome
+
+    data class NotRetained(
+        val reason: HistoryAdmissionNotRetainedReason,
+        override val flags: HistoryFlags,
+    ) : HistoryAdmissionOutcome
+}
 
 internal sealed class HistoryNavigationResult {
-    data class Adopted(val flags: HistoryFlags, val movedToStorage: Boolean) : HistoryNavigationResult()
+    data class Adopted(
+        val flags: HistoryFlags,
+        val storageMovement: HistoryStorageMovement,
+    ) : HistoryNavigationResult()
     data class Unavailable(val flags: HistoryFlags) : HistoryNavigationResult()
     data class Failed(val flags: HistoryFlags) : HistoryNavigationResult()
     data class MemoryRejected(val requiredBytes: Long, val flags: HistoryFlags) : HistoryNavigationResult()
@@ -108,7 +166,7 @@ internal interface HistoryStorageBackend {
     fun registerSession(sessionId: String)
     fun unregisterSession(sessionId: String)
     suspend fun initializeSession(sessionId: String)
-    suspend fun publish(entry: EditorHistoryEntry, snapshot: EditorHistorySnapshot): ColdHistoryPayload?
+    suspend fun publish(entry: EditorHistoryEntry, snapshot: EditorHistorySnapshot): HistoryPublishResult
     suspend fun load(
         entry: EditorHistoryEntry,
         expectedGeneration: String,
@@ -266,15 +324,21 @@ internal class EditorHistoryCoordinator(
         snapshot: EditorHistorySnapshot,
         clearRedo: Boolean,
         foregroundReserveBytes: Long
-    ): HistoryAdmissionResult {
+    ): HistoryAdmissionOutcome {
         checkMainOwner()
         if (!awaitIdle()) {
             snapshot.recycleBitmaps()
-            return HistoryAdmissionResult(false, false, visibleFlags)
+            return HistoryAdmissionOutcome.NotRetained(
+                HistoryAdmissionNotRetainedReason.Closed,
+                visibleFlags,
+            )
         }
         if (snapshot.coordinatorGeneration != documentGeneration) {
             snapshot.recycleBitmaps()
-            return HistoryAdmissionResult(false, false, visibleFlags)
+            return HistoryAdmissionOutcome.NotRetained(
+                HistoryAdmissionNotRetainedReason.Superseded,
+                visibleFlags,
+            )
         }
         val token = beginOperation()
         val generation = documentGeneration
@@ -286,46 +350,99 @@ internal class EditorHistoryCoordinator(
             publishState()
         }
         var retained = false
-        var moved = false
+        var storageMovement = HistoryStorageMovement.None
+        var notRetainedReason: HistoryAdmissionNotRetainedReason? = null
         try {
             val snapshotBytes = snapshot.bitmapBytes()
-            moved = spillUntilFits(snapshotBytes, emptySet(), token, generation)
-            if (isOperationCurrent(token, generation) && (fitsWith(snapshotBytes) || snapshotBytes > historyRamBudgetBytes())) {
+            val spill = spillUntilFits(snapshotBytes, emptySet(), token, generation)
+            if (spill.moved) {
+                storageMovement = storageMovement.plus(HistoryStorageMovement.ExistingEntriesSpilled)
+            }
+            notRetainedReason = spill.terminalReason
+            if (notRetainedReason == null && isOperationCurrent(token, generation) &&
+                (fitsWith(snapshotBytes) || snapshotBytes > historyRamBudgetBytes())
+            ) {
                 val admittedEntry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
                 if (snapshotBytes > historyRamBudgetBytes()) {
-                    val published = storage.publish(admittedEntry, snapshot)
-                    if (published != null && isOperationCurrent(token, generation)) {
-                        admittedEntry.coldPayload = published
-                        admittedEntry.hotSnapshot = null
-                        admittedEntry.payloadState = HistoryPayloadState.Cold
-                        snapshot.transferDiagnosticsToCoordinator()
-                        snapshot.recycleBitmaps()
-                        moved = true
-                    } else {
-                        published?.let { settleColdPayloads(listOf(it)) }
+                    when (val published = storage.publish(admittedEntry, snapshot)) {
+                        is HistoryPublishResult.Success -> {
+                            if (isOperationCurrent(token, generation)) {
+                                admittedEntry.coldPayload = published.payload
+                                admittedEntry.hotSnapshot = null
+                                admittedEntry.payloadState = HistoryPayloadState.Cold
+                                snapshot.transferDiagnosticsToCoordinator()
+                                snapshot.recycleBitmaps()
+                                storageMovement = storageMovement.plus(HistoryStorageMovement.AdmittedSnapshotStoredCold)
+                            } else {
+                                settleColdPayloads(listOf(published.payload))
+                                notRetainedReason = HistoryAdmissionNotRetainedReason.Superseded
+                            }
+                        }
+                        HistoryPublishResult.InsufficientStorage -> {
+                            notRetainedReason = if (isOperationCurrent(token, generation)) {
+                                HistoryAdmissionNotRetainedReason.StorageBudget
+                            } else {
+                                HistoryAdmissionNotRetainedReason.Superseded
+                            }
+                        }
+                        is HistoryPublishResult.Failed -> {
+                            notRetainedReason = if (isOperationCurrent(token, generation)) {
+                                HistoryAdmissionNotRetainedReason.StorageUnavailable
+                            } else {
+                                HistoryAdmissionNotRetainedReason.Superseded
+                            }
+                        }
                     }
                 }
-                if (admittedEntry.hotSnapshot == null || fitsWith(snapshotBytes)) {
-                snapshot.transferDiagnosticsToCoordinator()
-                undo.addLast(admittedEntry)
-                retained = true
-                publishState()
-                trimEntryCount(discarded)
-                moved = rebalanceHot(foregroundReserveBytes, token, generation) || moved
-                // Recheck after rebalanceHot suspension — cannot trim a superseded document.
-                if (isOperationCurrent(token, generation)) {
-                    if (trimDiskBudget(discarded, emptySet(), token, generation) == TrimResult.Superseded) {
+                if (notRetainedReason == null && (admittedEntry.hotSnapshot == null || fitsWith(snapshotBytes))) {
+                    snapshot.transferDiagnosticsToCoordinator()
+                    undo.addLast(admittedEntry)
+                    retained = true
+                    publishState()
+                    trimEntryCount(discarded)
+                    val rebalance = rebalanceHot(foregroundReserveBytes, token, generation)
+                    if (rebalance.moved) {
+                        val rebalanceMovement = when {
+                            admittedEntry.id in rebalance.spilledEntryIds &&
+                                rebalance.spilledEntryIds.any { it != admittedEntry.id } ->
+                                HistoryStorageMovement.Both
+                            admittedEntry.id in rebalance.spilledEntryIds ->
+                                HistoryStorageMovement.AdmittedSnapshotStoredCold
+                            else -> HistoryStorageMovement.ExistingEntriesSpilled
+                        }
+                        storageMovement = storageMovement.plus(rebalanceMovement)
+                    }
+                    if (isOperationCurrent(token, generation)) {
+                        if (trimDiskBudget(discarded, emptySet(), token, generation) == TrimResult.Superseded) {
+                            notRetainedReason = HistoryAdmissionNotRetainedReason.Superseded
+                            retained = false
+                        }
+                    } else {
+                        notRetainedReason = HistoryAdmissionNotRetainedReason.Superseded
                         retained = false
                     }
-                } else {
-                    retained = false
+                    if (retained && !undo.contains(admittedEntry)) {
+                        notRetainedReason = HistoryAdmissionNotRetainedReason.StorageBudget
+                        retained = false
+                    }
                 }
-                if (retained) retained = undo.contains(admittedEntry)
+            } else if (notRetainedReason == null) {
+                notRetainedReason = if (!isOperationCurrent(token, generation)) {
+                    HistoryAdmissionNotRetainedReason.Superseded
+                } else {
+                    HistoryAdmissionNotRetainedReason.MemoryCapacity
                 }
             }
-            // Admission is already committed; track any physical deletion failure.
             settleColdEntries(discarded)
-            return HistoryAdmissionResult(retained, moved, visibleFlags.copy(busy = false))
+            val flags = visibleFlags.copy(busy = false)
+            return if (retained) {
+                HistoryAdmissionOutcome.Retained(flags, storageMovement)
+            } else {
+                HistoryAdmissionOutcome.NotRetained(
+                    notRetainedReason ?: HistoryAdmissionNotRetainedReason.Superseded,
+                    flags,
+                )
+            }
         } finally {
             if (!retained && !snapshot.resourcesReleased) snapshot.recycleBitmaps()
             finishOperation(token)
@@ -355,12 +472,12 @@ internal class EditorHistoryCoordinator(
         diagnosticOperationKind = TrackerSession.HistoryOperationKind.DirectToCold
         publishState()
         val published = storage.publish(entry, snapshot)
-        if (published == null || !isOperationCurrent(token, generation)) {
-            published?.let { settleColdPayloads(listOf(it)) }
+        if (published !is HistoryPublishResult.Success || !isOperationCurrent(token, generation)) {
+            if (published is HistoryPublishResult.Success) settleColdPayloads(listOf(published.payload))
             if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
             return null
         }
-        entry.coldPayload = published
+        entry.coldPayload = published.payload
         entry.hotSnapshot = null
         entry.payloadState = HistoryPayloadState.Cold
         snapshot.transferDiagnosticsToCoordinator()
@@ -453,7 +570,12 @@ internal class EditorHistoryCoordinator(
             val targetResidentBytes = target.hotResidentBytes()
             val projectedRequired = (currentSnapshot!!.bitmapBytes() - targetResidentBytes).coerceAtLeast(0L)
             val protected = setOf(target.id)
-            val moved = spillUntilFits(projectedRequired, protected, token, generation)
+            val spill = spillUntilFits(projectedRequired, protected, token, generation)
+            var storageMovement = if (spill.moved) {
+                HistoryStorageMovement.ExistingEntriesSpilled
+            } else {
+                HistoryStorageMovement.None
+            }
 
             // Handle oversized current snapshot: publish directly to cold storage
             val currentSnapshotBytes = currentSnapshot!!.bitmapBytes()
@@ -463,6 +585,7 @@ internal class EditorHistoryCoordinator(
                     return HistoryNavigationResult.Failed(visibleFlags.copy(busy = false))
                 }
                 currentSnapshot = null // ownership transferred to cold storage
+                storageMovement = storageMovement.plus(HistoryStorageMovement.AdmittedSnapshotStoredCold)
             }
 
             // For oversized current snapshot, we only need target bytes to fit in hot (which they do, since target was hot)
@@ -521,7 +644,7 @@ internal class EditorHistoryCoordinator(
             publishState()
             trimEntryCount(discarded)
             settleColdEntries(discarded)
-            return HistoryNavigationResult.Adopted(visibleFlags.copy(busy = false), moved)
+            return HistoryNavigationResult.Adopted(visibleFlags.copy(busy = false), storageMovement)
         } catch (failure: BitmapAllocationRejectedException) {
             return HistoryNavigationResult.MemoryRejected(failure.requiredBytes, visibleFlags.copy(busy = false))
         } finally {
@@ -594,7 +717,7 @@ internal class EditorHistoryCoordinator(
                             newRedo.add(entry)
                             reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBefore)
                         }
-                        SpillResult.CurrentFailure -> {
+                        is SpillResult.CurrentFailure -> {
                             // Current-operation publish failure: intentionally discard.
                             // spillEntry already restored payloadState to Hot on publish-null,
                             // or threw. Settle from this operation.
@@ -636,7 +759,7 @@ internal class EditorHistoryCoordinator(
                         SpillResult.Success -> {
                             reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, hotBefore)
                         }
-                        SpillResult.CurrentFailure -> {
+                        is SpillResult.CurrentFailure -> {
                             // Non-strong or candidate spill: entry already restored to Hot by spillEntry.
                             // Do NOT discard — preserve as Hot. Stop spilling on transient failure.
                             if (strong) {
@@ -822,31 +945,48 @@ internal class EditorHistoryCoordinator(
         }
     }
 
-    private suspend fun spillUntilFits(requiredBytes: Long, protected: Set<String>, token: Long, generation: String): Boolean {
+    private suspend fun spillUntilFits(
+        requiredBytes: Long,
+        protected: Set<String>,
+        token: Long,
+        generation: String,
+    ): SpillUntilFitsResult {
         var moved = false
         while (isOperationCurrent(token, generation) && !fitsWith(requiredBytes)) {
             val candidate = (undo + redo).firstOrNull {
                 it.id !in protected && it.canColdSpill()
-            } ?: break
-            if (spillEntry(candidate, token, generation) != SpillResult.Success) break
+            } ?: return SpillUntilFitsResult(moved)
+            when (val result = spillEntry(candidate, token, generation)) {
+                SpillResult.Success -> Unit
+                is SpillResult.CurrentFailure -> return SpillUntilFitsResult(moved, result.reason)
+                SpillResult.Superseded ->
+                    return SpillUntilFitsResult(moved, HistoryAdmissionNotRetainedReason.Superseded)
+            }
             moved = true
         }
-        return moved
+        return SpillUntilFitsResult(
+            moved = moved,
+            terminalReason = if (isOperationCurrent(token, generation)) null
+            else HistoryAdmissionNotRetainedReason.Superseded,
+        )
     }
 
-    private suspend fun rebalanceHot(reserveBytes: Long, token: Long, generation: String): Boolean {
+    private suspend fun rebalanceHot(reserveBytes: Long, token: Long, generation: String): RebalanceResult {
         val target = (historyRamBudgetBytes() - reserveBytes.coerceAtLeast(0L)).coerceAtLeast(0L)
-        var moved = false
+        val spilledEntryIds = LinkedHashSet<String>()
         while (isOperationCurrent(token, generation) && hotBytes() > target) {
             val recentUndo = undo.lastOrNull()?.id
             val recentRedo = redo.lastOrNull()?.id
             val candidate = (undo + redo).firstOrNull {
                 it.canColdSpill() && it.id != recentUndo && it.id != recentRedo
             } ?: (undo + redo).firstOrNull { it.canColdSpill() }
-            if (candidate == null || spillEntry(candidate, token, generation) != SpillResult.Success) break
-            moved = true
+            if (candidate == null) break
+            when (spillEntry(candidate, token, generation)) {
+                SpillResult.Success -> spilledEntryIds += candidate.id
+                is SpillResult.CurrentFailure, SpillResult.Superseded -> break
+            }
         }
-        return moved
+        return RebalanceResult(spilledEntryIds)
     }
 
     /** Returns SpillResult.Success when entry is now Cold with confirmed publication.
@@ -854,12 +994,20 @@ internal class EditorHistoryCoordinator(
      *  caller may discard the entry. Returns SpillResult.Superseded when the operation
      *  is stale/closed; caller must NOT discard or reclaim — replacement/close owns settlement. */
     private suspend fun spillEntry(entry: EditorHistoryEntry, token: Long, generation: String): SpillResult {
-        val snapshot = entry.hotSnapshot ?: return if (entry.coldPayload != null) SpillResult.Success else SpillResult.CurrentFailure
+        val snapshot = entry.hotSnapshot ?: return if (entry.coldPayload != null) {
+            SpillResult.Success
+        } else {
+            SpillResult.CurrentFailure(HistoryAdmissionNotRetainedReason.StorageUnavailable)
+        }
         // Metadata-only entries own no bitmap payload. Keep their negligible
         // state hot; otherwise we would publish a manifest the cold loader
         // correctly rejects for containing zero bitmap payloads.
-        if (snapshot.storage == HistorySnapshotStorage.MetadataOnly) return SpillResult.CurrentFailure
-        if (entry.payloadState != HistoryPayloadState.Hot) return SpillResult.CurrentFailure
+        if (snapshot.storage == HistorySnapshotStorage.MetadataOnly) {
+            return SpillResult.CurrentFailure(HistoryAdmissionNotRetainedReason.StorageUnavailable)
+        }
+        if (entry.payloadState != HistoryPayloadState.Hot) {
+            return SpillResult.CurrentFailure(HistoryAdmissionNotRetainedReason.StorageUnavailable)
+        }
         entry.payloadState = HistoryPayloadState.Spilling
         if (diagnosticRecoveryMode != null) {
             diagnosticOperationKind = TrackerSession.HistoryOperationKind.Recovery
@@ -884,16 +1032,24 @@ internal class EditorHistoryCoordinator(
         }
         if (!isOperationCurrent(token, generation) || entry.payloadState == HistoryPayloadState.Discarded) {
             // Stale or closed during publication — replacement/close owns settlement.
-            published?.let { storage.delete(it) }
+            if (published is HistoryPublishResult.Success) storage.delete(published.payload)
             if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
             entry.hotSnapshot = null
             return SpillResult.Superseded
         }
-        if (published == null) {
-            entry.payloadState = HistoryPayloadState.Hot
-            return SpillResult.CurrentFailure
+        when (published) {
+            HistoryPublishResult.InsufficientStorage -> {
+                entry.payloadState = HistoryPayloadState.Hot
+                return SpillResult.CurrentFailure(HistoryAdmissionNotRetainedReason.StorageBudget)
+            }
+            is HistoryPublishResult.Failed -> {
+                entry.payloadState = HistoryPayloadState.Hot
+                return SpillResult.CurrentFailure(HistoryAdmissionNotRetainedReason.StorageUnavailable)
+            }
+            is HistoryPublishResult.Success -> Unit
         }
-        entry.coldPayload = published
+        val successfulPublication = published as HistoryPublishResult.Success
+        entry.coldPayload = successfulPublication.payload
         entry.hotSnapshot = null
         entry.payloadState = HistoryPayloadState.Cold
         snapshot.recycleBitmaps()
@@ -1142,33 +1298,45 @@ internal class EditorHistoryStorage(
         Unit
     }
 
-    override suspend fun publish(entry: EditorHistoryEntry, snapshot: EditorHistorySnapshot): ColdHistoryPayload? = withContext(ioDispatcher) {
+    override suspend fun publish(
+        entry: EditorHistoryEntry,
+        snapshot: EditorHistorySnapshot,
+    ): HistoryPublishResult = withContext(ioDispatcher) {
         val session = sessionDirectory(entry.documentGeneration)
-        if (!isSafeId(entry.id) || !isSafeId(entry.documentGeneration)) return@withContext null
+        if (!isSafeId(entry.id) || !isSafeId(entry.documentGeneration)) {
+            return@withContext HistoryPublishResult.Failed(
+                IllegalArgumentException("invalid history publication identity"),
+            )
+        }
         session.mkdirs()
         val diskReserve = 8L * 1024L * 1024L
-        if (enforceDiskSpace && root.usableSpace < BitmapMemoryBudget.saturatingAdd(snapshot.bitmapBytes(), diskReserve)) return@withContext null
+        if (enforceDiskSpace && root.usableSpace < BitmapMemoryBudget.saturatingAdd(snapshot.bitmapBytes(), diskReserve)) {
+            return@withContext HistoryPublishResult.InsufficientStorage
+        }
         val staging = File(session, "$STAGING_PREFIX${entry.id}-${UUID.randomUUID()}")
         val published = File(session, "$ENTRY_PREFIX${entry.id}")
         try {
-            check(staging.mkdirs())
+            if (!staging.mkdirs()) throw HistoryStorageWriteFailure("history staging directory creation failed")
             val manifest = snapshotManifest(entry, snapshot, staging)
             writeSynced(File(staging, MANIFEST), manifest.toString().toByteArray(Charsets.UTF_8))
             writeSynced(File(staging, COMPLETE), "ok".toByteArray(Charsets.US_ASCII))
             if (syncDirectories) syncDirectory(staging)
             if (published.exists()) published.deleteRecursively()
-            check(staging.renameTo(published))
+            if (!staging.renameTo(published)) throw HistoryStorageWriteFailure("history publication rename failed")
             if (syncDirectories) syncDirectory(session)
-            ColdHistoryPayload(published, published.directoryBytes(), snapshot.bitmapBytes(), entry.documentGeneration)
+            HistoryPublishResult.Success(
+                ColdHistoryPayload(published, published.directoryBytes(), snapshot.bitmapBytes(), entry.documentGeneration),
+            )
         } catch (ce: CancellationException) {
             staging.deleteRecursively()
             published.takeIf { isOwnedEntryDirectory(it, entry.documentGeneration, entry.id) }?.deleteRecursively()
             throw ce
         } catch (failure: Throwable) {
+            if (failure is HistoryStorageInvariantViolation) throw failure
             publishFailureObserverForTest?.invoke(failure)
             staging.deleteRecursively()
             published.takeIf { isOwnedEntryDirectory(it, entry.documentGeneration, entry.id) }?.deleteRecursively()
-            null
+            HistoryPublishResult.Failed(failure)
         }
     }
 
@@ -1403,11 +1571,15 @@ internal class EditorHistoryStorage(
         fun persist(bitmap: Bitmap?): String? {
             bitmap ?: return null
             bitmapKeys[bitmap]?.let { return it }
-            check(snapshot.storage == HistorySnapshotStorage.Exact)
+            if (snapshot.storage != HistorySnapshotStorage.Exact) {
+                throw HistoryStorageInvariantViolation("exact history publication requires bitmap storage")
+            }
             val key = "bitmap-${bitmapKeys.size}"
             val fileName = "$key.png"
             FileOutputStream(File(staging, fileName)).use { output ->
-                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    throw HistoryStorageWriteFailure("history bitmap compression failed")
+                }
                 output.fd.sync()
             }
             bitmapKeys[bitmap] = key

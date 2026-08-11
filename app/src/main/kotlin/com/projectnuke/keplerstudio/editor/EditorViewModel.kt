@@ -75,6 +75,10 @@ private const val HISTORY_BUSY_MESSAGE =
     "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요."
 private const val HISTORY_MEMORY_MESSAGE =
     "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다."
+private const val HISTORY_STORAGE_FAILURE_MESSAGE =
+    "편집은 적용했지만 되돌리기 기록을 저장소에 저장하지 못했습니다."
+private const val HISTORY_STORAGE_BUDGET_MESSAGE =
+    "편집은 적용했지만 되돌리기 기록 저장 공간이 부족하여 이번 기록을 유지하지 못했습니다."
 
 internal class PendingHistorySnapshot(
     private val deferred: CompletableDeferred<EditorHistorySnapshot?>,
@@ -318,7 +322,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val baseContentToken: String,
         val startingDocumentRevision: Int,
         val activeLayerId: String?,
-        val capturedStartingLocalParams: EditParams,
         var latestIntendedLocalParams: EditParams,
         var job: Job? = null,
         var terminalFinish: Boolean = false,
@@ -672,8 +675,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var restoreDraftToken: Long = 0L
     internal val trackerSession: TrackerSession? = DebugMemoryTracker.createEditorSession(this)
     internal val tracker: TrackerDiagnostics = DebugMemoryTracker.diagnostics(trackerSession)
+    private val historyStorageBackend = HistoryStorageBackendTestSeam.capture()
     internal val historyCoordinator =
-        EditorHistoryCoordinator(app.applicationContext, viewModelScope, trackerSession)
+        EditorHistoryCoordinator(
+            app.applicationContext,
+            viewModelScope,
+            trackerSession,
+            storage = historyStorageBackend ?: EditorHistoryStorage(app.applicationContext),
+        )
     private val historyActivity =
         HistoryActivityRegistry(
             coordinatorBusy = { historyCoordinator.flags().busy },
@@ -2475,7 +2484,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     baseContentToken = state.baseContentToken,
                     startingDocumentRevision = state.revision,
                     activeLayerId = activeLayer.id,
-                    capturedStartingLocalParams = activeLayer.localParams,
                     latestIntendedLocalParams = activeLayer.localParams,
                 )
             pendingSelectionParamStart = pending
@@ -3780,6 +3788,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val reserve = _uiState.value.historyBitmapBytes()
         val started = java.util.concurrent.atomic.AtomicBoolean(false)
         val historyPublishSeam = HistoryAdmissionTestSeam.capture()
+        val feedbackGeneration = snapshot.coordinatorGeneration ?: historyCoordinator.currentGeneration()
         var registration: HistoryActivityRegistry.Registration? = null
         snapshot.claimCoordinatorOwnership()
         val job =
@@ -3788,12 +3797,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 try {
                     historyPublishSeam?.awaitBeforeCoordinatorAdmission()
                     val result = historyCoordinator.admitAdoptedSnapshot(snapshot, clearRedo, reserve)
-                if (!result.retained) {
-                    updateUiStateAndRecycleReplaced {
-                        it.copy(message = HISTORY_MEMORY_MESSAGE)
-                    }
-                } else if (result.movedToStorage) {
-                    updateUiStateAndRecycleReplaced { it.copy(message = "오래된 편집 기록을 저장소로 옮겼습니다.") }
+                    if (
+                        !shuttingDown &&
+                        historyCoordinator.currentGeneration() == feedbackGeneration
+                    ) {
+                        when (historyAdmissionUserFeedback(result)) {
+                            HistoryAdmissionFeedback.None -> Unit
+                            HistoryAdmissionFeedback.MemoryWarning ->
+                                updateUiStateAndRecycleReplaced {
+                                    it.copy(message = HISTORY_MEMORY_MESSAGE)
+                                }
+                            HistoryAdmissionFeedback.StorageFailure ->
+                                updateUiStateAndRecycleReplaced {
+                                    it.copy(message = HISTORY_STORAGE_FAILURE_MESSAGE)
+                                }
+                            HistoryAdmissionFeedback.StorageBudgetWarning ->
+                                updateUiStateAndRecycleReplaced {
+                                    it.copy(message = HISTORY_STORAGE_BUDGET_MESSAGE)
+                                }
+                        }
                     }
                 } catch (cancelled: CancellationException) {
                     if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
@@ -6167,10 +6189,6 @@ fun exportPreview() {
                         is HistoryNavigationResult.Adopted -> {
                             scheduleDraftAutosave()
                             updateHistoryFlags()
-                            if (result.movedToStorage)
-                                updateUiStateAndRecycleReplaced {
-                                    it.copy(message = "오래된 편집 기록을 저장소로 옮겼습니다.")
-                                }
                         }
                         is HistoryNavigationResult.Unavailable ->
                             updateUiStateAndRecycleReplaced {

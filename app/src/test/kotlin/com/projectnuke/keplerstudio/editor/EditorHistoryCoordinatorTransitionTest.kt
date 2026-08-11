@@ -90,8 +90,8 @@ class EditorHistoryCoordinatorTransitionTest {
 
         val admission = coordinator.admitAdoptedSnapshot(snapshot(bitmap), true, 0L)
 
-        assertTrue(admission.retained)
-        assertFalse(admission.movedToStorage)
+        assertTrue(admission is HistoryAdmissionOutcome.Retained)
+        assertEquals(HistoryStorageMovement.None, (admission as HistoryAdmissionOutcome.Retained).storageMovement)
         assertTrue(coordinator.flags().canUndo)
         assertFalse(bitmap.isRecycled)
         coordinator.close()
@@ -106,11 +106,138 @@ class EditorHistoryCoordinatorTransitionTest {
 
         val admission = coordinator.admitAdoptedSnapshot(snapshot(bitmap), true, 0L)
 
-        assertTrue(admission.retained)
-        assertTrue(admission.movedToStorage)
+        assertTrue(admission is HistoryAdmissionOutcome.Retained)
+        assertEquals(
+            HistoryStorageMovement.AdmittedSnapshotStoredCold,
+            (admission as HistoryAdmissionOutcome.Retained).storageMovement,
+        )
         assertTrue(bitmap.isRecycled)
         assertEquals(1, storage.records.size)
         assertTrue(coordinator.flags().canUndo)
+    }
+
+    @Test
+    fun oversizedCurrentSnapshotPublicationFailureIsStorageUnavailableNotMemoryCapacity() =
+        testScope.runTest {
+            ramBudget = 8L
+            storage.failPublish = true
+            val bitmap = bitmap(0xff344454.toInt())
+
+            val outcome = coordinator.admitAdoptedSnapshot(snapshot(bitmap), true, 0L)
+
+            assertEquals(
+                HistoryAdmissionNotRetainedReason.StorageUnavailable,
+                (outcome as HistoryAdmissionOutcome.NotRetained).reason,
+            )
+            assertTrue(bitmap.isRecycled)
+            assertEquals(0, coordinator.undoEntryCountForTest())
+        }
+
+    @Test
+    fun existingEntrySpillFailureIsStorageUnavailableAndKeepsExistingHotSnapshot() =
+        testScope.runTest {
+            ramBudget = 16L
+            val existing = bitmap(0xff455565.toInt())
+            coordinator.admitAdoptedSnapshot(snapshot(existing), false, 0L)
+            storage.failPublish = true
+            val incoming = bitmap(0xff566676.toInt())
+
+            val outcome = coordinator.admitAdoptedSnapshot(snapshot(incoming), false, 0L)
+
+            assertEquals(
+                HistoryAdmissionNotRetainedReason.StorageUnavailable,
+                (outcome as HistoryAdmissionOutcome.NotRetained).reason,
+            )
+            assertFalse(existing.isRecycled)
+            assertTrue(incoming.isRecycled)
+            assertEquals(1, coordinator.undoEntryCountForTest())
+        }
+
+    @Test
+    fun existingEntrySpillAndCurrentHotAdmissionReportExistingMovementOnly() = testScope.runTest {
+        ramBudget = 16L
+        val existing = bitmap(0xff566676.toInt())
+        coordinator.admitAdoptedSnapshot(snapshot(existing), false, 0L)
+        val incoming = bitmap(0xff677787.toInt())
+
+        val outcome = coordinator.admitAdoptedSnapshot(snapshot(incoming), false, 0L)
+
+        assertEquals(
+            HistoryStorageMovement.ExistingEntriesSpilled,
+            (outcome as HistoryAdmissionOutcome.Retained).storageMovement,
+        )
+        assertTrue(existing.isRecycled)
+        assertFalse(incoming.isRecycled)
+    }
+
+    @Test
+    fun pureRamCapacityRejectionIsNotMemoryPublicationFailure() = testScope.runTest {
+        ramBudget = 16L
+        // A metadata-only hot entry is intentionally non-spillable. Its test bitmap makes the
+        // RAM-only rejection deterministic without depending on host heap availability.
+        val existing = bitmap(0xff677787.toInt())
+        coordinator.admitAdoptedSnapshot(
+            snapshot(existing, HistorySnapshotStorage.MetadataOnly),
+            false,
+            0L,
+        )
+        val bitmap = bitmap(0xff788898.toInt())
+
+        val outcome = coordinator.admitAdoptedSnapshot(snapshot(bitmap), true, 0L)
+
+        assertEquals(
+            HistoryAdmissionNotRetainedReason.MemoryCapacity,
+            (outcome as HistoryAdmissionOutcome.NotRetained).reason,
+        )
+        assertFalse(existing.isRecycled)
+        assertTrue(bitmap.isRecycled)
+        assertEquals(1, coordinator.undoEntryCountForTest())
+    }
+
+    @Test
+    fun oversizedCurrentSnapshotDiskBudgetRejectionIsStorageBudget() = testScope.runTest {
+        ramBudget = 8L
+        val budgetedCoordinator =
+            EditorHistoryCoordinator(
+                context,
+                testScope,
+                settlementDispatcher = dispatcher,
+                storage = storage,
+                historyRamBudgetBytes = { ramBudget },
+                historyDiskBudgetBytes = { 8L },
+            )
+        testScope.advanceUntilIdle()
+        val bitmap = bitmap(0xff788898.toInt())
+
+        try {
+            val outcome = budgetedCoordinator.admitAdoptedSnapshot(snapshotFor(budgetedCoordinator, bitmap), true, 0L)
+
+            assertEquals(
+                HistoryAdmissionNotRetainedReason.StorageBudget,
+                (outcome as HistoryAdmissionOutcome.NotRetained).reason,
+            )
+            assertTrue(bitmap.isRecycled)
+            assertEquals(0, budgetedCoordinator.undoEntryCountForTest())
+        } finally {
+            budgetedCoordinator.close()
+            testScope.advanceUntilIdle()
+        }
+    }
+
+    @Test
+    fun closedCoordinatorReportsClosedAndRecyclesSnapshot() = testScope.runTest {
+        coordinator.close()
+        advanceUntilIdle()
+        val bitmap = bitmap(0xff8999a9.toInt())
+
+        val outcome = coordinator.admitAdoptedSnapshot(snapshot(bitmap), true, 0L)
+
+        assertEquals(
+            HistoryAdmissionNotRetainedReason.Closed,
+            (outcome as HistoryAdmissionOutcome.NotRetained).reason,
+        )
+        assertTrue(bitmap.isRecycled)
+        assertEquals(0, coordinator.undoEntryCountForTest())
     }
 
     @Test
@@ -120,7 +247,10 @@ class EditorHistoryCoordinatorTransitionTest {
 
         val result = coordinator.admitAdoptedSnapshot(stale, true, 0L)
 
-        assertFalse(result.retained)
+        assertEquals(
+            HistoryAdmissionNotRetainedReason.Superseded,
+            (result as HistoryAdmissionOutcome.NotRetained).reason,
+        )
         assertTrue(bitmap.isRecycled)
         assertFalse(coordinator.flags().canUndo)
     }
@@ -153,12 +283,15 @@ class EditorHistoryCoordinatorTransitionTest {
         val bitmap = bitmap(0xff607080.toInt())
         val oldGeneration = coordinator.currentGeneration()
         storage.publishGate = CompletableDeferred()
+        val admission = CompletableDeferred<HistoryAdmissionOutcome>()
         val job =
             launch {
-                coordinator.admitAdoptedSnapshot(
-                    snapshot(bitmap),
-                    clearRedo = true,
-                    foregroundReserveBytes = ramBudget,
+                admission.complete(
+                    coordinator.admitAdoptedSnapshot(
+                        snapshot(bitmap),
+                        clearRedo = true,
+                        foregroundReserveBytes = ramBudget,
+                    ),
                 )
             }
         storage.publishStarted.await()
@@ -169,6 +302,10 @@ class EditorHistoryCoordinatorTransitionTest {
         job.join()
 
         assertFalse(oldGeneration == coordinator.currentGeneration())
+        assertEquals(
+            HistoryAdmissionNotRetainedReason.Superseded,
+            (admission.await() as HistoryAdmissionOutcome.NotRetained).reason,
+        )
         assertFalse(coordinator.flags().canUndo)
         assertTrue(bitmap.isRecycled)
         assertTrue(storage.deletedPayloads.get() >= 1)
@@ -579,6 +716,13 @@ class EditorHistoryCoordinatorTransitionTest {
             if (claim) it.claimCoordinatorOwnership()
         }
 
+    private fun snapshotFor(
+        owner: EditorHistoryCoordinator,
+        bitmap: Bitmap,
+    ): EditorHistorySnapshot = rawSnapshot(bitmap, HistorySnapshotStorage.Exact, owner.currentGeneration()).also {
+        it.claimCoordinatorOwnership()
+    }
+
     private fun rawSnapshot(
         bitmap: Bitmap?,
         storage: HistorySnapshotStorage,
@@ -613,6 +757,7 @@ class EditorHistoryCoordinatorTransitionTest {
         val publishStarted = CompletableDeferred<Unit>()
         var publishGate: CompletableDeferred<Unit>? = null
         var failPublish = false
+        var insufficientStorage = false
         var throwOnDeleteEntries = false
         val loads = AtomicInteger()
         val preflightCalls = AtomicInteger()
@@ -633,10 +778,11 @@ class EditorHistoryCoordinatorTransitionTest {
         override suspend fun publish(
             entry: EditorHistoryEntry,
             snapshot: EditorHistorySnapshot,
-        ): ColdHistoryPayload? {
+        ): HistoryPublishResult {
             publishStarted.complete(Unit)
             publishGate?.await()
-            if (failPublish) return null
+            if (insufficientStorage) return HistoryPublishResult.InsufficientStorage
+            if (failPublish) return HistoryPublishResult.Failed(IllegalStateException("publish failed"))
             val bitmap = snapshot.previewBitmap
             val bytes = snapshot.bitmapBytes()
             records[entry.id] =
@@ -649,7 +795,9 @@ class EditorHistoryCoordinatorTransitionTest {
                     bytes = bytes,
                 )
             val directory = File(root, entry.id).also(File::mkdirs)
-            return ColdHistoryPayload(directory, bytes.coerceAtLeast(1L), bytes, entry.documentGeneration)
+            return HistoryPublishResult.Success(
+                ColdHistoryPayload(directory, bytes.coerceAtLeast(1L), bytes, entry.documentGeneration),
+            )
         }
 
         override suspend fun load(

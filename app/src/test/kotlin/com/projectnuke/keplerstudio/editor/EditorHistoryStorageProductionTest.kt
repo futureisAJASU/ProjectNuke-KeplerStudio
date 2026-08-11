@@ -69,7 +69,9 @@ class EditorHistoryStorageProductionTest {
         val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
         storage.registerSession(generation)
         storage.initializeSession(generation)
-        val payload = checkNotNull(storage.publish(entry, snapshot)) { publishFailure.toString() }
+        val payload = checkNotNull((storage.publish(entry, snapshot) as? HistoryPublishResult.Success)?.payload) {
+            publishFailure.toString()
+        }
         entry.hotSnapshot = null
         entry.coldPayload = payload
         entry.payloadState = HistoryPayloadState.Hot
@@ -116,7 +118,9 @@ class EditorHistoryStorageProductionTest {
         val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
         storage.registerSession(generation)
         storage.initializeSession(generation)
-        val payload = checkNotNull(storage.publish(entry, snapshot)) { publishFailure.toString() }
+        val payload = checkNotNull((storage.publish(entry, snapshot) as? HistoryPublishResult.Success)?.payload) {
+            publishFailure.toString()
+        }
         entry.hotSnapshot = null
         entry.coldPayload = payload
         entry.payloadState = HistoryPayloadState.Hot
@@ -137,6 +141,25 @@ class EditorHistoryStorageProductionTest {
         assertTrue(preflightSeen)
         assertTrue(decoded > 0)
         loaded?.recycleBitmaps()
+        snapshot.recycleBitmaps()
+        storage.deleteSession(generation)
+        storage.unregisterSession(generation)
+    }
+
+    @Test
+    fun invalidPublicationIdentityIsStructuredFailureWithoutNullableAmbiguity() = runBlocking {
+        val vm = editor(false)
+        awaitReady(vm)
+        val snapshot = checkNotNull(vm.captureCurrentHistorySnapshot(HistorySnapshotStorage.Exact))
+        val storage = EditorHistoryStorage(context, Dispatchers.Unconfined, syncDirectories = false, enforceDiskSpace = false)
+        val generation = "storage-structured-failure"
+        val entry = EditorHistoryEntry(id = "../invalid", documentGeneration = generation, hotSnapshot = snapshot)
+        storage.registerSession(generation)
+        storage.initializeSession(generation)
+
+        val result = storage.publish(entry, snapshot)
+
+        assertTrue(result is HistoryPublishResult.Failed)
         snapshot.recycleBitmaps()
         storage.deleteSession(generation)
         storage.unregisterSession(generation)
@@ -224,7 +247,7 @@ class EditorHistoryStorageProductionTest {
         val entry = EditorHistoryEntry(documentGeneration = generation, hotSnapshot = snapshot)
         storage.registerSession(generation)
         storage.initializeSession(generation)
-        val payload = checkNotNull(storage.publish(entry, snapshot))
+        val payload = checkNotNull((storage.publish(entry, snapshot) as? HistoryPublishResult.Success)?.payload)
         entry.hotSnapshot = null
         entry.coldPayload = payload
         entry.payloadState = HistoryPayloadState.Hot
