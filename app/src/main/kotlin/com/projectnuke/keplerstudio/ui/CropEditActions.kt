@@ -10,6 +10,7 @@ import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel.EditorActionSettlement
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.MemoryRetryInput
 import com.projectnuke.keplerstudio.editor.MemoryRecoveryTestSeam
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
@@ -149,7 +150,12 @@ fun EditorViewModel.autoStraightenCrop() {
             val inputSlot = OwnedHandoff<OwnedBitmap>()
             try {
                 withContext(Dispatchers.Default) {
-                    if (MemoryRecoveryTestSeam.capture()?.rejectAutoStraightenInputCopy == true) {
+                    val seam = MemoryRecoveryTestSeam.capture()
+                    if (seam?.parkAutoStraightenInputCopy == true) {
+                        seam.awaitBeforeAutoStraightenInputCopy()
+                    }
+                    if (seam?.rejectAutoStraightenInputCopy == true) {
+                        seam.autoStraightenInputCopyFailureReached.complete(Unit)
                         throw BitmapAllocationRejectedException(
                             BitmapMemoryBudget.bytes(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888),
                         )
@@ -174,7 +180,8 @@ fun EditorViewModel.autoStraightenCrop() {
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                if (isCropResultCurrent(cropToken, state.revision))
+                val failureStillCurrent = isCropResultCurrent(cropToken, state.revision)
+                if (failureStillCurrent)
                     updateUiState {
                         it.copy(
                             message =
@@ -183,8 +190,13 @@ fun EditorViewModel.autoStraightenCrop() {
                                 else "기울기 보정에 실패했습니다: ${t.message}"
                         )
                     }
-                if (t is BitmapAllocationRejectedException)
-                    requestAllocationRecovery(MemoryRetryAction.AutoStraightenCrop, t.requiredBytes)
+                if (failureStillCurrent && t is BitmapAllocationRejectedException) {
+                    requestAllocationRecovery(
+                        MemoryRetryAction.AutoStraightenCrop,
+                        t.requiredBytes,
+                        retryInput = MemoryRetryInput.Crop(state.cropState),
+                    )
+                }
             } finally {
                 inputSlot.close()
                 sourceSnapshot.close()

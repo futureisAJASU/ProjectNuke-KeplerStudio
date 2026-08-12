@@ -962,6 +962,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 targetEntryId = targetEntryId,
                 coordinatorGeneration = coordinatorGeneration,
             )
+        MemoryRecoveryTestSeam.capture()?.recoveryRequested?.complete(descriptor)
         when (classifyRetryFailure(userMemoryRecoveryOwner, descriptor)) {
             RetryFailureArbitration.StrongRetryFailure -> {
                 settleStrongRetryFailure(descriptor)
@@ -2634,6 +2635,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         ) {
             return false
         }
+        val state = _uiState.value
+        return state.sourcePath == identity.sourcePath &&
+            state.baseContentToken == identity.baseToken &&
+            state.revision == identity.revision
+    }
+
+    private fun isCurrentExportRecoveryRequest(identity: ExportIdentity): Boolean {
+        if (shuttingDown || exportToken != identity.token) return false
         val state = _uiState.value
         return state.sourcePath == identity.sourcePath &&
             state.baseContentToken == identity.baseToken &&
@@ -5550,6 +5559,7 @@ fun exportPreview() {
         if (state.isBusy || brushingSnapshot != null) return
         val exportFormat = state.exportFormat
         val exportResolution = state.exportResolution
+        val exportRetryInput = MemoryRetryInput.Export(exportFormat, exportResolution)
         val exportParams = state.params
         val exportEngines = state.engineSelection()
         val exportLook = state.presetLook
@@ -5584,7 +5594,11 @@ fun exportPreview() {
                 it.copy(message = "선택 마스크를 내보내기용으로 준비하지 못했습니다.")
             }
             if (failure is BitmapAllocationRejectedException) {
-                requestAllocationRecovery(MemoryRetryAction.ExportPreview, failure.requiredBytes)
+                requestAllocationRecovery(
+                    MemoryRetryAction.ExportPreview,
+                    failure.requiredBytes,
+                    retryInput = exportRetryInput,
+                )
             }
             return
         }
@@ -5614,7 +5628,11 @@ fun exportPreview() {
                 updateUiStateAndRecycleReplaced {
                     it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.")
                 }
-                requestAllocationRecovery(MemoryRetryAction.ExportPreview, dirtyPeakBytes)
+                requestAllocationRecovery(
+                    MemoryRetryAction.ExportPreview,
+                    dirtyPeakBytes,
+                    retryInput = exportRetryInput,
+                )
                 return
             }
             ownedDirtyBase =
@@ -5633,6 +5651,7 @@ fun exportPreview() {
                             requestAllocationRecovery(
                                 MemoryRetryAction.ExportPreview,
                                 failure.requiredBytes,
+                                retryInput = exportRetryInput,
                             )
                         return
                     }
@@ -5650,6 +5669,7 @@ fun exportPreview() {
             requestAllocationRecovery(
                 MemoryRetryAction.ExportPreview,
                 estimateCleanExportPeakBytes(sourcePath, exportResolution),
+                retryInput = exportRetryInput,
             )
             return
         }
@@ -5934,10 +5954,8 @@ fun exportPreview() {
                                 }
                                 is ExportPipelineResult.Failed -> {
                                     lastExportFailureForTest = outcome.failure
+                                    val failure = outcome.failure
                                     if (isCurrentExport(exportIdentity)) {
-                                        val failure = outcome.failure
-                                        val isAllocationFailure =
-                                            failure is BitmapAllocationRejectedException
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
                                                 isBusy = false,
@@ -5945,13 +5963,16 @@ fun exportPreview() {
                                                     "이미지를 내보내지 못했습니다.",
                                             )
                                         }
-                                        if (isAllocationFailure) {
-                                            requestAllocationRecovery(
-                                                MemoryRetryAction.ExportPreview,
-                                                (failure as BitmapAllocationRejectedException)
-                                                    .requiredBytes,
-                                            )
-                                        }
+                                    }
+                                    if (
+                                        failure is BitmapAllocationRejectedException &&
+                                            isCurrentExportRecoveryRequest(exportIdentity)
+                                    ) {
+                                        requestAllocationRecovery(
+                                            MemoryRetryAction.ExportPreview,
+                                            failure.requiredBytes,
+                                            retryInput = exportRetryInput,
+                                        )
                                     }
                                 }
                                 is ExportPipelineResult.CleanupFailed -> {
@@ -6011,10 +6032,14 @@ fun exportPreview() {
                                 current.copy(isBusy = false)
                             }
                         }
-                        if (t is BitmapAllocationRejectedException) {
+                        if (
+                            t is BitmapAllocationRejectedException &&
+                                isCurrentExportRecoveryRequest(exportIdentity)
+                        ) {
                             requestAllocationRecovery(
                                 MemoryRetryAction.ExportPreview,
                                 t.requiredBytes,
+                                retryInput = exportRetryInput,
                             )
                         }
                     } finally {

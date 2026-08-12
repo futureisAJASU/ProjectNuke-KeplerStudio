@@ -427,6 +427,34 @@ class MemoryRecoveryOwnershipProductionTest {
     }
 
     @Test
+    fun staleAutoStraightenFailureCannotCreateRecoveryForNewCropState() = runBlocking {
+        val editor = harness.createEditor()
+        openDocument(editor, 0xff102030.toInt(), 1425L)
+        val seam =
+            MemoryRecoveryTestSeam(
+                rejectAutoStraightenInputCopy = true,
+                parkAutoStraightenInputCopy = true,
+            )
+        harness.ownSeam(MemoryRecoveryTestSeam.install(seam))
+        awaitEvent { editor.canEnterEditorActionPure() }
+
+        editor.autoStraightenCrop()
+        awaitEvent { seam.autoStraightenInputCopyReached.isCompleted }
+        editor.setStraightenDegrees(23f)
+        assertEquals(23f, editor.uiState.value.cropState.straightenDegrees)
+        seam.autoStraightenInputCopyRelease.complete(Unit)
+        awaitEvent { seam.autoStraightenInputCopyFailureReached.isCompleted }
+        awaitEvent { !editor.uiState.value.isBusy }
+
+        assertEquals(23f, editor.uiState.value.cropState.straightenDegrees)
+        assertNull(editor.memoryRecoveryOwnerPhaseForTest())
+        assertNull(editor.uiState.value.memoryRecoveryRequest)
+        assertEquals(0, seam.automaticEntryCount)
+        assertFalse(seam.automaticReached.isCompleted)
+        assertFalse(editor.uiState.value.message?.contains("기울기 보정에 실패") == true)
+    }
+
+    @Test
     fun modelAssistedMaskAwareRecoveryTreatsActiveSelectionAsIrrelevant() = runBlocking {
         val editor = harness.createEditor()
         openDocument(editor, 0xff102030.toInt(), 1423L)

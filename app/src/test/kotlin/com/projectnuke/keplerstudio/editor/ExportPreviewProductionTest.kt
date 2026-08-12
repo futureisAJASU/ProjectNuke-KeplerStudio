@@ -158,6 +158,47 @@ class ExportPreviewProductionTest {
     }
 
     @Test
+    fun asyncExportRecoveryOwnsInvocationSettingsNotLaterUiSettings() = runBlocking {
+        val rows = RecordingRows().also {
+            it.enableEncodingGate()
+            it.failEncodeWithMemory = 4096L
+        }
+        val history = RecordingHistoryStore(context)
+        val editor = editorWithDirtyBase()
+        installSeam(rows, history)
+        val recoverySeam = MemoryRecoveryTestSeam()
+        val recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+
+        try {
+            editor.exportPreview()
+            awaitMainUntil { rows.encodeStarted.isCompleted }
+
+            editor.setExportFormat(ExportFormat.Jpeg)
+            editor.setExportResolution(ExportResolution.Percent50)
+            rows.releaseEncoding()
+
+            awaitMainUntil { recoverySeam.recoveryRequested.isCompleted }
+            val descriptor = recoverySeam.recoveryRequested.getCompleted()
+            assertEquals(
+                MemoryRetryInput.Export(ExportFormat.Png, ExportResolution.Full),
+                descriptor.input,
+            )
+            awaitCompletion(editor) { editor.memoryRecoveryOwnerPhaseForTest() == null }
+            assertFalse(recoverySeam.automaticReached.isCompleted)
+        } finally {
+            recoveryHandle.close()
+        }
+
+        assertEquals(1, rows.inserted.get())
+        assertEquals(1, rows.deleted.get())
+        assertEquals(0, rows.published.get())
+        assertEquals(0, history.commits.get())
+        assertEquals(ExportFormat.Png, rows.lastRequestFormat)
+        assertFalse(editor.uiState.value.isBusy)
+        assertTrue(editor.uiState.value.message != "이미지가 Gallery > Pictures/KeplerStudio에 저장되었고, 앱 내 내보낸 사진 기록에도 추가되었습니다.")
+    }
+
+    @Test
     fun cancellationWhilePendingRemovesRowAndSettles() = runBlocking {
         val rows = RecordingRows().also { it.enableEncodingGate() }
         val history = RecordingHistoryStore(context)
@@ -385,9 +426,11 @@ private class RecordingRows : ExportRowStore {
     val insertStarted = CompletableDeferred<Unit>()
     private var gate: CompletableDeferred<Unit>? = null
     @Volatile var failEncode = false
+    @Volatile var failEncodeWithMemory: Long? = null
     @Volatile var failPublish = false
     @Volatile var failDelete = false
     var encodedBitmap: Bitmap? = null
+    @Volatile var lastRequestFormat: ExportFormat? = null
     var lastPublishedUri: Uri? = null
 
     fun enableEncodingGate() {
@@ -400,6 +443,7 @@ private class RecordingRows : ExportRowStore {
 
     override suspend fun insertPending(request: ExportRowRequest): Uri {
         inserted.incrementAndGet()
+        lastRequestFormat = request.format
         insertStarted.complete(Unit)
         return Uri.parse("content://exports/${request.fileName}")
     }
@@ -408,6 +452,7 @@ private class RecordingRows : ExportRowStore {
         encodeStarted.complete(Unit)
         gate?.await()
         encodedBitmap = bitmap
+        failEncodeWithMemory?.let { throw BitmapAllocationRejectedException(it) }
         if (failEncode) error("encode")
         encoded.incrementAndGet()
     }

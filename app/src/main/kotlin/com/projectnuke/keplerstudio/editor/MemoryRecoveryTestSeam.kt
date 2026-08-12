@@ -14,13 +14,18 @@ internal class MemoryRecoveryTestSeam(
     internal val strongRelease: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val trimReached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val trimRelease: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val recoveryRequested: CompletableDeferred<MemoryRetryDescriptor> = CompletableDeferred(),
     internal val rejectSelectionMaskAdmission: Boolean = false,
     internal val rejectAutoStraightenInputCopy: Boolean = false,
+    internal val parkAutoStraightenInputCopy: Boolean = false,
     internal val rejectExportPreparation: Boolean = false,
 ) {
     internal var cleanupStarted: Int = 0
     internal var automaticEntryCount: Int = 0
     internal var strongEntryCount: Int = 0
+    internal val autoStraightenInputCopyReached = CompletableDeferred<Unit>()
+    internal val autoStraightenInputCopyRelease = CompletableDeferred<Unit>()
+    internal val autoStraightenInputCopyFailureReached = CompletableDeferred<Unit>()
 
     internal suspend fun awaitBeforeAutomaticCleanup(descriptor: MemoryRetryDescriptor) {
         automaticEntryCount += 1
@@ -39,6 +44,11 @@ internal class MemoryRecoveryTestSeam(
         trimRelease.await()
     }
 
+    internal suspend fun awaitBeforeAutoStraightenInputCopy() {
+        autoStraightenInputCopyReached.complete(Unit)
+        autoStraightenInputCopyRelease.await()
+    }
+
     internal companion object Registry {
         private val lock = Any()
         private var installed: MemoryRecoveryTestSeam? = null
@@ -52,6 +62,7 @@ internal class MemoryRecoveryTestSeam(
                 seam.automaticRelease.complete(Unit)
                 seam.strongRelease.complete(Unit)
                 seam.trimRelease.complete(Unit)
+                seam.autoStraightenInputCopyRelease.complete(Unit)
                 synchronized(lock) {
                     if (installed === seam) installed = null
                 }
