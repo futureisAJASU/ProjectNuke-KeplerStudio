@@ -6,6 +6,7 @@ import kotlinx.coroutines.CompletableDeferred
 internal class HistoryNavigationTestSeam(
     internal val reached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val releaseGate: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val rejectAdoption: Boolean = false,
 ) {
     internal suspend fun awaitBeforeCoordinatorNavigation() {
         reached.complete(Unit)

@@ -787,8 +787,7 @@ internal class EditorHistoryCoordinator(
         HistoryAdmissionNotRetainedReason.Superseded -> HistoryNavigationNotCompletedReason.Superseded
         HistoryAdmissionNotRetainedReason.Closed -> HistoryNavigationNotCompletedReason.Closed
         HistoryAdmissionNotRetainedReason.MemoryCapacity ->
-            if (currentState) HistoryNavigationNotCompletedReason.CurrentStateStorageUnavailable
-            else HistoryNavigationNotCompletedReason.StorageUnavailable
+            error("navigation spill cannot report MemoryCapacity")
     }
 
     internal data class RecoverResult(

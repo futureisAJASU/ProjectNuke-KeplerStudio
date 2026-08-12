@@ -27,7 +27,7 @@ class HistoryNavigationFeedbackProductionTest {
 
     @Before
     fun setUp() {
-        harness = OwnedEditorViewModelHarness( context)
+        harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
     }
 
     @After
@@ -64,7 +64,137 @@ class HistoryNavigationFeedbackProductionTest {
         assertEquals(0, editor.redoEntryCountForTest())
         assertNull(editor.uiState.value.memoryRecoveryRequest)
         assertFalse(editor.uiState.value.message.orEmpty().contains("메모리가 부족"))
+        assertFalse(editor.uiState.value.message.orEmpty().contains("되돌리기를 완료하지 못했습니다"))
         assertEquals(2060, checkNotNull(editor.uiState.value.previewBitmap).width)
+    }
+
+    @Test
+    fun realUndoCurrentStateMemoryRejectionRequestsHistoryRecovery() = runBlocking {
+        val backend = NavigationStorageBackend()
+        harness.ownSeam(HistoryStorageBackendTestSeam.install(backend))
+        val editor = harness.createEditor()
+        awaitReady(editor)
+        val current = bitmap(1, 1, 0xff122334.toInt())
+        val target = bitmap(1, 1, 0xff233445.toInt())
+        editor.updateUiState {
+            it.copy(
+                previewBitmap = current,
+                originalPreviewBitmap = current,
+                baseContentToken = "navigation-memory-base",
+            )
+        }
+        assertTrue(editor.commitUndoSnapshot(snapshot(editor, target), true))
+        awaitMainUntil { !editor.uiState.value.historyBusy && editor.undoEntryCountForTest() == 1 }
+
+        val blocker = RetainedMemoryLedger.reserve("navigation-current-memory-blocker")
+        try {
+            blocker.replace(RetainedMemoryCategory.NativeBitmap, BitmapMemoryBudget.availableBytes())
+            editor.undoEdit()
+            awaitMainUntil({ debugDump(editor) }) {
+                editor.uiState.value.memoryRecoveryRequest != null && !editor.uiState.value.historyBusy
+            }
+
+            val request = checkNotNull(editor.uiState.value.memoryRecoveryRequest)
+            assertEquals(MemoryRetryAction.HistoryUndo, editor.memoryRecoveryActionForTest())
+            assertTrue(request.mayMoveOldHistory)
+            assertTrue(checkNotNull(editor.memoryRecoveryRequiredBytesForTest()) > 0L)
+            assertEquals(1, editor.undoEntryCountForTest())
+            assertEquals(0, editor.redoEntryCountForTest())
+            assertEquals(0xff122334.toInt(), checkNotNull(editor.uiState.value.previewBitmap).getPixel(0, 0))
+            assertFalse(editor.uiState.value.message.orEmpty().contains("기록에 저장하지 못해"))
+        } finally {
+            blocker.close()
+        }
+    }
+
+    @Test
+    fun realUndoAdoptionRejectionSettlesWithTerminalFeedback() = runBlocking {
+        val backend = NavigationStorageBackend()
+        harness.ownSeam(HistoryStorageBackendTestSeam.install(backend))
+        val editor = harness.createEditor()
+        awaitReady(editor)
+        val current = bitmap(1, 1, 0xff122334.toInt())
+        val target = bitmap(1, 1, 0xff233445.toInt())
+        editor.updateUiState {
+            it.copy(
+                previewBitmap = current,
+                originalPreviewBitmap = current,
+                baseContentToken = "navigation-adoption-base",
+            )
+        }
+        assertTrue(editor.commitUndoSnapshot(snapshot(editor, target), true))
+        awaitMainUntil { !editor.uiState.value.historyBusy && editor.undoEntryCountForTest() == 1 }
+
+        val seam = HistoryNavigationTestSeam(rejectAdoption = true)
+        seam.releaseGate.complete(Unit)
+        harness.ownSeam(HistoryNavigationTestSeam.install(seam))
+        editor.undoEdit()
+        awaitMainUntil { !editor.uiState.value.historyBusy && editor.uiState.value.message.orEmpty().contains("적용하지 못했습니다") }
+
+        assertEquals(1, editor.undoEntryCountForTest())
+        assertEquals(0, editor.redoEntryCountForTest())
+        assertEquals(0xff122334.toInt(), checkNotNull(editor.uiState.value.previewBitmap).getPixel(0, 0))
+        assertFalse(editor.uiState.value.message.orEmpty().contains("불러오는 중입니다"))
+        assertNull(editor.uiState.value.memoryRecoveryRequest)
+    }
+
+    @Test
+    fun realHotTargetMaskAdmissionRejectionRequestsHistoryRecovery() = runBlocking {
+        val backend = NavigationStorageBackend()
+        harness.ownSeam(HistoryStorageBackendTestSeam.install(backend))
+        val editor = harness.createEditor()
+        awaitReady(editor)
+        val current = bitmap(1, 1, 0xff122334.toInt())
+        val target = bitmap(1, 1, 0xff233445.toInt())
+        val targetMask = bitmap(1800, 1800, 0xffffffff.toInt())
+        editor.updateUiState {
+            it.copy(
+                previewBitmap = current,
+                originalPreviewBitmap = current,
+                baseContentToken = "navigation-hot-mask-base",
+            )
+        }
+        val targetSnapshot =
+            snapshot(editor, target).copy(
+                selectionLayers =
+                    listOf(SelectionLayer("history-mask", "history-mask", SelectionLayerKind.Brush, targetMask)),
+                activeSelectionLayerId = "history-mask",
+            )
+        assertTrue(editor.commitUndoSnapshot(targetSnapshot, true))
+        awaitMainUntil { !editor.uiState.value.historyBusy && editor.undoEntryCountForTest() == 1 }
+        awaitMainUntil { !editor.historyActivityBusyForTest() }
+
+        val blocker =
+            checkNotNull(
+                editor.selectionMaskOwnership.reserve(
+                    owner = "navigation-mask-blocker",
+                    bytes = BitmapMemoryBudget.selectionMaskBudgetBytes(),
+                )
+            )
+        val memoryBlocker = RetainedMemoryLedger.reserve("navigation-mask-memory-blocker")
+        try {
+            val retainedBytes =
+                (BitmapMemoryBudget.availableBytes() - 10L * 1024L * 1024L).coerceAtLeast(0L)
+            memoryBlocker.replace(RetainedMemoryCategory.NativeBitmap, retainedBytes)
+            assertFalse(editor.historyActivityBusyForTest())
+            assertTrue(editor.canEnterEditorActionPure())
+            awaitMainUntil { !editor.historyActivityBusyForTest() }
+            editor.undoEdit()
+            awaitMainUntil({ debugDump(editor) }) {
+                editor.uiState.value.memoryRecoveryRequest != null && !editor.uiState.value.historyBusy
+            }
+
+            assertEquals(MemoryRetryAction.HistoryUndo, editor.memoryRecoveryActionForTest())
+            assertTrue(checkNotNull(editor.memoryRecoveryRequiredBytesForTest()) > 0L)
+            assertEquals(1, editor.undoEntryCountForTest())
+            assertEquals(0, editor.redoEntryCountForTest())
+            assertEquals(0xff122334.toInt(), checkNotNull(editor.uiState.value.previewBitmap).getPixel(0, 0))
+            assertTrue(editor.uiState.value.selectionLayers.isEmpty())
+            assertFalse(editor.uiState.value.message.orEmpty().contains("적용하지 못했습니다"))
+        } finally {
+            memoryBlocker.close()
+            blocker.close()
+        }
     }
 
     @Test
@@ -100,6 +230,7 @@ class HistoryNavigationFeedbackProductionTest {
         }
 
         assertNull(editor.uiState.value.memoryRecoveryRequest)
+        assertEquals("navigation-cold-base", editor.uiState.value.baseContentToken)
     }
 
     @Test
@@ -185,6 +316,7 @@ class HistoryNavigationFeedbackProductionTest {
         assertEquals(1, editor.redoEntryCountForTest())
         assertNull(editor.uiState.value.memoryRecoveryRequest)
         assertFalse(editor.uiState.value.message.orEmpty().contains("메모리가 부족"))
+        assertFalse(editor.uiState.value.message.orEmpty().contains("되돌리기를 완료하지 못했습니다"))
         assertEquals(2040, checkNotNull(editor.uiState.value.previewBitmap).width)
     }
 
@@ -246,6 +378,7 @@ class HistoryNavigationFeedbackProductionTest {
 
         private data class Record(
             val generation: String,
+            val baseContentToken: String,
             val width: Int,
             val height: Int,
             val color: Int,
@@ -273,7 +406,14 @@ class HistoryNavigationFeedbackProductionTest {
             }
             val bitmap = checkNotNull(snapshot.previewBitmap)
             records[entry.id] =
-                Record(entry.documentGeneration, bitmap.width, bitmap.height, bitmap.getPixel(0, 0), snapshot.bitmapBytes())
+                Record(
+                    entry.documentGeneration,
+                    snapshot.baseContentToken,
+                    bitmap.width,
+                    bitmap.height,
+                    bitmap.getPixel(0, 0),
+                    snapshot.bitmapBytes(),
+                )
             return HistoryPublishResult.Success(
                 ColdHistoryPayload(File(root, entry.id).also(File::mkdirs), snapshot.bitmapBytes(), snapshot.bitmapBytes(), entry.documentGeneration),
             )
@@ -295,7 +435,7 @@ class HistoryNavigationFeedbackProductionTest {
                 toneEngine = ToneEngine.HistogramAuto,
                 hazeEngine = DehazeEngine.FastContrast,
                 baseBitmapDirty = false,
-                baseContentToken = "navigation-spill-base",
+                baseContentToken = record.baseContentToken,
                 previewBitmap = decoded,
                 originalPreviewBitmap = null,
                 presetLook = null,

@@ -431,6 +431,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Pure read-only inspection for tests: committed redo-stack entry count. */
     internal fun redoEntryCountForTest(): Int = historyCoordinator.redoEntryCountForTest()
 
+    /** Pure read-only inspection for navigation memory-recovery regressions. */
+    internal fun memoryRecoveryActionForTest(): MemoryRetryAction? = pendingMemoryRetry?.action
+    internal fun memoryRecoveryRequiredBytesForTest(): Long? = pendingMemoryRetry?.requiredBytes
+
     /** Test seam: invalidate the managed-edit token so that any in-flight
      *  parameter render whose [isManagedEditCurrent] check will fail, leaving
      *  the transaction with no adopted output. */
@@ -6178,10 +6182,14 @@ fun exportPreview() {
                             },
                             adopt = { snapshot ->
                                 val prefix = if (undo) "이전 편집 상태를 적용했습니다" else "다음 편집 상태를 적용했습니다"
-                                applyHistorySnapshot(
-                                    snapshot,
-                                    buildHistoryAppliedMessage(_uiState.value, snapshot, prefix),
-                                )
+                                if (historyNavigationSeam?.rejectAdoption == true) {
+                                    false
+                                } else {
+                                    applyHistorySnapshot(
+                                        snapshot,
+                                        buildHistoryAppliedMessage(_uiState.value, snapshot, prefix),
+                                    )
+                                }
                             },
                         )
                     if (!ownsHistoryNavigation(navigationIdentity)) return@launch
@@ -7919,14 +7927,18 @@ fun exportPreview() {
             } else if (snapshot.candidateAdmission != null) {
                 snapshot.candidateAdmission.also { snapshot.candidateAdmission = null }
             } else {
-                reserveSelectionMaskCandidate(
+                val admission = reserveSelectionMaskCandidate(
                     owner = "history-adopt:${snapshot.coordinatorGeneration ?: "unknown"}",
                     layers = snapshot.selectionLayers,
                     bytesAlreadyReserved =
                         snapshot.maskReservations.isNotEmpty() || snapshot.candidateAdmission != null,
-                ).takeUnless {
-                    it is SelectionMaskOwnershipLedger.MaskAdmission.Rejected
+                )
+                if (admission is SelectionMaskOwnershipLedger.MaskAdmission.Rejected) {
+                    throw BitmapAllocationRejectedException(
+                        selectionMaskCandidateBytes(snapshot.selectionLayers),
+                    )
                 }
+                admission
             }
         if (!metadataOnly && candidateAdmission == null) return false
         return try {
@@ -8014,7 +8026,7 @@ fun exportPreview() {
             if (storage == HistorySnapshotStorage.Exact) state.historyBitmapBytes() else 0L
         if (!BitmapMemoryBudget.canAllocate(required)) {
             leased.close()
-            return null
+            throw BitmapAllocationRejectedException(required)
         }
         return try {
             withContext(Dispatchers.Default) {

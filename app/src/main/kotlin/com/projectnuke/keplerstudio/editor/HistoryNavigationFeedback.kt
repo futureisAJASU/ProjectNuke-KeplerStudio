@@ -8,6 +8,8 @@ internal sealed interface HistoryNavigationFeedback {
     data object StorageBudget : HistoryNavigationFeedback
     data object CurrentStateStorageUnavailable : HistoryNavigationFeedback
     data object CurrentStateStorageBudget : HistoryNavigationFeedback
+    data object CurrentStateCaptureFailed : HistoryNavigationFeedback
+    data object AdoptionRejected : HistoryNavigationFeedback
 }
 
 internal fun historyNavigationFeedback(
@@ -23,13 +25,14 @@ internal fun historyNavigationFeedback(
             HistoryNavigationFeedback.StorageUnavailable
         HistoryNavigationNotCompletedReason.StorageBudget ->
             HistoryNavigationFeedback.StorageBudget
-        HistoryNavigationNotCompletedReason.CurrentStateStorageUnavailable,
-        HistoryNavigationNotCompletedReason.CurrentStateCaptureFailed ->
+        HistoryNavigationNotCompletedReason.CurrentStateStorageUnavailable ->
             HistoryNavigationFeedback.CurrentStateStorageUnavailable
         HistoryNavigationNotCompletedReason.CurrentStateStorageBudget ->
             HistoryNavigationFeedback.CurrentStateStorageBudget
+        HistoryNavigationNotCompletedReason.CurrentStateCaptureFailed ->
+            HistoryNavigationFeedback.CurrentStateCaptureFailed
         HistoryNavigationNotCompletedReason.AdoptionRejected ->
-            HistoryNavigationFeedback.None
+            HistoryNavigationFeedback.AdoptionRejected
         HistoryNavigationNotCompletedReason.Superseded,
         HistoryNavigationNotCompletedReason.Closed ->
             HistoryNavigationFeedback.None
@@ -48,7 +51,11 @@ internal fun historyNavigationMessage(feedback: HistoryNavigationFeedback): Stri
     HistoryNavigationFeedback.StorageBudget ->
         "되돌리기 기록 저장 공간이 부족하여 작업을 완료하지 못했습니다."
     HistoryNavigationFeedback.CurrentStateStorageUnavailable ->
-        "현재 편집 상태를 기록에 저장하지 못해 되돌리기를 완료하지 못했습니다."
+        "현재 편집 상태를 기록에 저장하지 못해 작업을 완료하지 못했습니다."
     HistoryNavigationFeedback.CurrentStateStorageBudget ->
         "되돌리기 기록 저장 공간이 부족하여 작업을 완료하지 못했습니다."
+    HistoryNavigationFeedback.CurrentStateCaptureFailed ->
+        "현재 편집 상태를 기록하지 못해 작업을 완료하지 못했습니다."
+    HistoryNavigationFeedback.AdoptionRejected ->
+        "저장된 편집 기록을 적용하지 못했습니다. 현재 편집과 기록은 유지됩니다."
 }
