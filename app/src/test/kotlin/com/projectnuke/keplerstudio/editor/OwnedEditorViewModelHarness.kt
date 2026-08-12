@@ -110,6 +110,8 @@ internal class OwnedEditorViewModelHarness(
                 .onFailure { failure = failure ?: it }
             runCatching { check(DraftSaveTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
+            runCatching { check(MemoryRecoveryTestSeam.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
             runCatching { check(SelectionPreviewPreparationGateway.installedHookCountForTest() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(cropTransformTestSeamCount() == 0) }
