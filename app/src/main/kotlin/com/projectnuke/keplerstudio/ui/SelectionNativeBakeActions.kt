@@ -327,6 +327,7 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
                 requestAllocationRecovery(
                     MemoryRetryAction.ApplySelectionNative,
                     failure.requiredBytes,
+                    targetSelectionLayerId = capturedActiveSelectionLayerId,
                 )
             }
         } else if (isManagedEditTokenCurrent(operationToken)) {

@@ -253,9 +253,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         userMemoryRecoveryOwner?.phase?.name
 
     internal fun memoryRecoveryOwnerCloseCountForTest(token: Long): Int =
-        closedMemoryRecoveryCounts[token]
-            ?: (userMemoryRecoveryOwner?.takeIf { it.descriptor.token == token }
-                ?: lastClosedMemoryRecoveryOwner?.takeIf { it.descriptor.token == token })?.closeCount
+        (userMemoryRecoveryOwner?.takeIf { it.descriptor.token == token }
+            ?: lastClosedMemoryRecoveryOwner?.takeIf { it.descriptor.token == token })?.closeCount
             ?: 0
 
     /** Test-only capture of the most recent export coroutine exception for
@@ -442,11 +441,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Pure read-only inspection for navigation memory-recovery regressions. */
     internal fun memoryRecoveryActionForTest(): MemoryRetryAction? =
-        (pendingMemoryRetry ?: userMemoryRecoveryOwner?.descriptor)?.action
+        userMemoryRecoveryOwner?.descriptor?.action
     internal fun memoryRecoveryRequiredBytesForTest(): Long? =
-        (pendingMemoryRetry ?: userMemoryRecoveryOwner?.descriptor)?.requiredBytes
+        userMemoryRecoveryOwner?.descriptor?.requiredBytes
     internal fun memoryRecoveryTokenForTest(): Long? =
-        (pendingMemoryRetry ?: userMemoryRecoveryOwner?.descriptor)?.token
+        userMemoryRecoveryOwner?.descriptor?.token
+    internal fun automaticRetryAttemptForTest(): MemoryRetryAction? = automaticRetryAttempt?.action
+    internal fun strongRetryAttemptForTest(): MemoryRetryAction? = strongRetryAttempt?.action
     internal fun trimMemoryCleanupActiveForTest(): Boolean = trimMemoryCleanupJob?.isActive == true
 
     /** Test seam: invalidate the managed-edit token so that any in-flight
@@ -779,10 +780,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private var memoryRecoveryToken: Long = 0L
-    private var pendingMemoryRetry: MemoryRetryDescriptor? = null
     private var userMemoryRecoveryOwner: MemoryRecoveryOwner? = null
     private var lastClosedMemoryRecoveryOwner: MemoryRecoveryOwner? = null
-    private val closedMemoryRecoveryCounts = HashMap<Long, Int>()
     private var trimMemoryCleanupJob: Job? = null
     private var automaticRetryAttempt: MemoryRetryDescriptor? = null
     private var strongRetryAttempt: MemoryRetryDescriptor? = null
@@ -927,6 +926,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         action: MemoryRetryAction,
         requiredBytes: Long,
         payload: String? = null,
+        targetSelectionLayerId: String? = null,
     ) {
         if (shuttingDown) return
         val state = _uiState.value
@@ -951,6 +951,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 baseContentToken = state.baseContentToken,
                 revision = state.revision,
                 payload = payload,
+                targetSelectionLayerId = targetSelectionLayerId,
                 navigationDirection = navigationDirection,
                 targetEntryId = targetEntryId,
                 coordinatorGeneration = coordinatorGeneration,
@@ -964,7 +965,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         if (strongRetryAttempt.matchesRetryFailure(descriptor)) {
             strongRetryAttempt = null
-            pendingMemoryRetry = null
             updateUiStateAndRecycleReplaced {
                 it.copy(
                     memoryRecoveryRequest = null,
@@ -979,13 +979,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val owner = MemoryRecoveryOwner(descriptor, MemoryRecoverySource.Automatic)
             owner.phase = MemoryRecoveryPhase.AwaitingUserDecision
             userMemoryRecoveryOwner = owner
-            pendingMemoryRetry = descriptor
             updateUiStateAndRecycleReplaced {
                 it.copy(
                     memoryRecoveryRequest =
                         MemoryRecoveryRequest(descriptor.token, mayMoveOldHistory = true),
                     isBusy = false,
-                    message = "자동 정리 후에도 현재 작업에 더 많은 메모리가 필요합니다.",
+                    message = "현재 작업에 더 많은 메모리가 필요합니다.",
                 )
             }
             return
@@ -996,18 +995,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun retryPendingMemoryRecovery(token: Long) {
-        val descriptor = pendingMemoryRetry?.takeIf { it.token == token } ?: return
-        val owner = userMemoryRecoveryOwner?.takeIf { it.descriptor === descriptor }
-            ?: run {
-                pendingMemoryRetry = null
-                closedMemoryRecoveryCounts[token] = 1
-                updateUiStateAndRecycleReplaced { current ->
-                    if (current.memoryRecoveryRequest?.token == token) {
-                        current.copy(memoryRecoveryRequest = null)
-                    } else current
-                }
-                return
-            }
+        val owner = userMemoryRecoveryOwner?.takeIf {
+            it.phase == MemoryRecoveryPhase.AwaitingUserDecision &&
+                it.descriptor.token == token
+        } ?: return
         // Validate staleness BEFORE any destructive cleanup.
         if (!isMemoryRecoveryOwnerCurrent(owner)) {
             retireUserMemoryRecoveryOwner(owner, clearUi = true)
@@ -1020,8 +1011,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun cancelPendingMemoryRecovery(token: Long) {
-        val descriptor = pendingMemoryRetry?.takeIf { it.token == token } ?: return
-        val owner = userMemoryRecoveryOwner?.takeIf { it.descriptor === descriptor } ?: return
+        val owner = userMemoryRecoveryOwner?.takeIf {
+            it.phase == MemoryRecoveryPhase.AwaitingUserDecision &&
+                it.descriptor.token == token
+        } ?: return
         retireUserMemoryRecoveryOwner(owner, clearUi = true)
     }
 
@@ -1053,27 +1046,39 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 trimMemoryCleanupJob?.takeIf { it.isActive }?.join()
-                if (!isMemoryRecoveryOwnerCurrent(owner)) return@launch
+                if (!isMemoryRecoveryOwnerCurrent(owner)) {
+                    retireUserMemoryRecoveryOwner(owner, clearUi = true)
+                    return@launch
+                }
                 if (strong) {
                     MemoryRecoveryTestSeam.capture()?.awaitBeforeStrongCleanup(owner.descriptor)
                 } else {
                     MemoryRecoveryTestSeam.capture()?.awaitBeforeAutomaticCleanup(owner.descriptor)
                 }
-                if (!isMemoryRecoveryOwnerCurrent(owner)) return@launch
+                if (!isMemoryRecoveryOwnerCurrent(owner)) {
+                    retireUserMemoryRecoveryOwner(owner, clearUi = true)
+                    return@launch
+                }
                 owner.phase = MemoryRecoveryPhase.Cleaning
                 val protectedEntryId = protectedHistoryTargetFor(owner.descriptor)
                 if (
                     (owner.descriptor.action == MemoryRetryAction.HistoryUndo ||
                         owner.descriptor.action == MemoryRetryAction.HistoryRedo) &&
                         protectedEntryId == null
-                ) return@launch
+                ) {
+                    retireUserMemoryRecoveryOwner(owner, clearUi = true)
+                    return@launch
+                }
                 val cleanupResult =
                     performMemoryCleanup(
                         strong = strong,
                         protectedEntryId = protectedEntryId,
                         owner = owner,
                     )
-                if (!isMemoryRecoveryOwnerCurrent(owner) || !cleanupResult.ownerStillCurrent) return@launch
+                if (!isMemoryRecoveryOwnerCurrent(owner) || !cleanupResult.ownerStillCurrent) {
+                    retireUserMemoryRecoveryOwner(owner, clearUi = true)
+                    return@launch
+                }
                 val isHistoryAction =
                     owner.descriptor.action == MemoryRetryAction.HistoryUndo ||
                         owner.descriptor.action == MemoryRetryAction.HistoryRedo
@@ -1092,14 +1097,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val retryOk = if (isHistoryAction) historyRetryOk else generalRetryOk
                 if (retryOk) {
                     owner.phase = MemoryRecoveryPhase.Retrying
-                    pendingMemoryRetry = null
                     updateRecoveryUiIfOwned(
                         owner,
                         null,
                         if (strong) {
-                            "硫붾え由??뺣━瑜??꾨즺?덉뒿?덈떎. ?묒뾽???ㅼ떆 ?쒕룄?⑸땲??"
+                            "메모리 정리를 완료했습니다. 작업을 다시 시도합니다."
                         } else {
-                            "硫붾え由щ? ?먮룞?쇰줈 ?뺣━?덉뒿?덈떎. ?묒뾽???ㅼ떆 ?쒕룄?⑸땲??"
+                            "메모리를 자동으로 정리했습니다. 작업을 다시 시도합니다."
                         },
                     )
                     if (strong) strongRetryAttempt = owner.descriptor else automaticRetryAttempt = owner.descriptor
@@ -1107,12 +1111,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         performMemoryRetry(owner.descriptor, owner)
                     }
                     closeUserMemoryRecoveryOwner(owner, clearUi = false, clearAttempts = false)
+                } else if (isMemoryRecoveryOwnerCurrent(owner) && strong) {
+                    updateRecoveryUiIfOwned(
+                        owner,
+                        null,
+                        "정리 후에도 현재 작업에 필요한 메모리를 확보하지 못했습니다. 이미지와 적용된 편집은 안전하게 유지됩니다.",
+                    )
+                    closeUserMemoryRecoveryOwner(owner, clearUi = false, clearAttempts = true)
                 } else if (isMemoryRecoveryOwnerCurrent(owner)) {
                     owner.phase = MemoryRecoveryPhase.AwaitingUserDecision
                     updateRecoveryUiIfOwned(
                         owner,
                         MemoryRecoveryRequest(owner.descriptor.token, mayMoveOldHistory = true),
-                        "?꾩옱 ?묒뾽????留롮? 硫붾え由ш? ?꾩슂?⑸땲??",
+                        "현재 작업에 더 많은 메모리가 필요합니다.",
                     )
                 }
             } finally {
@@ -1148,8 +1159,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (userMemoryRecoveryOwner !== owner) return
         owner.close()
         lastClosedMemoryRecoveryOwner = owner
-        closedMemoryRecoveryCounts[owner.descriptor.token] = owner.closeCount
-        if (pendingMemoryRetry === owner.descriptor) pendingMemoryRetry = null
         if (clearAttempts) {
             if (automaticRetryAttempt === owner.descriptor) automaticRetryAttempt = null
             if (strongRetryAttempt === owner.descriptor) strongRetryAttempt = null
@@ -1168,10 +1177,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         userMemoryRecoveryOwner?.let { owner ->
             owner.close()
             lastClosedMemoryRecoveryOwner = owner
-            closedMemoryRecoveryCounts[owner.descriptor.token] = owner.closeCount
         }
         userMemoryRecoveryOwner = null
-        pendingMemoryRetry = null
         automaticRetryAttempt = null
         strongRetryAttempt = null
     }
@@ -1258,16 +1265,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    private fun isMemoryRetryCurrent(descriptor: MemoryRetryDescriptor): Boolean {
-        return pendingMemoryRetry === descriptor && isMemoryRetryIdentityCurrent(descriptor)
-    }
-
     private fun isMemoryRetryIdentityCurrent(descriptor: MemoryRetryDescriptor): Boolean {
         val state = _uiState.value
         if (shuttingDown) return false
         if (state.sourcePath != descriptor.sourcePath) return false
         if (state.baseContentToken != descriptor.baseContentToken) return false
         if (state.revision != descriptor.revision) return false
+        if (
+            descriptor.action.requiresSelectionTargetIdentity() &&
+                state.activeSelectionLayerId != descriptor.targetSelectionLayerId
+        ) return false
         val currentGen = historyCoordinator.currentGeneration()
         if (
             descriptor.coordinatorGeneration != null &&
@@ -1336,11 +1343,38 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             state.revision == revision
     }
 
-    internal fun markMemoryRetrySucceeded(action: MemoryRetryAction) {
-        if (automaticRetryAttempt?.let { it.action == action && isMemoryRetryIdentityCurrent(it) } == true) {
+    private fun retryAttemptMatchesSuccessfulOperation(
+        attempt: MemoryRetryDescriptor,
+        action: MemoryRetryAction,
+        successfulSelectionLayerId: String?,
+    ): Boolean {
+        if (shuttingDown) return false
+        if (attempt.action != action) return false
+        val state = _uiState.value
+        if (state.sourcePath != attempt.sourcePath) return false
+        if (state.baseContentToken != attempt.baseContentToken) return false
+        if (attempt.targetSelectionLayerId != successfulSelectionLayerId) return false
+        val revisionMatches =
+            if (action in REVISION_ADVANCING_MEMORY_RETRY_ACTIONS) {
+                state.revision == attempt.revision || state.revision == attempt.revision + 1
+            } else {
+                state.revision == attempt.revision
+            }
+        return revisionMatches
+    }
+
+    internal fun markMemoryRetrySucceeded(
+        action: MemoryRetryAction,
+        successfulSelectionLayerId: String? = null,
+    ) {
+        if (automaticRetryAttempt?.let {
+            retryAttemptMatchesSuccessfulOperation(it, action, successfulSelectionLayerId)
+        } == true) {
             automaticRetryAttempt = null
         }
-        if (strongRetryAttempt?.let { it.action == action && isMemoryRetryIdentityCurrent(it) } == true) {
+        if (strongRetryAttempt?.let {
+            retryAttemptMatchesSuccessfulOperation(it, action, successfulSelectionLayerId)
+        } == true) {
             strongRetryAttempt = null
         }
     }
@@ -8434,12 +8468,10 @@ fun exportPreview() {
         userMemoryRecoveryOwner?.let { owner ->
             owner.close()
             lastClosedMemoryRecoveryOwner = owner
-            closedMemoryRecoveryCounts[owner.descriptor.token] = owner.closeCount
         }
         userMemoryRecoveryOwner = null
         trimMemoryCleanupJob?.cancel()
         trimMemoryCleanupJob = null
-        pendingMemoryRetry = null
         automaticRetryAttempt = null
         strongRetryAttempt = null
         updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null) }
@@ -8529,6 +8561,7 @@ internal data class MemoryRetryDescriptor(
     val baseContentToken: String,
     val revision: Int,
     val payload: String?,
+    val targetSelectionLayerId: String? = null,
     // Navigation-specific identity for target-aware recovery
     val navigationDirection: Boolean? = null, // true = undo, false = redo
     val targetEntryId: String? = null,
@@ -8536,6 +8569,26 @@ internal data class MemoryRetryDescriptor(
     val sourceBranchSize: Int = 0,
     val destinationBranchSize: Int = 0,
 )
+
+private val REVISION_ADVANCING_MEMORY_RETRY_ACTIONS =
+    setOf(
+        MemoryRetryAction.CreateBrushSelection,
+        MemoryRetryAction.SubjectSelection,
+        MemoryRetryAction.MaskAwareRemaster,
+        MemoryRetryAction.FlareNight,
+        MemoryRetryAction.FlareSun,
+        MemoryRetryAction.DuplicateSelection,
+        MemoryRetryAction.BackgroundSelection,
+        MemoryRetryAction.AutoStraightenCrop,
+        MemoryRetryAction.ApplySelectionNative,
+        MemoryRetryAction.RotatePreview,
+    )
+
+private fun MemoryRetryAction.requiresSelectionTargetIdentity(): Boolean =
+    this == MemoryRetryAction.DuplicateSelection ||
+        this == MemoryRetryAction.BackgroundSelection ||
+        this == MemoryRetryAction.ApplySelectionNative ||
+        this == MemoryRetryAction.MaskAwareRemaster
 
 internal data class MemoryCleanupResult(
     /** Whether any RAM/resource was released anywhere in the cleanup path. */
@@ -8557,6 +8610,10 @@ private fun MemoryRetryDescriptor?.matchesRetryFailure(
         previous.action != currentFailure.action ||
             previous.sourcePath != currentFailure.sourcePath ||
             previous.baseContentToken != currentFailure.baseContentToken
+    ) return false
+    if (
+        currentFailure.action.requiresSelectionTargetIdentity() &&
+            previous.targetSelectionLayerId != currentFailure.targetSelectionLayerId
     ) return false
     if (
         currentFailure.action == MemoryRetryAction.HistoryUndo ||
@@ -8584,6 +8641,7 @@ private fun MemoryRetryDescriptor.matchesSameRecoveryRequest(
         baseContentToken == other.baseContentToken &&
         revision == other.revision &&
         payload == other.payload &&
+        targetSelectionLayerId == other.targetSelectionLayerId &&
         navigationDirection == other.navigationDirection &&
         targetEntryId == other.targetEntryId &&
         coordinatorGeneration == other.coordinatorGeneration

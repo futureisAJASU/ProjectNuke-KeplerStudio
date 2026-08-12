@@ -172,7 +172,7 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
                 ownedCopy = null
                 settleAdoptedEditHistory(undoSnapshotOwned)
                 undoSnapshotOwned = null
-                markMemoryRetrySucceeded(MemoryRetryAction.DuplicateSelection)
+                markMemoryRetrySucceeded(MemoryRetryAction.DuplicateSelection, activeId)
                 persistDraftSnapshot()
             } else {
                 ownedCopy?.takeIf { !it.isRecycled }?.recycle()
@@ -190,7 +190,11 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
             else "마스크 복제에 실패했습니다."
             updateUiState { it.copy(isBusy = false, message = msg) }
             if (t is BitmapAllocationRejectedException)
-                requestAllocationRecovery(MemoryRetryAction.DuplicateSelection, t.requiredBytes)
+                requestAllocationRecovery(
+                    MemoryRetryAction.DuplicateSelection,
+                    t.requiredBytes,
+                    targetSelectionLayerId = activeId,
+                )
         }
     } finally {
         leasedSnapshot.close()
@@ -356,7 +360,7 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
                 ownedCopy = null
                 settleAdoptedEditHistory(undoSnapshotOwned)
                 undoSnapshotOwned = null
-                markMemoryRetrySucceeded(MemoryRetryAction.BackgroundSelection)
+                markMemoryRetrySucceeded(MemoryRetryAction.BackgroundSelection, activeId)
                 persistDraftSnapshot()
             } else {
                 ownedCopy?.takeIf { !it.isRecycled }?.recycle()
@@ -374,7 +378,11 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
             else "배경 마스크 생성에 실패했습니다."
             updateUiState { it.copy(isBusy = false, message = msg) }
             if (t is BitmapAllocationRejectedException)
-                requestAllocationRecovery(MemoryRetryAction.BackgroundSelection, t.requiredBytes)
+                requestAllocationRecovery(
+                    MemoryRetryAction.BackgroundSelection,
+                    t.requiredBytes,
+                    targetSelectionLayerId = activeId,
+                )
         }
     } finally {
         leasedSnapshot.close()

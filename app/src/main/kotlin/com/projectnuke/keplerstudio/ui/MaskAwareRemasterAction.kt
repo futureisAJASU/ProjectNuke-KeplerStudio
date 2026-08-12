@@ -99,6 +99,7 @@ fun EditorViewModel.applyMaskAwareRemaster() {
     val startSnapshot = acquireEditorSnapshot("maskAwareRemaster") ?: return
     val current = startSnapshot.state
     val documentGeneration = startSnapshot.identity.generation
+    val capturedActiveSelectionLayerId = current.activeSelectionLayerId
     val manualMaskAtEntry =
         if (!useModel) {
             current.selectionLayers
@@ -405,7 +406,12 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     updateUiState { it.copy(isBusy = false) }
                 }
                 if (t is BitmapAllocationRejectedException && failureIdentityUnchanged) {
-                    requestAllocationRecovery(MemoryRetryAction.MaskAwareRemaster, t.requiredBytes)
+                    requestAllocationRecovery(
+                        MemoryRetryAction.MaskAwareRemaster,
+                        t.requiredBytes,
+                        targetSelectionLayerId =
+                            capturedActiveSelectionLayerId.takeIf { !useModel },
+                    )
                 }
             } finally {
                 previewRenderSlot.close()
