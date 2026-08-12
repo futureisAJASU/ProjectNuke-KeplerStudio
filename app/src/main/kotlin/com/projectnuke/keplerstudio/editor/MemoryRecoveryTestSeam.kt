@@ -14,15 +14,22 @@ internal class MemoryRecoveryTestSeam(
     internal val strongRelease: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val trimReached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val trimRelease: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val rejectSelectionMaskAdmission: Boolean = false,
+    internal val rejectAutoStraightenInputCopy: Boolean = false,
+    internal val rejectExportPreparation: Boolean = false,
 ) {
     internal var cleanupStarted: Int = 0
+    internal var automaticEntryCount: Int = 0
+    internal var strongEntryCount: Int = 0
 
     internal suspend fun awaitBeforeAutomaticCleanup(descriptor: MemoryRetryDescriptor) {
+        automaticEntryCount += 1
         automaticReached.complete(descriptor)
         automaticRelease.await()
     }
 
     internal suspend fun awaitBeforeStrongCleanup(descriptor: MemoryRetryDescriptor) {
+        strongEntryCount += 1
         strongReached.complete(descriptor)
         strongRelease.await()
     }

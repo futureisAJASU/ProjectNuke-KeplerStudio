@@ -10,6 +10,7 @@ import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel.EditorActionSettlement
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.MemoryRecoveryTestSeam
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.SelectionLayer
@@ -148,6 +149,11 @@ fun EditorViewModel.autoStraightenCrop() {
             val inputSlot = OwnedHandoff<OwnedBitmap>()
             try {
                 withContext(Dispatchers.Default) {
+                    if (MemoryRecoveryTestSeam.capture()?.rejectAutoStraightenInputCopy == true) {
+                        throw BitmapAllocationRejectedException(
+                            BitmapMemoryBudget.bytes(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888),
+                        )
+                    }
                     inputSlot.publish(OwnedBitmap(bitmap.copyOrThrow(mutable = false)))
                 }
                 input = checkNotNull(inputSlot.take()?.take())

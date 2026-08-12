@@ -25,6 +25,8 @@ import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.MemoryRetryInput
+import com.projectnuke.keplerstudio.editor.SelectionRetryTarget
 import com.projectnuke.keplerstudio.editor.FeatureExecutionOutcome
 import com.projectnuke.keplerstudio.editor.FeatureMaskSummary
 import com.projectnuke.keplerstudio.editor.ModelFeature
@@ -422,7 +424,10 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                 settleAdoptedEditHistory(undoSnapshotOwned)
                 undoSnapshotOwned = null
                 pendingLayerBitmap = null
-                markMemoryRetrySucceeded(MemoryRetryAction.SubjectSelection)
+                markMemoryRetrySucceeded(
+                    MemoryRetryAction.SubjectSelection,
+                    state.activeSelectionLayerId.takeIf { !useModel },
+                )
                 persistDraftSnapshot()
             } catch (ce: CancellationException) {
                 pendingLayerBitmap?.recycle()
@@ -452,7 +457,18 @@ fun EditorViewModel.addSubjectSelectionFromEdgeModel() {
                         current.sourcePath == sourcePath &&
                         current.revision == sourceRevision
                 ) {
-                    requestAllocationRecovery(MemoryRetryAction.SubjectSelection, t.requiredBytes)
+                    requestAllocationRecovery(
+                        MemoryRetryAction.SubjectSelection,
+                        t.requiredBytes,
+                        selectionTarget =
+                            if (useModel) {
+                                SelectionRetryTarget.Irrelevant
+                            } else {
+                                state.activeSelectionLayerId?.let(SelectionRetryTarget::Layer)
+                                    ?: SelectionRetryTarget.Irrelevant
+                            },
+                        retryInput = MemoryRetryInput.Route(subjectAlgorithm.name),
+                    )
                 }
             } finally {
                 ownedBaseOwned?.takeIf { !it.isRecycled }?.recycle()

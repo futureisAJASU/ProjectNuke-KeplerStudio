@@ -9,6 +9,7 @@ import com.projectnuke.keplerstudio.editor.BitmapMemoryBudget
 import com.projectnuke.keplerstudio.editor.acquireEditorSnapshot
 import com.projectnuke.keplerstudio.editor.PendingHistorySnapshot
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.SelectionRetryTarget
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.copyOrThrow
 import com.projectnuke.keplerstudio.editor.SelectionLayer
@@ -193,7 +194,7 @@ private suspend fun EditorViewModel.duplicateSelectionLayerBackground(
                 requestAllocationRecovery(
                     MemoryRetryAction.DuplicateSelection,
                     t.requiredBytes,
-                    targetSelectionLayerId = activeId,
+                    selectionTarget = SelectionRetryTarget.Layer(activeId),
                 )
         }
     } finally {
@@ -381,7 +382,7 @@ private suspend fun EditorViewModel.createBackgroundSelectionBackground(
                 requestAllocationRecovery(
                     MemoryRetryAction.BackgroundSelection,
                     t.requiredBytes,
-                    targetSelectionLayerId = activeId,
+                    selectionTarget = SelectionRetryTarget.Layer(activeId),
                 )
         }
     } finally {

@@ -128,6 +128,36 @@ class ExportPreviewProductionTest {
     }
 
     @Test
+    fun exportRetryBecomesStaleWhenSettingsChangeWithoutSecondExport() = runBlocking {
+        val rows = RecordingRows()
+        val history = RecordingHistoryStore(context)
+        val editor = editorWithDirtyBase()
+        installSeam(rows, history)
+        val recoverySeam = MemoryRecoveryTestSeam(rejectExportPreparation = true)
+        val recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+
+        try {
+            editor.exportPreview()
+            awaitCompletion(editor) { recoverySeam.automaticReached.isCompleted }
+            recoverySeam.automaticRelease.complete(Unit)
+            awaitCompletion(editor) { editor.uiState.value.memoryRecoveryRequest != null }
+            val token = checkNotNull(editor.uiState.value.memoryRecoveryRequest?.token)
+            editor.setExportFormat(ExportFormat.Jpeg)
+            editor.setExportResolution(ExportResolution.Percent50)
+            editor.retryPendingMemoryRecovery(token)
+            awaitCompletion(editor) { editor.uiState.value.memoryRecoveryRequest == null }
+        } finally {
+            recoveryHandle.close()
+        }
+
+        assertEquals(0, rows.inserted.get())
+        assertEquals(0, rows.published.get())
+        assertEquals(0, rows.deleted.get())
+        assertEquals(0, history.commits.get())
+        assertFalse(editor.uiState.value.isBusy)
+    }
+
+    @Test
     fun cancellationWhilePendingRemovesRowAndSettles() = runBlocking {
         val rows = RecordingRows().also { it.enableEncodingGate() }
         val history = RecordingHistoryStore(context)

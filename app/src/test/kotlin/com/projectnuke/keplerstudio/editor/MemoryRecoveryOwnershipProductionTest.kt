@@ -6,6 +6,10 @@ import android.net.Uri
 import java.io.ByteArrayInputStream
 import java.util.concurrent.TimeUnit
 import com.projectnuke.keplerstudio.ui.selectSelectionLayer
+import com.projectnuke.keplerstudio.ui.duplicateActiveSelectionLayer
+import com.projectnuke.keplerstudio.ui.autoStraightenCrop
+import com.projectnuke.keplerstudio.ui.setStraightenDegrees
+import com.projectnuke.keplerstudio.ui.applyMaskAwareRemaster
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -35,6 +39,7 @@ class MemoryRecoveryOwnershipProductionTest {
 
     @After
     fun tearDown() {
+        ExperimentalLabController.resetForTest()
         ExperimentalComparisonStore.clear()
         harness.close()
     }
@@ -194,6 +199,83 @@ class MemoryRecoveryOwnershipProductionTest {
     }
 
     @Test
+    fun productionAutomaticRetryFailureTransfersToOneUserDecisionWithoutSecondCleanup() = runBlocking {
+        val editor = harness.createEditor()
+        openDocument(editor, 0xff102030.toInt(), 1332L)
+        val seam = MemoryRecoveryTestSeam(rejectSelectionMaskAdmission = true)
+        harness.ownSeam(MemoryRecoveryTestSeam.install(seam))
+
+        awaitEvent { editor.canEnterEditorActionPure(allowMaskSupersession = true) }
+        editor.createBrushSelectionInternal()
+        awaitEvent { seam.automaticReached.isCompleted }
+        seam.automaticRelease.complete(Unit)
+        awaitEvent { editor.uiState.value.memoryRecoveryRequest != null }
+
+        assertEquals(1, seam.cleanupStarted)
+        assertEquals(1, seam.automaticEntryCount)
+        assertEquals(MemoryRetryAction.CreateBrushSelection, editor.memoryRecoveryActionForTest())
+        assertEquals(0, editor.uiState.value.selectionLayers.size)
+    }
+
+    @Test
+    fun productionStrongRetryFailureIsTerminalWithoutThirdCleanup() = runBlocking {
+        val editor = harness.createEditor()
+        openDocument(editor, 0xff102030.toInt(), 1333L)
+        val seam = MemoryRecoveryTestSeam(rejectSelectionMaskAdmission = true)
+        harness.ownSeam(MemoryRecoveryTestSeam.install(seam))
+        val pixels = IntArray(1)
+        ExperimentalComparisonStore.publishDebug(
+            OwnedDebugComparisonArtifact.create(
+                DebugComparisonArtifact(
+                    fixtureVersion = "memory-recovery-strong-retry-failure",
+                    width = 1,
+                    height = 1,
+                    baselineArgb = pixels.copyOf(),
+                    experimentalArgb = pixels.copyOf(),
+                    maskArgb = null,
+                    differenceHeatmapArgb = pixels.copyOf(),
+                    metrics = ImageQualityMetricsV2(
+                        changedPixelRatio = 0f,
+                        maximumChannelDelta = 0,
+                        p95ChannelDelta = 0,
+                        lumaMeanAbsoluteError = 0f,
+                        chromaMeanAbsoluteError = 0f,
+                        highlightClippingIncrease = 0f,
+                        shadowClippingIncrease = 0f,
+                        localEdgeOvershoot = 0f,
+                        flatRegionVariationIncrease = 0f,
+                        colorNeutralDrift = 0f,
+                    ),
+                ),
+            ),
+        )
+
+        awaitEvent { editor.canEnterEditorActionPure(allowMaskSupersession = true) }
+        editor.createBrushSelectionInternal()
+        awaitEvent { seam.automaticReached.isCompleted }
+        seam.automaticRelease.complete(Unit)
+        awaitEvent { editor.uiState.value.memoryRecoveryRequest != null }
+        val token = checkNotNull(editor.uiState.value.memoryRecoveryRequest?.token)
+
+        editor.retryPendingMemoryRecovery(token)
+        awaitEvent { seam.strongReached.isCompleted }
+        seam.strongRelease.complete(Unit)
+        awaitEvent { editor.memoryRecoveryOwnerPhaseForTest() == null }
+
+        assertEquals(2, seam.cleanupStarted)
+        assertEquals(1, seam.automaticEntryCount)
+        assertEquals(1, seam.strongEntryCount)
+        assertNull(editor.uiState.value.memoryRecoveryRequest)
+        assertNull(editor.memoryRecoveryOwnerPhaseForTest())
+        assertNull(editor.strongRetryAttemptForTest())
+        assertEquals(
+            "정리 후에도 현재 작업에 필요한 메모리를 확보하지 못했습니다. 이미지와 적용된 편집은 안전하게 유지됩니다.",
+            editor.uiState.value.message,
+        )
+        assertTrue(checkNotNull(editor.uiState.value.previewBitmap).isRecycled.not())
+    }
+
+    @Test
     fun successfulStrongRetryClearsStrongAttemptMarker() = runBlocking {
         val editor = harness.createEditor()
         openDocument(editor, 0xff102030.toInt(), 0L)
@@ -290,7 +372,7 @@ class MemoryRecoveryOwnershipProductionTest {
     }
 
     @Test
-    fun duplicateSelectionRecoveryRejectsActiveLayerTargetDrift() = runBlocking {
+    fun duplicateSelectionRecoveryRejectsActiveLayerTargetDriftFromProductionEntryPoint() = runBlocking {
         val editor = harness.createEditor()
         openDocument(editor, 0xff102030.toInt(), 1421L)
         val layerA = SelectionLayer("layer-A", "A", SelectionLayerKind.Brush, bitmap(0xff101010.toInt()))
@@ -298,29 +380,21 @@ class MemoryRecoveryOwnershipProductionTest {
         editor.updateUiState {
             it.copy(selectionLayers = listOf(layerA, layerB), activeSelectionLayerId = layerA.id)
         }
-        val activeBytes = BitmapMemoryBudget.bytes(layerA.bitmap) + BitmapMemoryBudget.bytes(layerB.bitmap)
-        val blocker = checkNotNull(
-            editor.selectionMaskOwnership.reserve(
-                owner = "memory-recovery-duplicate-target",
-                bytes = (BitmapMemoryBudget.selectionMaskBudgetBytes() - activeBytes).coerceAtLeast(1L),
-                documentLayerDelta = 1,
-            )
-        )
-        val seam = MemoryRecoveryTestSeam()
+        val seam = MemoryRecoveryTestSeam(rejectSelectionMaskAdmission = true)
         harness.ownSeam(MemoryRecoveryTestSeam.install(seam))
 
-        editor.requestAllocationRecovery(
-            MemoryRetryAction.DuplicateSelection,
-            Long.MAX_VALUE,
-            targetSelectionLayerId = layerA.id,
-        )
+        awaitEvent { editor.canEnterEditorActionPure(allowMaskSupersession = true) }
+        editor.duplicateActiveSelectionLayer()
         awaitEvent("duplicate automatic") { seam.automaticReached.isCompleted }
+        assertEquals(
+            SelectionRetryTarget.Layer(layerA.id),
+            seam.automaticReached.getCompleted().selectionTarget,
+        )
         editor.selectSelectionLayer(layerB.id)
         if (editor.uiState.value.activeSelectionLayerId != layerB.id) {
             editor.updateUiState { it.copy(activeSelectionLayerId = layerB.id) }
         }
         assertEquals(layerB.id, editor.uiState.value.activeSelectionLayerId)
-        blocker.close()
         seam.automaticRelease.complete(Unit)
         awaitEvent { editor.memoryRecoveryOwnerPhaseForTest() == null }
 
@@ -328,6 +402,72 @@ class MemoryRecoveryOwnershipProductionTest {
         assertEquals(layerB.id, editor.uiState.value.activeSelectionLayerId)
         assertEquals(0, editor.undoEntryCountForTest())
         assertNull(editor.uiState.value.memoryRecoveryRequest)
+    }
+
+    @Test
+    fun autoStraightenRetryBecomesStaleAfterProductionCropSetterChangesInput() = runBlocking {
+        val editor = harness.createEditor()
+        openDocument(editor, 0xff102030.toInt(), 1422L)
+        val seam = MemoryRecoveryTestSeam(rejectAutoStraightenInputCopy = true)
+        harness.ownSeam(MemoryRecoveryTestSeam.install(seam))
+        awaitEvent { editor.canEnterEditorActionPure() }
+
+        editor.autoStraightenCrop()
+        awaitEvent { seam.automaticReached.isCompleted }
+        seam.automaticRelease.complete(Unit)
+        awaitEvent { editor.uiState.value.memoryRecoveryRequest != null }
+        val token = checkNotNull(editor.uiState.value.memoryRecoveryRequest?.token)
+        editor.setStraightenDegrees(12f)
+        editor.retryPendingMemoryRecovery(token)
+        awaitEvent { editor.memoryRecoveryOwnerPhaseForTest() == null }
+
+        assertEquals(12f, editor.uiState.value.cropState.straightenDegrees)
+        assertEquals(1, seam.cleanupStarted)
+        assertFalse(seam.strongReached.isCompleted)
+    }
+
+    @Test
+    fun modelAssistedMaskAwareRecoveryTreatsActiveSelectionAsIrrelevant() = runBlocking {
+        val editor = harness.createEditor()
+        openDocument(editor, 0xff102030.toInt(), 1423L)
+        val layer = SelectionLayer("model-layer", "model", SelectionLayerKind.Brush, bitmap(0xff101010.toInt()))
+        editor.updateUiState { it.copy(selectionLayers = listOf(layer), activeSelectionLayerId = layer.id) }
+        ExperimentalLabController.setRemasterOverride(RemasterRoute.V2ModelAssisted)
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val seam = MemoryRecoveryTestSeam(rejectSelectionMaskAdmission = true)
+        harness.ownSeam(MemoryRecoveryTestSeam.install(seam))
+        awaitEvent { editor.canEnterEditorActionPure(allowMaskSupersession = true) }
+
+        editor.applyMaskAwareRemaster()
+        awaitEvent { seam.automaticReached.isCompleted }
+        assertEquals(SelectionRetryTarget.Irrelevant, seam.automaticReached.getCompleted().selectionTarget)
+        assertEquals(1, seam.automaticEntryCount)
+    }
+
+    @Test
+    fun manualMaskAwareRecoveryBecomesStaleWhenActiveLayerChanges() = runBlocking {
+        val editor = harness.createEditor()
+        openDocument(editor, 0xff102030.toInt(), 1424L)
+        val layerA = SelectionLayer("manual-A", "A", SelectionLayerKind.Brush, bitmap(0xff101010.toInt()))
+        val layerB = SelectionLayer("manual-B", "B", SelectionLayerKind.Brush, bitmap(0xff202020.toInt()))
+        editor.updateUiState {
+            it.copy(selectionLayers = listOf(layerA, layerB), activeSelectionLayerId = layerA.id)
+        }
+        ExperimentalLabController.setRemasterOverride(RemasterRoute.V2MaskAware)
+        val seam = MemoryRecoveryTestSeam(rejectSelectionMaskAdmission = true)
+        harness.ownSeam(MemoryRecoveryTestSeam.install(seam))
+        awaitEvent { editor.canEnterEditorActionPure(allowMaskSupersession = true) }
+
+        editor.applyMaskAwareRemaster()
+        awaitEvent { seam.automaticReached.isCompleted }
+        assertEquals(SelectionRetryTarget.Layer(layerA.id), seam.automaticReached.getCompleted().selectionTarget)
+        editor.selectSelectionLayer(layerB.id)
+        seam.automaticRelease.complete(Unit)
+        awaitEvent { editor.memoryRecoveryOwnerPhaseForTest() == null }
+
+        assertEquals(layerB.id, editor.uiState.value.activeSelectionLayerId)
+        assertEquals(2, editor.uiState.value.selectionLayers.size)
+        assertFalse(seam.strongReached.isCompleted)
     }
 
     @Test
@@ -358,7 +498,10 @@ class MemoryRecoveryOwnershipProductionTest {
     fun selectionRetryIdentityRequiresExactCapturedLayer() {
         val previous = selectionDescriptor("layer-A")
         val sameTarget = previous.copy(token = 2L, requiredBytes = 99L)
-        val otherTarget = previous.copy(token = 3L, targetSelectionLayerId = "layer-B")
+        val otherTarget = previous.copy(
+            token = 3L,
+            selectionTarget = SelectionRetryTarget.Layer("layer-B"),
+        )
         assertTrue(memoryRetryAttemptMatchesFailureForTest(previous, sameTarget))
         assertFalse(memoryRetryAttemptMatchesFailureForTest(previous, otherTarget))
     }
@@ -461,7 +604,7 @@ class MemoryRecoveryOwnershipProductionTest {
             baseContentToken = "same-token",
             revision = 4,
             payload = null,
-            targetSelectionLayerId = target,
+            selectionTarget = SelectionRetryTarget.Layer(target),
         )
 
     private fun bitmap(color: Int): Bitmap =

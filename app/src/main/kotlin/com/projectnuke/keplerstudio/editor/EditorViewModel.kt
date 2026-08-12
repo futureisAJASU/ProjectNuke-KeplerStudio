@@ -838,11 +838,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         val reservation =
-            selectionMaskOwnership.reserve(
-                owner = "brushSelection:${start.identity.revision}:${UUID.randomUUID()}",
-                bytes = BitmapMemoryBudget.bytes(base.width, base.height, Bitmap.Config.ARGB_8888),
-                documentLayerDelta = 1,
-            )
+            if (MemoryRecoveryTestSeam.capture()?.rejectSelectionMaskAdmission == true) {
+                null
+            } else {
+                selectionMaskOwnership.reserve(
+                    owner = "brushSelection:${start.identity.revision}:${UUID.randomUUID()}",
+                    bytes = BitmapMemoryBudget.bytes(base.width, base.height, Bitmap.Config.ARGB_8888),
+                    documentLayerDelta = 1,
+                )
+            }
         if (reservation == null) {
             start.close()
             if (allowRecovery) {
@@ -926,7 +930,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         action: MemoryRetryAction,
         requiredBytes: Long,
         payload: String? = null,
-        targetSelectionLayerId: String? = null,
+        selectionTarget: SelectionRetryTarget = SelectionRetryTarget.Irrelevant,
+        retryInput: MemoryRetryInput? = null,
     ) {
         if (shuttingDown) return
         val state = _uiState.value
@@ -951,11 +956,25 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 baseContentToken = state.baseContentToken,
                 revision = state.revision,
                 payload = payload,
-                targetSelectionLayerId = targetSelectionLayerId,
+                selectionTarget = selectionTarget,
+                input = retryInput ?: memoryRetryInputFor(action, state, payload),
                 navigationDirection = navigationDirection,
                 targetEntryId = targetEntryId,
                 coordinatorGeneration = coordinatorGeneration,
             )
+        when (classifyRetryFailure(userMemoryRecoveryOwner, descriptor)) {
+            RetryFailureArbitration.StrongRetryFailure -> {
+                settleStrongRetryFailure(descriptor)
+                return
+            }
+            RetryFailureArbitration.AutomaticRetryFailure -> {
+                transferAutomaticRetryFailure(descriptor)
+                return
+            }
+            RetryFailureArbitration.FreshFailure,
+            RetryFailureArbitration.UnrelatedFailureWhileRetrying,
+            -> Unit
+        }
         userMemoryRecoveryOwner?.let { owner ->
             if (
                 owner.phase != MemoryRecoveryPhase.Retrying &&
@@ -963,36 +982,147 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             ) return
             retireUserMemoryRecoveryOwner(owner, clearUi = true)
         }
-        if (strongRetryAttempt.matchesRetryFailure(descriptor)) {
-            strongRetryAttempt = null
-            updateUiStateAndRecycleReplaced {
-                it.copy(
-                    memoryRecoveryRequest = null,
-                    isBusy = false,
-                    message = "정리 후에도 현재 작업에 필요한 메모리를 확보하지 못했습니다. 이미지와 적용된 편집은 안전하게 유지됩니다.",
-                )
-            }
-            return
-        }
-        if (automaticRetryAttempt.matchesRetryFailure(descriptor)) {
-            automaticRetryAttempt = null
-            val owner = MemoryRecoveryOwner(descriptor, MemoryRecoverySource.Automatic)
-            owner.phase = MemoryRecoveryPhase.AwaitingUserDecision
-            userMemoryRecoveryOwner = owner
-            updateUiStateAndRecycleReplaced {
-                it.copy(
-                    memoryRecoveryRequest =
-                        MemoryRecoveryRequest(descriptor.token, mayMoveOldHistory = true),
-                    isBusy = false,
-                    message = "현재 작업에 더 많은 메모리가 필요합니다.",
-                )
-            }
-            return
-        }
         val owner = MemoryRecoveryOwner(descriptor, MemoryRecoverySource.Automatic)
         userMemoryRecoveryOwner = owner
         owner.job = launchUserMemoryRecovery(owner, strong = false)
     }
+
+    private fun classifyRetryFailure(
+        owner: MemoryRecoveryOwner?,
+        currentFailure: MemoryRetryDescriptor,
+    ): RetryFailureArbitration {
+        val strongAttempt = strongRetryAttempt
+        if (
+            strongAttempt.matchesRetryFailure(currentFailure) &&
+                (owner == null || owner.descriptor === strongAttempt)
+        ) {
+            return RetryFailureArbitration.StrongRetryFailure
+        }
+        val automaticAttempt = automaticRetryAttempt
+        if (
+            automaticAttempt.matchesRetryFailure(currentFailure) &&
+                (owner == null || owner.descriptor === automaticAttempt)
+        ) {
+            return RetryFailureArbitration.AutomaticRetryFailure
+        }
+        return if (owner?.phase == MemoryRecoveryPhase.Retrying) {
+            RetryFailureArbitration.UnrelatedFailureWhileRetrying
+        } else {
+            RetryFailureArbitration.FreshFailure
+        }
+    }
+
+    private fun settleStrongRetryFailure(currentFailure: MemoryRetryDescriptor) {
+        val attempt = strongRetryAttempt
+        if (attempt?.matchesRetryFailure(currentFailure) == true) {
+            strongRetryAttempt = null
+        }
+        userMemoryRecoveryOwner
+            ?.takeIf { it.descriptor === attempt }
+            ?.let { owner ->
+            closeUserMemoryRecoveryOwner(owner, clearUi = false, clearAttempts = false)
+            }
+        updateUiStateAndRecycleReplaced {
+            it.copy(
+                memoryRecoveryRequest = null,
+                isBusy = false,
+                message = "정리 후에도 현재 작업에 필요한 메모리를 확보하지 못했습니다. 이미지와 적용된 편집은 안전하게 유지됩니다.",
+            )
+        }
+    }
+
+    private fun transferAutomaticRetryFailure(currentFailure: MemoryRetryDescriptor) {
+        val attempt = automaticRetryAttempt
+        if (attempt?.matchesRetryFailure(currentFailure) == true) {
+            automaticRetryAttempt = null
+        }
+        userMemoryRecoveryOwner
+            ?.takeIf { it.descriptor === attempt }
+            ?.let { owner ->
+            closeUserMemoryRecoveryOwner(owner, clearUi = false, clearAttempts = false)
+            }
+        val owner = MemoryRecoveryOwner(currentFailure, MemoryRecoverySource.Automatic)
+        owner.phase = MemoryRecoveryPhase.AwaitingUserDecision
+        userMemoryRecoveryOwner = owner
+        updateUiStateAndRecycleReplaced {
+            it.copy(
+                memoryRecoveryRequest =
+                    MemoryRecoveryRequest(currentFailure.token, mayMoveOldHistory = true),
+                isBusy = false,
+                message = "현재 작업에 더 많은 메모리가 필요합니다.",
+            )
+        }
+    }
+
+    private fun memoryRetryInputFor(
+        action: MemoryRetryAction,
+        state: EditorUiState,
+        payload: String?,
+    ): MemoryRetryInput =
+        when (action) {
+            MemoryRetryAction.AutoStraightenCrop -> MemoryRetryInput.Crop(state.cropState)
+            MemoryRetryAction.ExportPreview ->
+                MemoryRetryInput.Export(state.exportFormat, state.exportResolution)
+            MemoryRetryAction.RestoreDraft -> MemoryRetryInput.Draft(payload)
+            MemoryRetryAction.RotatePreview ->
+                MemoryRetryInput.Rotate(state.cropState)
+            else -> MemoryRetryInput.Irrelevant
+        }
+
+    private fun memoryRetryInputIsCurrent(
+        descriptor: MemoryRetryDescriptor,
+        state: EditorUiState,
+    ): Boolean =
+        when (val input = descriptor.input) {
+            MemoryRetryInput.Irrelevant -> true
+            is MemoryRetryInput.Export ->
+                state.exportFormat == input.format && state.exportResolution == input.resolution
+            is MemoryRetryInput.Crop -> state.cropState == input.state
+            is MemoryRetryInput.Rotate -> state.cropState == input.cropState
+            is MemoryRetryInput.Draft ->
+                when {
+                    input.generationId != null ->
+                        currentDraftGenerationId(getApplication<Application>()) == input.generationId
+                    input.legacyPayloadFingerprint != null ->
+                        legacyDraftPayloadFingerprint(getApplication<Application>()) ==
+                            input.legacyPayloadFingerprint
+                    else -> true
+                }
+            is MemoryRetryInput.Route ->
+                currentMemoryRetryRoute(descriptor.action, state) == input.route
+        }
+
+    private fun currentMemoryRetryRoute(
+        action: MemoryRetryAction,
+        state: EditorUiState,
+    ): String? =
+        when (action) {
+            MemoryRetryAction.SubjectSelection ->
+                RouteResolver.resolveSubjectRoute(
+                    engine = state.correctionEngineState.documentEngine,
+                    debugOverride = ExperimentalLabController.debugOverrides().subjectSelection,
+                    modelAvailable =
+                        ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]
+                            ?.canAttemptModelUse == true,
+                ).actualRoute.name
+            MemoryRetryAction.MaskAwareRemaster ->
+                RouteResolver.resolveRemasterRoute(
+                    engine = state.correctionEngineState.documentEngine,
+                    debugOverride = ExperimentalLabController.debugOverrides().remaster,
+                    modelAvailable =
+                        ModelAvailabilityRegistry.state.value[ModelFeature.Remaster]
+                            ?.canAttemptModelUse == true,
+                ).actualRoute.name
+            else -> null
+        }
+
+    private fun legacyDraftPayloadFingerprint(context: Context): String =
+        context
+            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+            .all
+            .entries
+            .sortedBy { it.key }
+            .joinToString(separator = "\u001f") { (key, value) -> "$key=$value" }
 
     fun retryPendingMemoryRecovery(token: Long) {
         val owner = userMemoryRecoveryOwner?.takeIf {
@@ -1271,10 +1401,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (state.sourcePath != descriptor.sourcePath) return false
         if (state.baseContentToken != descriptor.baseContentToken) return false
         if (state.revision != descriptor.revision) return false
-        if (
-            descriptor.action.requiresSelectionTargetIdentity() &&
-                state.activeSelectionLayerId != descriptor.targetSelectionLayerId
-        ) return false
+        if (!descriptor.selectionTarget.matchesCurrent(state.activeSelectionLayerId)) return false
+        if (!memoryRetryInputIsCurrent(descriptor, state)) return false
         val currentGen = historyCoordinator.currentGeneration()
         if (
             descriptor.coordinatorGeneration != null &&
@@ -1309,18 +1437,28 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             MemoryRetryAction.ApplySelectionNative -> applyActiveSelectionLocalEditNativeBaked()
             MemoryRetryAction.ExportPreview -> exportPreview()
             MemoryRetryAction.OpenImage -> descriptor.payload?.let { openImage(Uri.parse(it)) }
-            MemoryRetryAction.RestoreDraft -> retryDraftRestoreAfterMemory()
+            MemoryRetryAction.RestoreDraft ->
+                retryDraftRestoreAfterMemory(
+                    descriptor.input as? MemoryRetryInput.Draft
+                        ?: MemoryRetryInput.Draft(descriptor.payload),
+                )
             MemoryRetryAction.RotatePreview -> rotatePreview90()
             MemoryRetryAction.HistoryUndo -> descriptor.payload?.let { navigateHistory(true, it) }
             MemoryRetryAction.HistoryRedo -> descriptor.payload?.let { navigateHistory(false, it) }
         }
     }
 
-    private fun retryDraftRestoreAfterMemory() {
+    private fun retryDraftRestoreAfterMemory(input: MemoryRetryInput.Draft) {
         val token = ++restoreDraftToken
         val revision = _uiState.value.revision
         viewModelScope.launch {
-            restoreDraftIfAvailable(getApplication<Application>(), token, revision)
+            restoreDraftIfAvailable(
+                getApplication<Application>(),
+                token,
+                revision,
+                input.generationId,
+                input.legacyPayloadFingerprint,
+            )
         }
     }
 
@@ -1346,14 +1484,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun retryAttemptMatchesSuccessfulOperation(
         attempt: MemoryRetryDescriptor,
         action: MemoryRetryAction,
-        successfulSelectionLayerId: String?,
+        successfulSelectionTarget: SelectionRetryTarget,
     ): Boolean {
         if (shuttingDown) return false
         if (attempt.action != action) return false
         val state = _uiState.value
         if (state.sourcePath != attempt.sourcePath) return false
         if (state.baseContentToken != attempt.baseContentToken) return false
-        if (attempt.targetSelectionLayerId != successfulSelectionLayerId) return false
+        if (!memoryRetryInputIsCurrent(attempt, state)) return false
+        if (attempt.selectionTarget != successfulSelectionTarget) return false
         val revisionMatches =
             if (action in REVISION_ADVANCING_MEMORY_RETRY_ACTIONS) {
                 state.revision == attempt.revision || state.revision == attempt.revision + 1
@@ -1367,13 +1506,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         action: MemoryRetryAction,
         successfulSelectionLayerId: String? = null,
     ) {
+        val successfulSelectionTarget =
+            successfulSelectionLayerId?.let(SelectionRetryTarget::Layer)
+                ?: SelectionRetryTarget.Irrelevant
         if (automaticRetryAttempt?.let {
-            retryAttemptMatchesSuccessfulOperation(it, action, successfulSelectionLayerId)
+            retryAttemptMatchesSuccessfulOperation(it, action, successfulSelectionTarget)
         } == true) {
             automaticRetryAttempt = null
         }
         if (strongRetryAttempt?.let {
-            retryAttemptMatchesSuccessfulOperation(it, action, successfulSelectionLayerId)
+            retryAttemptMatchesSuccessfulOperation(it, action, successfulSelectionTarget)
         } == true) {
             strongRetryAttempt = null
         }
@@ -5460,7 +5602,11 @@ fun exportPreview() {
                         ),
                     )
                 } ?: Long.MAX_VALUE
-            if (liveBase == null || !BitmapMemoryBudget.canAllocate(dirtyPeakBytes)) {
+            if (
+                liveBase == null ||
+                    MemoryRecoveryTestSeam.capture()?.rejectExportPreparation == true ||
+                    !BitmapMemoryBudget.canAllocate(dirtyPeakBytes)
+            ) {
                 ownedExportLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
                 ownedExportLayers = emptyList()
                 exportPrepareTracker?.end()
@@ -7171,10 +7317,14 @@ fun exportPreview() {
         context: Context,
         restoreToken: Long,
         restoreStartRevision: Int,
+        expectedDraftGenerationId: String? = null,
     ): GenerationRestoreOutcome {
         val pointer =
             withContext(Dispatchers.IO) { currentDraftGenerationId(context) }
                 ?: return GenerationRestoreOutcome.Absent
+        if (expectedDraftGenerationId != null && pointer != expectedDraftGenerationId) {
+            return GenerationRestoreOutcome.Stale
+        }
         val validated =
             withContext(Dispatchers.IO) { validateCurrentDraftGeneration(context) }
                 ?: return if (
@@ -7507,7 +7657,11 @@ fun exportPreview() {
                             message = "메모리가 부족하여 임시저장 복구를 완료하지 못했습니다. 기존 편집과 임시저장은 안전합니다.",
                         )
                     }
-                    requestAllocationRecovery(MemoryRetryAction.RestoreDraft, t.requiredBytes)
+                    requestAllocationRecovery(
+                        MemoryRetryAction.RestoreDraft,
+                        t.requiredBytes,
+                        payload = pointer,
+                    )
                 }
                 return GenerationRestoreOutcome.MemoryRejected(t.requiredBytes)
             }
@@ -7552,6 +7706,8 @@ fun exportPreview() {
         context: Context,
         restoreToken: Long,
         restoreStartRevision: Int,
+        expectedDraftGenerationId: String? = null,
+        expectedLegacyPayloadFingerprint: String? = null,
     ) {
         if (
             shuttingDown ||
@@ -7560,10 +7716,28 @@ fun exportPreview() {
         )
             return
         val generationRestore =
-            restoreCurrentDraftGeneration(context, restoreToken, restoreStartRevision)
+            restoreCurrentDraftGeneration(
+                context,
+                restoreToken,
+                restoreStartRevision,
+                expectedDraftGenerationId,
+            )
         if (generationRestore == GenerationRestoreOutcome.Restored) return
         if (generationRestore == GenerationRestoreOutcome.Stale) return
         if (generationRestore is GenerationRestoreOutcome.MemoryRejected) return
+        if (
+            expectedLegacyPayloadFingerprint != null &&
+                withContext(Dispatchers.IO) {
+                    legacyDraftPayloadFingerprint(context)
+                } != expectedLegacyPayloadFingerprint
+        ) {
+            updateUiStateAndRecycleReplaced {
+                if (restoreToken == restoreDraftToken && it.revision == restoreStartRevision) {
+                    it.copy(isBusy = false)
+                } else it
+            }
+            return
+        }
         if (generationRestore is GenerationRestoreOutcome.Invalid) {
             val cleared =
                 withContext(Dispatchers.IO) {
@@ -7860,7 +8034,17 @@ fun exportPreview() {
                     )
                 }
                 if (t is BitmapAllocationRejectedException) {
-                    requestAllocationRecovery(MemoryRetryAction.RestoreDraft, t.requiredBytes)
+                    requestAllocationRecovery(
+                        MemoryRetryAction.RestoreDraft,
+                        t.requiredBytes,
+                        retryInput =
+                            withContext(Dispatchers.IO) {
+                                MemoryRetryInput.Draft(
+                                    generationId = null,
+                                    legacyPayloadFingerprint = legacyDraftPayloadFingerprint(context),
+                                )
+                            },
+                    )
                 }
             }
         } finally {
@@ -8553,6 +8737,30 @@ internal enum class MemoryRetryAction {
     HistoryRedo,
 }
 
+private enum class RetryFailureArbitration {
+    FreshFailure,
+    AutomaticRetryFailure,
+    StrongRetryFailure,
+    UnrelatedFailureWhileRetrying,
+}
+
+internal sealed interface SelectionRetryTarget {
+    data object Irrelevant : SelectionRetryTarget
+    data class Layer(val id: String) : SelectionRetryTarget
+}
+
+internal sealed interface MemoryRetryInput {
+    data object Irrelevant : MemoryRetryInput
+    data class Export(val format: ExportFormat, val resolution: ExportResolution) : MemoryRetryInput
+    data class Crop(val state: CropState) : MemoryRetryInput
+    data class Rotate(val cropState: CropState) : MemoryRetryInput
+    data class Draft(
+        val generationId: String?,
+        val legacyPayloadFingerprint: String? = null,
+    ) : MemoryRetryInput
+    data class Route(val route: String) : MemoryRetryInput
+}
+
 internal data class MemoryRetryDescriptor(
     val token: Long,
     val action: MemoryRetryAction,
@@ -8561,7 +8769,8 @@ internal data class MemoryRetryDescriptor(
     val baseContentToken: String,
     val revision: Int,
     val payload: String?,
-    val targetSelectionLayerId: String? = null,
+    val selectionTarget: SelectionRetryTarget = SelectionRetryTarget.Irrelevant,
+    val input: MemoryRetryInput = MemoryRetryInput.Irrelevant,
     // Navigation-specific identity for target-aware recovery
     val navigationDirection: Boolean? = null, // true = undo, false = redo
     val targetEntryId: String? = null,
@@ -8584,11 +8793,11 @@ private val REVISION_ADVANCING_MEMORY_RETRY_ACTIONS =
         MemoryRetryAction.RotatePreview,
     )
 
-private fun MemoryRetryAction.requiresSelectionTargetIdentity(): Boolean =
-    this == MemoryRetryAction.DuplicateSelection ||
-        this == MemoryRetryAction.BackgroundSelection ||
-        this == MemoryRetryAction.ApplySelectionNative ||
-        this == MemoryRetryAction.MaskAwareRemaster
+private fun SelectionRetryTarget.matchesCurrent(activeSelectionLayerId: String?): Boolean =
+    when (this) {
+        SelectionRetryTarget.Irrelevant -> true
+        is SelectionRetryTarget.Layer -> activeSelectionLayerId == id
+    }
 
 internal data class MemoryCleanupResult(
     /** Whether any RAM/resource was released anywhere in the cleanup path. */
@@ -8611,10 +8820,8 @@ private fun MemoryRetryDescriptor?.matchesRetryFailure(
             previous.sourcePath != currentFailure.sourcePath ||
             previous.baseContentToken != currentFailure.baseContentToken
     ) return false
-    if (
-        currentFailure.action.requiresSelectionTargetIdentity() &&
-            previous.targetSelectionLayerId != currentFailure.targetSelectionLayerId
-    ) return false
+    if (previous.selectionTarget != currentFailure.selectionTarget) return false
+    if (previous.input != currentFailure.input) return false
     if (
         currentFailure.action == MemoryRetryAction.HistoryUndo ||
             currentFailure.action == MemoryRetryAction.HistoryRedo
@@ -8641,7 +8848,8 @@ private fun MemoryRetryDescriptor.matchesSameRecoveryRequest(
         baseContentToken == other.baseContentToken &&
         revision == other.revision &&
         payload == other.payload &&
-        targetSelectionLayerId == other.targetSelectionLayerId &&
+        selectionTarget == other.selectionTarget &&
+        input == other.input &&
         navigationDirection == other.navigationDirection &&
         targetEntryId == other.targetEntryId &&
         coordinatorGeneration == other.coordinatorGeneration
@@ -9215,11 +9423,15 @@ internal fun EditorViewModel.reserveSelectionMaskCopy(
     config: Bitmap.Config? = source.config,
     documentLayerDelta: Int = 0,
 ): MaskReservation? =
-    selectionMaskOwnership.reserve(
-        owner = owner,
-        bytes = BitmapMemoryBudget.bytes(source.width, source.height, config),
-        documentLayerDelta = documentLayerDelta,
-    )
+    if (MemoryRecoveryTestSeam.capture()?.rejectSelectionMaskAdmission == true) {
+        null
+    } else {
+        selectionMaskOwnership.reserve(
+            owner = owner,
+            bytes = BitmapMemoryBudget.bytes(source.width, source.height, config),
+            documentLayerDelta = documentLayerDelta,
+        )
+    }
 
 internal fun EditorViewModel.reserveSelectionMaskOutput(
     owner: String,

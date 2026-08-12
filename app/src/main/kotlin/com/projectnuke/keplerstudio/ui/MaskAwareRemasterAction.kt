@@ -18,6 +18,8 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.ExperimentalLabController
 import com.projectnuke.keplerstudio.editor.RemasterRoute
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.MemoryRetryInput
+import com.projectnuke.keplerstudio.editor.SelectionRetryTarget
 import com.projectnuke.keplerstudio.editor.MaskReservation
 import com.projectnuke.keplerstudio.editor.FeatureExecutionOutcome
 import com.projectnuke.keplerstudio.editor.FeatureMaskSummary
@@ -368,6 +370,10 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                             settleAdoptedEditHistory(undoSnapshotOwned)
                             undoSnapshotOwned = null
                             persistDraftSnapshot()
+                            markMemoryRetrySucceeded(
+                                MemoryRetryAction.MaskAwareRemaster,
+                                capturedActiveSelectionLayerId.takeIf { !useModel },
+                            )
                         } else {
                             if (originalAdopted) remasteredOriginal = null
                             if (previewAdopted) renderedPreview = null
@@ -409,8 +415,14 @@ fun EditorViewModel.applyMaskAwareRemaster() {
                     requestAllocationRecovery(
                         MemoryRetryAction.MaskAwareRemaster,
                         t.requiredBytes,
-                        targetSelectionLayerId =
-                            capturedActiveSelectionLayerId.takeIf { !useModel },
+                        selectionTarget =
+                            if (useModel) {
+                                SelectionRetryTarget.Irrelevant
+                            } else {
+                                capturedActiveSelectionLayerId?.let(SelectionRetryTarget::Layer)
+                                    ?: SelectionRetryTarget.Irrelevant
+                            },
+                        retryInput = MemoryRetryInput.Route(remasterAlgorithm.name),
                     )
                 }
             } finally {

@@ -13,6 +13,7 @@ import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FallbackPolicy
 import com.projectnuke.keplerstudio.editor.HistorySnapshotStorage
 import com.projectnuke.keplerstudio.editor.MemoryRetryAction
+import com.projectnuke.keplerstudio.editor.SelectionRetryTarget
 import com.projectnuke.keplerstudio.editor.PreparedResourceHandoff
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.RenderFailedException
@@ -327,7 +328,9 @@ private suspend fun EditorViewModel.applySelectionNativeBakeBackground(
                 requestAllocationRecovery(
                     MemoryRetryAction.ApplySelectionNative,
                     failure.requiredBytes,
-                    targetSelectionLayerId = capturedActiveSelectionLayerId,
+                    selectionTarget =
+                        capturedActiveSelectionLayerId?.let(SelectionRetryTarget::Layer)
+                            ?: SelectionRetryTarget.Irrelevant,
                 )
             }
         } else if (isManagedEditTokenCurrent(operationToken)) {
