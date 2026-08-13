@@ -114,25 +114,51 @@ class MainActivity : ComponentActivity() {
             val vm: EditorViewModel = viewModel()
             editorViewModel = vm
             val state by vm.uiState.collectAsState()
-            val scope = rememberCoroutineScope()
-            var appMode by remember { mutableStateOf(AppMode.Home) }
+            val leaveState by vm.editorLeaveState.collectAsState()
+            var appMode by rememberSaveable { mutableStateOf(AppMode.Home) }
             var galleryMode by rememberSaveable { mutableStateOf(GalleryDisplayMode.Draft) }
             var showLeaveDialog by remember { mutableStateOf(false) }
-            var showSavingDialog by remember { mutableStateOf(false) }
+            var lastHandledLeaveToken by rememberSaveable { mutableStateOf<Long?>(null) }
+            val showSavingDialog =
+                leaveState.phase == com.projectnuke.keplerstudio.editor.EditorLeavePhase.Quiescing ||
+                    leaveState.phase == com.projectnuke.keplerstudio.editor.EditorLeavePhase.Saving
             val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
                 if (uri != null) {
                     vm.openImage(uri)
                     appMode = AppMode.Editor
                 }
             }
-            val hasEditableWork = state.previewBitmap != null ||
-                state.originalPreviewBitmap != null ||
-                state.canUndo ||
-                state.canRedo ||
-                state.selectionLayers.isNotEmpty()
+            LaunchedEffect(leaveState.token, leaveState.phase) {
+                val token = leaveState.token ?: return@LaunchedEffect
+                when (leaveState.phase) {
+                    com.projectnuke.keplerstudio.editor.EditorLeavePhase.Completed -> {
+                        if (token != lastHandledLeaveToken) lastHandledLeaveToken = token
+                        showLeaveDialog = false
+                        appMode = AppMode.Home
+                    }
+                    com.projectnuke.keplerstudio.editor.EditorLeavePhase.Failed -> {
+                        if (token == lastHandledLeaveToken) return@LaunchedEffect
+                        lastHandledLeaveToken = token
+                        Toast.makeText(
+                            context,
+                            leaveState.message ?: "\uC784\uC2DC \uC800\uC7A5\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1 \uD654\uBA74\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4.",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                    else -> Unit
+                }
+            }
 
-            BackHandler(enabled = appMode == AppMode.Editor && hasEditableWork) { showLeaveDialog = true }
-            BackHandler(enabled = appMode == AppMode.Editor && !hasEditableWork) { appMode = AppMode.Home }
+            BackHandler(enabled = appMode == AppMode.Editor && !showSavingDialog) {
+                when (vm.editorLeaveDisposition()) {
+                    EditorViewModel.EditorLeaveDisposition.EmptyAndIdle -> appMode = AppMode.Home
+                    EditorViewModel.EditorLeaveDisposition.PendingDocumentOperation -> {
+                        vm.cancelPendingDocumentWorkForLeave()
+                        appMode = AppMode.Home
+                    }
+                    EditorViewModel.EditorLeaveDisposition.EditableDocument -> showLeaveDialog = true
+                }
+            }
             BackHandler(enabled = appMode == AppMode.Gallery) { appMode = AppMode.Home }
             BackHandler(enabled = appMode == AppMode.Home) { finish() }
 
@@ -146,9 +172,15 @@ class MainActivity : ComponentActivity() {
                         draftGenerationThumbnailPath = state.draftGenerationThumbnailPath,
                         recoveryDebugInfo = state.recoveryDebugInfo,
                         activeSourcePath = state.sourcePath,
-                        onOpenPhoto = { picker.launch("image/*") },
+                        onOpenPhoto = {
+                            vm.acknowledgeEditorLeave()
+                            picker.launch("image/*")
+                        },
                         onOpenGallery = { appMode = AppMode.Gallery },
-                        onContinueEditing = { appMode = AppMode.Editor },
+                        onContinueEditing = {
+                            vm.acknowledgeEditorLeave()
+                            appMode = AppMode.Editor
+                        },
                         onClearDraft = vm::clearDraft
                     )
                     AppMode.Gallery -> GalleryScreen(
@@ -161,7 +193,10 @@ class MainActivity : ComponentActivity() {
                         draftGenerationThumbnailPath = state.draftGenerationThumbnailPath,
                         recoveryDebugInfo = state.recoveryDebugInfo,
                         onBack = { appMode = AppMode.Home },
-                        onContinueEditing = { appMode = AppMode.Editor },
+                        onContinueEditing = {
+                            vm.acknowledgeEditorLeave()
+                            appMode = AppMode.Editor
+                        },
                         onClearDraft = vm::clearDraft,
                         onClearSavedExports = vm::clearSavedExports,
                         onRemoveSavedExport = vm::removeSavedExport
@@ -179,16 +214,7 @@ class MainActivity : ComponentActivity() {
                         confirmButton = {
                             TextButton(onClick = {
                                 showLeaveDialog = false
-                                showSavingDialog = true
-                                scope.launch {
-                                    val saved = vm.persistDraftSnapshotNow()
-                                    showSavingDialog = false
-                                    if (saved) {
-                                        appMode = AppMode.Home
-                                    } else {
-                                        Toast.makeText(context, "임시 저장에 실패했습니다. 편집 화면을 유지합니다.", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
+                                vm.requestSaveAndLeave()
                             }) { Text("\uC800\uC7A5\uD558\uACE0 \uB098\uAC00\uAE30") }
                         },
                         dismissButton = {
@@ -211,6 +237,31 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         confirmButton = { }
+                    )
+                }
+
+                if (
+                    leaveState.phase == com.projectnuke.keplerstudio.editor.EditorLeavePhase.Failed
+                ) {
+                    AlertDialog(
+                        onDismissRequest = {
+                            vm.acknowledgeEditorLeave(leaveState.token)
+                        },
+                        containerColor = Color(0xFF242424),
+                        titleContentColor = Color(0xFFF2F2F2),
+                        textContentColor = Color(0xFFC8C8C8),
+                        title = { Text("\uC800\uC7A5\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4") },
+                        text = {
+                            Text(
+                                leaveState.message
+                                    ?: "\uC784\uC2DC \uC800\uC7A5\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1 \uD654\uBA74\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4."
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                vm.acknowledgeEditorLeave(leaveState.token)
+                            }) { Text("\uD655\uC778") }
+                        },
                     )
                 }
             }

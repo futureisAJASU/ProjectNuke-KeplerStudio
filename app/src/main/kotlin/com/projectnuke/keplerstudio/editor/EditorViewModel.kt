@@ -212,6 +212,28 @@ private enum class OpenImageFailureStage {
     Adoption,
 }
 
+internal enum class EditorLeavePhase {
+    Idle,
+    Quiescing,
+    Saving,
+    Completed,
+    Failed,
+    Closed,
+}
+
+internal data class EditorLeaveState(
+    val token: Long? = null,
+    val phase: EditorLeavePhase = EditorLeavePhase.Idle,
+    val draftGenerationId: String? = null,
+    val message: String? = null,
+)
+
+private class EditorLeaveOwner(val token: Long) {
+    var phase: EditorLeavePhase = EditorLeavePhase.Quiescing
+    var job: Job? = null
+    val result = CompletableDeferred<Boolean>()
+}
+
 class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private val _uiState =
         MutableStateFlow(
@@ -228,6 +250,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var nativeSessionRelease: ((Long) -> Unit)? = null
     private var renderJob: Job? = null
     private var openImageJob: Job? = null
+    private var openImageToken: Long = 0L
+    private var restoreDraftJob: Job? = null
     private val correctionEngineSettings = CorrectionEngineSettings(app.applicationContext)
     @Volatile private var correctionEngineEpoch: Long = 0L
     private var exportJob: Job? = null
@@ -238,6 +262,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal var cropJob: Job? = null
     private var draftSaveJob: Job? = null
     private val draftSaveMutex = Mutex()
+    private val _editorLeaveState = MutableStateFlow(EditorLeaveState())
+    internal val editorLeaveState: StateFlow<EditorLeaveState> = _editorLeaveState.asStateFlow()
+    private var editorLeaveCounter: Long = 0L
+    private var editorLeaveOwner: EditorLeaveOwner? = null
+
+    private fun editorLeaveLocksActions(): Boolean =
+        editorLeaveOwner?.phase in setOf(
+            EditorLeavePhase.Quiescing,
+            EditorLeavePhase.Saving,
+            EditorLeavePhase.Completed,
+            EditorLeavePhase.Failed,
+        )
 
     /** Pure read-only inspection for tests: current Draft save epoch. */
     internal fun draftEpochForTest(): Long = draftOperationEpoch
@@ -346,7 +382,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val sourcePath: String?,
         val baseContentToken: String,
         val startRevision: Int,
+        var job: Job? = null,
+        var phase: AsyncBusyPhase = AsyncBusyPhase.Active,
     )
+    private enum class AsyncBusyPhase { Active, Cancelling, Closed }
     private var asyncBusyOwner: AsyncBusyOwner? = null
     private var transactionFinishJob: Job? = null
     private val selectionTransactionGate = Any()
@@ -747,6 +786,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         data object Closed : EditorActionSettlement
         data object HistoryBusy : EditorActionSettlement
         data object AcceptedActionBusy : EditorActionSettlement
+        data object LeavingEditor : EditorActionSettlement
     }
 
     private enum class MemoryRecoveryPhase {
@@ -1452,7 +1492,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun retryDraftRestoreAfterMemory(input: MemoryRetryInput.Draft) {
         val token = ++restoreDraftToken
         val revision = _uiState.value.revision
-        viewModelScope.launch {
+        val job = viewModelScope.launch {
             restoreDraftIfAvailable(
                 getApplication<Application>(),
                 token,
@@ -1461,6 +1501,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 input.legacyPayloadFingerprint,
             )
         }
+        restoreDraftJob = job
+        job.invokeOnCompletion { if (restoreDraftJob === job) restoreDraftJob = null }
     }
 
     private fun isDocumentIdentityCurrent(descriptor: MemoryRetryDescriptor): Boolean {
@@ -2366,6 +2408,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         HistoryBusy,
         AcceptedActionBusy,
         EditorBusy,
+        LeavingEditor,
         Closed,
     }
 
@@ -2394,6 +2437,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         allowMaskSupersession: Boolean,
     ): EditorActionAdmission {
         if (shuttingDown) return EditorActionAdmission.Closed
+        if (editorLeaveLocksActions()) {
+            return EditorActionAdmission.LeavingEditor
+        }
         if (externalActionContinuation?.isActive == true &&
             externalActionContinuationPhase == ExternalActionContinuationPhase.WaitingForOwnHistory
         ) {
@@ -2470,6 +2516,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         prerequisite: HistoryActivityRegistry.Registration,
         continuation: () -> Unit,
     ): Boolean {
+        if (editorLeaveLocksActions()) return false
         if (!historyActivityBusy()) return false
         if (externalActionContinuation?.isActive == true) return true
         val continuationToken = ++externalActionContinuationToken
@@ -2518,6 +2565,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun settleEditorAction(): EditorActionSettlement {
         if (shuttingDown) return EditorActionSettlement.Closed
+        if (editorLeaveLocksActions()) return EditorActionSettlement.LeavingEditor
         if (externalActionContinuation?.isActive == true &&
             externalActionContinuationPhase == ExternalActionContinuationPhase.WaitingForOwnHistory
         ) {
@@ -2576,6 +2624,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     internal fun settleForEditorAction(): Boolean {
         if (shuttingDown) return false
+        if (editorLeaveLocksActions()) return false
         if (historyActivityBusy()) return false
         abortPendingParameterEdit()
         // An editor action is an intent to capture a new start state. Settle interactive
@@ -2641,8 +2690,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             state.revision == identity.revision
     }
 
+    private fun isCurrentExportForUi(identity: ExportIdentity): Boolean =
+        isCurrentExport(identity) && !editorLeaveLocksActions()
+
     private fun isCurrentExportRecoveryRequest(identity: ExportIdentity): Boolean {
-        if (shuttingDown || exportToken != identity.token) return false
+        if (shuttingDown || editorLeaveLocksActions() || exportToken != identity.token) return false
         val state = _uiState.value
         return state.sourcePath == identity.sourcePath &&
             state.baseContentToken == identity.baseToken &&
@@ -3842,7 +3894,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun invalidateDraftOperations() {
         draftOperationEpoch += 1L
         restoreDraftToken += 1L
+        restoreDraftJob?.cancel()
         draftSaveJob?.cancel()
+    }
+
+    private fun invalidateOpenImage() {
+        openImageToken += 1L
+        openImageJob?.cancel()
+        if (!shuttingDown) {
+            updateUiStateAndRecycleReplaced { state ->
+                if (state.isBusy) state.copy(isBusy = false) else state
+            }
+        }
     }
 
     private fun beginDraftSaveOperation(): Pair<Long, Job?> {
@@ -3901,7 +3964,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         identity: DocumentIdentity,
     ): AsyncBusyOwner? {
         synchronized(this) {
-            if (asyncBusyOwner != null || shuttingDown) return null
+            if (asyncBusyOwner != null || shuttingDown || editorLeaveLocksActions()) return null
             val owner =
                 AsyncBusyOwner(
                     token = ++asyncBusyCounter,
@@ -3920,10 +3983,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun releaseAsyncBusyOwner(owner: AsyncBusyOwner) {
         synchronized(this) {
             if (asyncBusyOwner !== owner) return
+            owner.phase = AsyncBusyPhase.Closed
             asyncBusyOwner = null
             if (!shuttingDown) updateUiState { it.copy(isBusy = false) }
         }
     }
+
+    internal fun activeAsyncBusyOwnerForTest(): String? =
+        asyncBusyOwner?.operationType
+
+    internal fun activeAsyncBusyJobForTest(): Job? = asyncBusyOwner?.job
 
     /** Applies a selection-layer edit from one leased start state. */
     internal fun applyAsyncSelectionLayerEdit(
@@ -3949,7 +4018,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // Publish the action slot before the worker starts.  Otherwise a
         // second edit can capture state while this exact before-snapshot is
         // still being prepared.
-        viewModelScope.launch(Dispatchers.Default) {
+        val job = viewModelScope.launch(Dispatchers.Default, CoroutineStart.LAZY) {
             var before: EditorHistorySnapshot? = null
             var replacement: Bitmap? = null
             var replacementReservation: MaskReservation? = null
@@ -3971,11 +4040,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     replacement = layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
                     replacement?.eraseColor(0xFF000000.toInt())
                 }
+                AsyncBusyTestSeam.capture()?.awaitBeforeAdoption()
                 withContext(Dispatchers.Main) {
                     val current = _uiState.value
                     val currentLayer = current.selectionLayers.firstOrNull { it.id == layerId }
                     val currentIdentity =
-                        current.sourcePath == leased.identity.sourcePath &&
+                        asyncBusyOwner === busyOwner &&
+                            busyOwner.phase == AsyncBusyPhase.Active &&
+                            current.sourcePath == leased.identity.sourcePath &&
                             current.baseContentToken == leased.identity.baseContentToken &&
                             current.revision == leased.identity.revision &&
                             historyCoordinator.currentGeneration() == leased.identity.generation &&
@@ -4024,6 +4096,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 leased.close()
             }
         }
+        job.invokeOnCompletion {
+            if (job.isCancelled) {
+                leased.close()
+            }
+        }
+        busyOwner.job = job
+        job.start()
         return true
     }
 
@@ -4039,14 +4118,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val startIdentity = leased.identity
         val pending = prepareHistorySnapshot(tag, leased)
-        viewModelScope.launch(Dispatchers.Default) {
+        val job = viewModelScope.launch(Dispatchers.Default, CoroutineStart.LAZY) {
             var snapshot: EditorHistorySnapshot? = null
             try {
                 snapshot = pending.await()
+                AsyncBusyTestSeam.capture()?.awaitBeforeAdoption()
                 withContext(Dispatchers.Main) {
                     val current = _uiState.value
                     val currentIdentity =
-                        current.sourcePath == startIdentity.sourcePath &&
+                        asyncBusyOwner === busyOwner &&
+                            busyOwner.phase == AsyncBusyPhase.Active &&
+                            current.sourcePath == startIdentity.sourcePath &&
                             current.baseContentToken == startIdentity.baseContentToken &&
                             current.revision == startIdentity.revision &&
                             historyCoordinator.currentGeneration() == startIdentity.generation
@@ -4070,6 +4152,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 leased.close()
             }
         }
+        job.invokeOnCompletion {
+            if (job.isCancelled) {
+                pending.close()
+                leased.close()
+            }
+        }
+        busyOwner.job = job
+        job.start()
         return true
     }
 
@@ -4201,27 +4291,266 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         forceDraftSaveAsync()
     }
 
+    internal enum class EditorLeaveDisposition {
+        EmptyAndIdle,
+        PendingDocumentOperation,
+        EditableDocument,
+    }
+
+    internal fun editorLeaveDisposition(): EditorLeaveDisposition {
+        val state = _uiState.value
+        val editable =
+            state.previewBitmap != null ||
+                state.originalPreviewBitmap != null ||
+                state.canUndo ||
+                state.canRedo ||
+                state.selectionLayers.isNotEmpty()
+        val pending =
+            state.isBusy ||
+                openImageJob?.isActive == true ||
+                restoreDraftJob?.isActive == true ||
+                managedEdits.job?.isActive == true ||
+                asyncBusyOwner?.job?.isActive == true ||
+                cropJob?.isActive == true ||
+                selectionLivePreviewJob?.isActive == true ||
+                transactionFinishJob?.isActive == true ||
+                brushTransactionState != BrushTransactionState.Idle ||
+                selectionParamTransaction != null ||
+                pendingSelectionParamStart != null ||
+                activeHistoryNavigation != null
+        return when {
+            editable -> EditorLeaveDisposition.EditableDocument
+            pending -> EditorLeaveDisposition.PendingDocumentOperation
+            else -> EditorLeaveDisposition.EmptyAndIdle
+        }
+    }
+
+    internal fun cancelPendingDocumentWorkForLeave() {
+        invalidateOpenImage()
+        restoreDraftToken += 1L
+        restoreDraftJob?.cancel()
+        invalidateManagedEdits()
+        renderJob?.cancel()
+        invalidateCropOperation()
+        cropJob?.cancel()
+        invalidateSelectionPreview()
+        externalActionContinuationToken += 1L
+        externalActionContinuation?.cancel()
+        externalActionContinuation = null
+        invalidateMemoryRecoveryForDocumentReplacement()
+        updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, isBusy = false) }
+    }
+
+    private fun claimEditorLeaveOwner(): Pair<EditorLeaveOwner, Boolean>? {
+        var startTransaction = false
+        val owner = synchronized(this) {
+            if (shuttingDown) return null
+            val current = editorLeaveOwner
+            if (current != null &&
+                current.phase != EditorLeavePhase.Closed &&
+                current.phase != EditorLeavePhase.Idle
+            ) return current to false
+            val claimed = EditorLeaveOwner(++editorLeaveCounter)
+            editorLeaveOwner = claimed
+            _editorLeaveState.value = EditorLeaveState(claimed.token, EditorLeavePhase.Quiescing)
+            EditorLeaveTestSeam.capture()?.record(EditorLeaveTestStage.OwnershipClaimed)
+            startTransaction = true
+            claimed
+        }
+        return owner to startTransaction
+    }
+
+    internal fun requestSaveAndLeave(): Long? {
+        val (owner, startTransaction) = claimEditorLeaveOwner() ?: return null
+        if (startTransaction) {
+            val job = viewModelScope.launch { runEditorLeave(owner) }
+            synchronized(this) {
+                if (editorLeaveOwner === owner) owner.job = job else job.cancel()
+            }
+        }
+        return owner.token
+    }
+
+    internal fun acknowledgeEditorLeave(token: Long? = null) {
+        val owner = synchronized(this) {
+            editorLeaveOwner?.takeIf {
+                token == null || it.token == token
+            }
+        } ?: return
+        if (owner.phase != EditorLeavePhase.Failed && owner.phase != EditorLeavePhase.Completed) return
+        owner.phase = EditorLeavePhase.Closed
+        if (editorLeaveOwner === owner) {
+            _editorLeaveState.value = EditorLeaveState(phase = EditorLeavePhase.Idle)
+        }
+    }
+
     suspend fun persistDraftSnapshotNow(): Boolean {
-        if (shuttingDown) return false
-        // This is the app-level save-and-leave boundary. Settle the visible
-        // parameter transaction first, then await the filesystem commit. Android
-        // teardown itself cannot provide this suspend guarantee.
-        settleParameterTransaction(SettlementReason.SaveAndLeave)
-        if (shuttingDown) return false
-        val (epoch, previous) = beginDraftSaveOperation()
-        val testSeam = DraftSaveTestSeam.capture()
-        previous?.join()
-        val currentJob = currentCoroutineContext()[Job]
-        if (currentJob != null) draftSaveJob = currentJob
-        return try {
-            persistDraftSnapshotInternal(epoch, SettlementReason.ManualDraftSave, testSeam)
-        } finally {
-            if (draftSaveJob === currentJob) draftSaveJob = null
+        val (owner, startTransaction) = claimEditorLeaveOwner() ?: return false
+        if (startTransaction) {
+            owner.job = currentCoroutineContext()[Job]
+            runEditorLeave(owner)
+        }
+        return owner.result.await()
+    }
+
+    private fun ownsEditorLeave(owner: EditorLeaveOwner): Boolean =
+        editorLeaveOwner === owner && owner.phase != EditorLeavePhase.Closed && !shuttingDown
+
+    private suspend fun cancelAndAwait(job: Job?) {
+        if (job == null || job === currentCoroutineContext()[Job]) return
+        job.cancel()
+        job.join()
+    }
+
+    private suspend fun quiesceEditorForLeave(owner: EditorLeaveOwner) {
+        externalActionContinuationToken += 1L
+        val continuation = externalActionContinuation
+        externalActionContinuation = null
+        externalActionContinuationPhase = ExternalActionContinuationPhase.Closed
+        cancelAndAwait(continuation)
+
+        val recoveryJob = userMemoryRecoveryOwner?.job
+        invalidateMemoryRecoveryForDocumentReplacement()
+        updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null) }
+        cancelAndAwait(recoveryJob)
+
+        val openJob = openImageJob
+        invalidateOpenImage()
+        cancelAndAwait(openJob)
+        val restoreJob = restoreDraftJob
+        restoreDraftToken += 1L
+        restoreDraftJob?.cancel()
+        cancelAndAwait(restoreJob)
+
+        val staleDraftJob = draftSaveJob
+        draftSaveJob?.cancel()
+        restoreDraftToken += 1L
+        cancelAndAwait(staleDraftJob)
+        EditorLeaveTestSeam.capture()?.record(EditorLeaveTestStage.MutationsInvalidated)
+
+        val parameterSettlement = settleParameterTransaction(SettlementReason.SaveAndLeave)
+        (parameterSettlement as? SettlementResult.Committed)?.historyPrerequisite?.let {
+            runCatching { it.await() }
+        }
+
+        val pendingBrushJob = pendingBrushStart?.job
+        if (pendingBrushStart != null && brushIdentity == null) {
+            cancelBrushStroke()
+        } else if (brushTransactionState != BrushTransactionState.Idle) {
+            finishBrushStroke()
+        }
+        cancelAndAwait(pendingBrushJob)
+        cancelAndAwait(brushSettlementJob)
+        cancelAndAwait(brushSnapshotJob)
+
+        val pendingSelection = pendingSelectionParamStart
+        pendingSelection?.let { pending ->
+            pending.closed = true
+            val pendingJob = pending.job
+            pendingJob?.cancel()
+            if (pendingSelectionParamStart === pending) pendingSelectionParamStart = null
+            cancelAndAwait(pendingJob)
+        }
+        selectionParamTransaction?.let { transaction ->
+            finishSelectionParamGesture()
+            transactionFinishJob?.join()
+            if (selectionParamTransaction === transaction) settleSelectionParamTransaction(transaction)
+        }
+        selectionLivePreviewJob?.cancel()
+        cancelAndAwait(selectionLivePreviewJob)
+        cancelAndAwait(transactionFinishJob)
+
+        val managedJob = managedEdits.job
+        invalidateManagedEdits()
+        renderJob?.cancel()
+        cancelAndAwait(managedJob)
+        cancelAndAwait(renderJob)
+
+        val crop = cropJob
+        invalidateCropOperation()
+        cropJob?.cancel()
+        cancelAndAwait(crop)
+
+        val asyncJob = asyncBusyOwner?.job
+        asyncBusyOwner?.phase = AsyncBusyPhase.Cancelling
+        asyncBusyOwner = null
+        asyncJob?.cancel()
+        cancelAndAwait(asyncJob)
+        updateUiStateAndRecycleReplaced { if (it.isBusy) it.copy(isBusy = false) else it }
+
+        invalidateComparison()
+
+        val activeHistoryJob = historyActivity.job
+        if (activeHistoryNavigation != null) {
+            activeHistoryNavigation = null
+            historyNavigationCounter += 1L
+            historyActivity.cancel()
+            cancelAndAwait(activeHistoryJob)
+        } else {
+            activeHistoryJob?.join()
+        }
+        historyActivity.clearCompleted()
+        EditorLeaveTestSeam.capture()?.record(EditorLeaveTestStage.InteractiveOwnersSettled)
+        check(ownsEditorLeave(owner))
+    }
+
+    private suspend fun runEditorLeave(owner: EditorLeaveOwner) {
+        try {
+            quiesceEditorForLeave(owner)
+            if (!ownsEditorLeave(owner)) return
+            EditorLeaveTestSeam.capture()?.record(EditorLeaveTestStage.BeforeFinalDraftCapture)
+            owner.phase = EditorLeavePhase.Saving
+            _editorLeaveState.value = EditorLeaveState(owner.token, EditorLeavePhase.Saving)
+            val (epoch, previous) = beginDraftSaveOperation()
+            val testSeam = DraftSaveTestSeam.capture()
+            previous?.join()
+            val owningJob = currentCoroutineContext()[Job]
+            if (owningJob != null) draftSaveJob = owningJob
+            val saved =
+                try {
+                    persistDraftSnapshotInternal(epoch, SettlementReason.ManualDraftSave, testSeam)
+                } finally {
+                    if (draftSaveJob === owningJob) draftSaveJob = null
+                }
+            if (!ownsEditorLeave(owner)) return
+            if (saved) {
+                EditorLeaveTestSeam.capture()?.record(EditorLeaveTestStage.DraftCommitted)
+                updateUiStateAndRecycleReplaced { if (it.isBusy) it.copy(isBusy = false) else it }
+                owner.phase = EditorLeavePhase.Completed
+                _editorLeaveState.value =
+                    EditorLeaveState(owner.token, EditorLeavePhase.Completed, _uiState.value.draftGenerationId)
+            } else {
+                owner.phase = EditorLeavePhase.Failed
+                _editorLeaveState.value =
+                    EditorLeaveState(
+                        owner.token,
+                        EditorLeavePhase.Failed,
+                        message = "\uC784\uC2DC \uC800\uC7A5\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1 \uD654\uBA74\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4.",
+                    )
+            }
+            owner.result.complete(saved)
+        } catch (_: CancellationException) {
+            owner.phase = EditorLeavePhase.Closed
+            owner.result.complete(false)
+        } catch (failure: Throwable) {
+            if (!ownsEditorLeave(owner)) {
+                owner.result.complete(false)
+                return
+            }
+            owner.phase = EditorLeavePhase.Failed
+            _editorLeaveState.value =
+                EditorLeaveState(
+                    owner.token,
+                    EditorLeavePhase.Failed,
+                    message = "\uD3B8\uC9D1 \uC791\uC5C5\uC744 \uC548\uC804\uD558\uAC8C \uB9C8\uBB34\uB9AC\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1 \uD654\uBA74\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4.",
+                )
+            owner.result.complete(false)
+            Log.w("KeplerStudio.Leave", "editor leave failed", failure)
         }
     }
 
     internal fun scheduleDraftAutosave(delayMs: Long = 2000L) {
-        if (shuttingDown) return
+        if (shuttingDown || editorLeaveLocksActions()) return
         val (epoch, _) = beginDraftSaveOperation()
         val testSeam = DraftSaveTestSeam.capture()
         val job =
@@ -4238,7 +4567,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun forceDraftSaveAsync() {
-        if (shuttingDown) return
+        if (shuttingDown || editorLeaveLocksActions()) return
         val (epoch, _) = beginDraftSaveOperation()
         val testSeam = DraftSaveTestSeam.capture()
         val job =
@@ -4444,7 +4773,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val startupRevision = _uiState.value.revision
         val startupHistoryStore =
             ExportTestSeam.capture()?.historyStore ?: savedExportHistoryStore
-        viewModelScope.launch {
+        val startupJob = viewModelScope.launch {
             try {
                 val context = getApplication<Application>()
                 val engines = loadEngineSelection(context)
@@ -4485,10 +4814,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 startupInitCompletion.complete(Unit)
             }
         }
+        restoreDraftJob = startupJob
+        startupJob.invokeOnCompletion { if (restoreDraftJob === startupJob) restoreDraftJob = null }
     }
 
     fun openImage(uri: Uri) {
-        if (shuttingDown) return
+        if (shuttingDown || editorLeaveLocksActions()) return
         val settlement = settleParameterTransactionBeforeExternalEdit()
         if (continueAfterOwnParameterSettlement(settlement) { openImage(uri) }) return
         if (!settleForEditorAction()) return
@@ -4502,8 +4833,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         invalidateSelectionPreview()
         cropJob?.cancel()
         closeParamUndoWindow()
-        val openToken = restoreDraftToken + 1L
-        restoreDraftToken = openToken
+        val openToken = ++openImageToken
         val invalidateRevision = _uiState.value.revision + 1
         val openingMessage = "\uC774\uBBF8\uC9C0\uB97C \uC5EC\uB294 \uC911\uC785\uB2C8\uB2E4"
         updateUiStateAndRecycleReplaced {
@@ -4686,7 +5016,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun ownsOpenImageSettlement(identity: OpenImageIdentity): Boolean =
         !shuttingDown &&
-            identity.token == restoreDraftToken &&
+            identity.token == openImageToken &&
             _uiState.value.revision == identity.invalidateRevision
 
     private fun openImageFailureMessage(stage: OpenImageFailureStage): String =
@@ -4699,6 +5029,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun updateParams(transform: (EditParams) -> EditParams) {
         if (shuttingDown) return
+        if (editorLeaveLocksActions()) return
         prepareForGlobalParamEdit()
         val parameterAdmission = editorActionAdmission(allowMaskSupersession = true)
         if (
@@ -5542,7 +5873,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
 fun exportPreview() {
-        if (shuttingDown) return
+        if (shuttingDown || editorLeaveLocksActions()) return
         prepareForExternalEdit()
         val state = _uiState.value
         val sourcePath = state.sourcePath
@@ -5928,7 +6259,7 @@ fun exportPreview() {
                                             } else {
                                                 current.savedExports
                                             }
-                                        if (isCurrentExport(exportIdentity)) {
+                                        if (isCurrentExportForUi(exportIdentity)) {
                                             current.copy(
                                                 isBusy = false,
                                                 savedExports = merged,
@@ -5955,7 +6286,7 @@ fun exportPreview() {
                                 is ExportPipelineResult.Failed -> {
                                     lastExportFailureForTest = outcome.failure
                                     val failure = outcome.failure
-                                    if (isCurrentExport(exportIdentity)) {
+                                    if (isCurrentExportForUi(exportIdentity)) {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
                                                 isBusy = false,
@@ -5977,7 +6308,7 @@ fun exportPreview() {
                                 }
                                 is ExportPipelineResult.CleanupFailed -> {
                                     lastExportFailureForTest = outcome.cleanupFailure
-                                    if (isCurrentExport(exportIdentity)) {
+                                    if (isCurrentExportForUi(exportIdentity)) {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
                                                 isBusy = false,
@@ -6018,7 +6349,7 @@ fun exportPreview() {
                         // exceptions surface as ExportPipelineResult.Failed;
                         // reaching here implies a transfer/Settlement failure.
                         lastExportFailureForTest = t
-                        if (isCurrentExport(exportIdentity)) {
+                        if (isCurrentExportForUi(exportIdentity)) {
                             updateUiStateAndRecycleReplaced { current ->
                                 current.copy(
                                     isBusy = false,
@@ -6479,6 +6810,7 @@ fun exportPreview() {
     fun redoEdit() = navigateHistory(undo = false)
 
     private fun navigateHistory(undo: Boolean, expectedTargetId: String? = null) {
+        if (editorLeaveLocksActions()) return
         if (historyActivityBusy()) {
             reportHistoryBusyAdmission()
             return
@@ -6665,7 +6997,7 @@ fun exportPreview() {
     }
 
     fun rotatePreview90() {
-        if (shuttingDown) return
+        if (shuttingDown || editorLeaveLocksActions()) return
         val settlement = settleParameterTransactionBeforeExternalEdit()
         if (continueAfterOwnParameterSettlement(settlement) { rotatePreview90() }) return
         rotatePreview90Async()
@@ -6777,7 +7109,11 @@ fun exportPreview() {
                             )
                         }
                         if (failure is BitmapAllocationRejectedException) {
-                            requestAllocationRecovery(MemoryRetryAction.RotatePreview, failure.requiredBytes)
+                            requestAllocationRecovery(
+                                MemoryRetryAction.RotatePreview,
+                                failure.requiredBytes,
+                                retryInput = MemoryRetryInput.Rotate(state.cropState),
+                            )
                         }
                     }
                 } finally {
@@ -8636,6 +8972,13 @@ fun exportPreview() {
         // cancels owned jobs, and releases memory/history ownership. It does not
         // claim that filesystem persistence can be completed here.
         shuttingDown = true
+        editorLeaveOwner?.let { owner ->
+            owner.phase = EditorLeavePhase.Closed
+            owner.job?.cancel()
+            owner.result.complete(false)
+        }
+        editorLeaveOwner = null
+        _editorLeaveState.value = EditorLeaveState(phase = EditorLeavePhase.Closed)
         activeHistoryNavigation = null
         historyNavigationCounter += 1L
         settleParameterTransaction(SettlementReason.Shutdown)
@@ -8668,12 +9011,19 @@ fun exportPreview() {
         brushWorkingMask = null
         invalidateManagedEdits()
         invalidateDraftOperations()
+        invalidateOpenImage()
         renderJob?.cancel()
         invalidateExport()
         invalidateSelectionPreview()
         paramUndoWindowJob?.cancel()
         cropJob?.cancel()
         transactionFinishJob?.cancel()
+        restoreDraftJob?.cancel()
+        asyncBusyOwner?.let { owner ->
+            owner.phase = AsyncBusyPhase.Closed
+            owner.job?.cancel()
+        }
+        asyncBusyOwner = null
         userMemoryRecoveryOwner?.let { owner ->
             owner.close()
             lastClosedMemoryRecoveryOwner = owner
