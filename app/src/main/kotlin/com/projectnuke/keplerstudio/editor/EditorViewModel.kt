@@ -2693,6 +2693,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun isCurrentExportForUi(identity: ExportIdentity): Boolean =
         isCurrentExport(identity) && !editorLeaveLocksActions()
 
+    private fun isCurrentExportOwnerForUi(identity: ExportIdentity): Boolean =
+        !shuttingDown &&
+            exportJob === identity.owningJob &&
+            exportToken == identity.token &&
+            !editorLeaveLocksActions()
+
     private fun isCurrentExportRecoveryRequest(identity: ExportIdentity): Boolean {
         if (shuttingDown || editorLeaveLocksActions() || exportToken != identity.token) return false
         val state = _uiState.value
@@ -3901,10 +3907,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun invalidateOpenImage() {
         openImageToken += 1L
         openImageJob?.cancel()
-        if (!shuttingDown) {
-            updateUiStateAndRecycleReplaced { state ->
-                if (state.isBusy) state.copy(isBusy = false) else state
-            }
+        clearDocumentBusyIfNoExport()
+    }
+
+    private fun clearDocumentBusyIfNoExport() {
+        if (shuttingDown || exportJob?.isActive == true) return
+        updateUiStateAndRecycleReplaced { state ->
+            if (state.isBusy) state.copy(isBusy = false) else state
         }
     }
 
@@ -3985,7 +3994,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             if (asyncBusyOwner !== owner) return
             owner.phase = AsyncBusyPhase.Closed
             asyncBusyOwner = null
-            if (!shuttingDown) updateUiState { it.copy(isBusy = false) }
+            if (!shuttingDown && exportJob?.isActive != true) {
+                updateUiState { it.copy(isBusy = false) }
+            }
         }
     }
 
@@ -4015,6 +4026,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return false
         }
         invalidateComparison()
+        val operationSeam = AsyncBusyTestSeam.capture()
         // Publish the action slot before the worker starts.  Otherwise a
         // second edit can capture state while this exact before-snapshot is
         // still being prepared.
@@ -4040,7 +4052,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     replacement = layer.bitmap.copyOrThrow(Bitmap.Config.ARGB_8888, true)
                     replacement?.eraseColor(0xFF000000.toInt())
                 }
-                AsyncBusyTestSeam.capture()?.awaitBeforeAdoption()
+                operationSeam?.awaitBeforeAdoption()
                 withContext(Dispatchers.Main) {
                     val current = _uiState.value
                     val currentLayer = current.selectionLayers.firstOrNull { it.id == layerId }
@@ -4118,11 +4130,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         val startIdentity = leased.identity
         val pending = prepareHistorySnapshot(tag, leased)
+        val operationSeam = AsyncBusyTestSeam.capture()
         val job = viewModelScope.launch(Dispatchers.Default, CoroutineStart.LAZY) {
             var snapshot: EditorHistorySnapshot? = null
             try {
                 snapshot = pending.await()
-                AsyncBusyTestSeam.capture()?.awaitBeforeAdoption()
+                operationSeam?.awaitBeforeAdoption()
                 withContext(Dispatchers.Main) {
                     val current = _uiState.value
                     val currentIdentity =
@@ -4338,7 +4351,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         externalActionContinuation?.cancel()
         externalActionContinuation = null
         invalidateMemoryRecoveryForDocumentReplacement()
-        updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null, isBusy = false) }
+        updateUiStateAndRecycleReplaced { it.copy(memoryRecoveryRequest = null) }
+        clearDocumentBusyIfNoExport()
     }
 
     private fun claimEditorLeaveOwner(): Pair<EditorLeaveOwner, Boolean>? {
@@ -4363,12 +4377,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun requestSaveAndLeave(): Long? {
         val (owner, startTransaction) = claimEditorLeaveOwner() ?: return null
         if (startTransaction) {
-            val job = viewModelScope.launch { runEditorLeave(owner) }
-            synchronized(this) {
-                if (editorLeaveOwner === owner) owner.job = job else job.cancel()
-            }
+            startEditorLeave(owner)
         }
         return owner.token
+    }
+
+    private fun startEditorLeave(owner: EditorLeaveOwner) {
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) { runEditorLeave(owner) }
+        val start = synchronized(this) {
+            if (editorLeaveOwner === owner) {
+                owner.job = job
+                true
+            } else false
+        }
+        if (start) job.start() else job.cancel()
     }
 
     internal fun acknowledgeEditorLeave(token: Long? = null) {
@@ -4387,8 +4409,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun persistDraftSnapshotNow(): Boolean {
         val (owner, startTransaction) = claimEditorLeaveOwner() ?: return false
         if (startTransaction) {
-            owner.job = currentCoroutineContext()[Job]
-            runEditorLeave(owner)
+            startEditorLeave(owner)
         }
         return owner.result.await()
     }
@@ -4399,6 +4420,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun cancelAndAwait(job: Job?) {
         if (job == null || job === currentCoroutineContext()[Job]) return
         job.cancel()
+        job.join()
+    }
+
+    private suspend fun awaitOwnedJob(job: Job?) {
+        if (job == null || job === currentCoroutineContext()[Job]) return
         job.join()
     }
 
@@ -4434,14 +4460,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         val pendingBrushJob = pendingBrushStart?.job
-        if (pendingBrushStart != null && brushIdentity == null) {
-            cancelBrushStroke()
-        } else if (brushTransactionState != BrushTransactionState.Idle) {
-            finishBrushStroke()
+        when {
+            pendingBrushStart != null && brushIdentity == null -> {
+                cancelBrushStroke()
+                cancelAndAwait(pendingBrushJob)
+            }
+            brushIdentity != null && brushWorkingMask == null -> {
+                val preparationJob = brushSnapshotJob
+                cancelBrushStroke()
+                cancelAndAwait(preparationJob)
+            }
+            brushIdentity != null && brushWorkingMask != null -> {
+                if (brushTransactionState != BrushTransactionState.Finishing) {
+                    finishBrushStroke()
+                }
+                awaitOwnedJob(brushSettlementJob)
+            }
         }
-        cancelAndAwait(pendingBrushJob)
-        cancelAndAwait(brushSettlementJob)
-        cancelAndAwait(brushSnapshotJob)
 
         val pendingSelection = pendingSelectionParamStart
         pendingSelection?.let { pending ->
@@ -4476,7 +4511,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         asyncBusyOwner = null
         asyncJob?.cancel()
         cancelAndAwait(asyncJob)
-        updateUiStateAndRecycleReplaced { if (it.isBusy) it.copy(isBusy = false) else it }
+        if (exportJob?.isActive != true) {
+            updateUiStateAndRecycleReplaced { if (it.isBusy) it.copy(isBusy = false) else it }
+        }
 
         invalidateComparison()
 
@@ -4515,7 +4552,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             if (!ownsEditorLeave(owner)) return
             if (saved) {
                 EditorLeaveTestSeam.capture()?.record(EditorLeaveTestStage.DraftCommitted)
-                updateUiStateAndRecycleReplaced { if (it.isBusy) it.copy(isBusy = false) else it }
+                if (exportJob?.isActive != true) {
+                    updateUiStateAndRecycleReplaced { if (it.isBusy) it.copy(isBusy = false) else it }
+                }
                 owner.phase = EditorLeavePhase.Completed
                 _editorLeaveState.value =
                     EditorLeaveState(owner.token, EditorLeavePhase.Completed, _uiState.value.draftGenerationId)
@@ -4531,6 +4570,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             owner.result.complete(saved)
         } catch (_: CancellationException) {
             owner.phase = EditorLeavePhase.Closed
+            if (editorLeaveOwner === owner) {
+                _editorLeaveState.value = EditorLeaveState(phase = EditorLeavePhase.Closed)
+            }
             owner.result.complete(false)
         } catch (failure: Throwable) {
             if (!ownsEditorLeave(owner)) {
@@ -4602,7 +4644,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val draftSnapshot = acquireEditorSnapshot("draftSave") ?: return false
         val draftState = draftSnapshot.state
         ParameterLifecycleTestHook.notifyDraftCaptureBegan(draftEpoch)
-        testSeam?.awaitRelease()
+        try {
+            testSeam?.awaitRelease()
+        } catch (failure: Throwable) {
+            draftSnapshot.close()
+            throw failure
+        }
         val draftTracker =
             beginMemoryTracking(
                 "persistDraftSnapshot",
@@ -6273,7 +6320,7 @@ fun exportPreview() {
                                 }
                                 is ExportPipelineResult.PublishedWithMetadataFailure -> {
                                     lastExportFailureForTest = outcome.failure
-                                    if (isCurrentExport(exportIdentity)) {
+                                    if (isCurrentExportForUi(exportIdentity)) {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
                                                 isBusy = false,
@@ -6326,7 +6373,7 @@ fun exportPreview() {
                                     // export (revision-only mutation), this
                                     // stale owner must clear its own busy state
                                     // — no newer owner exists to take it over.
-                                    if (exportIdentity.token == exportToken) {
+                                    if (isCurrentExportOwnerForUi(exportIdentity)) {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(isBusy = false)
                                         }

@@ -6,10 +6,12 @@ import kotlinx.coroutines.CompletableDeferred
 internal class DraftSaveTestSeam(
     internal val reached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val releaseGate: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val failure: Throwable? = null,
 ) {
     internal suspend fun awaitRelease() {
         reached.complete(Unit)
         releaseGate.await()
+        failure?.let { throw it }
     }
 
     internal companion object Registry {
