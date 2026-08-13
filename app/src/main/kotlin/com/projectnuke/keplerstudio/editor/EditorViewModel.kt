@@ -2693,11 +2693,38 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun isCurrentExportForUi(identity: ExportIdentity): Boolean =
         isCurrentExport(identity) && !editorLeaveLocksActions()
 
-    private fun isCurrentExportOwnerForUi(identity: ExportIdentity): Boolean =
+    /**
+     * Export resource ownership is independent of whether leave currently
+     * owns the user-facing message.  In particular, a terminal export job
+     * must release its own busy bit while the leave screen is Completed or
+     * Failed.  Do not add document identity here: an exact export owner may
+     * legitimately become document-stale before it terminates.
+     */
+    private fun isExactExportOwner(identity: ExportIdentity): Boolean =
         !shuttingDown &&
             exportJob === identity.owningJob &&
-            exportToken == identity.token &&
-            !editorLeaveLocksActions()
+            exportToken == identity.token
+
+    private fun releaseExportBusyIfOwned(identity: ExportIdentity) {
+        if (!isExactExportOwner(identity)) return
+        updateUiStateAndRecycleReplaced { current ->
+            if (current.isBusy) current.copy(isBusy = false) else current
+        }
+    }
+
+    private fun releaseExportBusyIfTokenOwned(token: Long) {
+        if (shuttingDown || exportToken != token) return
+        updateUiStateAndRecycleReplaced { current ->
+            if (current.isBusy) current.copy(isBusy = false) else current
+        }
+    }
+
+    private fun releaseExportBusyIfJobOwned(job: Job) {
+        if (shuttingDown || exportJob !== job) return
+        updateUiStateAndRecycleReplaced { current ->
+            if (current.isBusy) current.copy(isBusy = false) else current
+        }
+    }
 
     private fun isCurrentExportRecoveryRequest(identity: ExportIdentity): Boolean {
         if (shuttingDown || editorLeaveLocksActions() || exportToken != identity.token) return false
@@ -3387,6 +3414,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 startRevision = capturedRevision,
                 activeLayerId = layerId,
             )
+        val preparationSeam = BrushPreparationTestSeam.capture()
         brushIdentity = transactionIdentity
         brushWorkingMask = null
         // Defer the full Exact history snapshot bitmap copies to a worker — copying
@@ -3407,6 +3435,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             producerLease.selectionLayers.map { it.id to it.bitmap },
                             documentGeneration = producerLease.identity.generation,
                         )
+                    preparationSeam?.awaitBeforeAdoption()
                     withContext(Dispatchers.Main) {
                         val currentIdentity = brushIdentity?.strokeId == strokeId
                         val canAdopt =
@@ -3670,6 +3699,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun hasActiveBrushStroke(): Boolean = brushTransactionState != BrushTransactionState.Idle
 
     internal fun isBrushPreparing(): Boolean = brushTransactionState == BrushTransactionState.Preparing
+
+    internal fun brushSnapshotJobActiveForTest(): Boolean = brushSnapshotJob?.isActive == true
 
     internal fun hasPendingBrushStartForTest(): Boolean = pendingBrushStart != null
 
@@ -6075,16 +6106,7 @@ fun exportPreview() {
                     exportPrepareTracker = null
                 },
                 {
-                    val live = _uiState.value
-                    if (
-                        !shuttingDown &&
-                            exportToken == token &&
-                            live.sourcePath == sourcePath &&
-                            live.baseContentToken == exportBaseToken &&
-                            live.revision == exportRevision
-                    ) {
-                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
-                    }
+                    releaseExportBusyIfTokenOwned(token)
                 },
             )
         val launchedJob =
@@ -6296,6 +6318,7 @@ fun exportPreview() {
                         withContext(NonCancellable) {
                             when (outcome) {
                                 is ExportPipelineResult.Published<*> -> {
+                                    releaseExportBusyIfOwned(exportIdentity)
                                     val mutation =
                                         outcome.metadata as SavedExportHistoryMutation
                                     val currentRevision = historyStore.revision
@@ -6308,7 +6331,6 @@ fun exportPreview() {
                                             }
                                         if (isCurrentExportForUi(exportIdentity)) {
                                             current.copy(
-                                                isBusy = false,
                                                 savedExports = merged,
                                                 message =
                                                     "이미지가 Gallery > Pictures/KeplerStudio에 저장되었고, 앱 내 내보낸 사진 기록에도 추가되었습니다.",
@@ -6320,10 +6342,10 @@ fun exportPreview() {
                                 }
                                 is ExportPipelineResult.PublishedWithMetadataFailure -> {
                                     lastExportFailureForTest = outcome.failure
+                                    releaseExportBusyIfOwned(exportIdentity)
                                     if (isCurrentExportForUi(exportIdentity)) {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
-                                                isBusy = false,
                                                 message =
                                                     "이미지는 갤러리에 저장되었지만 앱 내 내보낸 사진 기록을 저장하지 못했습니다.",
                                             )
@@ -6333,10 +6355,10 @@ fun exportPreview() {
                                 is ExportPipelineResult.Failed -> {
                                     lastExportFailureForTest = outcome.failure
                                     val failure = outcome.failure
+                                    releaseExportBusyIfOwned(exportIdentity)
                                     if (isCurrentExportForUi(exportIdentity)) {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
-                                                isBusy = false,
                                                 message =
                                                     "이미지를 내보내지 못했습니다.",
                                             )
@@ -6355,10 +6377,10 @@ fun exportPreview() {
                                 }
                                 is ExportPipelineResult.CleanupFailed -> {
                                     lastExportFailureForTest = outcome.cleanupFailure
+                                    releaseExportBusyIfOwned(exportIdentity)
                                     if (isCurrentExportForUi(exportIdentity)) {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
-                                                isBusy = false,
                                                 message =
                                                     "이미지를 내보내지 못했으며 임시 파일을 정리하지 못했습니다.",
                                             )
@@ -6373,22 +6395,14 @@ fun exportPreview() {
                                     // export (revision-only mutation), this
                                     // stale owner must clear its own busy state
                                     // — no newer owner exists to take it over.
-                                    if (isCurrentExportOwnerForUi(exportIdentity)) {
-                                        updateUiStateAndRecycleReplaced { current ->
-                                            current.copy(isBusy = false)
-                                        }
-                                    }
+                                    releaseExportBusyIfOwned(exportIdentity)
                                 }
                             }
                         }
                     } catch (ce: kotlinx.coroutines.CancellationException) {
                         // A cancelled export that hasn't been superseded by a
                         // newer owner must clear its busy state.
-                        if (exportJob === exportCoroutine) {
-                            updateUiStateAndRecycleReplaced { current ->
-                                current.copy(isBusy = false)
-                            }
-                        }
+                        releaseExportBusyIfJobOwned(exportCoroutine)
                         throw ce
                     } catch (t: Throwable) {
                         // A pre-publish throw from render preparation is the
@@ -6396,18 +6410,12 @@ fun exportPreview() {
                         // exceptions surface as ExportPipelineResult.Failed;
                         // reaching here implies a transfer/Settlement failure.
                         lastExportFailureForTest = t
+                        releaseExportBusyIfJobOwned(exportCoroutine)
                         if (isCurrentExportForUi(exportIdentity)) {
                             updateUiStateAndRecycleReplaced { current ->
                                 current.copy(
-                                    isBusy = false,
                                     message = "이미지를 내보내지 못했습니다.",
                                 )
-                            }
-                        } else if (exportJob === exportCoroutine) {
-                            // The owning export was cancelled/stale without a
-                            // newer owner taking over; this owner must clear busy.
-                            updateUiStateAndRecycleReplaced { current ->
-                                current.copy(isBusy = false)
                             }
                         }
                         if (

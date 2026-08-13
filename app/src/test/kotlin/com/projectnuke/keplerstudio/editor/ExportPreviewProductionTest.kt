@@ -199,6 +199,74 @@ class ExportPreviewProductionTest {
     }
 
     @Test
+    fun exportSettlesBusyAfterSuccessfulLeaveWithoutOverwritingLeaveState() = runBlocking {
+        val rows = RecordingRows().also { it.enableEncodingGate() }
+        val history = RecordingHistoryStore(context)
+        val editor = editorWithDirtyBase(baseBitmapDirty = false)
+        installSeam(rows, history)
+        val draftSeam = DraftSaveTestSeam()
+        harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+        editor.exportPreview()
+        awaitMainUntil { rows.encodeStarted.isCompleted && editor.uiState.value.isBusy }
+
+        val leaveToken = editor.requestSaveAndLeave()
+        awaitMainUntil { draftSeam.reached.isCompleted }
+        draftSeam.releaseGate.complete(Unit)
+        awaitCompletion(editor) {
+            editor.editorLeaveState.value.phase == EditorLeavePhase.Completed ||
+                editor.editorLeaveState.value.phase == EditorLeavePhase.Failed
+        }
+        assertEquals(EditorLeavePhase.Completed, editor.editorLeaveState.value.phase)
+        assertTrue(editor.uiState.value.isBusy)
+
+        rows.releaseEncoding()
+        awaitCompletion(editor) { !editor.exportJobActiveForTest() }
+
+        assertFalse(editor.uiState.value.isBusy)
+        assertEquals(EditorLeavePhase.Completed, editor.editorLeaveState.value.phase)
+        assertEquals(1, rows.published.get())
+        assertEquals(1, editor.uiState.value.savedExports.size)
+        editor.acknowledgeEditorLeave(leaveToken)
+        assertEquals(EditorLeavePhase.Idle, editor.editorLeaveState.value.phase)
+        assertTrue(editor.canEnterEditorActionPure())
+    }
+
+    @Test
+    fun exportSettlesBusyAfterFailedLeaveAndDoesNotReplaceFailure() = runBlocking {
+        val rows = RecordingRows().also { it.enableEncodingGate() }
+        val history = RecordingHistoryStore(context)
+        val editor = editorWithDirtyBase(baseBitmapDirty = false)
+        installSeam(rows, history)
+        val draftSeam = DraftSaveTestSeam(failure = IllegalStateException("final draft failure"))
+        val draftHandle = harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+
+        editor.exportPreview()
+        awaitMainUntil { rows.encodeStarted.isCompleted && editor.uiState.value.isBusy }
+
+        val leaveToken = editor.requestSaveAndLeave()
+        awaitMainUntil { draftSeam.reached.isCompleted }
+        draftSeam.releaseGate.complete(Unit)
+        awaitMainUntil {
+            editor.editorLeaveState.value.phase == EditorLeavePhase.Failed
+        }
+        val leaveMessage = editor.editorLeaveState.value.message
+        assertTrue(editor.uiState.value.isBusy)
+
+        rows.releaseEncoding()
+        awaitCompletion(editor) { !editor.exportJobActiveForTest() }
+
+        assertFalse(editor.uiState.value.isBusy)
+        assertEquals(EditorLeavePhase.Failed, editor.editorLeaveState.value.phase)
+        assertEquals(leaveMessage, editor.editorLeaveState.value.message)
+        assertFalse(editor.uiState.value.message?.contains("Gallery") == true)
+
+        editor.acknowledgeEditorLeave(leaveToken)
+        assertEquals(EditorLeavePhase.Idle, editor.editorLeaveState.value.phase)
+        assertTrue(editor.canEnterEditorActionPure())
+        draftHandle.close()
+    }
+
+    @Test
     fun cancellationWhilePendingRemovesRowAndSettles() = runBlocking {
         val rows = RecordingRows().also { it.enableEncodingGate() }
         val history = RecordingHistoryStore(context)
@@ -343,22 +411,24 @@ class ExportPreviewProductionTest {
         installSeam(rows, history)
     }
 
-    private fun editorWithDirtyBase(): EditorViewModel {
+    private fun editorWithDirtyBase(baseBitmapDirty: Boolean = true): EditorViewModel {
         val vm = harness.createEditor()
+        awaitInit(vm)
         val base = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
         base.eraseColor(0xff112233.toInt())
+        val source = context.filesDir.resolve("export-source.png")
+        source.outputStream().use { check(base.compress(Bitmap.CompressFormat.PNG, 100, it)) }
         vm.updateUiState {
             it.copy(
-                sourcePath = "/tmp/source_for_export.png",
+                sourcePath = source.absolutePath,
                 baseContentToken = "export-base-token",
                 previewBitmap = base,
                 originalPreviewBitmap = base,
-                baseBitmapDirty = true,
+                baseBitmapDirty = baseBitmapDirty,
                 exportFormat = ExportFormat.Png,
                 exportResolution = ExportResolution.Full,
             )
         }
-        awaitInit(vm)
         awaitReady(vm)
         return vm
     }
@@ -390,7 +460,10 @@ class ExportPreviewProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
         }
-        assertTrue(predicate())
+        assertTrue(
+            "state=${vm.editorLeaveState.value} ui=${vm.uiState.value} ownership=${vm.debugResidentOwnership()}",
+            predicate(),
+        )
     }
 
     /** Pumps the Main looper (and gives background a turn) until [predicate]

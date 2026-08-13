@@ -130,15 +130,22 @@ class MainActivity : ComponentActivity() {
             }
             LaunchedEffect(leaveState.token, leaveState.phase) {
                 val token = leaveState.token ?: return@LaunchedEffect
+                if (
+                    !shouldHandleEditorLeaveTerminal(
+                        leaveState.phase,
+                        token,
+                        lastHandledLeaveToken,
+                    )
+                ) {
+                    return@LaunchedEffect
+                }
+                lastHandledLeaveToken = token
                 when (leaveState.phase) {
                     com.projectnuke.keplerstudio.editor.EditorLeavePhase.Completed -> {
-                        if (token != lastHandledLeaveToken) lastHandledLeaveToken = token
                         showLeaveDialog = false
                         appMode = AppMode.Home
                     }
                     com.projectnuke.keplerstudio.editor.EditorLeavePhase.Failed -> {
-                        if (token == lastHandledLeaveToken) return@LaunchedEffect
-                        lastHandledLeaveToken = token
                         Toast.makeText(
                             context,
                             leaveState.message ?: "\uC784\uC2DC \uC800\uC7A5\uC5D0 \uC2E4\uD328\uD588\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1 \uD654\uBA74\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4.",

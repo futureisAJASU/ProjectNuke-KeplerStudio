@@ -207,6 +207,43 @@ class ExternalIntentCoordinationProductionTest {
         }
     }
 
+    @Test
+    fun acceptedExternalContinuationIsCancelledBySaveAndLeave() {
+        val sourceFile = draftSourceFile("intent-leave-source.png")
+        val setup = openAdoptedTransaction(sourceFile.absolutePath)
+        val vm = setup.vm
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+        try {
+            val beforeRevision = vm.uiState.value.revision
+            vm.applyCorrectionEngineToCurrentDocument(CorrectionEngine.Engine2)
+            assertTrue(
+                awaitEvent(vm) { gate.reached.isCompleted && vm.uiState.value.historyBusy }
+            )
+
+            val draftSeam = DraftSaveTestSeam()
+            harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+            vm.requestSaveAndLeave()
+            gate.releaseGate.complete(Unit)
+            assertTrue(awaitEvent(vm) { draftSeam.reached.isCompleted })
+            draftSeam.releaseGate.complete(Unit)
+            assertTrue(
+                awaitEvent(vm) {
+                    vm.editorLeaveState.value.phase == EditorLeavePhase.Completed
+                }
+            )
+
+            assertEquals(beforeRevision + 1, vm.uiState.value.revision)
+            assertEquals(CorrectionEngine.Engine1, vm.uiState.value.correctionEngineState.documentEngine)
+            assertEquals(1, vm.undoEntryCountForTest())
+        } finally {
+            gate.releaseGate.complete(Unit)
+            setup.renderer.close()
+            setup.hooks.close()
+            sourceFile.delete()
+        }
+    }
+
     // Test 2: preset look settles the adopted transaction exactly once, then
     // the preset applies the new params on top of the committed state.
     @Test

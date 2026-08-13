@@ -4,12 +4,14 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
 import com.projectnuke.keplerstudio.ui.paintActiveSelectionAt
+import com.projectnuke.keplerstudio.ui.updateActiveSelectionParamsLive
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.Collections
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -320,6 +322,178 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
         assertEquals(1, vm.uiState.value.revision)
         assertTrue(vm.uiState.value.canUndo)
         assertTrue(vm.uiState.value.selectionLayers.single().bitmap.getPixel(3, 3) != 0)
+    }
+
+    @Test
+    fun pendingBrushPreparationIsCancelledBeforeWorkingMaskAdoption() = runBlocking {
+        val source = sourceFile("leave-preparing-brush.png")
+        val vm = editorWithDocumentAndMask(source)
+        val seam = BrushPreparationTestSeam()
+        harness.ownSeam(BrushPreparationTestSeam.install(seam))
+
+        assertTrue(vm.beginBrushStroke())
+        await { seam.reached.isCompleted && vm.isBrushPreparing() }
+        vm.requestSaveAndLeave()
+        await { vm.editorLeaveState.value.phase == EditorLeavePhase.Completed }
+
+        assertTrue(!vm.hasActiveBrushStroke())
+        assertTrue(!vm.isBrushPreparing())
+        assertTrue(!vm.uiState.value.canUndo)
+        seam.releaseGate.complete(Unit)
+        await { vm.brushSnapshotJobActiveForTest() == false }
+        assertTrue(!vm.uiState.value.canUndo)
+    }
+
+    @Test
+    fun pendingSelectionStartIsCancelledBeforeLeaveDraftCapture() = runBlocking {
+        val source = sourceFile("leave-pending-selection.png")
+        val vm = editorWithDocumentAndMask(source)
+        harness.ownSeam(EditorRenderer.installRendererOverrideForTest { request ->
+            RenderResult.Success(
+                operation = request.operation,
+                requestedRoute = NativeRenderRoute.V1,
+                output = bitmap(0xff224466.toInt(), 8, 4),
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        })
+        val adopted = CompletableDeferred<Unit>()
+        harness.ownSeam(
+            ParameterLifecycleTestHook.install(
+                ParameterLifecycleHooks(onRenderOutputAdopted = { adopted.complete(Unit) })
+            )
+        )
+        vm.updateParams { it.copy(exposure = 0.2f) }
+        await { adopted.isCompleted && vm.adoptedParamsForTest()?.exposure == 0.2f }
+        await { !vm.historyActivityBusyForTest() }
+        val gate = HistoryAdmissionTestSeam()
+        harness.ownSeam(HistoryAdmissionTestSeam.install(gate))
+
+        assertTrue(vm.startSelectionParamGesture())
+        await { gate.reached.isCompleted && vm.pendingSelectionParamStart() != null }
+        val before = vm.uiState.value
+        vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.8f) }
+
+        vm.requestSaveAndLeave()
+        gate.releaseSuccess()
+        await { vm.editorLeaveState.value.phase == EditorLeavePhase.Completed }
+
+        assertNull(vm.pendingSelectionParamStart())
+        assertNull(vm.currentSelectionParamTransaction())
+        assertEquals(before.revision, vm.uiState.value.revision)
+        assertEquals(
+            before.selectionLayers.single().localParams,
+            vm.uiState.value.selectionLayers.single().localParams,
+        )
+    }
+
+    @Test
+    fun activeSelectionTransactionIsSettledBeforeLeaveDraftCapture() = runBlocking {
+        val source = sourceFile("leave-active-selection.png")
+        val vm = editorWithDocumentAndMask(source)
+        val output = bitmap(0xff224466.toInt(), 8, 4)
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest {
+                RenderResult.Success(
+                    operation = RenderOperation.SelectionLivePreview,
+                    requestedRoute = NativeRenderRoute.V1,
+                    output = output,
+                    actualRoute = NativeRenderRoute.V1,
+                    decision = RenderRouteDecision.FollowDocument,
+                    usedDebugOverride = false,
+                    algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                    participation = RenderParticipation(),
+                    durationMillis = 0L,
+                    knownTransientBytes = 0L,
+                )
+            }
+        try {
+            assertTrue(vm.startSelectionParamGesture())
+            val transaction = checkNotNull(vm.currentSelectionParamTransaction())
+            vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.35f) }
+            await { transaction.succeeded && vm.currentSelectionParamTransaction() === transaction }
+            val draftSeam = DraftSaveTestSeam()
+            harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+
+            vm.requestSaveAndLeave()
+            await { draftSeam.reached.isCompleted }
+            draftSeam.releaseGate.complete(Unit)
+            await { vm.editorLeaveState.value.phase == EditorLeavePhase.Completed }
+
+            assertNull(vm.currentSelectionParamTransaction())
+            assertEquals(0.35f, vm.uiState.value.selectionLayers.single().localParams.exposure)
+            assertNotNull(vm.uiState.value.draftGenerationId)
+        } finally {
+            renderer.close()
+            if (!output.isRecycled) output.recycle()
+        }
+    }
+
+    @Test
+    fun memoryRecoveryOwnerIsInvalidatedBeforeLeaveSave() = runBlocking {
+        val source = sourceFile("leave-memory-recovery.png")
+        val vm = editorWithDocument(source)
+        val recovery = MemoryRecoveryTestSeam()
+        harness.ownSeam(MemoryRecoveryTestSeam.install(recovery))
+        vm.requestAllocationRecovery(MemoryRetryAction.CreateBrushSelection, Long.MAX_VALUE)
+        await { recovery.automaticReached.isCompleted }
+
+        val draftSeam = DraftSaveTestSeam()
+        harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+        vm.requestSaveAndLeave()
+        await { draftSeam.reached.isCompleted }
+        draftSeam.releaseGate.complete(Unit)
+        await { vm.editorLeaveState.value.phase == EditorLeavePhase.Completed }
+
+        assertNull(vm.memoryRecoveryOwnerPhaseForTest())
+        assertNull(vm.uiState.value.memoryRecoveryRequest)
+        assertEquals(1, recovery.automaticEntryCount)
+        assertEquals(0, recovery.cleanupStarted)
+    }
+
+    @Test
+    fun representativeActionsAreRejectedWhileLeaveIsSaving() = runBlocking {
+        val source = sourceFile("leave-admission.png")
+        val vm = editorWithDocument(source)
+        val seam = DraftSaveTestSeam()
+        harness.ownSeam(DraftSaveTestSeam.install(seam))
+        vm.requestSaveAndLeave()
+        await { seam.reached.isCompleted }
+        val before = vm.uiState.value
+
+        vm.updateParams { it.copy(exposure = 0.9f) }
+        vm.rotatePreview90()
+        vm.undoEdit()
+        vm.openImage(Uri.parse("content://leave/rejected"))
+
+        assertEquals(before.revision, vm.uiState.value.revision)
+        assertEquals(before.sourcePath, vm.uiState.value.sourcePath)
+        assertEquals(EditorLeavePhase.Saving, vm.editorLeaveState.value.phase)
+        seam.releaseGate.complete(Unit)
+        await { vm.editorLeaveState.value.phase == EditorLeavePhase.Completed }
+    }
+
+    @Test
+    fun viewModelTeardownClosesActiveLeaveWithoutLateCompletion() = runBlocking {
+        val source = sourceFile("leave-shutdown.png")
+        val vm = editorWithDocument(source)
+        val seam = DraftSaveTestSeam()
+        harness.ownSeam(DraftSaveTestSeam.install(seam))
+        vm.requestSaveAndLeave()
+        await { seam.reached.isCompleted }
+        harness.beforeClear { seam.releaseGate.complete(Unit) }
+
+        harness.clearViewModels()
+
+        assertEquals(EditorLeavePhase.Closed, vm.editorLeaveState.value.phase)
+        assertTrue(!vm.hasActiveViewModelJobsForTest())
+        seam.releaseGate.complete(Unit)
+        assertEquals(EditorLeavePhase.Closed, vm.editorLeaveState.value.phase)
     }
 
     private fun editorWithDocument(source: File): EditorViewModel {
