@@ -191,6 +191,7 @@ class EditorScreenV2UiTest {
                 toneEngine = ToneEngine.HistogramAuto,
                 hazeEngine = DehazeEngine.FastContrast,
                 correctionEngineState = correctionEngineState,
+                documentActionAvailable = true,
                 maintenanceBusy = false,
                 comparisonBusy = false,
                 onRetentionSelected = {},
