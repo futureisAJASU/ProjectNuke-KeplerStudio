@@ -1,5 +1,9 @@
 package com.projectnuke.keplerstudio.ui
 
+import android.graphics.Bitmap
+import androidx.lifecycle.ViewModelStore
+import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.GlobalModelDiagnostics
 import com.projectnuke.keplerstudio.editor.ModelRuntimeType
 import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.ModelCapabilityPhase
@@ -7,6 +11,9 @@ import com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelLoadResult
 import com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle
+import com.projectnuke.keplerstudio.editor.ModelFailureReason
+import com.projectnuke.keplerstudio.editor.ModelRunResult
+import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertEquals
@@ -33,19 +40,24 @@ import java.util.concurrent.atomic.AtomicInteger
 @Config(sdk = [29])
 class RemasterModelSessionValidationTest {
     private var testSeam: AutoCloseable? = null
+    private var inferenceTestSeam: AutoCloseable? = null
 
     @Before
     fun resetSession() = runBlocking {
         RemasterModelSession.unloadIdleNow()
         ModelAvailabilityRegistry.resetForTest()
+        GlobalModelDiagnostics.resetForTest(true)
     }
 
     @After
     fun closeSession() = runBlocking {
         testSeam?.close()
         testSeam = null
+        inferenceTestSeam?.close()
+        inferenceTestSeam = null
         RemasterModelSession.unloadIdleNow()
         ModelAvailabilityRegistry.resetForTest()
+        GlobalModelDiagnostics.resetForTest()
     }
 
     private fun token(epoch: Long) =
@@ -645,6 +657,239 @@ class RemasterModelSessionValidationTest {
         override fun close() {
             closeCount += 1
         }
+    }
+
+    @Test
+    fun `unload during inference closes without publishing loaded`() = runBlocking {
+        val runner = FakeRunner()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        assertTrue(RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) is ModelLoadResult.Ready)
+
+        val accepted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        inferenceTestSeam = RemasterModelSession.installInferenceTestSeam(
+            onStage = { stage ->
+                if (stage == RemasterModelSession.InferenceStage.BeforeNativeInference) {
+                    accepted.complete(Unit)
+                    release.await()
+                }
+            },
+            onClose = { release.complete(Unit) },
+        )
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        val operation = ModelOperationContext(1L, "document")
+        val inference = async(Dispatchers.Default) {
+            RemasterModelSession.createForegroundMaskResult(bitmap, operation = operation)
+        }
+
+        accepted.await()
+        assertEquals(ModelRunnerLifecycle.Inferencing, RemasterModelSession.lifecycle)
+        RemasterModelSession.unload()
+        assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
+        assertFalse(RemasterModelSession.canStartInferenceForTest())
+        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionActive)
+        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
+        assertEquals("closing", GlobalModelDiagnostics.snapshot().single().state)
+
+        val secondInference = async(Dispatchers.Default) {
+            RemasterModelSession.createForegroundMaskResult(
+                bitmap,
+                operation = ModelOperationContext(11L, "document"),
+            )
+        }
+        release.complete(Unit)
+        val result = inference.await()
+        val secondResult = secondInference.await()
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Unloaded }
+
+        assertTrue(result is ModelRunResult.Failure)
+        assertEquals(ModelFailureReason.Closed, (result as ModelRunResult.Failure).failure.reason)
+        assertTrue(secondResult is ModelRunResult.Failure)
+        assertEquals(ModelFailureReason.Closed, (secondResult as ModelRunResult.Failure).failure.reason)
+        assertEquals(1, runner.closeCount)
+        assertFalse(RemasterModelSession.isModelLoaded)
+        assertFalse(RemasterModelSession.isModelLoading)
+        assertFalse(RemasterModelSession.isInferring)
+        assertEquals(null, RemasterModelSession.activeModel)
+        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionActive)
+        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
+        assertTrue(GlobalModelDiagnostics.snapshot().isEmpty())
+        bitmap.recycle()
+    }
+
+    @Test
+    fun `validation epoch replacement rejects stale inference and closes its session`() = runBlocking {
+        val runner = FakeRunner()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        assertTrue(RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) is ModelLoadResult.Ready)
+
+        val accepted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        inferenceTestSeam = RemasterModelSession.installInferenceTestSeam(
+            onStage = { stage ->
+                if (stage == RemasterModelSession.InferenceStage.BeforeNativeInference) {
+                    accepted.complete(Unit)
+                    release.await()
+                }
+            },
+            onClose = { release.complete(Unit) },
+        )
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        val inference = async(Dispatchers.Default) {
+            RemasterModelSession.createForegroundMaskResult(
+                bitmap,
+                operation = ModelOperationContext(2L, "document"),
+            )
+        }
+        accepted.await()
+
+        ModelAvailabilityRegistry.beginProbe()
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        release.complete(Unit)
+        val result = inference.await()
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Unloaded }
+
+        assertTrue(result is ModelRunResult.Failure)
+        assertNotEquals(ModelFailureReason.InferenceFailed, (result as ModelRunResult.Failure).failure.reason)
+        assertEquals(1, runner.closeCount)
+        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
+        bitmap.recycle()
+    }
+
+    @Test
+    fun `unloadIdleNow waits for inference and reclaims the exact runner once`() = runBlocking {
+        val runner = FakeRunner()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        assertTrue(RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) is ModelLoadResult.Ready)
+
+        val accepted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        inferenceTestSeam = RemasterModelSession.installInferenceTestSeam(
+            onStage = { stage ->
+                if (stage == RemasterModelSession.InferenceStage.BeforeNativeInference) {
+                    accepted.complete(Unit)
+                    release.await()
+                }
+            },
+            onClose = { release.complete(Unit) },
+        )
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        val inference = async(Dispatchers.Default) {
+            RemasterModelSession.createForegroundMaskResult(
+                bitmap,
+                operation = ModelOperationContext(3L, "document"),
+            )
+        }
+        accepted.await()
+
+        val reclaim = async(Dispatchers.Default) { RemasterModelSession.unloadIdleNow() }
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Closing }
+        assertFalse(RemasterModelSession.canStartInferenceForTest())
+        release.complete(Unit)
+
+        assertTrue(reclaim.await())
+        val result = inference.await()
+        assertTrue(result is ModelRunResult.Failure)
+        assertEquals(1, runner.closeCount)
+        assertEquals(ModelRunnerLifecycle.Unloaded, RemasterModelSession.lifecycle)
+        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionActive)
+        bitmap.recycle()
+    }
+
+    @Test
+    fun `unload A cannot close newer load B`() = runBlocking {
+        val runnerA = FakeRunner()
+        val runnerB = FakeRunner()
+        val runners = ArrayDeque<FakeRunner>().apply {
+            add(runnerA)
+            add(runnerB)
+        }
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runners.removeFirst() })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        val context = RuntimeEnvironment.getApplication()
+        assertTrue(RemasterModelSession.ensureEdgeLoaded(context) is ModelLoadResult.Ready)
+
+        val accepted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        inferenceTestSeam = RemasterModelSession.installInferenceTestSeam(
+            onStage = { stage ->
+                if (stage == RemasterModelSession.InferenceStage.BeforeNativeInference) {
+                    accepted.complete(Unit)
+                    release.await()
+                }
+            },
+            onClose = { release.complete(Unit) },
+        )
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        val inference = async(Dispatchers.Default) {
+            RemasterModelSession.createForegroundMaskResult(
+                bitmap,
+                operation = ModelOperationContext(4L, "document"),
+            )
+        }
+        accepted.await()
+        RemasterModelSession.unload()
+        assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
+
+        RemasterModelSession.load(context, edgeCandidate())
+        release.complete(Unit)
+        inference.await()
+        awaitCondition {
+            RemasterModelSession.lifecycle == ModelRunnerLifecycle.Loaded &&
+                RemasterModelSession.installedRunnerForTest() === runnerB
+        }
+
+        assertEquals(1, runnerA.closeCount)
+        assertEquals(0, runnerB.closeCount)
+        assertTrue(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionActive)
+        assertTrue(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
+        bitmap.recycle()
+    }
+
+    @Test
+    fun `editor teardown logically closes an in-flight model session`() = runBlocking {
+        val editorStore = ViewModelStore()
+        val editor = EditorViewModel(RuntimeEnvironment.getApplication())
+        editorStore.put("editor", editor)
+
+        val runner = FakeRunner()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        assertTrue(RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) is ModelLoadResult.Ready)
+
+        val accepted = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        inferenceTestSeam = RemasterModelSession.installInferenceTestSeam(
+            onStage = { stage ->
+                if (stage == RemasterModelSession.InferenceStage.BeforeNativeInference) {
+                    accepted.complete(Unit)
+                    release.await()
+                }
+            },
+            onClose = { release.complete(Unit) },
+        )
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        val inference = async(Dispatchers.Default) {
+            RemasterModelSession.createForegroundMaskResult(
+                bitmap,
+                operation = ModelOperationContext(5L, "document"),
+            )
+        }
+        accepted.await()
+
+        editorStore.clear()
+        assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
+        assertFalse(RemasterModelSession.canStartInferenceForTest())
+        release.complete(Unit)
+
+        val result = inference.await()
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Unloaded }
+        assertTrue(result is ModelRunResult.Failure)
+        assertEquals(1, runner.closeCount)
+        bitmap.recycle()
     }
 
     private suspend fun awaitIdle(ms: Long) {

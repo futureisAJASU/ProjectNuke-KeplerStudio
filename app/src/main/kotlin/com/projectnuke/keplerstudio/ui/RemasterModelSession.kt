@@ -9,6 +9,7 @@ import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
 import com.projectnuke.keplerstudio.editor.GlobalModelDiagnostics
+import com.projectnuke.keplerstudio.editor.BitmapAllocationRejectedException
 import com.projectnuke.keplerstudio.editor.DeterministicModelFallback
 import com.projectnuke.keplerstudio.editor.MemoryTrackerScope
 import com.projectnuke.keplerstudio.editor.ModelAlphaHandling
@@ -42,6 +43,7 @@ import kotlin.math.max
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -49,6 +51,62 @@ import kotlinx.coroutines.sync.withLock
 
 object RemasterModelSession : ModelRunnerContract {
     private val EDGE_FEATURES = listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection)
+    private val sessionStateLock = Any()
+
+    private enum class SessionCommandKind { Load, EnsureLoaded, Unload, IdleUnload }
+
+    private class SessionCommand(
+        val generation: Long,
+        val kind: SessionCommandKind,
+    ) {
+        var job: Job? = null
+    }
+
+    /** Physical ownership remains until the runner has drained and is closed. */
+    private class InstalledSessionOwner(
+        val commandGeneration: Long,
+        val registrySessionGeneration: Long,
+        val validationIdentity: ModelSessionValidationIdentity,
+        val candidate: RemasterModelCandidate,
+        val runner: AutoCloseable,
+    ) {
+        var registryClosed: Boolean = false
+        var physicallyClosed: Boolean = false
+    }
+
+    internal enum class InferenceStage {
+        Accepted,
+        BeforeNativeInference,
+        AfterNativeInference,
+        BeforeResultPublication,
+        Finalizer,
+    }
+
+    private class InferenceTestSeam(
+        private val onStage: (suspend (InferenceStage) -> Unit)?,
+        private val onClose: (() -> Unit)?,
+    ) {
+        @Volatile private var active = true
+
+        suspend fun atStage(stage: InferenceStage) {
+            if (active) onStage?.invoke(stage)
+        }
+
+        fun deactivate() {
+            if (active) {
+                active = false
+                runCatching { onClose?.invoke() }
+            }
+        }
+    }
+
+    private val inferenceTestOwnerLock = Any()
+    private var installedInferenceTestSeam: InferenceTestSeam? = null
+    private val installedInferenceTestSeamCount = AtomicLong()
+
+    private var currentCommand: SessionCommand? = null
+    private var installedSessionOwner: InstalledSessionOwner? = null
+
     var activeModel by mutableStateOf<RemasterModelCandidate?>(null)
         private set
 
@@ -154,17 +212,151 @@ object RemasterModelSession : ModelRunnerContract {
                 )
             }
 
-    fun load(context: Context, candidate: RemasterModelCandidate) {
-        val generation = commandGeneration.incrementAndGet()
-        val seam = synchronized(modelTestOwnerLock) { installedModelTestOwner }
-        isModelLoading = true
+    private fun beginCommand(kind: SessionCommandKind): SessionCommand =
+        synchronized(sessionStateLock) {
+            SessionCommand(commandGeneration.incrementAndGet(), kind).also { command ->
+                currentCommand = command
+            }
+        }
+
+    private fun bindCommandJob(command: SessionCommand, job: Job) {
+        synchronized(sessionStateLock) { command.job = job }
+    }
+
+    private fun clearCommandIfOwned(command: SessionCommand) {
+        synchronized(sessionStateLock) {
+            if (currentCommand === command) currentCommand = null
+            if (command.job?.isCompleted == true) command.job = null
+        }
+    }
+
+    private fun isCurrentCommand(generation: Long): Boolean =
+        synchronized(sessionStateLock) {
+            currentCommand?.generation == generation && commandGeneration.get() == generation
+        }
+
+    private fun setStatusIfCurrent(generation: Long, text: String) {
+        synchronized(sessionStateLock) {
+            if (isCurrentCommand(generation)) statusText = text
+        }
+    }
+
+    private fun captureInferenceTestSeam(): InferenceTestSeam? =
+        synchronized(inferenceTestOwnerLock) { installedInferenceTestSeam }
+
+    private fun sessionValidationIsCurrent(owner: InstalledSessionOwner): Boolean {
+        val token =
+            (ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
+                as? ModelLoadResult.Ready)?.runner
+                ?: return false
+        return token.sessionIdentity() == owner.validationIdentity &&
+            ModelAvailabilityRegistry.isCurrent(token)
+    }
+
+    private fun isCurrentInferenceOwner(owner: InstalledSessionOwner): Boolean =
+        synchronized(sessionStateLock) {
+            installedSessionOwner === owner &&
+                commandGeneration.get() == owner.commandGeneration &&
+                lifecycle == ModelRunnerLifecycle.Inferencing &&
+                isModelLoaded &&
+                !isModelLoading &&
+                sessionValidationIdentity == owner.validationIdentity &&
+                registrySessionGeneration == owner.registrySessionGeneration
+        } && sessionValidationIsCurrent(owner)
+
+    private fun isCurrentInferenceOwnerForAdmission(owner: InstalledSessionOwner): Boolean =
+        synchronized(sessionStateLock) {
+            installedSessionOwner === owner &&
+                commandGeneration.get() == owner.commandGeneration &&
+                lifecycle in setOf(ModelRunnerLifecycle.Loaded, ModelRunnerLifecycle.Inferencing) &&
+                isModelLoaded &&
+                !isModelLoading &&
+                sessionValidationIdentity == owner.validationIdentity &&
+                registrySessionGeneration == owner.registrySessionGeneration
+        } && sessionValidationIsCurrent(owner)
+
+    private fun staleInferenceFailure(owner: InstalledSessionOwner): ModelRunResult.Failure {
+        val reason = synchronized(sessionStateLock) {
+            when {
+                installedSessionOwner !== owner ||
+                    lifecycle == ModelRunnerLifecycle.Closing ||
+                    lifecycle == ModelRunnerLifecycle.Unloaded -> ModelFailureReason.Closed
+                commandGeneration.get() != owner.commandGeneration -> ModelFailureReason.StaleGeneration
+                else -> ModelFailureReason.CapabilityUnknown
+            }
+        }
+        return ModelRunResult.Failure(
+            ModelFailure(reason),
+            DeterministicModelFallback.NoResult,
+        )
+    }
+
+    private fun clearPublicSessionFields() {
+        closeableModel = null
+        sessionValidationIdentity = null
+        registrySessionGeneration = 0L
+        installedCommandGeneration = 0L
+        activeModel = null
         isModelLoaded = false
-        lifecycle = ModelRunnerLifecycle.Loading
-        statusText = "모델을 불러오는 중입니다."
-        GlobalModelDiagnostics.publish("RemasterModelSession", "loading")
-        modelScope.launch {
-            modelMutex.withLock {
-                if (generation != commandGeneration.get()) return@withLock
+    }
+
+    /** Logical close is published before physical close so new inference cannot enter. */
+    private fun requestLogicalCloseLocked() {
+        val owner = installedSessionOwner
+        if (owner != null) {
+            if (!owner.registryClosed) {
+                ModelAvailabilityRegistry.reportSessionClosed(EDGE_FEATURES, owner.registrySessionGeneration)
+                owner.registryClosed = true
+            }
+            clearPublicSessionFields()
+            return
+        }
+        // During the narrow Session Ready -> field transfer window the local
+        // runner still owns the physical resource, but the registry/public
+        // fields may already describe it. Close that logical publication here;
+        // the suspended publication finally still closes the local runner.
+        if (registrySessionGeneration != 0L) {
+            ModelAvailabilityRegistry.reportSessionClosed(EDGE_FEATURES, registrySessionGeneration)
+        }
+        if (closeableModel != null || activeModel != null || registrySessionGeneration != 0L) {
+            clearPublicSessionFields()
+        }
+    }
+
+    private fun publishUnloadedIfCurrent(generation: Long): Boolean {
+        val published = synchronized(sessionStateLock) {
+            if (!isCurrentCommand(generation)) {
+                false
+            } else {
+                isModelLoaded = false
+                isModelLoading = false
+                isInferring = false
+                lifecycle = ModelRunnerLifecycle.Unloaded
+                clearPublicSessionFields()
+                statusText = "\uB85C\uB4DC\uB41C \uBAA8\uB378\uC774 \uC5C6\uC2B5\uB2C8\uB2E4."
+                GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
+                true
+            }
+        }
+        return published
+    }
+
+    fun load(context: Context, candidate: RemasterModelCandidate) {
+        val command = beginCommand(SessionCommandKind.Load)
+        val generation = command.generation
+        val seam = synchronized(modelTestOwnerLock) { installedModelTestOwner }
+        synchronized(sessionStateLock) {
+            requestLogicalCloseLocked()
+            isModelLoading = true
+            isModelLoaded = false
+            lifecycle = ModelRunnerLifecycle.Loading
+            statusText = "모델을 불러오는 중입니다."
+            GlobalModelDiagnostics.publish("RemasterModelSession", "loading")
+        }
+        val job = modelScope.launch {
+            try {
+                modelMutex.withLock {
+                    if (!isCurrentCommand(generation)) return@withLock
                 val result = publishCandidateLocked(
                     context.applicationContext,
                     candidate,
@@ -172,57 +364,108 @@ object RemasterModelSession : ModelRunnerContract {
                     generation,
                     seam,
                 )
-                if (generation == commandGeneration.get()) {
-                    statusText = statusTextFor(candidate, result)
+                if (isCurrentCommand(generation)) {
+                    setStatusIfCurrent(generation, statusTextFor(candidate, result))
                 }
             }
+            } finally {
+                clearCommandIfOwned(command)
+            }
         }
+        bindCommandJob(command, job)
     }
 
     internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> {
-        val generation = commandGeneration.incrementAndGet()
+        val reusableOwner = synchronized(sessionStateLock) {
+            installedSessionOwner?.takeIf {
+                lifecycle in setOf(ModelRunnerLifecycle.Loaded, ModelRunnerLifecycle.Inferencing) &&
+                    isModelLoaded &&
+                    !isModelLoading
+            }
+        }
+        if (reusableOwner != null && sessionValidationIsCurrent(reusableOwner)) {
+            return modelMutex.withLock {
+                if (installedSessionOwner === reusableOwner &&
+                    lifecycle != ModelRunnerLifecycle.Closing &&
+                    isModelLoaded &&
+                    sessionValidationIsCurrent(reusableOwner)
+                ) {
+                    statusText = "${reusableOwner.candidate.title} \uBAA8\uB378\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."
+                    ModelLoadResult.Ready(Unit)
+                } else {
+                    ModelLoadResult.RuntimeUnavailable("model session was superseded")
+                }
+            }
+        }
+        val command = beginCommand(SessionCommandKind.EnsureLoaded)
+        val generation = command.generation
         val seam = synchronized(modelTestOwnerLock) { installedModelTestOwner }
-        return modelMutex.withLock {
-            if (generation != commandGeneration.get()) {
+        synchronized(sessionStateLock) {
+            requestLogicalCloseLocked()
+            isModelLoading = true
+            isModelLoaded = false
+            lifecycle = ModelRunnerLifecycle.Loading
+            statusText = "모델을 불러오는 중입니다."
+        }
+        return try {
+            modelMutex.withLock {
+            if (!isCurrentCommand(generation)) {
                 return@withLock ModelLoadResult.RuntimeUnavailable("model load was superseded")
             }
             val validation = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
             val token = (validation as? ModelLoadResult.Ready)?.runner
                 ?: return@withLock validation.asUnitFailure().also {
                     closeInstalledRunnerLocked()
-                    isModelLoading = false
-                    isModelLoaded = false
-                    lifecycle = ModelRunnerLifecycle.Failed
-                    statusText = "모델을 불러오지 못했습니다."
+                    synchronized(sessionStateLock) {
+                        if (isCurrentCommand(generation)) {
+                            isModelLoading = false
+                            isModelLoaded = false
+                            lifecycle = ModelRunnerLifecycle.Failed
+                            setStatusIfCurrent(generation, "모델을 불러오지 못했습니다.")
+                        }
+                    }
                 }
             if (
-                activeModel?.id == "edge_masker" &&
+                    lifecycle != ModelRunnerLifecycle.Closing &&
+                    activeModel?.id == "edge_masker" &&
                     isModelLoaded &&
                     closeableModel != null &&
                     sessionValidationIdentity == token.sessionIdentity()
             ) {
-                statusText = "${activeModel?.title ?: "Edge Masker"} 모델을 사용할 수 있습니다."
+                    setStatusIfCurrent(
+                        generation,
+                        "${activeModel?.title ?: "Edge Masker"} 모델을 사용할 수 있습니다.",
+                    )
                 return@withLock ModelLoadResult.Ready(Unit)
             }
             val candidate = OnDeviceRemasterModels.firstOrNull { it.id == "edge_masker" }
                 ?: return@withLock ModelLoadResult.RuntimeUnavailable("Edge Masker runner is not registered").also {
                     closeInstalledRunnerLocked()
-                    isModelLoading = false
-                    isModelLoaded = false
-                    lifecycle = ModelRunnerLifecycle.Failed
-                    statusText = "모델을 불러오지 못했습니다."
+                    synchronized(sessionStateLock) {
+                        if (isCurrentCommand(generation)) {
+                            isModelLoading = false
+                            isModelLoaded = false
+                            lifecycle = ModelRunnerLifecycle.Failed
+                            setStatusIfCurrent(generation, "모델을 불러오지 못했습니다.")
+                        }
+                    }
                 }
             isModelLoading = true
             isModelLoaded = false
             lifecycle = ModelRunnerLifecycle.Loading
-            statusText = "모델을 불러오는 중입니다."
+            setStatusIfCurrent(generation, "모델을 불러오는 중입니다.")
             publishCandidateLocked(
                 context.applicationContext,
                 candidate,
                 ModelFeature.SubjectSelection,
                 generation,
                 seam,
-            ).also { result -> statusText = statusTextFor(candidate, result) }
+            ).also { result ->
+                setStatusIfCurrent(generation, statusTextFor(candidate, result))
+            }
+            }
+        } finally {
+            clearCommandIfOwned(command)
         }
     }
 
@@ -285,22 +528,40 @@ object RemasterModelSession : ModelRunnerContract {
             checkPublicationCurrent(generation, token, "Session Ready")
 
             closeInstalledRunnerLocked()
-            closeableModel = localRunner.peek()
-            activeModel = candidate
-            sessionValidationIdentity = token.sessionIdentity()
-            registrySessionGeneration = publishedSessionGeneration
-            installedCommandGeneration = generation
-            fieldsInstalled = true
+            synchronized(sessionStateLock) {
+                check(isCurrentCommand(generation) && ModelAvailabilityRegistry.isCurrent(token)) {
+                    "model load was superseded before field installation"
+                }
+                closeableModel = localRunner.peek()
+                activeModel = candidate
+                sessionValidationIdentity = token.sessionIdentity()
+                registrySessionGeneration = publishedSessionGeneration
+                installedCommandGeneration = generation
+                fieldsInstalled = true
+            }
             seam?.atStage(PublicationStage.FieldsInstalled)
             checkPublicationCurrent(generation, token, "field installation")
             check(closeableModel === localRunner.peek()) { "installed runner identity changed" }
 
-            localRunner.transfer()
-            isModelLoaded = true
-            isModelLoading = false
-            lifecycle = ModelRunnerLifecycle.Loaded
-            GlobalModelDiagnostics.publish("RemasterModelSession", "loaded")
-            statusText = "${candidate.title} 모델을 사용할 수 있습니다."
+            synchronized(sessionStateLock) {
+                check(isCurrentCommand(generation) && ModelAvailabilityRegistry.isCurrent(token)) {
+                    "model load was superseded before final installation"
+                }
+                val installedRunner = localRunner.transfer()
+                installedSessionOwner =
+                    InstalledSessionOwner(
+                        commandGeneration = generation,
+                        registrySessionGeneration = publishedSessionGeneration,
+                        validationIdentity = token.sessionIdentity(),
+                        candidate = candidate,
+                        runner = installedRunner,
+                    )
+                isModelLoaded = true
+                isModelLoading = false
+                lifecycle = ModelRunnerLifecycle.Loaded
+                GlobalModelDiagnostics.publish("RemasterModelSession", "loaded")
+                setStatusIfCurrent(generation, "${candidate.title} 모델을 사용할 수 있습니다.")
+            }
             return ModelLoadResult.Ready(Unit)
         } catch (cancelled: CancellationException) {
             failureResult = ModelLoadResult.LoadFailed(cancelled.message ?: "model load cancelled")
@@ -312,17 +573,24 @@ object RemasterModelSession : ModelRunnerContract {
             val failed = failureResult
             if (failed != null) {
                 val superseded = generation != commandGeneration.get()
-                if (fieldsInstalled && installedCommandGeneration == generation) {
-                    closeableModel = null
-                    activeModel = null
-                    sessionValidationIdentity = null
-                    registrySessionGeneration = 0L
-                    installedCommandGeneration = 0L
+                val fieldsBelongToThisCommand = synchronized(sessionStateLock) {
+                    if (fieldsInstalled && installedCommandGeneration == generation) {
+                        clearPublicSessionFields()
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (fieldsBelongToThisCommand) {
+                    if (installedSessionOwner?.commandGeneration == generation) {
+                        closeInstalledRunnerLocked()
+                    }
                 }
                 localRunner.close()
                 if (publishedSessionGeneration != 0L) {
-                    ModelAvailabilityRegistry.reportSessionClosed(EDGE_FEATURES, publishedSessionGeneration)
-                    if (registrySessionGeneration == publishedSessionGeneration) registrySessionGeneration = 0L
+                    if (installedSessionOwner?.registrySessionGeneration != publishedSessionGeneration) {
+                        ModelAvailabilityRegistry.reportSessionClosed(EDGE_FEATURES, publishedSessionGeneration)
+                    }
                 }
                 if (loadGeneration != 0L) {
                     ModelAvailabilityRegistry.reportEdgeLoad(
@@ -331,16 +599,22 @@ object RemasterModelSession : ModelRunnerContract {
                     )
                 }
                 if (!superseded) {
-                    isModelLoaded = closeableModel != null
-                    isModelLoading = false
-                    lifecycle = if (isModelLoaded) ModelRunnerLifecycle.Loaded else ModelRunnerLifecycle.Failed
-                    statusText =
-                        if (isModelLoaded) "${activeModel?.title ?: candidate.title} 모델을 사용할 수 있습니다."
-                        else statusTextFor(candidate, failed)
-                    GlobalModelDiagnostics.publish(
-                        "RemasterModelSession",
-                        if (isModelLoaded) "loaded" else "unloaded",
-                    )
+                    synchronized(sessionStateLock) {
+                        if (isCurrentCommand(generation)) {
+                            isModelLoaded = installedSessionOwner != null && closeableModel != null
+                            isModelLoading = false
+                            lifecycle = if (isModelLoaded) ModelRunnerLifecycle.Loaded else ModelRunnerLifecycle.Failed
+                            setStatusIfCurrent(
+                                generation,
+                                if (isModelLoaded) "${activeModel?.title ?: candidate.title} 모델을 사용할 수 있습니다."
+                                else statusTextFor(candidate, failed),
+                            )
+                            GlobalModelDiagnostics.publish(
+                                "RemasterModelSession",
+                                if (isModelLoaded) "loaded" else "unloaded",
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -351,20 +625,34 @@ object RemasterModelSession : ModelRunnerContract {
         token: com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken,
         stage: String,
     ) {
-        check(generation == commandGeneration.get() && ModelAvailabilityRegistry.isCurrent(token)) {
+        check(isCurrentCommand(generation) && ModelAvailabilityRegistry.isCurrent(token)) {
             "model load was superseded after $stage"
         }
     }
 
     private fun closeInstalledRunnerLocked() {
-        val runner = closeableModel
-        closeableModel = null
-        publishSessionClosed()
-        activeModel = null
-        sessionValidationIdentity = null
-        installedCommandGeneration = 0L
-        isModelLoaded = false
-        runCatching { runner?.close() }
+        val runnerToClose: AutoCloseable?
+        synchronized(sessionStateLock) {
+            val owner = installedSessionOwner
+            if (owner != null) {
+                installedSessionOwner = null
+                if (!owner.registryClosed) {
+                    ModelAvailabilityRegistry.reportSessionClosed(EDGE_FEATURES, owner.registrySessionGeneration)
+                    owner.registryClosed = true
+                }
+                clearPublicSessionFields()
+                runnerToClose = if (!owner.physicallyClosed) {
+                    owner.physicallyClosed = true
+                    owner.runner
+                } else {
+                    null
+                }
+            } else {
+                runnerToClose = closeableModel
+                clearPublicSessionFields()
+            }
+        }
+        runCatching { runnerToClose?.close() }
     }
 
     internal suspend fun createForegroundMask(
@@ -387,66 +675,76 @@ object RemasterModelSession : ModelRunnerContract {
         bitmap: Bitmap,
         diagnostics: MemoryTrackerScope? = null,
         operation: ModelOperationContext,
-    ): ModelRunResult<TrackedMask> =
-        modelMutex.withLock {
-            val capability =
-                ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]
-            if (capability?.phase != ModelCapabilityPhase.Ready || !capability.sessionActive) {
-                return@withLock ModelRunResult.Failure(
-                    ModelFailure(
-                        modelCapabilityFailureReason(capability?.phase),
-                        capability?.lastFailure?.detail,
-                    ),
-                    DeterministicModelFallback.NoResult,
-                )
+    ): ModelRunResult<TrackedMask> {
+        val seam = captureInferenceTestSeam()
+        return modelMutex.withLock {
+            val owner = synchronized(sessionStateLock) {
+                if (lifecycle == ModelRunnerLifecycle.Closing ||
+                    lifecycle == ModelRunnerLifecycle.Loading ||
+                    lifecycle == ModelRunnerLifecycle.Unloaded
+                ) {
+                    null
+                } else {
+                    installedSessionOwner
+                }
+            } ?: return@withLock ModelRunResult.Failure(
+                ModelFailure(ModelFailureReason.Closed),
+                DeterministicModelFallback.NoResult,
+            )
+            if (!isCurrentInferenceOwnerForAdmission(owner)) {
+                return@withLock staleInferenceFailure(owner)
             }
-            if (activeModel?.id != "edge_masker" || !isModelLoaded) {
-                return@withLock ModelRunResult.Failure(
-                    ModelFailure(ModelFailureReason.Closed),
-                    DeterministicModelFallback.NoResult,
-                )
-            }
-            val currentToken =
-                (ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
-                    as? ModelLoadResult.Ready)?.runner
-                    ?: return@withLock ModelRunResult.Failure(
-                        ModelFailure(ModelFailureReason.CapabilityUnknown),
-                        DeterministicModelFallback.NoResult,
-                    )
-            if (sessionValidationIdentity != currentToken.sessionIdentity() ||
-                !ModelAvailabilityRegistry.isCurrent(currentToken)
-            ) {
-                return@withLock ModelRunResult.Failure(
-                    ModelFailure(ModelFailureReason.RuntimeUnavailable, "model validation epoch is stale"),
-                    DeterministicModelFallback.NoResult,
-                )
-            }
-            val model =
-                closeableModel
-                    ?: return@withLock ModelRunResult.Failure(
-                        ModelFailure(ModelFailureReason.Closed),
-                        DeterministicModelFallback.NoResult,
-                    )
+            val model = owner.runner
             operation.validateOrThrow()
-            isInferring = true
-            lifecycle = ModelRunnerLifecycle.Inferencing
-            GlobalModelDiagnostics.publish("RemasterModelSession", "inferring")
-            // Track the foreground mask through a TrackedMask so the bitmap and
-            // diagnostic edge settle together exactly once, regardless of outcome.
-            // Built-late: we allocate the TrackedMask on success.
+            val accepted = synchronized(sessionStateLock) {
+                if (installedSessionOwner !== owner ||
+                    commandGeneration.get() != owner.commandGeneration ||
+                    lifecycle != ModelRunnerLifecycle.Loaded ||
+                    !isModelLoaded ||
+                    isModelLoading ||
+                    sessionValidationIdentity != owner.validationIdentity ||
+                    registrySessionGeneration != owner.registrySessionGeneration
+                ) {
+                    false
+                } else {
+                    isInferring = true
+                    lifecycle = ModelRunnerLifecycle.Inferencing
+                    GlobalModelDiagnostics.publish("RemasterModelSession", "inferring")
+                    true
+                }
+            }
+            if (!accepted || !sessionValidationIsCurrent(owner)) {
+                return@withLock staleInferenceFailure(owner)
+            }
+            seam?.atStage(InferenceStage.Accepted)
             var ownedMask: TrackedMask? = null
             try {
                 operation.validateOrThrow()
+                if (!isCurrentInferenceOwner(owner)) return@withLock staleInferenceFailure(owner)
+                seam?.atStage(InferenceStage.BeforeNativeInference)
+                if (!isCurrentInferenceOwner(owner)) return@withLock staleInferenceFailure(owner)
                 ownedMask =
                     createForegroundMaskFromSegmenter(
                         model,
                         bitmap,
                         diagnostics,
                         operation,
-                        activeModel?.id ?: "edge_masker",
-                        activeModel?.semanticVersion ?: "1.0.0",
+                        owner.candidate.id,
+                        owner.candidate.semanticVersion,
                     )
+                seam?.atStage(InferenceStage.AfterNativeInference)
                 operation.validateOrThrow()
+                if (!isCurrentInferenceOwner(owner)) {
+                    ownedMask.recycleAndRelease()
+                    ownedMask = null
+                    return@withLock staleInferenceFailure(owner)
+                }
+                seam?.atStage(InferenceStage.BeforeResultPublication)
+                if (!isCurrentInferenceOwner(owner)) {
+                    ownedMask.recycleAndRelease()
+                    ownedMask = null
+                    return@withLock staleInferenceFailure(owner)
+                }
                 ModelRunResult.Success(
                     ownedMask,
                     confidence = 1f,
@@ -455,78 +753,112 @@ object RemasterModelSession : ModelRunnerContract {
             } catch (cancelled: CancellationException) {
                 ownedMask?.recycleAndRelease()
                 throw cancelled
+            } catch (allocation: BitmapAllocationRejectedException) {
+                ownedMask?.recycleAndRelease()
+                throw allocation
             } catch (failure: Throwable) {
                 ownedMask?.recycleAndRelease()
                 ModelRunResult.Failure(
-                    ModelFailure(ModelFailureReason.InferenceFailed, failure.message),
+                    ModelFailure(
+                        if (failure is com.projectnuke.keplerstudio.editor.StaleModelGenerationException) {
+                            ModelFailureReason.StaleGeneration
+                        } else {
+                            ModelFailureReason.InferenceFailed
+                        },
+                        failure.message,
+                    ),
                     DeterministicModelFallback.NoResult,
                 )
             } finally {
-                isInferring = false
-                lifecycle =
-                    if (isModelLoaded) ModelRunnerLifecycle.Loaded
-                    else ModelRunnerLifecycle.Unloaded
-                GlobalModelDiagnostics.publish(
-                    "RemasterModelSession",
-                    if (isModelLoaded) "loaded" else "unloaded",
-                )
+                seam?.atStage(InferenceStage.Finalizer)
+                val validationCurrent = sessionValidationIsCurrent(owner)
+                synchronized(sessionStateLock) {
+                    val stillOwnsPhysicalSession =
+                        installedSessionOwner === owner &&
+                            commandGeneration.get() == owner.commandGeneration &&
+                            lifecycle == ModelRunnerLifecycle.Inferencing
+                    val stillOwnsSession =
+                        stillOwnsPhysicalSession &&
+                            isModelLoaded &&
+                            sessionValidationIdentity == owner.validationIdentity &&
+                            registrySessionGeneration == owner.registrySessionGeneration &&
+                            validationCurrent
+                    if (installedSessionOwner === owner && isInferring) {
+                        isInferring = false
+                    }
+                    if (stillOwnsSession) {
+                        lifecycle = ModelRunnerLifecycle.Loaded
+                        GlobalModelDiagnostics.publish("RemasterModelSession", "loaded")
+                    } else if (stillOwnsPhysicalSession && !validationCurrent) {
+                        requestLogicalCloseLocked()
+                        lifecycle = ModelRunnerLifecycle.Closing
+                    }
+                }
+                if (!validationCurrent && synchronized(sessionStateLock) {
+                        installedSessionOwner === owner && lifecycle == ModelRunnerLifecycle.Closing
+                    }) {
+                    closeInstalledRunnerLocked()
+                    synchronized(sessionStateLock) {
+                        if (installedSessionOwner == null && lifecycle == ModelRunnerLifecycle.Closing) {
+                            lifecycle = ModelRunnerLifecycle.Unloaded
+                            isModelLoading = false
+                            isInferring = false
+                            statusText = "\uB85C\uB4DC\uB41C \uBAA8\uB378\uC774 \uC5C6\uC2B5\uB2C8\uB2E4."
+                            GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
+                        }
+                    }
+                }
             }
         }
+    }
 
     fun unload() {
-        val generation = commandGeneration.incrementAndGet()
-        isModelLoading = true
-        lifecycle = ModelRunnerLifecycle.Closing
+        val command = beginCommand(SessionCommandKind.Unload)
+        val generation = command.generation
+        synchronized(sessionStateLock) {
+            requestLogicalCloseLocked()
+            isModelLoading = false
+            lifecycle = ModelRunnerLifecycle.Closing
+        }
+        statusText = "\uBAA8\uB378\uC744 \uC885\uB8CC\uD558\uB294 \uC911\uC785\uB2C8\uB2E4."
         GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
-        modelScope.launch {
+        val job = modelScope.launch {
+            try {
             modelMutex.withLock {
-                if (generation != commandGeneration.get()) return@withLock
-                val sessionClosePublished = publishSessionClosed()
-                runCatching { closeableModel?.close() }
-                closeableModel = null
-                sessionValidationIdentity = null
-                installedCommandGeneration = 0L
-                activeModel = null
-                isModelLoaded = false
-                isModelLoading = false
-                lifecycle = ModelRunnerLifecycle.Unloaded
-                if (!sessionClosePublished) ModelAvailabilityRegistry.reportEdgeUnloaded()
-                GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
-                statusText = "로드된 모델이 없습니다."
+                if (!isCurrentCommand(generation)) return@withLock
+                closeInstalledRunnerLocked()
+                publishUnloadedIfCurrent(generation)
+            }
+            } finally {
+                clearCommandIfOwned(command)
             }
         }
+        bindCommandJob(command, job)
     }
 
     suspend fun unloadIdleNow(): Boolean {
-        val generation = commandGeneration.incrementAndGet()
-        return modelMutex.withLock {
-            if (generation != commandGeneration.get()) return@withLock false
-            GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
-            lifecycle = ModelRunnerLifecycle.Closing
-            val sessionClosePublished = publishSessionClosed()
-            runCatching { closeableModel?.close() }
-            closeableModel = null
-            sessionValidationIdentity = null
-            installedCommandGeneration = 0L
-            activeModel = null
-            isModelLoaded = false
-            isModelLoading = false
-            lifecycle = ModelRunnerLifecycle.Unloaded
-            if (!sessionClosePublished) ModelAvailabilityRegistry.reportEdgeUnloaded()
-            GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
-            statusText = "로드된 모델이 없습니다."
-            true
+        val command = beginCommand(SessionCommandKind.IdleUnload)
+        val hadSession = synchronized(sessionStateLock) {
+            installedSessionOwner != null || isModelLoaded || closeableModel != null
         }
-    }
-
-    private fun publishSessionClosed(): Boolean {
-        if (registrySessionGeneration == 0L) return false
-        ModelAvailabilityRegistry.reportSessionClosed(
-            EDGE_FEATURES,
-            registrySessionGeneration,
-        )
-        registrySessionGeneration = 0L
-        return true
+        synchronized(sessionStateLock) {
+            requestLogicalCloseLocked()
+            isModelLoading = false
+            lifecycle = ModelRunnerLifecycle.Closing
+        }
+        statusText = "\uBAA8\uB378\uC744 \uC885\uB8CC\uD558\uB294 \uC911\uC785\uB2C8\uB2E4."
+        return try {
+            modelMutex.withLock {
+            if (!isCurrentCommand(command.generation)) return@withLock false
+            GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
+            val hadPhysicalOwner = installedSessionOwner != null || closeableModel != null
+            closeInstalledRunnerLocked()
+            publishUnloadedIfCurrent(command.generation)
+            hadSession || hadPhysicalOwner
+            }
+        } finally {
+            clearCommandIfOwned(command)
+        }
     }
 
     private fun isSupportedModelContract(candidate: RemasterModelCandidate): Boolean {
@@ -807,9 +1139,40 @@ object RemasterModelSession : ModelRunnerContract {
 
     internal fun installedTestSeamCount(): Int = synchronized(modelTestOwnerLock) { if (installedModelTestOwner == null) 0 else 1 }
 
+    /** Captures one inference gate at operation creation; later installations cannot retarget it. */
+    internal fun installInferenceTestSeam(
+        onStage: (suspend (InferenceStage) -> Unit)? = null,
+        onClose: (() -> Unit)? = null,
+    ): AutoCloseable {
+        val seam = InferenceTestSeam(onStage, onClose)
+        synchronized(inferenceTestOwnerLock) {
+            check(installedInferenceTestSeam == null) { "inference test owner already installed" }
+            installedInferenceTestSeam = seam
+            installedInferenceTestSeamCount.incrementAndGet()
+        }
+        return AutoCloseable {
+            seam.deactivate()
+            synchronized(inferenceTestOwnerLock) {
+                if (installedInferenceTestSeam === seam) {
+                    installedInferenceTestSeam = null
+                    installedInferenceTestSeamCount.decrementAndGet()
+                }
+            }
+        }
+    }
+
+    internal fun installedInferenceTestSeamCount(): Int =
+        installedInferenceTestSeamCount.get().toInt()
+
     internal fun validationIdentityForTest(): ModelSessionValidationIdentity? = sessionValidationIdentity
     internal fun sessionGenerationForTest(): Long = registrySessionGeneration
     internal fun installedRunnerForTest(): AutoCloseable? = closeableModel
+    internal fun canStartInferenceForTest(): Boolean =
+        synchronized(sessionStateLock) {
+            lifecycle == ModelRunnerLifecycle.Loaded &&
+                isModelLoaded &&
+                installedSessionOwner != null
+        }
 }
 
 /** Immutable validation facts bound to a loaded native/model session. */

@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import androidx.lifecycle.ViewModelStore
+import com.projectnuke.keplerstudio.ui.RemasterModelSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -111,6 +112,8 @@ internal class OwnedEditorViewModelHarness(
             runCatching { check(DraftSaveTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(AsyncBusyTestSeam.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
+            runCatching { check(RemasterModelSession.installedInferenceTestSeamCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(BrushPreparationTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }

@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.FlareGuardMode
+import com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle
 
 private val RemasterCardBackground = Color(0xFF242424)
 private val RemasterAccent = Color(0xFFE6E6E6)
@@ -53,7 +54,11 @@ fun RemasterToolPanel(
     val edgeMaskerStatusLabel = edgeMasker.registryStatus(remasterCapability)
     val edgeLoaded = remasterCapability?.sessionReady == true
     val edgeAttemptable = remasterCapability?.canAttemptModelUse == true
-    val edgeLoadingOrInferring = RemasterModelSession.isModelLoading || RemasterModelSession.isInferring
+    val edgeLoadingOrInferring =
+        RemasterModelSession.isModelLoading ||
+            RemasterModelSession.isInferring ||
+            RemasterModelSession.lifecycle in
+                setOf(ModelRunnerLifecycle.Loading, ModelRunnerLifecycle.Closing)
     val hasImage = editorState.previewBitmap != null || editorState.originalPreviewBitmap != null
 
     Column(modifier = Modifier.fillMaxWidth()) {
