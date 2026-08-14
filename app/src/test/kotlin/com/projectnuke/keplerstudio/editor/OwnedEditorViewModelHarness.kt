@@ -16,6 +16,40 @@ internal fun yieldToEditorBackgroundForTest() {
     runBlocking { withContext(Dispatchers.Default) { yield() } }
 }
 
+/**
+ * Pumps Robolectric Main while allowing Default/IO work to make progress.
+ *
+ * The old polling pattern created a new runBlocking/Default bridge for every
+ * unsuccessful predicate check. Keep one bridge for the whole bounded wait;
+ * each background turn is still explicit, so Robolectric Main remains under
+ * the caller's control.
+ */
+internal fun awaitEditorConditionForTest(
+    description: String,
+    timeoutMillis: Long = 15_000L,
+    pumpMain: () -> Unit = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+    diagnostic: () -> String = { "" },
+    predicate: () -> Boolean,
+) {
+    require(timeoutMillis > 0L) { "timeoutMillis must be positive" }
+    val deadlineNanos = System.nanoTime() + timeoutMillis * 1_000_000L
+    runBlocking {
+        var satisfied = false
+        while (System.nanoTime() < deadlineNanos) {
+            pumpMain()
+            if (predicate()) {
+                satisfied = true
+                break
+            }
+            withContext(Dispatchers.Default) { yield() }
+        }
+        check(satisfied || predicate()) {
+            val detail = diagnostic().takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""
+            "$description timed out after ${timeoutMillis}ms$detail"
+        }
+    }
+}
+
 /** Owns every ViewModel and filesystem resource created by one production test. */
 internal class OwnedEditorViewModelHarness(
     private val application: Application,

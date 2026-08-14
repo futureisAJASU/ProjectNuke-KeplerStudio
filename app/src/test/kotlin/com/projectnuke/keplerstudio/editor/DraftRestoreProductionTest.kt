@@ -29,7 +29,7 @@ class DraftRestoreProductionTest {
 
     @Before
     fun cleanDraft() {
-        harness = OwnedEditorViewModelHarness(context)
+        harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
         draftGenerationsRoot(context).deleteRecursively()
@@ -63,13 +63,15 @@ class DraftRestoreProductionTest {
             }
         val hooks =
             ParameterLifecycleTestHook.install(
-                ParameterLifecycleHooks(onRenderOutputAdopted = { adopted.incrementAndGet() })
+                ParameterLifecycleHooks(
+                    onRenderOutputAdopted = { adopted.incrementAndGet() },
+                )
             )
         var sessionFactory: AutoCloseable? = null
         try {
             awaitReady(vm1)
             vm1.updateParams { it.copy(exposure = 0.3f) }
-            awaitEvent { adopted.get() >= 1 && vm1.hasOpenParameterGesture() }
+            awaitEvent(vm1) { adopted.get() >= 1 && vm1.hasOpenParameterGesture() }
 
             val saved = vm1.persistDraftSnapshotNow()
             assertTrue("draft save must succeed", saved)
@@ -96,7 +98,7 @@ class DraftRestoreProductionTest {
             assertEquals("restored base token", "restore-base", vm2.uiState.value.baseContentToken)
             assertEquals("restored original preview side", 16, vm2.uiState.value.originalPreviewBitmap?.width)
             assertFalse("restored document is not busy", vm2.uiState.value.isBusy)
-            awaitEvent { vm2.canEnterEditorAction() }
+            awaitEvent(vm2) { vm2.canEnterEditorAction() }
         } finally {
             sessionFactory?.close()
             hooks.close()
@@ -123,7 +125,7 @@ class DraftRestoreProductionTest {
         try {
             awaitReady(vm1)
             vm1.updateParams { it.copy(exposure = 0.25f) }
-            awaitEvent { vm1.uiState.value.params.exposure == 0.25f && !vm1.uiState.value.isBusy }
+            awaitEvent(vm1) { vm1.uiState.value.params.exposure == 0.25f && !vm1.uiState.value.isBusy }
             val saved = vm1.persistDraftSnapshotNow()
             assertTrue("draft save with mask must succeed", saved)
             val validated =
@@ -149,7 +151,7 @@ class DraftRestoreProductionTest {
             assertTrue("restored layer inverted", layer.inverted)
             assertEquals("restored layer opacity", 0.5f, layer.opacity)
             assertEquals("restored active layer id", "restore-mask", vm2.uiState.value.activeSelectionLayerId)
-            awaitEvent { vm2.canEnterEditorAction() }
+            awaitEvent(vm2) { vm2.canEnterEditorAction() }
         } finally {
             sessionFactory?.close()
             renderer.close()
@@ -230,37 +232,52 @@ class DraftRestoreProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(400) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
-            if (vm.canEnterEditorAction()) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
+        awaitEditorConditionForTest(
+            description = "editor must become ready",
+            pumpMain = {
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+            },
+        ) {
+            vm.canEnterEditorAction()
         }
-        repeat(5000) {
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            if (vm.canEnterEditorAction()) return
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue(vm.canEnterEditorAction())
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(2000) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (vm.startupInitCompletion.isCompleted) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
+        awaitEditorConditionForTest(
+            description = "startup init must complete",
+            pumpMain = {
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+            },
+        ) {
+            vm.startupInitCompletion.isCompleted
         }
-        assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
-    private fun awaitEvent(predicate: () -> Boolean) {
-        repeat(2000) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (predicate()) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue(predicate())
+    private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
+        var initialVirtualTimeAdvanced = false
+        awaitEditorConditionForTest(
+            description = "draft restore event must settle",
+            pumpMain = {
+                if (!initialVirtualTimeAdvanced) {
+                    shadowOf(android.os.Looper.getMainLooper()).idleFor(150, TimeUnit.MILLISECONDS)
+                    initialVirtualTimeAdvanced = true
+                }
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(0, TimeUnit.MILLISECONDS)
+            },
+            diagnostic = {
+                "busy=${vm.uiState.value.isBusy} " +
+                    "revision=${vm.uiState.value.revision} " +
+                    "admission=${vm.editorActionAdmissionForTest()} " +
+                    "pending=${vm.pendingParamRenderRevision()} " +
+                    "phase=${vm.paramRenderPhaseForTest()} " +
+                    "latest=${vm.latestParamsForTest()?.exposure} " +
+                    "adopted=${vm.adoptedParamsForTest()?.exposure} " +
+                    "gesture=${vm.hasOpenParameterGesture()} " +
+                    "message=${vm.uiState.value.message}"
+            },
+            predicate = predicate,
+        )
     }
 }
