@@ -14,6 +14,8 @@ import com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle
 import com.projectnuke.keplerstudio.editor.ModelFailureReason
 import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
+import com.projectnuke.keplerstudio.editor.ModelConfidence
+import com.projectnuke.keplerstudio.editor.TrackedMask
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertEquals
@@ -35,12 +37,15 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class RemasterModelSessionValidationTest {
     private var testSeam: AutoCloseable? = null
     private var inferenceTestSeam: AutoCloseable? = null
+    private var commandStartTestSeam: AutoCloseable? = null
 
     @Before
     fun resetSession() = runBlocking {
@@ -55,6 +60,8 @@ class RemasterModelSessionValidationTest {
         testSeam = null
         inferenceTestSeam?.close()
         inferenceTestSeam = null
+        commandStartTestSeam?.close()
+        commandStartTestSeam = null
         RemasterModelSession.unloadIdleNow()
         ModelAvailabilityRegistry.resetForTest()
         GlobalModelDiagnostics.resetForTest()
@@ -650,6 +657,8 @@ class RemasterModelSessionValidationTest {
 
         // No seam must remain installed after teardown.
         assertEquals(0, RemasterModelSession.installedTestSeamCount(), "no seam must remain after test")
+        assertEquals(0, RemasterModelSession.installedInferenceTestSeamCount(), "no inference seam must remain after test")
+        assertEquals(0, RemasterModelSession.installedCommandStartTestSeamCount(), "no command seam must remain after test")
     }
 
     private class FakeRunner : AutoCloseable {
@@ -657,6 +666,68 @@ class RemasterModelSessionValidationTest {
         override fun close() {
             closeCount += 1
         }
+    }
+
+    private class CountingEdgeTracker : TrackedMask.EdgeTracker {
+        var releaseCount = 0
+
+        override fun track(bitmap: Bitmap, owner: String): Long = 1L
+
+        override fun release(edge: Long) {
+            releaseCount += 1
+        }
+    }
+
+    private fun fullConfidence() =
+        ModelConfidence(
+            wholeImageMean = 1f,
+            peak = 1f,
+            activeRegionMean = 1f,
+            activeRegionPercentile = 1f,
+            affectedAreaRatio = 1f,
+            backgroundLeakage = 0f,
+            finalPolicy = 1f,
+        )
+
+    private class CommandStartGate {
+        val claimed = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val claimCount = AtomicInteger()
+        val transitionCount = AtomicInteger()
+    }
+
+    private fun installCommandStartGate(): CommandStartGate {
+        val gate = CommandStartGate()
+        commandStartTestSeam = RemasterModelSession.installCommandStartTestSeam(
+            onOwnershipClaimed = {
+                if (gate.claimCount.incrementAndGet() == 1) {
+                    gate.claimed.countDown()
+                    gate.release.await()
+                }
+            },
+            onInitialTransitionPublished = { gate.transitionCount.incrementAndGet() },
+            onClose = { gate.release.countDown() },
+        )
+        return gate
+    }
+
+    private fun assertLoadedRunnerB(runnerB: FakeRunner) {
+        assertTrue(RemasterModelSession.installedRunnerForTest() === runnerB)
+        assertTrue(RemasterModelSession.isModelLoaded)
+        assertFalse(RemasterModelSession.isModelLoading)
+        assertEquals(ModelRunnerLifecycle.Loaded, RemasterModelSession.lifecycle)
+        assertEquals("edge_masker", RemasterModelSession.activeModel?.id)
+        assertEquals("Edge Masker 모델을 사용할 수 있습니다.", RemasterModelSession.statusText)
+        val remaster = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster)
+        val subject = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection)
+        assertTrue(remaster.sessionActive)
+        assertTrue(subject.sessionActive)
+        assertEquals(remaster.sessionGeneration, subject.sessionGeneration)
+        assertEquals(remaster.sessionGeneration, RemasterModelSession.sessionGenerationForTest())
+        val validated = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.SubjectSelection)
+            as ModelLoadResult.Ready
+        assertEquals(validated.runner.sessionIdentity(), RemasterModelSession.validationIdentityForTest())
+        assertEquals("loaded", GlobalModelDiagnostics.snapshot().single().state)
     }
 
     @Test
@@ -668,9 +739,11 @@ class RemasterModelSessionValidationTest {
 
         val accepted = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
+        val nativeStageCount = AtomicInteger()
         inferenceTestSeam = RemasterModelSession.installInferenceTestSeam(
             onStage = { stage ->
                 if (stage == RemasterModelSession.InferenceStage.BeforeNativeInference) {
+                    nativeStageCount.incrementAndGet()
                     accepted.complete(Unit)
                     release.await()
                 }
@@ -698,15 +771,16 @@ class RemasterModelSessionValidationTest {
                 operation = ModelOperationContext(11L, "document"),
             )
         }
+        val secondResult = secondInference.await()
+        assertTrue(secondResult is ModelRunResult.Failure)
+        assertEquals(ModelFailureReason.Closed, (secondResult as ModelRunResult.Failure).failure.reason)
+        assertEquals(1, nativeStageCount.get(), "closing admission must reject before native inference")
         release.complete(Unit)
         val result = inference.await()
-        val secondResult = secondInference.await()
         awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Unloaded }
 
         assertTrue(result is ModelRunResult.Failure)
         assertEquals(ModelFailureReason.Closed, (result as ModelRunResult.Failure).failure.reason)
-        assertTrue(secondResult is ModelRunResult.Failure)
-        assertEquals(ModelFailureReason.Closed, (secondResult as ModelRunResult.Failure).failure.reason)
         assertEquals(1, runner.closeCount)
         assertFalse(RemasterModelSession.isModelLoaded)
         assertFalse(RemasterModelSession.isModelLoading)
@@ -756,6 +830,117 @@ class RemasterModelSessionValidationTest {
         assertEquals(1, runner.closeCount)
         assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
         bitmap.recycle()
+    }
+
+    @Test
+    fun `unload after native output recycles stale tracked mask exactly once`() = runBlocking {
+        val runner = FakeRunner()
+        val edgeTracker = CountingEdgeTracker()
+        var produced: TrackedMask? = null
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        assertTrue(RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) is ModelLoadResult.Ready)
+
+        val nativeOutput = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        inferenceTestSeam = RemasterModelSession.installInferenceTestSeam(
+            onStage = { stage ->
+                if (stage == RemasterModelSession.InferenceStage.AfterNativeInference) {
+                    nativeOutput.complete(Unit)
+                    release.await()
+                }
+            },
+            syntheticNativeOutput = { _, _, operation, modelId, modelVersion ->
+                TrackedMask.acquireForTest(
+                    Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+                    edgeTracker,
+                    "test:synthetic-mask",
+                    modelId,
+                    modelVersion,
+                    operation.operationToken,
+                    operation.documentGeneration,
+                    fullConfidence(),
+                ).also { produced = it }
+            },
+        )
+        val input = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        val inference = async(Dispatchers.Default) {
+            RemasterModelSession.createForegroundMaskResult(
+                input,
+                operation = ModelOperationContext(21L, "document"),
+            )
+        }
+
+        nativeOutput.await()
+        assertTrue(produced != null)
+        RemasterModelSession.unload()
+        assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
+        release.complete(Unit)
+
+        val result = inference.await()
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Unloaded }
+        assertTrue(result is ModelRunResult.Failure)
+        assertEquals(ModelFailureReason.Closed, (result as ModelRunResult.Failure).failure.reason)
+        assertTrue(produced!!.isSettled)
+        assertTrue(produced!!.bitmap.isRecycled)
+        assertEquals(1, edgeTracker.releaseCount)
+        assertEquals(1, runner.closeCount)
+        input.recycle()
+    }
+
+    @Test
+    fun `validation replacement after native output rejects and recycles stale tracked mask`() = runBlocking {
+        val runner = FakeRunner()
+        val edgeTracker = CountingEdgeTracker()
+        var produced: TrackedMask? = null
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        assertTrue(RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) is ModelLoadResult.Ready)
+
+        val nativeOutput = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        inferenceTestSeam = RemasterModelSession.installInferenceTestSeam(
+            onStage = { stage ->
+                if (stage == RemasterModelSession.InferenceStage.AfterNativeInference) {
+                    nativeOutput.complete(Unit)
+                    release.await()
+                }
+            },
+            syntheticNativeOutput = { _, _, operation, modelId, modelVersion ->
+                TrackedMask.acquireForTest(
+                    Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888),
+                    edgeTracker,
+                    "test:synthetic-mask",
+                    modelId,
+                    modelVersion,
+                    operation.operationToken,
+                    operation.documentGeneration,
+                    fullConfidence(),
+                ).also { produced = it }
+            },
+        )
+        val input = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        val inference = async(Dispatchers.Default) {
+            RemasterModelSession.createForegroundMaskResult(
+                input,
+                operation = ModelOperationContext(22L, "document"),
+            )
+        }
+
+        nativeOutput.await()
+        ModelAvailabilityRegistry.beginProbe()
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        release.complete(Unit)
+
+        val result = inference.await()
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Unloaded }
+        assertTrue(result is ModelRunResult.Failure)
+        assertEquals(ModelFailureReason.StaleGeneration, (result as ModelRunResult.Failure).failure.reason)
+        assertTrue(produced!!.isSettled)
+        assertTrue(produced!!.bitmap.isRecycled)
+        assertEquals(1, edgeTracker.releaseCount)
+        assertEquals(1, runner.closeCount)
+        input.recycle()
     }
 
     @Test
@@ -847,6 +1032,144 @@ class RemasterModelSessionValidationTest {
         assertTrue(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionActive)
         assertTrue(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
         bitmap.recycle()
+    }
+
+    @Test
+    fun `unload command start linearizes before newer load B`() = runBlocking {
+        val runnerA = FakeRunner()
+        val runnerB = FakeRunner()
+        val context = RuntimeEnvironment.getApplication()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerA })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        assertTrue(RemasterModelSession.ensureEdgeLoaded(context) is ModelLoadResult.Ready)
+        testSeam?.close()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerB })
+
+        val gate = installCommandStartGate()
+        val old = async(Dispatchers.Default) { RemasterModelSession.unload() }
+        assertTrue(gate.claimed.await(5, TimeUnit.SECONDS))
+        assertEquals(0, gate.transitionCount.get(), "claim and transition are observed as one locked boundary")
+
+        val bInvoked = CompletableDeferred<Unit>()
+        val newer = async(Dispatchers.Default) {
+            bInvoked.complete(Unit)
+            RemasterModelSession.load(context, edgeCandidate())
+        }
+        bInvoked.await()
+        assertEquals(1, gate.claimCount.get(), "B cannot claim while A owns the transition lock")
+        assertEquals(0, gate.transitionCount.get())
+
+        gate.release.countDown()
+        old.await()
+        newer.await()
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Loaded }
+
+        assertEquals(1, runnerA.closeCount)
+        assertLoadedRunnerB(runnerB)
+    }
+
+    @Test
+    fun `idle unload command start cannot invalidate newer load B`() = runBlocking {
+        val runnerA = FakeRunner()
+        val runnerB = FakeRunner()
+        val context = RuntimeEnvironment.getApplication()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerA })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+        assertTrue(RemasterModelSession.ensureEdgeLoaded(context) is ModelLoadResult.Ready)
+        testSeam?.close()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerB })
+
+        val gate = installCommandStartGate()
+        val old = async(Dispatchers.Default) { RemasterModelSession.unloadIdleNow() }
+        assertTrue(gate.claimed.await(5, TimeUnit.SECONDS))
+        assertEquals(0, gate.transitionCount.get())
+
+        val bInvoked = CompletableDeferred<Unit>()
+        val newer = async(Dispatchers.Default) {
+            bInvoked.complete(Unit)
+            RemasterModelSession.load(context, edgeCandidate())
+        }
+        bInvoked.await()
+        assertEquals(1, gate.claimCount.get())
+        assertEquals(0, gate.transitionCount.get())
+
+        gate.release.countDown()
+        old.await()
+        newer.await()
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Loaded }
+
+        assertEquals(1, runnerA.closeCount)
+        assertLoadedRunnerB(runnerB)
+    }
+
+    @Test
+    fun `load command start linearizes before newer load B`() = runBlocking {
+        val runnerA = FakeRunner()
+        val runnerB = FakeRunner()
+        val context = RuntimeEnvironment.getApplication()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerA })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+
+        val gate = installCommandStartGate()
+        val old = async(Dispatchers.Default) {
+            RemasterModelSession.load(context, edgeCandidate())
+        }
+        assertTrue(gate.claimed.await(5, TimeUnit.SECONDS))
+        assertEquals(0, gate.transitionCount.get())
+
+        testSeam?.close()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerB })
+        val bInvoked = CompletableDeferred<Unit>()
+        val newer = async(Dispatchers.Default) {
+            bInvoked.complete(Unit)
+            RemasterModelSession.load(context, edgeCandidate())
+        }
+        bInvoked.await()
+        assertEquals(1, gate.claimCount.get())
+        assertEquals(0, gate.transitionCount.get())
+
+        gate.release.countDown()
+        old.await()
+        newer.await()
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Loaded }
+
+        assertTrue(runnerA.closeCount <= 1)
+        assertLoadedRunnerB(runnerB)
+    }
+
+    @Test
+    fun `ensure loaded command start linearizes before newer load B`() = runBlocking {
+        val runnerA = FakeRunner()
+        val runnerB = FakeRunner()
+        val context = RuntimeEnvironment.getApplication()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerA })
+        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+
+        val gate = installCommandStartGate()
+        val old = async(Dispatchers.Default) {
+            RemasterModelSession.ensureEdgeLoaded(context)
+        }
+        assertTrue(gate.claimed.await(5, TimeUnit.SECONDS))
+        assertEquals(0, gate.transitionCount.get())
+
+        testSeam?.close()
+        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerB })
+        val bInvoked = CompletableDeferred<Unit>()
+        val newer = async(Dispatchers.Default) {
+            bInvoked.complete(Unit)
+            RemasterModelSession.load(context, edgeCandidate())
+        }
+        bInvoked.await()
+        assertEquals(1, gate.claimCount.get())
+        assertEquals(0, gate.transitionCount.get())
+
+        gate.release.countDown()
+        old.await()
+        newer.await()
+        awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Loaded }
+
+        assertTrue(runnerA.closeCount <= 1)
+        assertLoadedRunnerB(runnerB)
     }
 
     @Test

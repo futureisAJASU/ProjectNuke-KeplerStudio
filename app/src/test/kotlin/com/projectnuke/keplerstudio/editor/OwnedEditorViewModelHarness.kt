@@ -114,6 +114,7 @@ internal class OwnedEditorViewModelHarness(
             runCatching { check(AsyncBusyTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(RemasterModelSession.installedInferenceTestSeamCount() == 0) }
+            runCatching { check(RemasterModelSession.installedCommandStartTestSeamCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(BrushPreparationTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
