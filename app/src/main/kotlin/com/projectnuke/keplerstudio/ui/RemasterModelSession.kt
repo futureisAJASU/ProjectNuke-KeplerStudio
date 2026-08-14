@@ -263,10 +263,10 @@ object RemasterModelSession : ModelRunnerContract {
             val startSeam = synchronized(commandStartTestOwnerLock) { installedCommandStartTestSeam }
             startSeam?.ownershipClaimed()
             val hadSession = installedSessionOwner != null || isModelLoaded || closeableModel != null
-            requestLogicalCloseLocked()
             when (kind) {
                 SessionCommandKind.Load,
                 SessionCommandKind.EnsureLoaded -> {
+                    requestLogicalCloseLocked()
                     isModelLoading = true
                     isModelLoaded = false
                     lifecycle = ModelRunnerLifecycle.Loading
@@ -275,11 +275,7 @@ object RemasterModelSession : ModelRunnerContract {
                 }
                 SessionCommandKind.Unload,
                 SessionCommandKind.IdleUnload -> {
-                    isModelLoading = false
-                    isModelLoaded = false
-                    lifecycle = ModelRunnerLifecycle.Closing
-                    statusText = "\uBAA8\uB378\uC744 \uC885\uB8CC\uD558\uB294 \uC911\uC785\uB2C8\uB2E4."
-                    GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
+                    publishLogicalClosingLocked()
                 }
             }
             startSeam?.initialTransitionPublished()
@@ -349,10 +345,14 @@ object RemasterModelSession : ModelRunnerContract {
                 registrySessionGeneration == owner.registrySessionGeneration
         } && sessionValidationIsCurrent(owner)
 
-    private fun staleInferenceFailure(owner: InstalledSessionOwner): ModelRunResult.Failure {
-        val validationCurrent = sessionValidationIsCurrent(owner)
+    private fun staleInferenceFailure(
+        owner: InstalledSessionOwner,
+        knownValidationCurrent: Boolean? = null,
+    ): ModelRunResult.Failure {
+        val validationCurrent = knownValidationCurrent ?: sessionValidationIsCurrent(owner)
         val reason = synchronized(sessionStateLock) {
             when {
+                knownValidationCurrent == false -> ModelFailureReason.StaleGeneration
                 installedSessionOwner !== owner ||
                     lifecycle == ModelRunnerLifecycle.Closing ||
                     lifecycle == ModelRunnerLifecycle.Unloaded -> ModelFailureReason.Closed
@@ -374,6 +374,33 @@ object RemasterModelSession : ModelRunnerContract {
         installedCommandGeneration = 0L
         activeModel = null
         isModelLoaded = false
+    }
+
+    private fun isExactInstalledOwnerLocked(owner: InstalledSessionOwner): Boolean =
+        installedSessionOwner === owner &&
+            commandGeneration.get() == owner.commandGeneration &&
+            installedCommandGeneration == owner.commandGeneration &&
+            registrySessionGeneration == owner.registrySessionGeneration &&
+            sessionValidationIdentity == owner.validationIdentity
+
+    /**
+     * Revokes logical availability and publishes the complete Closing snapshot.
+     * The optional owner makes validation-driven cleanup incapable of touching a
+     * newer command/session. Physical runner close remains outside this lock.
+     */
+    private fun publishLogicalClosingLocked(
+        owner: InstalledSessionOwner? = null,
+        settleInference: Boolean = false,
+    ): Boolean {
+        if (owner != null && !isExactInstalledOwnerLocked(owner)) return false
+        requestLogicalCloseLocked()
+        isModelLoading = false
+        isModelLoaded = false
+        if (settleInference) isInferring = false
+        lifecycle = ModelRunnerLifecycle.Closing
+        statusText = "\uBAA8\uB378\uC744 \uC885\uB8CC\uD558\uB294 \uC911\uC785\uB2C8\uB2E4."
+        GlobalModelDiagnostics.publish("RemasterModelSession", "closing")
+        return true
     }
 
     /** Logical close is published before physical close so new inference cannot enter. */
@@ -415,6 +442,39 @@ object RemasterModelSession : ModelRunnerContract {
             }
         }
         return published
+    }
+
+    private fun publishUnloadedIfClosedOwner(owner: InstalledSessionOwner): Boolean =
+        synchronized(sessionStateLock) {
+            if (installedSessionOwner != null ||
+                commandGeneration.get() != owner.commandGeneration ||
+                lifecycle != ModelRunnerLifecycle.Closing
+            ) {
+                false
+            } else {
+                isModelLoaded = false
+                isModelLoading = false
+                isInferring = false
+                lifecycle = ModelRunnerLifecycle.Unloaded
+                clearPublicSessionFields()
+                statusText = "\uB85C\uB4DC\uB41C \uBAA8\uB378\uC774 \uC5C6\uC2B5\uB2C8\uB2E4."
+                GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
+                true
+            }
+        }
+
+    private fun settleStaleInstalledOwner(owner: InstalledSessionOwner): Boolean {
+        val ownsClose = synchronized(sessionStateLock) {
+            if (!isExactInstalledOwnerLocked(owner) || sessionValidationIsCurrent(owner)) {
+                false
+            } else {
+                publishLogicalClosingLocked(owner)
+            }
+        }
+        if (!ownsClose) return false
+        closeInstalledRunnerLocked()
+        publishUnloadedIfClosedOwner(owner)
+        return true
     }
 
     fun load(context: Context, candidate: RemasterModelCandidate) {
@@ -488,6 +548,7 @@ object RemasterModelSession : ModelRunnerContract {
                             isModelLoading = false
                             isModelLoaded = false
                             lifecycle = ModelRunnerLifecycle.Failed
+                            GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                             setStatusIfCurrent(generation, "모델을 불러오지 못했습니다.")
                         }
                     }
@@ -513,6 +574,7 @@ object RemasterModelSession : ModelRunnerContract {
                             isModelLoading = false
                             isModelLoaded = false
                             lifecycle = ModelRunnerLifecycle.Failed
+                            GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
                             setStatusIfCurrent(generation, "모델을 불러오지 못했습니다.")
                         }
                     }
@@ -761,7 +823,9 @@ object RemasterModelSession : ModelRunnerContract {
                 DeterministicModelFallback.NoResult,
             )
             if (!isCurrentInferenceOwnerForAdmission(owner)) {
-                return@withLock staleInferenceFailure(owner)
+                val validationCurrent = sessionValidationIsCurrent(owner)
+                settleStaleInstalledOwner(owner)
+                return@withLock staleInferenceFailure(owner, validationCurrent)
             }
             val model = owner.runner
             operation.validateOrThrow()
@@ -846,6 +910,7 @@ object RemasterModelSession : ModelRunnerContract {
             } finally {
                 seam?.atStage(InferenceStage.Finalizer)
                 val validationCurrent = sessionValidationIsCurrent(owner)
+                var validationCloseOwned = false
                 synchronized(sessionStateLock) {
                     val stillOwnsPhysicalSession =
                         installedSessionOwner === owner &&
@@ -864,23 +929,15 @@ object RemasterModelSession : ModelRunnerContract {
                         lifecycle = ModelRunnerLifecycle.Loaded
                         GlobalModelDiagnostics.publish("RemasterModelSession", "loaded")
                     } else if (stillOwnsPhysicalSession && !validationCurrent) {
-                        requestLogicalCloseLocked()
-                        lifecycle = ModelRunnerLifecycle.Closing
+                        validationCloseOwned = publishLogicalClosingLocked(
+                            owner = owner,
+                            settleInference = true,
+                        )
                     }
                 }
-                if (!validationCurrent && synchronized(sessionStateLock) {
-                        installedSessionOwner === owner && lifecycle == ModelRunnerLifecycle.Closing
-                    }) {
+                if (validationCloseOwned) {
                     closeInstalledRunnerLocked()
-                    synchronized(sessionStateLock) {
-                        if (installedSessionOwner == null && lifecycle == ModelRunnerLifecycle.Closing) {
-                            lifecycle = ModelRunnerLifecycle.Unloaded
-                            isModelLoading = false
-                            isInferring = false
-                            statusText = "\uB85C\uB4DC\uB41C \uBAA8\uB378\uC774 \uC5C6\uC2B5\uB2C8\uB2E4."
-                            GlobalModelDiagnostics.publish("RemasterModelSession", "unloaded")
-                        }
-                    }
+                    publishUnloadedIfClosedOwner(owner)
                 }
             }
         }
