@@ -99,6 +99,7 @@ object RemasterModelSession : ModelRunnerContract {
 
     internal enum class InferenceStage {
         Accepted,
+        AfterInferenceStatePublication,
         BeforeNativeInference,
         AfterNativeInference,
         BeforeResultPublication,
@@ -135,9 +136,30 @@ object RemasterModelSession : ModelRunnerContract {
         }
     }
 
+    private class EnsureReusableTestSeam(
+        private val onBeforeValidationRecheck: (suspend () -> Unit)?,
+        private val onClose: (() -> Unit)?,
+    ) {
+        @Volatile private var active = true
+
+        suspend fun beforeValidationRecheck() {
+            if (active) onBeforeValidationRecheck?.invoke()
+        }
+
+        fun deactivate() {
+            if (active) {
+                active = false
+                runCatching { onClose?.invoke() }
+            }
+        }
+    }
+
     private val inferenceTestOwnerLock = Any()
     private var installedInferenceTestSeam: InferenceTestSeam? = null
     private val installedInferenceTestSeamCount = AtomicLong()
+    private val ensureReusableTestOwnerLock = Any()
+    private var installedEnsureReusableTestSeam: EnsureReusableTestSeam? = null
+    private val installedEnsureReusableTestSeamCount = AtomicLong()
     private val commandStartTestOwnerLock = Any()
     private var installedCommandStartTestSeam: CommandStartTestSeam? = null
     private val installedCommandStartTestSeamCount = AtomicLong()
@@ -306,6 +328,9 @@ object RemasterModelSession : ModelRunnerContract {
 
     private fun captureInferenceTestSeam(): InferenceTestSeam? =
         synchronized(inferenceTestOwnerLock) { installedInferenceTestSeam }
+
+    private fun captureEnsureReusableTestSeam(): EnsureReusableTestSeam? =
+        synchronized(ensureReusableTestOwnerLock) { installedEnsureReusableTestSeam }
 
     private fun isInferenceLogicallyAvailable(): Boolean = synchronized(sessionStateLock) {
         lifecycle == ModelRunnerLifecycle.Loaded &&
@@ -504,6 +529,7 @@ object RemasterModelSession : ModelRunnerContract {
     }
 
     internal suspend fun ensureEdgeLoaded(context: Context): ModelLoadResult<Unit> {
+        val reusableTestSeam = captureEnsureReusableTestSeam()
         val reusableOwner = synchronized(sessionStateLock) {
             installedSessionOwner?.takeIf {
                 lifecycle in setOf(ModelRunnerLifecycle.Loaded, ModelRunnerLifecycle.Inferencing) &&
@@ -513,13 +539,20 @@ object RemasterModelSession : ModelRunnerContract {
         }
         if (reusableOwner != null && sessionValidationIsCurrent(reusableOwner)) {
             return modelMutex.withLock {
+                reusableTestSeam?.beforeValidationRecheck()
                 val validationCurrent = sessionValidationIsCurrent(reusableOwner)
+                if (!validationCurrent) {
+                    settleStaleInstalledOwner(reusableOwner)
+                    return@withLock ModelLoadResult.RuntimeUnavailable("model session was superseded")
+                }
                 val reusable = synchronized(sessionStateLock) {
                     if (installedSessionOwner === reusableOwner &&
                         lifecycle != ModelRunnerLifecycle.Closing &&
                         isModelLoaded &&
                         !isModelLoading &&
-                        validationCurrent
+                        sessionValidationIdentity == reusableOwner.validationIdentity &&
+                        registrySessionGeneration == reusableOwner.registrySessionGeneration &&
+                        commandGeneration.get() == reusableOwner.commandGeneration
                     ) {
                         statusText = "${reusableOwner.candidate.title} \uBAA8\uB378\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC788\uC2B5\uB2C8\uB2E4."
                         true
@@ -846,12 +879,16 @@ object RemasterModelSession : ModelRunnerContract {
                     true
                 }
             }
-            if (!accepted || !sessionValidationIsCurrent(owner)) {
+            if (!accepted) {
                 return@withLock staleInferenceFailure(owner)
             }
-            seam?.atStage(InferenceStage.Accepted)
             var ownedMask: TrackedMask? = null
             try {
+                seam?.atStage(InferenceStage.AfterInferenceStatePublication)
+                if (!sessionValidationIsCurrent(owner)) {
+                    return@withLock staleInferenceFailure(owner, knownValidationCurrent = false)
+                }
+                seam?.atStage(InferenceStage.Accepted)
                 operation.validateOrThrow()
                 if (!isCurrentInferenceOwner(owner)) return@withLock staleInferenceFailure(owner)
                 seam?.atStage(InferenceStage.BeforeNativeInference)
@@ -1281,6 +1318,32 @@ object RemasterModelSession : ModelRunnerContract {
 
     internal fun installedInferenceTestSeamCount(): Int =
         installedInferenceTestSeamCount.get().toInt()
+
+    internal fun installEnsureReusableTestSeam(
+        onBeforeValidationRecheck: (suspend () -> Unit)? = null,
+        onClose: (() -> Unit)? = null,
+    ): AutoCloseable {
+        val seam = EnsureReusableTestSeam(onBeforeValidationRecheck, onClose)
+        synchronized(ensureReusableTestOwnerLock) {
+            check(installedEnsureReusableTestSeam == null) {
+                "ensure reusable test owner already installed"
+            }
+            installedEnsureReusableTestSeam = seam
+            installedEnsureReusableTestSeamCount.incrementAndGet()
+        }
+        return AutoCloseable {
+            seam.deactivate()
+            synchronized(ensureReusableTestOwnerLock) {
+                if (installedEnsureReusableTestSeam === seam) {
+                    installedEnsureReusableTestSeam = null
+                    installedEnsureReusableTestSeamCount.decrementAndGet()
+                }
+            }
+        }
+    }
+
+    internal fun installedEnsureReusableTestSeamCount(): Int =
+        installedEnsureReusableTestSeamCount.get().toInt()
 
     internal fun installCommandStartTestSeam(
         onOwnershipClaimed: (() -> Unit)? = null,
