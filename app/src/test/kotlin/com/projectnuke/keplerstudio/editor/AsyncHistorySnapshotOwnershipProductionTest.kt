@@ -8,6 +8,8 @@ import java.io.File
 import java.util.Collections
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -167,6 +169,7 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         val renderer = harness.ownSeam(EditorRenderer.installRendererOverrideForTest {
             renderStarted.complete(Unit)
             releaseRender.await()
+            currentCoroutineContext().ensureActive()
             renderSuccess(it.operation, 0xff00ff00.toInt())
         })
 
