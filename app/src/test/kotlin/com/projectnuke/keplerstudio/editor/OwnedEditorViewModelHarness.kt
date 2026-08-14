@@ -4,49 +4,65 @@ import android.app.Application
 import androidx.lifecycle.ViewModelStore
 import com.projectnuke.keplerstudio.ui.RemasterModelSession
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.robolectric.Shadows.shadowOf
 
-/** Gives Default/IO-owned production work a deterministic scheduler turn while tests pump Main. */
+/**
+ * Legacy scheduler boundary retained for specialized polling tests that have
+ * not yet migrated to an explicit completion signal. DraftRestore does not use
+ * this helper.
+ */
 internal fun yieldToEditorBackgroundForTest() {
     runBlocking { withContext(Dispatchers.Default) { yield() } }
 }
 
 /**
- * Pumps Robolectric Main while allowing Default/IO work to make progress.
+ * Waits for a real production completion signal while pumping Robolectric Main.
  *
- * The old polling pattern created a new runBlocking/Default bridge for every
- * unsuccessful predicate check. Keep one bridge for the whole bounded wait;
- * each background turn is still explicit, so Robolectric Main remains under
- * the caller's control.
+ * The completion callback wakes the waiter immediately. The short timed wait
+ * is only a bounded fallback so Main can be pumped when the production chain
+ * needs another continuation; it is not a scheduler/yield loop.
  */
-internal fun awaitEditorConditionForTest(
+internal fun awaitEditorCompletionForTest(
     description: String,
+    completion: Job,
     timeoutMillis: Long = 15_000L,
     pumpMain: () -> Unit = { shadowOf(android.os.Looper.getMainLooper()).idle() },
     diagnostic: () -> String = { "" },
-    predicate: () -> Boolean,
 ) {
     require(timeoutMillis > 0L) { "timeoutMillis must be positive" }
+    val wakeup = CountDownLatch(1)
+    val completionHandle = completion.invokeOnCompletion { wakeup.countDown() }
     val deadlineNanos = System.nanoTime() + timeoutMillis * 1_000_000L
-    runBlocking {
-        var satisfied = false
-        while (System.nanoTime() < deadlineNanos) {
+    try {
+        // Give an already-queued Default/IO continuation one turn before the
+        // first signal wait. This is one bridge per completion wait, never one
+        // bridge per unsuccessful poll.
+        runBlocking { withContext(Dispatchers.Default) { yield() } }
+        while (!completion.isCompleted) {
             pumpMain()
-            if (predicate()) {
-                satisfied = true
-                break
-            }
-            withContext(Dispatchers.Default) { yield() }
+            if (completion.isCompleted) break
+            val remainingNanos = deadlineNanos - System.nanoTime()
+            if (remainingNanos <= 0L) break
+            wakeup.await(
+                minOf(remainingNanos, TimeUnit.MILLISECONDS.toNanos(25L)),
+                TimeUnit.NANOSECONDS,
+            )
         }
-        check(satisfied || predicate()) {
+        pumpMain()
+        check(completion.isCompleted) {
             val detail = diagnostic().takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""
             "$description timed out after ${timeoutMillis}ms$detail"
         }
+    } finally {
+        completionHandle.dispose()
     }
 }
 

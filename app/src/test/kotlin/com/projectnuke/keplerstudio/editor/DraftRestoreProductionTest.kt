@@ -19,6 +19,12 @@ import org.robolectric.annotation.Config
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -50,7 +56,7 @@ class DraftRestoreProductionTest {
     fun restoredDraftReappliesAdoptedParamsPixelsAndSource() = runBlocking {
         val sourceFile = draftSourceFile("restore-source.png")
         val vm1 = editor(sourceFile.absolutePath, withMask = false)
-        val adopted = AtomicInteger(0)
+        val firstAdoption = CompletableDeferred<Int>()
         val restoreRenders = AtomicInteger(0)
         val renderer =
             EditorRenderer.installRendererOverrideForTest { request ->
@@ -64,16 +70,23 @@ class DraftRestoreProductionTest {
         val hooks =
             ParameterLifecycleTestHook.install(
                 ParameterLifecycleHooks(
-                    onRenderOutputAdopted = { adopted.incrementAndGet() },
+                    onRenderOutputAdopted = { firstAdoption.complete(it) },
                 )
             )
         var sessionFactory: AutoCloseable? = null
         try {
             awaitReady(vm1)
             vm1.updateParams { it.copy(exposure = 0.3f) }
-            awaitEvent(vm1) { adopted.get() >= 1 && vm1.hasOpenParameterGesture() }
+            advanceParameterRenderDelay()
+            awaitEditorCompletionForTest(
+                description = "first parameter render must be adopted",
+                completion = firstAdoption,
+                pumpMain = ::drainReadyMain,
+                diagnostic = { parameterDiagnostic(vm1) },
+            )
+            assertTrue("first adoption keeps gesture open", vm1.hasOpenParameterGesture())
 
-            val saved = vm1.persistDraftSnapshotNow()
+            val saved = persistDraftForTest(vm1)
             assertTrue("draft save must succeed", saved)
             val validated =
                 validateCurrentDraftGeneration(context)
@@ -98,7 +111,7 @@ class DraftRestoreProductionTest {
             assertEquals("restored base token", "restore-base", vm2.uiState.value.baseContentToken)
             assertEquals("restored original preview side", 16, vm2.uiState.value.originalPreviewBitmap?.width)
             assertFalse("restored document is not busy", vm2.uiState.value.isBusy)
-            awaitEvent(vm2) { vm2.canEnterEditorAction() }
+            awaitReady(vm2)
         } finally {
             sessionFactory?.close()
             hooks.close()
@@ -113,6 +126,7 @@ class DraftRestoreProductionTest {
     fun restoredDraftReappliesSelectionMaskLayer() = runBlocking {
         val sourceFile = draftSourceFile("restore-mask-source.png")
         val vm1 = editor(sourceFile.absolutePath, withMask = true)
+        val adoption = CompletableDeferred<Int>()
         val renderer =
             EditorRenderer.installRendererOverrideForTest { request ->
                 if (request.operation == RenderOperation.DraftRestore) {
@@ -121,12 +135,24 @@ class DraftRestoreProductionTest {
                     successOutput(0xffff0000.toInt())
                 }
             }
+        val hooks =
+            ParameterLifecycleTestHook.install(
+                ParameterLifecycleHooks(onRenderOutputAdopted = { adoption.complete(it) })
+            )
         var sessionFactory: AutoCloseable? = null
         try {
             awaitReady(vm1)
             vm1.updateParams { it.copy(exposure = 0.25f) }
-            awaitEvent(vm1) { vm1.uiState.value.params.exposure == 0.25f && !vm1.uiState.value.isBusy }
-            val saved = vm1.persistDraftSnapshotNow()
+            advanceParameterRenderDelay()
+            awaitEditorCompletionForTest(
+                description = "second parameter render must be adopted",
+                completion = adoption,
+                pumpMain = ::drainReadyMain,
+                diagnostic = { parameterDiagnostic(vm1) },
+            )
+            assertEquals(0.25f, vm1.uiState.value.params.exposure)
+            assertFalse("second render settles busy state", vm1.uiState.value.isBusy)
+            val saved = persistDraftForTest(vm1)
             assertTrue("draft save with mask must succeed", saved)
             val validated =
                 validateCurrentDraftGeneration(context)
@@ -151,9 +177,10 @@ class DraftRestoreProductionTest {
             assertTrue("restored layer inverted", layer.inverted)
             assertEquals("restored layer opacity", 0.5f, layer.opacity)
             assertEquals("restored active layer id", "restore-mask", vm2.uiState.value.activeSelectionLayerId)
-            awaitEvent(vm2) { vm2.canEnterEditorAction() }
+            awaitReady(vm2)
         } finally {
             sessionFactory?.close()
+            hooks.close()
             renderer.close()
             sourceFile.delete()
         }
@@ -232,52 +259,82 @@ class DraftRestoreProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        awaitEditorConditionForTest(
-            description = "editor must become ready",
-            pumpMain = {
-                shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
-                shadowOf(android.os.Looper.getMainLooper()).idle()
-            },
-        ) {
-            vm.canEnterEditorAction()
+        val ready = CompletableDeferred<Unit>()
+        val observerScope = CoroutineScope(Dispatchers.Default)
+        val observer =
+            observerScope.launch {
+                vm.uiState.first { !it.isBusy && !it.historyBusy }
+                ready.complete(Unit)
+            }
+        try {
+            awaitEditorCompletionForTest(
+                description = "editor must become ready",
+                completion = ready,
+                pumpMain = ::drainReadyMain,
+            )
+        } finally {
+            observer.cancel()
+            observerScope.cancel()
         }
+        assertTrue(
+            "editor must become ready: admission=${vm.editorActionAdmissionForTest()} " +
+                "historyBusy=${vm.historyActivityBusyForTest()}",
+            vm.canEnterEditorAction(),
+        )
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        awaitEditorConditionForTest(
+        awaitEditorCompletionForTest(
             description = "startup init must complete",
+            completion = vm.startupInitCompletion,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
                 shadowOf(android.os.Looper.getMainLooper()).idle()
             },
-        ) {
-            vm.startupInitCompletion.isCompleted
+        )
+    }
+
+    private fun advanceParameterRenderDelay() {
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(120, TimeUnit.MILLISECONDS)
+        drainReadyMain()
+    }
+
+    private fun drainReadyMain() {
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(0, TimeUnit.MILLISECONDS)
+    }
+
+    private fun parameterDiagnostic(vm: EditorViewModel): String =
+        "busy=${vm.uiState.value.isBusy} " +
+            "revision=${vm.uiState.value.revision} " +
+            "admission=${vm.editorActionAdmissionForTest()} " +
+            "pending=${vm.pendingParamRenderRevision()} " +
+            "phase=${vm.paramRenderPhaseForTest()} " +
+            "phases=${vm.paramRenderRevisionPhasesForTest()} " +
+            "latest=${vm.latestParamsForTest()?.exposure} " +
+            "adopted=${vm.adoptedParamsForTest()?.exposure} " +
+            "gesture=${vm.hasOpenParameterGesture()} " +
+            "message=${vm.uiState.value.message}"
+
+    private fun persistDraftForTest(vm: EditorViewModel): Boolean {
+        val result = CompletableDeferred<Boolean>()
+        val callerScope = CoroutineScope(Dispatchers.Default)
+        val caller =
+            callerScope.launch {
+                result.complete(vm.persistDraftSnapshotNow())
+            }
+        try {
+            awaitEditorCompletionForTest(
+                description = "draft save caller must complete",
+                completion = result,
+                timeoutMillis = 30_000L,
+                pumpMain = ::drainReadyMain,
+                diagnostic = { "leave=${vm.editorLeaveState.value}" },
+            )
+            return runBlocking { result.await() }
+        } finally {
+            caller.cancel()
+            callerScope.cancel()
         }
     }
 
-    private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        var initialVirtualTimeAdvanced = false
-        awaitEditorConditionForTest(
-            description = "draft restore event must settle",
-            pumpMain = {
-                if (!initialVirtualTimeAdvanced) {
-                    shadowOf(android.os.Looper.getMainLooper()).idleFor(150, TimeUnit.MILLISECONDS)
-                    initialVirtualTimeAdvanced = true
-                }
-                shadowOf(android.os.Looper.getMainLooper()).idleFor(0, TimeUnit.MILLISECONDS)
-            },
-            diagnostic = {
-                "busy=${vm.uiState.value.isBusy} " +
-                    "revision=${vm.uiState.value.revision} " +
-                    "admission=${vm.editorActionAdmissionForTest()} " +
-                    "pending=${vm.pendingParamRenderRevision()} " +
-                    "phase=${vm.paramRenderPhaseForTest()} " +
-                    "latest=${vm.latestParamsForTest()?.exposure} " +
-                    "adopted=${vm.adoptedParamsForTest()?.exposure} " +
-                    "gesture=${vm.hasOpenParameterGesture()} " +
-                    "message=${vm.uiState.value.message}"
-            },
-            predicate = predicate,
-        )
-    }
 }

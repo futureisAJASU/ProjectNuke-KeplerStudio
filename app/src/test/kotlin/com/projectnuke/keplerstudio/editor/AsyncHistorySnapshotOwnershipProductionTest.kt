@@ -96,6 +96,7 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         installResetDecode {
             decodeStarted.complete(Unit)
             releaseDecode.await()
+            currentCoroutineContext().ensureActive()
             bitmap(0xff00ff00.toInt())
         }
 
@@ -121,6 +122,7 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         installResetDecode {
             decodeStarted.complete(Unit)
             releaseDecode.await()
+            currentCoroutineContext().ensureActive()
             bitmap(0xff00ff00.toInt())
         }
 
