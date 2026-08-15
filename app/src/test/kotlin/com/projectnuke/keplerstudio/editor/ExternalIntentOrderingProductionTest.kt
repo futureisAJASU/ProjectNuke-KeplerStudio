@@ -4,6 +4,14 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -17,7 +25,6 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.File
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
@@ -52,6 +59,9 @@ class ExternalIntentOrderingProductionTest {
         val vm = editor(sourceFile.absolutePath)
         val output = renderOutput(0xff224466.toInt())
         val pendingGate = CompletableDeferred<Unit>()
+        val secondRenderEntered = CompletableDeferred<Unit>()
+        val firstAdoption = CompletableDeferred<Int>()
+        val transactionClosed = CompletableDeferred<Long>()
         val renderCalls = AtomicInteger(0)
         var adopted = mutableListOf<Int>()
         var commitBegan = mutableListOf<Long>()
@@ -62,7 +72,9 @@ class ExternalIntentOrderingProductionTest {
         val renderer = EditorRenderer.installRendererOverrideForTest {
             val call = renderCalls.incrementAndGet()
             if (call == 2) {
+                secondRenderEntered.complete(Unit)
                 pendingGate.await()
+                currentCoroutineContext().ensureActive()
             }
             RenderResult.Success(
                 operation = RenderOperation.NativePreview,
@@ -80,11 +92,17 @@ class ExternalIntentOrderingProductionTest {
         val hooks =
             ParameterLifecycleTestHook.install(
                 ParameterLifecycleHooks(
-                    onRenderOutputAdopted = { adopted += it },
+                    onRenderOutputAdopted = {
+                        adopted += it
+                        firstAdoption.complete(it)
+                    },
                     onInactivityTimerFired = { inactivityFired++ },
                     onTransactionCommitBegan = { commitBegan += it },
                     onTransactionCommitted = { committed += it },
-                    onTransactionClosed = { closed += it },
+                    onTransactionClosed = {
+                        closed += it
+                        transactionClosed.complete(it)
+                    },
                     onRollbackAdoptedStartState = { rollbacks++ },
                 )
             )
@@ -93,12 +111,12 @@ class ExternalIntentOrderingProductionTest {
 
             // adopt 0.2 inside an open transaction
             vm.updateParams { it.copy(exposure = 0.2f) }
-            awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            awaitCompletion("first render must be adopted", firstAdoption, vm)
             assertEquals(0.2f, vm.adoptedParamsForTest()?.exposure)
 
             // request 0.4; the renderer suspends — no adoption, transaction still open
             vm.updateParams { it.copy(exposure = 0.4f) }
-            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitCompletion("second render must enter its cancellation gate", secondRenderEntered, vm)
             assertTrue("0.4 render must be suspended", renderCalls.get() >= 2)
             assertEquals("adopted params stay 0.2", 0.2f, vm.adoptedParamsForTest()?.exposure)
             assertEquals("latest optimistic params are 0.4", 0.4f, vm.latestParamsForTest()?.exposure)
@@ -107,7 +125,10 @@ class ExternalIntentOrderingProductionTest {
 
             // Undo on first invocation: settlement commits 0.2, then Undo pops it
             vm.undoEdit()
-            awaitEvent(vm) { vm.uiState.value.params.exposure == 0f && !vm.uiState.value.isBusy }
+            awaitCompletion("external undo must close the parameter transaction", transactionClosed, vm)
+            awaitState("external undo must restore the start state", vm) {
+                it.params.exposure == 0f && !it.isBusy
+            }
 
             assertEquals("0.4 never adopts", 1, adopted.size)
             assertEquals(2, renderCalls.get())
@@ -142,6 +163,10 @@ class ExternalIntentOrderingProductionTest {
         val output = Bitmap.createBitmap(16, 8, Bitmap.Config.ARGB_8888)
         output.eraseColor(0xff224466.toInt())
         val pendingGate = CompletableDeferred<Unit>()
+        val secondRenderEntered = CompletableDeferred<Unit>()
+        val firstAdoption = CompletableDeferred<Int>()
+        val transactionClosed = CompletableDeferred<Long>()
+        val draftCaptureBegan = CompletableDeferred<Long>()
         val renderCalls = AtomicInteger(0)
         var adopted = mutableListOf<Int>()
         var commitBegan = mutableListOf<Long>()
@@ -152,7 +177,9 @@ class ExternalIntentOrderingProductionTest {
         val renderer = EditorRenderer.installRendererOverrideForTest {
             val call = renderCalls.incrementAndGet()
             if (call == 2) {
+                secondRenderEntered.complete(Unit)
                 pendingGate.await()
+                currentCoroutineContext().ensureActive()
             }
             RenderResult.Success(
                 operation = RenderOperation.NativePreview,
@@ -170,24 +197,33 @@ class ExternalIntentOrderingProductionTest {
         val hooks =
             ParameterLifecycleTestHook.install(
                 ParameterLifecycleHooks(
-                    onRenderOutputAdopted = { adopted += it },
+                    onRenderOutputAdopted = {
+                        adopted += it
+                        firstAdoption.complete(it)
+                    },
                     onTransactionCommitBegan = { commitBegan += it },
                     onTransactionCommitted = { committed += it },
-                    onTransactionClosed = { closed += it },
+                    onTransactionClosed = {
+                        closed += it
+                        transactionClosed.complete(it)
+                    },
                     onRollbackAdoptedStartState = { rollbacks++ },
-                    onDraftCaptureBegan = { draftCaptures += it },
+                    onDraftCaptureBegan = {
+                        draftCaptures += it
+                        draftCaptureBegan.complete(it)
+                    },
                 )
             )
         try {
             awaitReady(vm)
 
             vm.updateParams { it.copy(exposure = 0.3f) }
-            awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
+            awaitCompletion("first render must be adopted", firstAdoption, vm)
             assertEquals("adopted pixels are the 16x8 output", 16, uiPixelBitmap(vm).width)
             assertEquals(8, uiPixelBitmap(vm).height)
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitCompletion("second render must enter its cancellation gate", secondRenderEntered, vm)
             assertTrue("0.5 render must be suspended", renderCalls.get() >= 2)
             assertTrue("busy while render is pending", vm.uiState.value.isBusy)
             val revisionBeforeRotate = vm.uiState.value.revision
@@ -195,9 +231,10 @@ class ExternalIntentOrderingProductionTest {
 
             // rotate on first invocation
             vm.rotatePreview90()
-            awaitEvent(vm, advanceVirtualTime = false) {
-                val preview = vm.uiState.value.previewBitmap
-                preview != null && !vm.uiState.value.isBusy && preview.width == 8 && preview.height == 16
+            awaitCompletion("external rotate must close the parameter transaction", transactionClosed, vm)
+            awaitState("external rotate must publish the rotated preview", vm) {
+                val preview = it.previewBitmap
+                preview != null && !it.isBusy && preview.width == 8 && preview.height == 16
             }
 
             assertEquals("0.5 never adopts", 1, adopted.size)
@@ -211,7 +248,10 @@ class ExternalIntentOrderingProductionTest {
             assertEquals("settlement and rotation each advance the revision", revisionBeforeRotate + 2, vm.uiState.value.revision)
             assertEquals("settlement and rotation each record history", 2, vm.undoEntryCountForTest())
             // settle schedules an autosave (+1), the rotation forces a save (+1)
-            awaitEvent(vm, advanceVirtualTime = false) { validateCurrentDraftGeneration(context) != null }
+            awaitCompletion("external rotate must begin draft capture", draftCaptureBegan, vm)
+            awaitState("external rotate draft generation must validate", vm) {
+                validateCurrentDraftGeneration(context) != null
+            }
             assertEquals("rotation forces exactly one Draft capture", 1, draftCaptures.size)
             assertEquals("rotation bumps the Draft epoch", epochBefore + 2L, vm.draftEpochForTest())
             val validated = validateCurrentDraftGeneration(context) ?: error("no validated draft")
@@ -228,17 +268,20 @@ class ExternalIntentOrderingProductionTest {
     // Test 3: no adoption, external save — settlement rolls back to the exact
     // start state exactly once and the saved Draft records the start state.
     @Test
-    fun externalSaveWithNoAdoptionRollsBackExactlyOnce() = runBlocking {
+    fun externalSaveWithNoAdoptionRollsBackExactlyOnce() {
         val sourceFile = draftSourceFile("external-noadopt-source.png")
         val vm = editor(sourceFile.absolutePath)
         val suspended = CompletableDeferred<Unit>()
+        val renderEntered = CompletableDeferred<Unit>()
         var adopted = 0
         var commitBegan = 0
         var committed = 0
         var rollbacks = mutableListOf<Int>()
         var closed = mutableListOf<Long>()
         val renderer = EditorRenderer.installRendererOverrideForTest {
+            renderEntered.complete(Unit)
             suspended.await()
+            currentCoroutineContext().ensureActive()
             RenderResult.Success(
                 operation = RenderOperation.NativePreview,
                 requestedRoute = NativeRenderRoute.V1,
@@ -270,10 +313,10 @@ class ExternalIntentOrderingProductionTest {
             val epochBefore = vm.draftEpochForTest()
 
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { vm.pendingParamRenderRevision() != null }
+            awaitCompletion("pending render must enter its cancellation gate", renderEntered, vm)
             assertEquals("no adoption before the save", 0, adopted)
 
-            val saved = vm.persistDraftSnapshotNow()
+            val saved = persistDraftForTest(vm)
             assertTrue("save must complete", saved)
 
             assertEquals("params roll back to start", 0f, vm.uiState.value.params.exposure)
@@ -360,55 +403,69 @@ class ExternalIntentOrderingProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        // Type 4 bounded virtual-time/state observation; Type 5 yield preserved
-        // as specialized synchronization for compound transaction observation.
-        repeat(200) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
-            if (vm.canEnterEditorAction()) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue(vm.canEnterEditorAction())
+        awaitState("editor must become ready", vm) { !it.isBusy && !it.historyBusy }
+        assertTrue("editor action admission must be ready", vm.canEnterEditorAction())
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        // Type 4 bounded state observation (startup init event); Type 5 yield
-        // preserved as specialized synchronization for startup pipeline settlement.
-        repeat(500) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (vm.startupInitCompletion.isCompleted) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
-    }
-
-    private fun awaitEvent(vm: EditorViewModel, advanceVirtualTime: Boolean = true, predicate: () -> Boolean) {
-        // Type 4 bounded virtual-time/state observation; Type 5 yield preserved
-        // as specialized synchronization for compound transaction observation.
-        // The loop exits immediately when the predicate holds; it is bounded
-        // and not arbitrary scheduler luck.
-        if (advanceVirtualTime) repeat(500) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
-            if (predicate()) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-        }
-        if (!advanceVirtualTime) repeat(200) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
-            if (predicate()) return
-            yieldToEditorBackgroundForTest()
-        }
-        if (!advanceVirtualTime) repeat(500) {
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            if (predicate()) return
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue(
-            "event timeout: busy=${vm.uiState.value.isBusy}, revision=${vm.uiState.value.revision}, " +
-                "params=${vm.uiState.value.params.exposure}, pending=${vm.pendingParamRenderRevision()}, " +
-                "open=${vm.hasOpenParameterGesture()}",
-            predicate(),
+        awaitEditorCompletionForTest(
+            description = "startup init must complete",
+            completion = vm.startupInitCompletion,
+            pumpMain = ::drainMain,
+            diagnostic = { editorDiagnostic(vm) },
         )
     }
+
+    private fun awaitCompletion(description: String, completion: CompletableDeferred<*>, vm: EditorViewModel) {
+        awaitEditorCompletionForTest(
+            description = description,
+            completion = completion,
+            pumpMain = ::drainMain,
+            diagnostic = { editorDiagnostic(vm) },
+        )
+    }
+
+    private fun awaitState(description: String, vm: EditorViewModel, predicate: (EditorUiState) -> Boolean) {
+        val completion = CompletableDeferred<Unit>()
+        val observerScope = CoroutineScope(Dispatchers.Default)
+        val observer = observerScope.launch {
+            vm.uiState.first(predicate)
+            completion.complete(Unit)
+        }
+        try {
+            awaitCompletion(description, completion, vm)
+        } finally {
+            observer.cancel()
+            observerScope.cancel()
+        }
+    }
+
+    private fun persistDraftForTest(vm: EditorViewModel): Boolean {
+        val callerScope = CoroutineScope(Dispatchers.Default)
+        val deferred = callerScope.async { vm.persistDraftSnapshotNow() }
+        try {
+            awaitEditorCompletionForTest(
+                description = "draft save caller must complete",
+                completion = deferred,
+                timeoutMillis = 30_000L,
+                pumpMain = ::drainMain,
+                diagnostic = { "leave=${vm.editorLeaveState.value} ${editorDiagnostic(vm)}" },
+            )
+            return runBlocking { deferred.await() }
+        } finally {
+            deferred.cancel()
+            callerScope.cancel()
+        }
+    }
+
+    private fun drainMain() {
+        shadowOf(android.os.Looper.getMainLooper()).idleFor(20, java.util.concurrent.TimeUnit.MILLISECONDS)
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+    }
+
+    private fun editorDiagnostic(vm: EditorViewModel): String =
+        "busy=${vm.uiState.value.isBusy} revision=${vm.uiState.value.revision} " +
+            "historyBusy=${vm.uiState.value.historyBusy} admission=${vm.editorActionAdmissionForTest()} " +
+            "pending=${vm.pendingParamRenderRevision()} phase=${vm.paramRenderPhaseForTest()} " +
+            "open=${vm.hasOpenParameterGesture()}"
 }
