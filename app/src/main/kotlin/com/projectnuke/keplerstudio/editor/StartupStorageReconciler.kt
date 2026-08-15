@@ -10,6 +10,7 @@ internal enum class StartupReconcileDisposition {
     PRESERVED_POINTER,
     PRESERVED_REFERENCED,
     PRESERVED_LIVE_TRANSACTION,
+    PRESERVED_DOCUMENT,
     DELETED_STAGING,
     DELETED_UNREFERENCED,
     DELETED_TEMP,
@@ -31,7 +32,8 @@ internal data class StartupReconcileOutcome(
     val preservedCount: Int get() = entries.count {
         it.disposition == StartupReconcileDisposition.PRESERVED_POINTER ||
             it.disposition == StartupReconcileDisposition.PRESERVED_REFERENCED ||
-            it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION
+            it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION ||
+            it.disposition == StartupReconcileDisposition.PRESERVED_DOCUMENT
     }
     val ignoredCount: Int get() = entries.count { it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN }
 }
@@ -78,6 +80,10 @@ internal fun reconcileStartupArtifacts(
     context: Context,
     inProcessSourcePath: String?,
 ): StartupReconcileOutcome {
+    // The current document is an authoritative in-process root. Register it
+    // before taking the reachability snapshot so later deletion checks use the
+    // same ownership boundary as IncomingSourceTransaction adoption.
+    inProcessSourcePath?.let { IncomingSourceLiveOwnership.registerDocument(File(it)) }
     val entries = mutableListOf<StartupReconcileEntry>()
     val seam = StartupReconcileTestSeam.capture()
     val referenced =
@@ -191,10 +197,14 @@ private fun recordReferencedDeletion(
 }
 
 private fun recordIncomingSourceDeletion(file: File, disposition: StartupReconcileDisposition): StartupReconcileEntry =
-    when (IncomingSourceLiveOwnership.deleteIfNotLive(file)) {
-        null -> StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION)
-        true -> StartupReconcileEntry(file.absolutePath, disposition)
-        false -> StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
+    when (IncomingSourceLiveOwnership.deleteIfUnowned(file)) {
+        IncomingSourceLiveOwnership.DeleteResult.PRESERVED_LIVE_TRANSACTION ->
+            StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION)
+        IncomingSourceLiveOwnership.DeleteResult.PRESERVED_DOCUMENT ->
+            StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.PRESERVED_DOCUMENT)
+        IncomingSourceLiveOwnership.DeleteResult.DELETED -> StartupReconcileEntry(file.absolutePath, disposition)
+        IncomingSourceLiveOwnership.DeleteResult.FAILED ->
+            StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
     }
 
 private fun recordIncomingSourceReferencedDeletion(file: File, referenced: Set<File>): StartupReconcileEntry {

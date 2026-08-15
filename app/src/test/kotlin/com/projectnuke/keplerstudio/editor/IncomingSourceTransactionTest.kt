@@ -28,6 +28,7 @@ class IncomingSourceTransactionTest {
 
     @Before
     fun clearOwnedSources() {
+        IncomingSourceLiveOwnership.clearForTest()
         context.cacheDir.listFiles { file ->
             file.name.startsWith("source_") &&
                 (file.name.endsWith(".img") || file.name.endsWith(".img.staging"))
@@ -51,6 +52,8 @@ class IncomingSourceTransactionTest {
             assertTrue(owned.wasTransferredForTest())
             assertEquals(null, owned.cleanup())
             assertTrue(adopted.isFile)
+            assertTrue(IncomingSourceLiveOwnership.isDocumentOwnedForTest(adopted))
+            IncomingSourceLiveOwnership.releaseDocumentForTest(adopted)
             adopted.delete()
         }
     }
@@ -155,7 +158,25 @@ class IncomingSourceTransactionTest {
 
             owned.transferToDocument()
             assertFalse("transfer releases transaction ownership", IncomingSourceLiveOwnership.isLiveForTest(final))
+            assertTrue("transfer establishes document ownership", IncomingSourceLiveOwnership.isDocumentOwnedForTest(final))
+            IncomingSourceLiveOwnership.releaseDocumentForTest(final)
             final.delete()
+        }
+    }
+
+    @Test
+    fun replacedDocumentSourceIsReclaimedAfterOwnershipRelease() {
+        runBlocking {
+            val owned = transaction { ByteArrayInputStream(byteArrayOf(9)) }.acquire(Uri.EMPTY)
+            val final = owned.file
+            owned.transferToDocument()
+            assertTrue(IncomingSourceLiveOwnership.isDocumentOwnedForTest(final))
+
+            IncomingSourceLiveOwnership.releaseDocumentForTest(final)
+            val outcome = reconcileStartupArtifacts(context, null)
+
+            assertFalse("released document source becomes reclaimable", final.exists())
+            assertTrue(outcome.entries.any { it.path == final.absolutePath && it.disposition == StartupReconcileDisposition.DELETED_UNREFERENCED })
         }
     }
 

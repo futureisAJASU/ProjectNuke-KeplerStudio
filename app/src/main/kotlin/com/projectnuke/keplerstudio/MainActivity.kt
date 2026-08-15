@@ -80,7 +80,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
 private val MainDarkColors = darkColorScheme(
@@ -786,7 +788,32 @@ private fun calculateThumbnailSampleSize(width: Int, height: Int, maxSide: Int):
 }
 
 private data class TemporaryCacheStats(val fileCount: Int = 0, val totalBytes: Long = 0L, val oldFileCount: Int = 0, val oldBytes: Long = 0L)
-private data class TemporaryCacheCleanupResult(val removedCount: Int, val removedBytes: Long)
+internal data class TemporaryCacheCleanupResult(val removedCount: Int, val removedBytes: Long)
+
+/** Deterministic split point for production manual-cache-cleanup ownership tests. */
+internal class IncomingSourceCacheCleanupTestSeam {
+    @Volatile internal var snapshotReached: CompletableDeferred<Unit>? = null
+    @Volatile internal var snapshotRelease: CompletableDeferred<Unit>? = null
+
+    internal companion object Registry {
+        private val lock = Any()
+        private var installed: IncomingSourceCacheCleanupTestSeam? = null
+
+        internal fun install(seam: IncomingSourceCacheCleanupTestSeam): AutoCloseable {
+            synchronized(lock) {
+                check(installed == null) { "cache cleanup test seam already installed" }
+                installed = seam
+            }
+            return AutoCloseable {
+                synchronized(lock) {
+                    if (installed === seam) installed = null
+                }
+            }
+        }
+
+        internal fun capture(): IncomingSourceCacheCleanupTestSeam? = synchronized(lock) { installed }
+    }
+}
 
 private fun calculateTemporaryCacheStats(context: Context): TemporaryCacheStats {
     val now = System.currentTimeMillis()
@@ -800,11 +827,15 @@ private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: Stri
     val protectedPaths = listOfNotNull(activeSourcePath, draftSourcePath).map { File(it).absolutePath }.toSet()
     var removedCount = 0
     var removedBytes = 0L
-    listTemporarySourceFiles(context).forEach { file ->
+    val files = listTemporarySourceFiles(context)
+    val seam = IncomingSourceCacheCleanupTestSeam.capture()
+    seam?.snapshotReached?.complete(Unit)
+    seam?.snapshotRelease?.let { release -> runBlocking { release.await() } }
+    files.forEach { file ->
         val shouldDelete = file.absolutePath !in protectedPaths && (!olderThan7DaysOnly || now - file.lastModified() > TemporarySourceMaxAgeMs)
         if (shouldDelete) {
             val size = file.length()
-            if (IncomingSourceLiveOwnership.deleteIfNotLive(file) == true) {
+            if (IncomingSourceLiveOwnership.deleteIfUnowned(file) == IncomingSourceLiveOwnership.DeleteResult.DELETED) {
                 removedCount += 1
                 removedBytes += size
             }
@@ -812,6 +843,15 @@ private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: Stri
     }
     return TemporaryCacheCleanupResult(removedCount, removedBytes)
 }
+
+/** Test-only access to the real production cache cleanup path. */
+internal fun cleanupTemporarySourceFilesForTest(
+    context: Context,
+    activeSourcePath: String?,
+    draftSourcePath: String?,
+    olderThan7DaysOnly: Boolean,
+): TemporaryCacheCleanupResult =
+    cleanupTemporarySourceFiles(context, activeSourcePath, draftSourcePath, olderThan7DaysOnly)
 
 private fun listTemporarySourceFiles(context: Context): List<File> =
     context.cacheDir.listFiles { file -> file.isFile && IncomingSourceArtifactNames.isFinalName(file.name) }.orEmpty().toList()

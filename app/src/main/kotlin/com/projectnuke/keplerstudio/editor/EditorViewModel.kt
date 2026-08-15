@@ -1603,6 +1603,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         next: EditorUiState,
         replaceDocument: Boolean = false,
         adoptedNativeSession: Long = 0L,
+        registerIncomingDocument: Boolean = true,
     ): Boolean {
         val settled =
             next.withVisibleNativeContractIfChangedFrom(expected).let {
@@ -1610,6 +1611,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
         return bitmapLeaseLedger.withStateTransition {
             if (!_uiState.compareAndSet(expected, settled)) return@withStateTransition false
+            if (replaceDocument) {
+                IncomingSourceLiveOwnership.replaceDocument(
+                    previousPath = expected.sourcePath,
+                    nextPath = settled.sourcePath.takeIf { registerIncomingDocument },
+                )
+            }
             val generation =
                 if (replaceDocument) {
                     invalidateMemoryRecoveryForDocumentReplacement()
@@ -5061,13 +5068,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         nextState,
                         replaceDocument = true,
                         adoptedNativeSession = createdSession,
+                        registerIncomingDocument = false,
                     )
                 ) {
                     nativeSession = previousSession
                     nativeSessionRelease = previousSessionRelease
                     error("open image adoption superseded")
                 }
-                checkNotNull(ownedSource).transferToDocument()
+                checkNotNull(ownedSource).transferToDocument(previousState.sourcePath)
                 ownedSource = null
                 createdSession = 0L
                 createdSessionRelease = null
@@ -9123,6 +9131,7 @@ fun exportPreview() {
         discardPendingParamUndoSnapshot()
         historyCoordinator.close()
         uiStateOwnership?.releaseAll()
+        uiState.value.sourcePath?.let { IncomingSourceLiveOwnership.releaseDocument(File(it)) }
         bitmapLeaseLedger.releaseState(uiState.value)
         recycleBitmaps(bitmapLeaseLedger.shutdown())
         tracker.logSnapshot("preTrackerClose")
@@ -11254,8 +11263,14 @@ private fun deleteOwnedWorkingSource(context: Context, sourcePath: String?) {
         source.parentFile == cacheDirectory &&
             source.name.startsWith("source_") &&
             source.extension == "img"
-    if (ownedDraftSource || ownedIncomingSource) {
+    if (ownedDraftSource) {
         source.delete()
+    } else if (
+        ownedIncomingSource &&
+            IncomingSourceLiveOwnership.deleteIfUnowned(source) == IncomingSourceLiveOwnership.DeleteResult.DELETED
+    ) {
+        // Incoming cache sources share the same linearized ownership boundary
+        // as startup and manual cache cleanup.
     }
 }
 
@@ -11705,14 +11720,20 @@ private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: Stri
     val files =
         context.cacheDir
             .listFiles { file ->
-                file.isFile && file.name.startsWith("source_") && file.name.endsWith(".img")
+                file.isFile && IncomingSourceArtifactNames.isFinalName(file.name)
             }
             .orEmpty()
     var removed = 0
     files.forEach { file ->
         val expired = now - file.lastModified() > maxAgeMs
         val isActive = activePath != null && file.absolutePath == activePath
-        if (expired && !isActive && file.delete()) removed += 1
+        if (
+            expired &&
+                !isActive &&
+                IncomingSourceLiveOwnership.deleteIfUnowned(file) == IncomingSourceLiveOwnership.DeleteResult.DELETED
+        ) {
+            removed += 1
+        }
     }
     return removed
 }

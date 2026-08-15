@@ -2,12 +2,15 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import android.content.Context
+import android.graphics.Bitmap
+import android.net.Uri
 import com.projectnuke.keplerstudio.bridge.installNativeSessionFactoryForTest
 import java.io.ByteArrayInputStream
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -34,6 +37,7 @@ class StartupStorageReconcilerProductionTest {
 
     @Before
     fun cleanStorage() {
+        IncomingSourceLiveOwnership.clearForTest()
         harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
         draftGenerationsRoot(context).deleteRecursively()
         context.filesDir.resolve("editor_sources").deleteRecursively()
@@ -47,6 +51,7 @@ class StartupStorageReconcilerProductionTest {
     @After
     fun cleanStorageAfter() {
         harness.close()
+        IncomingSourceLiveOwnership.clearForTest()
     }
 
     // Orphan .staging_* directories (crash before finalize) are reclaimed while
@@ -271,7 +276,7 @@ class StartupStorageReconcilerProductionTest {
     }
 
     @Test
-    fun olderCacheSnapshotCannotDeleteNewerLiveIncomingFinal() {
+    fun olderCacheSnapshotCannotDeleteNewerAdoptedIncomingFinal() {
         runBlocking {
         val staleFinal = File(context.cacheDir, IncomingSourceArtifactNames.finalName("snapshot-race")).apply { writeText("dead") }
         val reached = CompletableDeferred<Unit>()
@@ -298,10 +303,18 @@ class StartupStorageReconcilerProductionTest {
             assertTrue(owned.file.isFile)
             assertTrue(IncomingSourceLiveOwnership.isLiveForTest(owned.file))
 
+            // The old reconcile view is still paused. Adoption must hand the
+            // exact path from transaction ownership to the current document
+            // root before the transaction owner is released.
+            owned.transferToDocument()
+            assertFalse(IncomingSourceLiveOwnership.isLiveForTest(owned.file))
+            assertTrue(IncomingSourceLiveOwnership.isDocumentOwnedForTest(owned.file))
+
             release.complete(Unit)
             awaitEditorCompletionForTest("reconciliation must finish", reconciliation)
-            assertTrue("old snapshot must not delete newer live final", owned.file.exists())
-            owned.cleanup()
+            assertTrue("old snapshot must not delete newly adopted final", owned.file.exists())
+            IncomingSourceLiveOwnership.releaseDocumentForTest(owned.file)
+            owned.file.delete()
         } finally {
             release.complete(Unit)
             installed.close()
@@ -332,6 +345,68 @@ class StartupStorageReconcilerProductionTest {
         } finally {
             sessionFactory?.close()
             installed.close()
+        }
+    }
+
+    @Test
+    fun realStartupReconcileAndOpenImagePreserveNewCurrentSource() = runBlocking {
+        val orphan = File(context.cacheDir, IncomingSourceArtifactNames.finalName("startup-orphan")).apply { writeText("dead") }
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val startupSeam = StartupReconcileTestSeam().also {
+            it.cacheSnapshotReached = reached
+            it.cacheSnapshotRelease = release
+        }
+        val startupHandle = StartupReconcileTestSeam.install(startupSeam)
+        var openHandle: AutoCloseable? = null
+        try {
+            val vm = harness.createEditor()
+            awaitEditorCompletionForTest("startup reconciliation must capture its view", reached)
+
+            val preview = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+            openHandle = harness.ownSeam(
+                OpenImageTestSeam.install(
+                    OpenImageTestSeam(
+                        sourceTransactionFactory = { app, _ ->
+                            IncomingSourceTransaction(
+                                app,
+                                inputStreamProvider = { ByteArrayInputStream(byteArrayOf(4, 5, 6)) },
+                                idProvider = { "startup-open" },
+                            )
+                        },
+                        decode = { preview },
+                        nativeSessionFactory = { 8080L },
+                    ),
+                ),
+            )
+            val openCompletion = async(Dispatchers.Default) {
+                vm.uiState.first {
+                    !it.isBusy && it.sourcePath?.endsWith(IncomingSourceArtifactNames.finalName("startup-open")) == true
+                }
+            }
+            vm.openImage(Uri.parse("content://startup/open-image"))
+            awaitEditorCompletionForTest(
+                description = "openImage must complete while startup reconcile is paused",
+                completion = openCompletion,
+                pumpMain = {
+                    shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+                    shadowOf(android.os.Looper.getMainLooper()).idle()
+                },
+            )
+            val sourcePath = checkNotNull(vm.uiState.value.sourcePath)
+            assertTrue("new source must be document-owned before reconcile resumes", IncomingSourceLiveOwnership.isDocumentOwnedForTest(File(sourcePath)))
+
+            release.complete(Unit)
+            awaitInit(vm)
+            assertFalse("startup orphan must be reclaimed", orphan.exists())
+            assertTrue("open image source must survive startup cleanup", File(sourcePath).exists())
+            IncomingSourceLiveOwnership.releaseDocumentForTest(File(sourcePath))
+            File(sourcePath).delete()
+            Unit
+        } finally {
+            release.complete(Unit)
+            openHandle?.close()
+            startupHandle.close()
         }
     }
 
