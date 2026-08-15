@@ -2,11 +2,14 @@ package com.projectnuke.keplerstudio.editor
 
 import android.content.Context
 import java.io.File
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.runBlocking
 
 /** How a startup reconcile pass classified one artifact. */
 internal enum class StartupReconcileDisposition {
     PRESERVED_POINTER,
     PRESERVED_REFERENCED,
+    PRESERVED_LIVE_TRANSACTION,
     DELETED_STAGING,
     DELETED_UNREFERENCED,
     DELETED_TEMP,
@@ -25,7 +28,11 @@ internal data class StartupReconcileOutcome(
 ) {
     val deletedCount: Int get() = entries.count { it.disposition == StartupReconcileDisposition.DELETED_STAGING || it.disposition == StartupReconcileDisposition.DELETED_UNREFERENCED || it.disposition == StartupReconcileDisposition.DELETED_TEMP }
     val failedCount: Int get() = entries.count { it.disposition == StartupReconcileDisposition.FAILED_DELETION }
-    val preservedCount: Int get() = entries.count { it.disposition == StartupReconcileDisposition.PRESERVED_POINTER || it.disposition == StartupReconcileDisposition.PRESERVED_REFERENCED }
+    val preservedCount: Int get() = entries.count {
+        it.disposition == StartupReconcileDisposition.PRESERVED_POINTER ||
+            it.disposition == StartupReconcileDisposition.PRESERVED_REFERENCED ||
+            it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION
+    }
     val ignoredCount: Int get() = entries.count { it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN }
 }
 
@@ -35,6 +42,9 @@ internal data class StartupReconcileOutcome(
  */
 internal class StartupReconcileTestSeam {
     @Volatile internal var outcome: StartupReconcileOutcome? = null
+    /** Test-only split point after the cache candidate snapshot and before deletion. */
+    @Volatile internal var cacheSnapshotReached: CompletableDeferred<Unit>? = null
+    @Volatile internal var cacheSnapshotRelease: CompletableDeferred<Unit>? = null
 
     internal companion object Registry {
         private val lock = Any()
@@ -108,14 +118,17 @@ internal fun reconcileStartupArtifacts(
 
     val cacheRoot = runCatching { context.cacheDir.canonicalFile }.getOrNull()
     if (cacheRoot != null) {
-        cacheRoot.listFiles()?.forEach { file ->
+        val cacheFiles = cacheRoot.listFiles()?.toList().orEmpty()
+        seam?.cacheSnapshotReached?.complete(Unit)
+        seam?.cacheSnapshotRelease?.let { release -> runBlocking { release.await() } }
+        cacheFiles.forEach { file ->
             val canonical = runCatching { file.canonicalFile }.getOrNull()
             if (canonical == null || canonical.parentFile != cacheRoot) return@forEach
             when {
-                canonical.name.endsWith(STAGING_FILE_SUFFIX) ->
-                    entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_STAGING)
-                canonical.name.startsWith(CACHE_SOURCE_PREFIX) && canonical.name.endsWith(CACHE_SOURCE_SUFFIX) ->
-                    entries += recordReferencedDeletion(canonical, referenced, StartupReconcileDisposition.DELETED_UNREFERENCED)
+                IncomingSourceArtifactNames.isStagingName(canonical.name) ->
+                    entries += recordIncomingSourceDeletion(canonical, StartupReconcileDisposition.DELETED_STAGING)
+                IncomingSourceArtifactNames.isFinalName(canonical.name) ->
+                    entries += recordIncomingSourceReferencedDeletion(canonical, referenced)
                 else -> entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
             }
         }
@@ -177,6 +190,20 @@ private fun recordReferencedDeletion(
     }
 }
 
+private fun recordIncomingSourceDeletion(file: File, disposition: StartupReconcileDisposition): StartupReconcileEntry =
+    when (IncomingSourceLiveOwnership.deleteIfNotLive(file)) {
+        null -> StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION)
+        true -> StartupReconcileEntry(file.absolutePath, disposition)
+        false -> StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
+    }
+
+private fun recordIncomingSourceReferencedDeletion(file: File, referenced: Set<File>): StartupReconcileEntry {
+    val canonical = runCatching { file.canonicalFile }.getOrNull()
+        ?: return StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
+    if (canonical in referenced) return StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_REFERENCED)
+    return recordIncomingSourceDeletion(canonical, StartupReconcileDisposition.DELETED_UNREFERENCED)
+}
+
 private fun recordDirectoryDeletion(
     dir: File,
     ownerRoot: File,
@@ -203,8 +230,5 @@ private fun recordDirectoryDeletion(
 private const val WORKING_SOURCES_DIR = "editor_sources"
 private const val WORKING_SOURCE_PREFIX = "restored_"
 private const val WORKING_SOURCE_SUFFIX = ".img"
-private const val CACHE_SOURCE_PREFIX = "source_"
-private const val CACHE_SOURCE_SUFFIX = ".img"
-private const val STAGING_FILE_SUFFIX = ".img.staging"
 private const val DRAFT_TEMP_SUFFIX = ".tmp"
 private const val LEGACY_DRAFT_DIR = "drafts/current"

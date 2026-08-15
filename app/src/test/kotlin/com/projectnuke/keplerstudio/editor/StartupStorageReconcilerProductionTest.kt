@@ -3,7 +3,11 @@ package com.projectnuke.keplerstudio.editor
 import android.app.Application
 import android.content.Context
 import com.projectnuke.keplerstudio.bridge.installNativeSessionFactoryForTest
+import java.io.ByteArrayInputStream
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -235,6 +239,74 @@ class StartupStorageReconcilerProductionTest {
         assertTrue("foreign cache file must be untouched", foreignCache.exists())
         assertEquals(2, outcome.entries.count { it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN })
         assertEquals(0, outcome.deletedCount)
+    }
+
+    @Test
+    fun liveIncomingStagingAndFinalArePreservedUntilOwnershipEnds() {
+        val staging = File(context.cacheDir, IncomingSourceArtifactNames.stagingName("live")).apply { writeText("partial") }
+        val final = File(context.cacheDir, IncomingSourceArtifactNames.finalName("live")).apply { writeText("final") }
+        IncomingSourceLiveOwnership.register(staging, final)
+        try {
+            val live = reconcileStartupArtifacts(context, null)
+            assertTrue("live staging must survive", staging.exists())
+            assertTrue("live final before adoption must survive", final.exists())
+            assertEquals(2, live.entries.count { it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION })
+        } finally {
+            IncomingSourceLiveOwnership.release(staging, final)
+        }
+        val dead = reconcileStartupArtifacts(context, null)
+        assertFalse("released staging is a startup orphan", staging.exists())
+        assertFalse("released final is a startup orphan", final.exists())
+        assertEquals(2, dead.deletedCount)
+    }
+
+    @Test
+    fun unknownImgStagingIsNotClaimedByIncomingSourceCleanup() {
+        val unknown = File(context.cacheDir, "unrelated.img.staging").apply { writeText("foreign") }
+
+        val outcome = reconcileStartupArtifacts(context, null)
+
+        assertTrue("unknown staging owner must be preserved", unknown.exists())
+        assertTrue(outcome.entries.any { it.path == unknown.absolutePath && it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN })
+    }
+
+    @Test
+    fun olderCacheSnapshotCannotDeleteNewerLiveIncomingFinal() {
+        runBlocking {
+        val staleFinal = File(context.cacheDir, IncomingSourceArtifactNames.finalName("snapshot-race")).apply { writeText("dead") }
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val seam = StartupReconcileTestSeam().also {
+            it.cacheSnapshotReached = reached
+            it.cacheSnapshotRelease = release
+        }
+        val installed = StartupReconcileTestSeam.install(seam)
+        try {
+            val reconciliation = async(Dispatchers.Default) { reconcileStartupArtifacts(context, null) }
+            awaitEditorCompletionForTest("reconciliation must capture cache snapshot", reached)
+            assertTrue(staleFinal.delete())
+
+            val acquisition = async(Dispatchers.Default) {
+                IncomingSourceTransaction(
+                    context,
+                    inputStreamProvider = { ByteArrayInputStream(byteArrayOf(7)) },
+                    idProvider = { "snapshot-race" },
+                ).acquire(android.net.Uri.EMPTY)
+            }
+            awaitEditorCompletionForTest("new transaction must promote its final", acquisition)
+            val owned = acquisition.await()
+            assertTrue(owned.file.isFile)
+            assertTrue(IncomingSourceLiveOwnership.isLiveForTest(owned.file))
+
+            release.complete(Unit)
+            awaitEditorCompletionForTest("reconciliation must finish", reconciliation)
+            assertTrue("old snapshot must not delete newer live final", owned.file.exists())
+            owned.cleanup()
+        } finally {
+            release.complete(Unit)
+            installed.close()
+        }
+        }
     }
 
     // The real startup path runs reconciliation: orphans present at VM init are

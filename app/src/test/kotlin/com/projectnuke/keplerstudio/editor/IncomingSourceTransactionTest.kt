@@ -120,6 +120,45 @@ class IncomingSourceTransactionTest {
         }
     }
 
+    @Test
+    fun reconcilePreservesLiveStagingDuringCopyThenRollbackReleasesOwnership() {
+        runBlocking {
+            val stream = GateInputStream()
+            val acquisition = async { transaction { stream }.acquire(Uri.EMPTY) }
+            awaitEditorCompletionForTest(
+                description = "incoming copy must enter its gate",
+                completion = stream.entered,
+            )
+            val staging = context.cacheDir.listFiles().orEmpty().single { IncomingSourceArtifactNames.isStagingName(it.name) }
+            reconcileStartupArtifacts(context, null)
+            assertTrue("live staging must survive reconciliation", staging.exists())
+            assertTrue(IncomingSourceLiveOwnership.isLiveForTest(staging))
+
+            acquisition.cancel()
+            stream.release()
+            runCatching { acquisition.await() }
+            assertFalse("rollback removes staging", staging.exists())
+            assertFalse("rollback releases ownership", IncomingSourceLiveOwnership.isLiveForTest(staging))
+            reconcileStartupArtifacts(context, null)
+        }
+    }
+
+    @Test
+    fun reconcilePreservesPromotedFinalUntilDocumentTransfer() {
+        runBlocking {
+            val owned = transaction { ByteArrayInputStream(byteArrayOf(1)) }.acquire(Uri.EMPTY)
+            val final = owned.file
+            assertTrue("promotion creates final before adoption", final.exists())
+            reconcileStartupArtifacts(context, null)
+            assertTrue("live final before adoption must survive", final.exists())
+            assertTrue(IncomingSourceLiveOwnership.isLiveForTest(final))
+
+            owned.transferToDocument()
+            assertFalse("transfer releases transaction ownership", IncomingSourceLiveOwnership.isLiveForTest(final))
+            final.delete()
+        }
+    }
+
     private fun transaction(provider: suspend (Uri) -> InputStream?): IncomingSourceTransaction =
         IncomingSourceTransaction(context, inputStreamProvider = provider)
 

@@ -16,6 +16,7 @@ import kotlinx.coroutines.yield
 /** A completed incoming source whose file is still owned by the open operation. */
 internal class OwnedIncomingSource internal constructor(
     val file: File,
+    private val releaseLiveOwnership: () -> Unit,
 ) {
     private var transferred = false
 
@@ -23,15 +24,21 @@ internal class OwnedIncomingSource internal constructor(
     fun transferToDocument(): File {
         check(!transferred) { "incoming source ownership already transferred" }
         transferred = true
+        releaseLiveOwnership()
         return file
     }
 
     /** Releases the file if this operation still owns it. */
     fun cleanup(): Throwable? {
-        if (transferred || !file.exists()) return null
-        return runCatching {
-            check(file.delete()) { "owned incoming source deletion failed" }
-        }.exceptionOrNull()
+        if (transferred) return null
+        return try {
+            if (file.exists()) check(file.delete()) { "owned incoming source deletion failed" }
+            null
+        } catch (failure: Throwable) {
+            failure
+        } finally {
+            releaseLiveOwnership()
+        }
     }
 
     internal fun wasTransferredForTest(): Boolean = transferred
@@ -54,6 +61,7 @@ internal class IncomingSourceTransaction(
         val pair = allocatePair()
         val staging = pair.staging
         val final = pair.final
+        IncomingSourceLiveOwnership.register(staging, final)
         try {
             inputStreamProvider(uri).use { input ->
                 requireNotNull(input) { "incoming image input stream is null" }
@@ -65,7 +73,7 @@ internal class IncomingSourceTransaction(
             }
             currentCoroutineContext().ensureActive()
             check(staging.renameTo(final)) { "incoming image source promotion failed" }
-            OwnedIncomingSource(final)
+            OwnedIncomingSource(final) { IncomingSourceLiveOwnership.release(staging, final) }
         } catch (cancellation: kotlinx.coroutines.CancellationException) {
             cleanupPaths(staging, final, cancellation)
             throw cancellation
@@ -98,8 +106,8 @@ internal class IncomingSourceTransaction(
         }
         repeat(MAX_ALLOCATION_ATTEMPTS) {
             val id = idProvider()
-            val staging = File(cacheDirectory, "source_${id}.img.staging")
-            val final = File(cacheDirectory, "source_${id}.img")
+            val staging = File(cacheDirectory, IncomingSourceArtifactNames.stagingName(id))
+            val final = File(cacheDirectory, IncomingSourceArtifactNames.finalName(id))
             if (final.exists()) return@repeat
             if (staging.createNewFile()) return SourcePathPair(staging, final)
         }
@@ -107,11 +115,15 @@ internal class IncomingSourceTransaction(
     }
 
     private fun cleanupPaths(staging: File, final: File, cause: Throwable) {
-        listOf(staging, final).forEach { path ->
-            if (!path.exists()) return@forEach
-            runCatching { check(path.delete()) { "incoming source cleanup failed: ${path.name}" } }
-                .exceptionOrNull()
-                ?.let(cause::addSuppressed)
+        try {
+            listOf(staging, final).forEach { path ->
+                if (!path.exists()) return@forEach
+                runCatching { check(path.delete()) { "incoming source cleanup failed: ${path.name}" } }
+                    .exceptionOrNull()
+                    ?.let(cause::addSuppressed)
+            }
+        } finally {
+            IncomingSourceLiveOwnership.release(staging, final)
         }
     }
 
@@ -124,4 +136,45 @@ internal class IncomingSourceTransaction(
         const val MAX_ALLOCATION_ATTEMPTS = 32
         const val CHECKPOINT_MASK = 0x0f
     }
+}
+
+/** Shared naming contract and current-process ownership boundary for incoming sources. */
+internal object IncomingSourceArtifactNames {
+    fun finalName(id: String): String = "source_${id}.img"
+    fun stagingName(id: String): String = "${finalName(id)}.staging"
+
+    fun isFinalName(name: String): Boolean =
+        name.startsWith("source_") && name.endsWith(".img") && name.length > "source_.img".length
+
+    fun isStagingName(name: String): Boolean =
+        name.startsWith("source_") && name.endsWith(".img.staging") && name.length > "source_.img.staging".length
+}
+
+/**
+ * In-memory roots disappear on process death, letting startup reclaim dead artifacts.
+ * Registration and reconciler deletion checks share one monitor so an older reconcile
+ * snapshot cannot delete a path allocated by a newer transaction.
+ */
+internal object IncomingSourceLiveOwnership {
+    private val lock = Any()
+    private val livePaths = mutableSetOf<String>()
+
+    fun register(staging: File, final: File) = synchronized(lock) {
+        livePaths += canonical(staging)
+        livePaths += canonical(final)
+    }
+
+    fun release(staging: File, final: File) = synchronized(lock) {
+        livePaths -= canonical(staging)
+        livePaths -= canonical(final)
+    }
+
+    /** null means a live transaction owns the path. */
+    fun deleteIfNotLive(file: File): Boolean? = synchronized(lock) {
+        if (canonical(file) in livePaths) null else file.delete()
+    }
+
+    internal fun isLiveForTest(file: File): Boolean = synchronized(lock) { canonical(file) in livePaths }
+
+    private fun canonical(file: File): String = runCatching { file.canonicalPath }.getOrElse { file.absolutePath }
 }

@@ -68,6 +68,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
+import com.projectnuke.keplerstudio.editor.IncomingSourceArtifactNames
+import com.projectnuke.keplerstudio.editor.IncomingSourceLiveOwnership
 import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ThumbnailBitmapCache
@@ -802,7 +804,7 @@ private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: Stri
         val shouldDelete = file.absolutePath !in protectedPaths && (!olderThan7DaysOnly || now - file.lastModified() > TemporarySourceMaxAgeMs)
         if (shouldDelete) {
             val size = file.length()
-            if (file.delete()) {
+            if (IncomingSourceLiveOwnership.deleteIfNotLive(file) == true) {
                 removedCount += 1
                 removedBytes += size
             }
@@ -812,7 +814,7 @@ private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: Stri
 }
 
 private fun listTemporarySourceFiles(context: Context): List<File> =
-    context.cacheDir.listFiles { file -> file.isFile && file.name.startsWith("source_") && file.name.endsWith(".img") }.orEmpty().toList()
+    context.cacheDir.listFiles { file -> file.isFile && IncomingSourceArtifactNames.isFinalName(file.name) }.orEmpty().toList()
 
 private fun formatCacheBytes(bytes: Long): String {
     val formatter = DecimalFormat("0.#")

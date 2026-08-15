@@ -39,7 +39,7 @@ class DraftRestoreProductionTest {
         harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        draftGenerationsRoot(context).takeIf(File::exists)?.deleteRecursively()
     }
 
     @After
@@ -47,7 +47,7 @@ class DraftRestoreProductionTest {
         harness.close()
         context.filesDir.resolve("editor_history_v3").deleteRecursively()
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        draftGenerationsRoot(context).takeIf(File::exists)?.deleteRecursively()
     }
 
     // Test 1: a saved draft generation is actually restored into a fresh
