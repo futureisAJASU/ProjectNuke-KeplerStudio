@@ -34,6 +34,9 @@ class MemoryRecoveryOwnershipProductionTest {
 
     @Before
     fun setUp() {
+        ExperimentalLabController.resetForTest()
+        ExperimentalComparisonStore.clear()
+        RetainedMemoryLedger.resetForTest()
         harness = OwnedEditorViewModelHarness(installBitmapCopySeam = true, application = application)
     }
 
@@ -316,7 +319,7 @@ class MemoryRecoveryOwnershipProductionTest {
 
         editor.requestAllocationRecovery(
             MemoryRetryAction.CreateBrushSelection,
-            BitmapMemoryBudget.availableBytes() / 2L,
+            1L,
         )
         awaitEvent { seam.automaticReached.isCompleted }
         seam.automaticRelease.complete(Unit)
@@ -326,10 +329,20 @@ class MemoryRecoveryOwnershipProductionTest {
         editor.retryPendingMemoryRecovery(token)
         awaitEvent { seam.strongReached.isCompleted }
         seam.strongRelease.complete(Unit)
-        awaitEvent {
-            editor.uiState.value.selectionLayers.size == 1 &&
-                editor.strongRetryAttemptForTest() == null
-        }
+        awaitEvent(
+            label = "strong retry settles",
+            predicate = {
+                editor.uiState.value.selectionLayers.size == 1 &&
+                    editor.strongRetryAttemptForTest() == null
+            },
+            diagnostic = {
+                "layers=${editor.uiState.value.selectionLayers.size} " +
+                    "strong=${editor.strongRetryAttemptForTest()} " +
+                    "busy=${editor.uiState.value.isBusy} " +
+                    "request=${editor.uiState.value.memoryRecoveryRequest} " +
+                    "message=${editor.uiState.value.message}"
+            },
+        )
     }
 
     @Test
@@ -640,7 +653,14 @@ class MemoryRecoveryOwnershipProductionTest {
 
     private fun awaitEvent(predicate: () -> Boolean) = awaitEvent("event", predicate)
 
-    private fun awaitEvent(label: String, predicate: () -> Boolean) {
+    private fun awaitEvent(label: String, predicate: () -> Boolean) =
+        awaitEvent(label, predicate, diagnostic = { "" })
+
+    private fun awaitEvent(
+        label: String,
+        predicate: () -> Boolean,
+        diagnostic: () -> String = { "" },
+    ) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
         while (System.nanoTime() < deadline) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -649,6 +669,6 @@ class MemoryRecoveryOwnershipProductionTest {
             if (predicate()) return
             Thread.sleep(5L)
         }
-        assertTrue(label, predicate())
+        assertTrue("$label ${diagnostic()}", predicate())
     }
 }

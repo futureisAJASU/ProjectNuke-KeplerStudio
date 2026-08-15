@@ -65,6 +65,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -252,6 +253,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var openImageJob: Job? = null
     private var openImageToken: Long = 0L
     private var restoreDraftJob: Job? = null
+    /** Startup coordinator owns history/reconciliation independently of the replaceable restore child. */
+    private var startupCoordinatorJob: Job? = null
     private val correctionEngineSettings = CorrectionEngineSettings(app.applicationContext)
     @Volatile private var correctionEngineEpoch: Long = 0L
     private var exportJob: Job? = null
@@ -337,12 +340,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal val savedExportHistoryRevisionForTest: Long
         get() = savedExportHistoryStore.revision
 
-    /**
-     * Completes when the startup init coroutine (engine prefs, Draft restore,
-     * export-history rebuild) has fully finished. Tests await this before
-     * ending a test or clearing the ViewModel so no init IO outlives the
-     * test sandbox.
-     */
+    /** Completes after engine setup, Draft restore/supersession, history, and reconciliation settle. */
     internal val startupInitCompletion = CompletableDeferred<Unit>()
 
     private val savedExportHistoryMutex = Mutex()
@@ -4880,7 +4878,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         hazeEngine = engines.hazeEngine,
                     )
                 }
-                restoreDraftIfAvailable(context, startupRestoreToken, startupRevision)
+                // Draft restore is a replaceable child operation. OpenImage
+                // and clearDraft may cancel it, but they must not cancel the
+                // coordinator's remaining startup phases.
+                supervisorScope {
+                    val restoreChild =
+                        launch(start = CoroutineStart.LAZY) {
+                            restoreDraftIfAvailable(context, startupRestoreToken, startupRevision)
+                        }
+                    restoreDraftJob = restoreChild
+                    restoreChild.invokeOnCompletion {
+                        if (restoreDraftJob === restoreChild) restoreDraftJob = null
+                    }
+                    restoreChild.start()
+                    restoreChild.join()
+                }
+                StartupInitializationTestSeam.capture()?.onStage?.invoke(
+                    StartupInitializationStage.HISTORY_LOAD_STARTED,
+                )
                 try {
                     val historyResult =
                         withContext(Dispatchers.IO) {
@@ -4896,6 +4911,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     historyResult.retention ?: it.exportHistoryRetention,
                             )
                     }
+                    StartupInitializationTestSeam.capture()?.onStage?.invoke(
+                        StartupInitializationStage.HISTORY_LOAD_FINISHED,
+                    )
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (failure: Throwable) {
@@ -4905,6 +4923,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         it.copy(message = "내보낸 사진 기록을 불러오지 못했습니다.")
                     }
                 }
+                StartupInitializationTestSeam.capture()?.onStage?.invoke(
+                    StartupInitializationStage.RECONCILIATION_STARTED,
+                )
                 runCatching {
                     withContext(Dispatchers.IO) {
                         draftSaveMutex.withLock {
@@ -4921,12 +4942,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }.onFailure { t ->
                     Log.w(FLARE_GUARD_AI_TAG, "Startup storage reconcile failed", t)
                 }
+                StartupInitializationTestSeam.capture()?.onStage?.invoke(
+                    StartupInitializationStage.RECONCILIATION_FINISHED,
+                )
             } finally {
+                runCatching {
+                    StartupInitializationTestSeam.capture()?.onStage?.invoke(
+                        StartupInitializationStage.COORDINATOR_SETTLED,
+                    )
+                }
                 startupInitCompletion.complete(Unit)
             }
         }
-        restoreDraftJob = startupJob
-        startupJob.invokeOnCompletion { if (restoreDraftJob === startupJob) restoreDraftJob = null }
+        startupCoordinatorJob = startupJob
+        startupJob.invokeOnCompletion {
+            if (startupCoordinatorJob === startupJob) startupCoordinatorJob = null
+        }
     }
 
     fun openImage(uri: Uri) {
@@ -9159,6 +9190,7 @@ fun exportPreview() {
         cropJob?.cancel()
         transactionFinishJob?.cancel()
         restoreDraftJob?.cancel()
+        startupCoordinatorJob?.cancel()
         asyncBusyOwner?.let { owner ->
             owner.phase = AsyncBusyPhase.Closed
             owner.job?.cancel()

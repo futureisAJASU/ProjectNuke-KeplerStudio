@@ -172,6 +172,8 @@ internal class OwnedEditorViewModelHarness(
                 .onFailure { failure = failure ?: it }
             runCatching { check(DraftRestoreTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
+            runCatching { check(StartupInitializationTestSeam.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
             runCatching { check(AsyncBusyTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(RemasterModelSession.installedInferenceTestSeamCount() == 0) }
@@ -193,6 +195,7 @@ internal class OwnedEditorViewModelHarness(
                     .onFailure { failure = failure ?: it }
             }
             files.clear()
+            ThumbnailBitmapCache.clear()
             // Test-only retained-memory reservations are process-global.  A
             // failed/aborted test must not poison the next Robolectric class.
             RetainedMemoryLedger.resetForTest()

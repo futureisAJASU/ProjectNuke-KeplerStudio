@@ -4,6 +4,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
 import com.projectnuke.keplerstudio.bridge.installNativeSessionFactoryForTest
+import com.projectnuke.keplerstudio.ui.RemasterModelSession
 import java.io.ByteArrayInputStream
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -65,10 +66,12 @@ class DraftRestoreProductionTest {
         val sourceFile = draftSourceFile("restore-source.png")
         val vm1 = editor(sourceFile.absolutePath, withMask = false)
         val firstAdoption = CompletableDeferred<Int>()
+        var vm2RestoreRevision = Int.MAX_VALUE
+        val restoredEditCommitted = CompletableDeferred<Int>()
         val restoreRenders = AtomicInteger(0)
         val renderer =
             EditorRenderer.installRendererOverrideForTest { request ->
-                if (request.operation == RenderOperation.DraftRestore) {
+                if (request.operation == RenderOperation.DraftRestore || request.operation == RenderOperation.HistoryMaterialization) {
                     restoreRenders.incrementAndGet()
                     successOutput(0xff0000ff.toInt())
                 } else {
@@ -79,11 +82,78 @@ class DraftRestoreProductionTest {
             ParameterLifecycleTestHook.install(
                 ParameterLifecycleHooks(
                     onRenderOutputAdopted = { firstAdoption.complete(it) },
+                    onTransactionCommitted = { revision ->
+                        if (revision > vm2RestoreRevision) restoredEditCommitted.complete(revision)
+                    },
                 )
         )
         var sessionFactory: AutoCloseable? = null
         try {
             awaitReady(vm1)
+            val persistedCrop =
+                CropState(
+                    aspectRatio = CropAspectRatio.Square,
+                    cropLeft = 0.11f,
+                    cropTop = 0.17f,
+                    cropRight = 0.88f,
+                    cropBottom = 0.83f,
+                    rotationDegrees = 90,
+                    straightenDegrees = 6.5f,
+                    flipHorizontal = true,
+                )
+            val persistedLook = createPresetColorLookFromParams(EditParams(exposure = 0.12f), size = 5, strength = 0.4f)
+            val persistedQuickEffects =
+                listOf(
+                    ActiveQuickEffect(QuickEffectKind.VignetteCorrection, QuickEffectStrength.Strong),
+                    ActiveQuickEffect(QuickEffectKind.SoftBlur, QuickEffectStrength.Weak),
+                )
+            val persistedPaint = SelectionPaintSettings(SelectionPaintMode.Remove, 87f, 0.31f, 0.62f)
+            val persistedContracts =
+                AlgorithmContractSet(
+                    nativeRenderContract = AlgorithmContracts.NATIVE_V1,
+                    flareGuardContract = AlgorithmContracts.FLARE_V1,
+                    remasterContract = AlgorithmContracts.REMASTER_V1,
+                    subjectSelectionContract = AlgorithmContracts.SUBJECT_V1,
+                    selectionBlendContract = AlgorithmContracts.SELECTION_BLEND,
+                    migratedFromLegacy = "legacy-contract",
+                )
+            val persistedProvenance =
+                BaseProvenanceChain(
+                    listOf(
+                        BakedFeatureProvenance(
+                            feature = BakedFeatureType.Remaster,
+                            operationId = "restore-provenance",
+                            sequence = 3L,
+                            requestedRoute = NativeRenderRoute.V2.name,
+                            actualRoute = NativeRenderRoute.V1.name,
+                            participation = RenderParticipation(model = true, rule = true),
+                            capabilityPhase = null,
+                            outcome = FeatureExecutionOutcome.Fallback,
+                            fallbackReason = "test-fallback",
+                            stageContract = AlgorithmContracts.REMASTER_V1,
+                            timestampMillis = 1234L,
+                        )
+                    )
+                )
+            vm1.updateUiState {
+                it.copy(
+                    baseBitmapDirty = true,
+                    presetLook = persistedLook,
+                    cropState = persistedCrop,
+                    exportFormat = ExportFormat.Png,
+                    exportResolution = ExportResolution.Percent50,
+                    correctionEngineState =
+                        it.correctionEngineState.copy(
+                            defaultEngine = CorrectionEngine.Engine2,
+                            documentEngine = CorrectionEngine.Engine2,
+                        ),
+                    activeQuickEffects = persistedQuickEffects,
+                    selectionPaintSettings = persistedPaint,
+                    showSelectionOverlay = false,
+                    algorithmContracts = persistedContracts,
+                    baseProvenance = persistedProvenance,
+                )
+            }
             vm1.updateParams { it.copy(exposure = 0.3f) }
             advanceParameterRenderDelay()
             awaitEditorCompletionForTest(
@@ -128,9 +198,38 @@ class DraftRestoreProductionTest {
             assertFalse("working source is a fresh copy", restoredSource == sourceFile.absolutePath)
             assertEquals("draft generation id restored", pointer, vm2.uiState.value.draftGenerationId)
             assertEquals("restored base token", "restore-base", vm2.uiState.value.baseContentToken)
+            assertFalse("Draft restore does not eagerly load Remaster models", RemasterModelSession.isModelLoaded)
+            assertTrue("restored crop state", vm2.uiState.value.cropState == persistedCrop)
+            assertEquals("restored export format", ExportFormat.Png, vm2.uiState.value.exportFormat)
+            assertEquals("restored export resolution", ExportResolution.Percent50, vm2.uiState.value.exportResolution)
+            assertEquals("restored correction engine", CorrectionEngine.Engine2, vm2.uiState.value.correctionEngineState.documentEngine)
+            assertEquals("restored quick effects", persistedQuickEffects, vm2.uiState.value.activeQuickEffects)
+            assertEquals("restored selection paint settings", persistedPaint, vm2.uiState.value.selectionPaintSettings)
+            assertFalse("restored selection overlay", vm2.uiState.value.showSelectionOverlay)
+            assertEquals("restored algorithm contracts", AlgorithmContracts.FLARE_V1, vm2.uiState.value.algorithmContracts.flareGuardContract)
+            assertEquals("restored base provenance", "restore-provenance", vm2.uiState.value.baseProvenance.operations.single().operationId)
+            assertEquals("restored look size", persistedLook.size, vm2.uiState.value.presetLook?.size)
+            assertEquals("restored look strength", persistedLook.strength, vm2.uiState.value.presetLook?.strength)
+            assertTrue("restored look values", persistedLook.values.contentEquals(vm2.uiState.value.presetLook?.values ?: FloatArray(0)))
             assertEquals("restored original preview side", 16, vm2.uiState.value.originalPreviewBitmap?.width)
             assertFalse("restored document is not busy", vm2.uiState.value.isBusy)
             awaitReady(vm2)
+            vm2RestoreRevision = vm2.uiState.value.revision
+
+            vm2.updateParams { it.copy(exposure = 0.61f) }
+            advanceParameterRenderDelay()
+            advanceInactivityWindowForRestore()
+            awaitEditorCompletionForTest(
+                description = "new edit must commit history after restore",
+                completion = restoredEditCommitted,
+                pumpMain = ::drainReadyMain,
+            )
+            assertEquals("new edit is based on restored params", 0.61f, vm2.uiState.value.params.exposure)
+            assertTrue("new edit creates fresh-process undo", vm2.uiState.value.canUndo)
+            vm2.undoEdit()
+            awaitReady(vm2)
+            assertEquals("undo returns to restored params", 0.3f, vm2.uiState.value.params.exposure)
+            assertEquals("undo returns to restored pixels", 0xff0000ff.toInt(), uiPixelColor(vm2))
 
             // A second fresh ViewModel in the same test process represents a
             // repeated process recreation.  It must consume the same
@@ -433,6 +532,7 @@ class DraftRestoreProductionTest {
             )
             assertEquals("OpenImage remains current", opened, vm2.uiState.value.previewBitmap)
             assertEquals("OpenImage clears restored draft identity", null, vm2.uiState.value.draftGenerationId)
+            awaitInit(vm2)
             assertTrue("startup completion settles after supersession", vm2.startupInitCompletion.isCompleted)
         } finally {
             release.complete(Unit)
@@ -511,6 +611,335 @@ class DraftRestoreProductionTest {
     }
 
     @Test
+    fun startupCoordinatorSurvivesOpenImageWhileRestoreAndStartupPhasesAreParked() = runBlocking {
+        val sourceFile = draftSourceFile("restore-startup-open-source.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore) {
+                    successOutput(0xff0000ff.toInt())
+                } else {
+                    successOutput(0xffff0000.toInt())
+                }
+            }
+        val restoreReached = CompletableDeferred<Unit>()
+        val restoreRelease = CompletableDeferred<Unit>()
+        val restoreHandle =
+            harness.ownSeam(
+                DraftRestoreTestSeam.install(
+                    DraftRestoreTestSeam { stage, _ ->
+                        if (stage == DraftRestoreTestStage.SourceDecoded) {
+                            restoreReached.complete(Unit)
+                            restoreRelease.await()
+                        }
+                    }
+                )
+            )
+        val historyStarted = CompletableDeferred<Unit>()
+        val historyRelease = CompletableDeferred<Unit>()
+        val historyFinished = CompletableDeferred<Unit>()
+        val reconcileStarted = CompletableDeferred<Unit>()
+        val reconcileRelease = CompletableDeferred<Unit>()
+        val reconcileFinished = CompletableDeferred<Unit>()
+        val startupHandle =
+            harness.ownSeam(
+                StartupInitializationTestSeam.install(
+                    StartupInitializationTestSeam { stage ->
+                        when (stage) {
+                            StartupInitializationStage.HISTORY_LOAD_STARTED -> {
+                                historyStarted.complete(Unit)
+                                historyRelease.await()
+                            }
+                            StartupInitializationStage.HISTORY_LOAD_FINISHED -> historyFinished.complete(Unit)
+                            StartupInitializationStage.RECONCILIATION_STARTED -> {
+                                reconcileStarted.complete(Unit)
+                                reconcileRelease.await()
+                            }
+                            StartupInitializationStage.RECONCILIATION_FINISHED -> reconcileFinished.complete(Unit)
+                            StartupInitializationStage.COORDINATOR_SETTLED -> Unit
+                        }
+                    }
+                )
+            )
+        val orphan = context.cacheDir.resolve("source_startup_orphan.img")
+        orphan.writeBytes(byteArrayOf(9, 8, 7))
+        val opened = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        opened.eraseColor(0xff00aaff.toInt())
+        val openedDone = CompletableDeferred<Unit>()
+        var vm2Observer: kotlinx.coroutines.Job? = null
+        val openHandle =
+            harness.ownSeam(
+                OpenImageTestSeam.install(
+                    OpenImageTestSeam(
+                        sourceTransactionFactory = { app, _ ->
+                            IncomingSourceTransaction(
+                                app,
+                                inputStreamProvider = { ByteArrayInputStream(byteArrayOf(1, 2, 3)) },
+                            )
+                        },
+                        decode = { opened },
+                        nativeSessionFactory = { 7801L },
+                    )
+                )
+            )
+        var sessionFactory: AutoCloseable? = null
+        try {
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("draft must save", persistDraftForTest(vm1))
+            sessionFactory = installNativeSessionFactoryForTest { 7800L }
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "restore must reach source decode before OpenImage",
+                completion = restoreReached,
+                pumpMain = ::drainReadyMain,
+            )
+            vm2Observer = CoroutineScope(Dispatchers.Default).launch {
+                vm2.uiState.first { it.previewBitmap === opened }
+                openedDone.complete(Unit)
+            }
+            vm2.openImage(Uri.parse("content://restore/startup-open"))
+            restoreRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "OpenImage must adopt while startup continues",
+                completion = openedDone,
+                pumpMain = ::drainReadyMain,
+            )
+            awaitEditorCompletionForTest(
+                description = "startup history must still execute after OpenImage",
+                completion = historyStarted,
+                pumpMain = ::drainReadyMain,
+            )
+            assertFalse("startup completion waits for history", vm2.startupInitCompletion.isCompleted)
+            historyRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "startup reconciliation must still execute after history",
+                completion = reconcileStarted,
+                pumpMain = ::drainReadyMain,
+            )
+            assertFalse("startup completion waits for reconciliation", vm2.startupInitCompletion.isCompleted)
+            assertTrue("orphan remains until reconciliation is released", orphan.isFile)
+            reconcileRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "startup coordinator must settle after both phases",
+                completion = vm2.startupInitCompletion,
+                pumpMain = ::drainReadyMain,
+            )
+            assertTrue("history phase settled", historyFinished.isCompleted)
+            assertTrue("reconciliation phase settled", reconcileFinished.isCompleted)
+            assertFalse("startup orphan reclaimed", orphan.exists())
+            assertEquals("OpenImage remains current", opened, vm2.uiState.value.previewBitmap)
+        } finally {
+            restoreRelease.complete(Unit)
+            historyRelease.complete(Unit)
+            reconcileRelease.complete(Unit)
+            vm2Observer?.cancel()
+            openHandle.close()
+            startupHandle.close()
+            restoreHandle.close()
+            sessionFactory?.close()
+            renderer.close()
+            if (!opened.isRecycled) opened.recycle()
+            orphan.delete()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun openImageAfterRestoreCannotCancelParkedStartupHistory() = runBlocking {
+        val sourceFile = draftSourceFile("restore-startup-history-source.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+        assertTrue("draft must save", persistDraftForTest(vm1))
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore) successOutput(0xff0000ff.toInt())
+                else successOutput(0xffff0000.toInt())
+            }
+        val historyStarted = CompletableDeferred<Unit>()
+        val historyRelease = CompletableDeferred<Unit>()
+        val reconcileStarted = CompletableDeferred<Unit>()
+        val reconcileRelease = CompletableDeferred<Unit>()
+        val startupHandle =
+            harness.ownSeam(
+                StartupInitializationTestSeam.install(
+                    StartupInitializationTestSeam { stage ->
+                        when (stage) {
+                            StartupInitializationStage.HISTORY_LOAD_STARTED -> {
+                                historyStarted.complete(Unit)
+                                historyRelease.await()
+                            }
+                            StartupInitializationStage.RECONCILIATION_STARTED -> {
+                                reconcileStarted.complete(Unit)
+                                reconcileRelease.await()
+                            }
+                            else -> Unit
+                        }
+                    }
+                )
+            )
+        val opened = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        opened.eraseColor(0xff00aaff.toInt())
+        val openedDone = CompletableDeferred<Unit>()
+        var observer: kotlinx.coroutines.Job? = null
+        val openHandle =
+            harness.ownSeam(
+                OpenImageTestSeam.install(
+                    OpenImageTestSeam(
+                        sourceTransactionFactory = { app, _ ->
+                            IncomingSourceTransaction(
+                                app,
+                                inputStreamProvider = { ByteArrayInputStream(byteArrayOf(4, 5, 6)) },
+                            )
+                        },
+                        decode = { opened },
+                        nativeSessionFactory = { 7811L },
+                    )
+                )
+            )
+        var sessionFactory: AutoCloseable? = null
+        try {
+            sessionFactory = installNativeSessionFactoryForTest { 7810L }
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "restore must finish before startup history park",
+                completion = historyStarted,
+                pumpMain = ::drainReadyMain,
+            )
+            assertFalse("startup history remains pending", vm2.startupInitCompletion.isCompleted)
+            awaitReady(vm2)
+            assertEquals("OpenImage is admitted while startup history is parked", EditorViewModel.EditorActionAdmission.Ready, vm2.editorActionAdmissionForTest())
+            observer = CoroutineScope(Dispatchers.Default).launch {
+                vm2.uiState.first { it.previewBitmap === opened }
+                openedDone.complete(Unit)
+            }
+            vm2.openImage(Uri.parse("content://restore/history-open"))
+            historyRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "OpenImage must adopt while history startup is settling",
+                completion = openedDone,
+                pumpMain = ::drainReadyMain,
+                diagnostic = {
+                    "busy=${vm2.uiState.value.isBusy} source=${vm2.uiState.value.sourcePath} " +
+                        "openJob=${vm2.openImageJobActiveForTest()} failure=${vm2.lastOpenImageFailureForTest} " +
+                        "admission=${vm2.editorActionAdmissionForTest()} historyBusy=${vm2.historyActivityBusyForTest()}"
+                },
+            )
+            awaitEditorCompletionForTest(
+                description = "reconciliation must follow parked history",
+                completion = reconcileStarted,
+                pumpMain = ::drainReadyMain,
+            )
+            assertFalse("startup waits for reconciliation", vm2.startupInitCompletion.isCompleted)
+            reconcileRelease.complete(Unit)
+            awaitInit(vm2)
+            assertEquals("OpenImage remains current after startup history", opened, vm2.uiState.value.previewBitmap)
+        } finally {
+            historyRelease.complete(Unit)
+            reconcileRelease.complete(Unit)
+            observer?.cancel()
+            openHandle.close()
+            startupHandle.close()
+            sessionFactory?.close()
+            renderer.close()
+            if (!opened.isRecycled) opened.recycle()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun startupCoordinatorSurvivesClearDraftAndStillReconciles() = runBlocking {
+        val sourceFile = draftSourceFile("restore-startup-clear-source.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+        assertTrue("draft must save", persistDraftForTest(vm1))
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore) successOutput(0xff0000ff.toInt())
+                else successOutput(0xffff0000.toInt())
+            }
+        val restoreReached = CompletableDeferred<Unit>()
+        val restoreRelease = CompletableDeferred<Unit>()
+        val restoreHandle =
+            harness.ownSeam(
+                DraftRestoreTestSeam.install(
+                    DraftRestoreTestSeam { stage, _ ->
+                        if (stage == DraftRestoreTestStage.SourceDecoded) {
+                            restoreReached.complete(Unit)
+                            restoreRelease.await()
+                        }
+                    }
+                )
+            )
+        val historyStarted = CompletableDeferred<Unit>()
+        val historyRelease = CompletableDeferred<Unit>()
+        val reconcileStarted = CompletableDeferred<Unit>()
+        val reconcileRelease = CompletableDeferred<Unit>()
+        val startupHandle =
+            harness.ownSeam(
+                StartupInitializationTestSeam.install(
+                    StartupInitializationTestSeam { stage ->
+                        when (stage) {
+                            StartupInitializationStage.HISTORY_LOAD_STARTED -> {
+                                historyStarted.complete(Unit)
+                                historyRelease.await()
+                            }
+                            StartupInitializationStage.RECONCILIATION_STARTED -> {
+                                reconcileStarted.complete(Unit)
+                                reconcileRelease.await()
+                            }
+                            else -> Unit
+                        }
+                    }
+                )
+            )
+        val orphan = context.cacheDir.resolve("source_startup_clear_orphan.img")
+        orphan.writeBytes(byteArrayOf(2, 4, 6))
+        var sessionFactory: AutoCloseable? = null
+        try {
+            sessionFactory = installNativeSessionFactoryForTest { 7901L }
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "restore must reach source decode before clearDraft",
+                completion = restoreReached,
+                pumpMain = ::drainReadyMain,
+            )
+            vm2.clearDraft()
+            restoreRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "clearDraft startup history must execute",
+                completion = historyStarted,
+                pumpMain = ::drainReadyMain,
+            )
+            assertFalse("clearDraft cannot cancel startup coordinator", vm2.startupInitCompletion.isCompleted)
+            historyRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "clearDraft startup reconciliation must execute",
+                completion = reconcileStarted,
+                pumpMain = ::drainReadyMain,
+            )
+            reconcileRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "clearDraft startup coordinator must settle",
+                completion = vm2.startupInitCompletion,
+                pumpMain = ::drainReadyMain,
+            )
+            assertEquals("clearDraft removes pointer", null, currentDraftGenerationId(context))
+            assertFalse("clearDraft does not leave orphan", orphan.exists())
+            assertEquals("clearDraft cannot be resurrected", null, vm2.uiState.value.draftGenerationId)
+        } finally {
+            restoreRelease.complete(Unit)
+            historyRelease.complete(Unit)
+            reconcileRelease.complete(Unit)
+            startupHandle.close()
+            restoreHandle.close()
+            sessionFactory?.close()
+            renderer.close()
+            orphan.delete()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
     fun teardownDuringNativeRestoreCancelsWithoutLateAdoption() = runBlocking {
         val sourceFile = draftSourceFile("restore-teardown-source.png")
         val vm1 = editor(sourceFile.absolutePath, withMask = false)
@@ -551,11 +980,60 @@ class DraftRestoreProductionTest {
             )
             assertTrue("teardown must invalidate restore owner", vm2.isShuttingDown())
             assertEquals("teardown cannot publish draft state", null, vm2.uiState.value.draftGenerationId)
+            assertTrue(
+                "teardown removes unadopted working sources",
+                context.filesDir.resolve("editor_sources").listFiles { file ->
+                    file.name.startsWith("restored_") && file.name.endsWith(".img")
+                }.orEmpty().isEmpty(),
+            )
         } finally {
             release.complete(Unit)
             restoreHandle.close()
             sessionFactory?.close()
             renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun teardownDuringParkedStartupCoordinatorSettlesCompletion() = runBlocking {
+        val sourceFile = draftSourceFile("restore-teardown-startup-source.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+        assertTrue("draft must save", persistDraftForTest(vm1))
+        val historyStarted = CompletableDeferred<Unit>()
+        val historyRelease = CompletableDeferred<Unit>()
+        val startupHandle =
+            harness.ownSeam(
+                StartupInitializationTestSeam.install(
+                    StartupInitializationTestSeam { stage ->
+                        if (stage == StartupInitializationStage.HISTORY_LOAD_STARTED) {
+                            historyStarted.complete(Unit)
+                            historyRelease.await()
+                        }
+                    }
+                )
+            )
+        try {
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "startup coordinator must reach history before teardown",
+                completion = historyStarted,
+                pumpMain = ::drainReadyMain,
+            )
+            assertFalse("parked startup is not complete", vm2.startupInitCompletion.isCompleted)
+            harness.clearViewModels()
+            historyRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "cancelled startup coordinator must settle completion",
+                completion = vm2.startupInitCompletion,
+                pumpMain = ::drainReadyMain,
+            )
+            assertTrue("teardown marks ViewModel shut down", vm2.isShuttingDown())
+            assertFalse("teardown leaves no ViewModel jobs", vm2.hasActiveViewModelJobsForTest())
+        } finally {
+            historyRelease.complete(Unit)
+            startupHandle.close()
             sourceFile.delete()
         }
     }
@@ -775,6 +1253,118 @@ class DraftRestoreProductionTest {
         }
     }
 
+    @Test
+    fun corruptPresentSourceCannotPartiallyAdopt() = runBlocking {
+        val sourceFile = draftSourceFile("restore-corrupt-source.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation must save", persistDraftForTest(vm1))
+            val generation = checkNotNull(currentDraftGenerationId(context))
+            checkNotNull(findDraftGenerationDirectory(context, generation)).sourceFile.writeBytes(byteArrayOf(1, 3, 5, 7))
+            assertTrue("test pointer remains published", publishDraftGeneration(context, generation))
+
+            val vm2 = harness.createEditor()
+            awaitInit(vm2)
+            assertEquals("corrupt source clears pointer", null, currentDraftGenerationId(context))
+            assertEquals("corrupt source cannot publish source", null, vm2.uiState.value.sourcePath)
+            assertEquals("corrupt source cannot publish preview", null, vm2.uiState.value.previewBitmap)
+            assertTrue("corrupt source cannot publish layers", vm2.uiState.value.selectionLayers.isEmpty())
+        } finally {
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun geometryMismatchedSelectionMaskCannotPartiallyAdopt() = runBlocking {
+        val sourceFile = draftSourceFile("restore-mismatched-mask.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = true)
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation with mask must save", persistDraftForTest(vm1))
+            val generation = checkNotNull(currentDraftGenerationId(context))
+            val directory = checkNotNull(findDraftGenerationDirectory(context, generation))
+            val manifest = checkNotNull(validateCurrentDraftGeneration(context)).manifest
+            val mask = directory.maskFile(manifest.selectionLayers.first().maskFileName)
+            val wrongSize = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
+            try {
+                mask.outputStream().use { out -> assertTrue(wrongSize.compress(Bitmap.CompressFormat.PNG, 100, out)) }
+            } finally {
+                wrongSize.recycle()
+            }
+            assertTrue("test pointer remains published", publishDraftGeneration(context, generation))
+
+            val vm2 = harness.createEditor()
+            awaitInit(vm2)
+            assertEquals("mismatched mask clears pointer", null, currentDraftGenerationId(context))
+            assertEquals("mismatched mask cannot publish source", null, vm2.uiState.value.sourcePath)
+            assertTrue("mismatched mask cannot publish layers", vm2.uiState.value.selectionLayers.isEmpty())
+        } finally {
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun invalidGenerationFallsBackToMatchingLegacyPayload() = runBlocking {
+        val sourceFile = draftSourceFile("restore-legacy-fallback-source.png")
+        val legacyDirectory = context.filesDir.resolve("drafts/current").apply { mkdirs() }
+        val legacySource = legacyDirectory.resolve("source.img")
+        sourceFile.copyTo(legacySource, overwrite = true)
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val renderer = EditorRenderer.installRendererOverrideForTest { successOutput(0xff556677.toInt()) }
+        var sessionFactory: AutoCloseable? = null
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation must save", persistDraftForTest(vm1))
+            val generation = checkNotNull(currentDraftGenerationId(context))
+            checkNotNull(findDraftGenerationDirectory(context, generation)).manifestFile.writeText("{bad", Charsets.UTF_8)
+            context
+                .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_DRAFT_SOURCE, legacySource.absolutePath)
+                .putFloat("draft_exposure", 0.44f)
+                .commit()
+            assertTrue("test pointer remains published", publishDraftGeneration(context, generation))
+            sessionFactory = installNativeSessionFactoryForTest { 7611L }
+            val vm2 = harness.createEditor()
+            awaitInit(vm2)
+            awaitReady(vm2)
+            val restoredLegacySource = checkNotNull(vm2.uiState.value.sourcePath)
+            assertTrue("legacy fallback source is persisted", File(restoredLegacySource).isFile)
+            assertTrue("legacy fallback source uses owned naming", File(restoredLegacySource).name.startsWith("source_"))
+            assertEquals("legacy fallback params", 0.44f, vm2.uiState.value.params.exposure)
+            val fallbackPointer = currentDraftGenerationId(context)
+            assertTrue("legacy fallback cannot retain the invalid generation", fallbackPointer == null || fallbackPointer != generation)
+            if (fallbackPointer != null) {
+                assertTrue("legacy fallback republishes only a valid generation", validateCurrentDraftGeneration(context) != null)
+            }
+        } finally {
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
+            legacySource.delete()
+        }
+    }
+
+    @Test
+    fun noDraftStartupLeavesEditorEmptyAndReady() = runBlocking {
+        clearCurrentDraftGenerationPointer(context)
+        context
+            .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .commit()
+        val vm = harness.createEditor()
+        awaitInit(vm)
+        awaitReady(vm)
+        assertEquals("no draft source", null, vm.uiState.value.sourcePath)
+        assertEquals("no draft preview", null, vm.uiState.value.previewBitmap)
+        assertEquals("no draft id", null, vm.uiState.value.draftGenerationId)
+    }
+
     private fun draftSourceFile(name: String): File {
         val source = context.cacheDir.resolve(name)
         val bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
@@ -920,6 +1510,13 @@ class DraftRestoreProductionTest {
     private fun advanceParameterRenderDelay() {
         shadowOf(android.os.Looper.getMainLooper()).idleFor(120, TimeUnit.MILLISECONDS)
         drainReadyMain()
+    }
+
+    private fun advanceInactivityWindowForRestore() {
+        repeat(4) {
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(300, TimeUnit.MILLISECONDS)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+        }
     }
 
     private fun drainReadyMain() {
