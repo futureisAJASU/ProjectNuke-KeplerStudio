@@ -453,16 +453,15 @@ class ParameterNoAdoptionRollbackProductionTest {
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean): Boolean {
-        repeat(200) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
+        val deadlineNanos = System.nanoTime() + 15_000_000_000L
+        while (true) {
             if (predicate()) return true
-        }
-        repeat(5000) {
+            if (System.nanoTime() > deadlineNanos) return false
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            if (predicate()) return true
             yieldToEditorBackgroundForTest()
+            Thread.sleep(5L)
         }
-        return false
     }
 
     companion object {

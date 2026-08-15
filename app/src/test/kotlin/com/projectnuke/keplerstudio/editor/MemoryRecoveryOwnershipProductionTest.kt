@@ -641,10 +641,13 @@ class MemoryRecoveryOwnershipProductionTest {
     private fun awaitEvent(predicate: () -> Boolean) = awaitEvent("event", predicate)
 
     private fun awaitEvent(label: String, predicate: () -> Boolean) {
-        repeat(20_000) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        while (System.nanoTime() < deadline) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return
             yieldToEditorBackgroundForTest()
+            if (predicate()) return
+            Thread.sleep(5L)
         }
         assertTrue(label, predicate())
     }

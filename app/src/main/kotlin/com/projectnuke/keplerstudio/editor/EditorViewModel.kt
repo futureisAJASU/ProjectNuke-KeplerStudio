@@ -304,6 +304,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Test-only diagnostic for nonfatal saved-export history failures. */
     @Volatile internal var lastSavedExportHistoryFailureForTest: Throwable? = null
 
+    /** Test-only diagnostic for the most recent editor-leave failure. */
+    @Volatile internal var lastEditorLeaveFailureForTest: Throwable? = null
+
+    /** Test-only diagnostic: why the most recent draft snapshot persist returned false. */
+    @Volatile internal var lastDraftSaveFailureReasonForTest: String? = null
+
     /** Pure read-only inspection for tests: current export token (drives
      *  stale-export identity checks across ViewModel state changes). */
     internal fun exportTokenForTest(): Long = exportToken
@@ -4618,6 +4624,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     message = "\uD3B8\uC9D1 \uC791\uC5C5\uC744 \uC548\uC804\uD558\uAC8C \uB9C8\uBB34\uB9AC\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4. \uD3B8\uC9D1 \uD654\uBA74\uC744 \uC720\uC9C0\uD569\uB2C8\uB2E4.",
                 )
             owner.result.complete(false)
+            lastEditorLeaveFailureForTest = failure
             Log.w("KeplerStudio.Leave", "editor leave failed", failure)
         }
     }
@@ -4670,9 +4677,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (diskPointer != draftPointerBaseline) return@withLock null
                     DraftPointerSnapshot(diskPointer)
                 }
-            } ?: return false
+            } ?: run { lastDraftSaveFailureReasonForTest = "epoch-or-pointer-mismatch"; return false }
         settleParameterTransaction(reason)
-        val draftSnapshot = acquireEditorSnapshot("draftSave") ?: return false
+        val draftSnapshot = acquireEditorSnapshot("draftSave")
+            ?: run { lastDraftSaveFailureReasonForTest = "snapshot-acquire-failed"; return false }
         val draftState = draftSnapshot.state
         ParameterLifecycleTestHook.notifyDraftCaptureBegan(draftEpoch)
         try {
@@ -4757,6 +4765,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (committed == null) {
             payload.recycleOwnedBitmaps()
             draftTracker?.end()
+            lastDraftSaveFailureReasonForTest = "saveDraftSnapshot-returned-null"
             updateUiStateAndRecycleReplaced {
                 if (owningJob?.isActive != false && isDraftPayloadDocumentCurrent(payload)) {
                     it.copy(
@@ -4769,6 +4778,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         payload.recycleOwnedBitmaps()
         draftTracker?.end()
+        if (!settled) lastDraftSaveFailureReasonForTest = "settleCommittedDraft-rolled-back"
         return settled
     }
 
@@ -4887,6 +4897,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     updateUiStateAndRecycleReplaced {
                         it.copy(message = "내보낸 사진 기록을 불러오지 못했습니다.")
                     }
+                }
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        draftSaveMutex.withLock {
+                            reconcileStartupArtifacts(context, _uiState.value.sourcePath)
+                        }
+                    }
+                }.onSuccess { outcome ->
+                    if (outcome.failedCount > 0) {
+                        Log.w(
+                            FLARE_GUARD_AI_TAG,
+                            "Startup storage reconcile: ${outcome.failedCount} deletion failures",
+                        )
+                    }
+                }.onFailure { t ->
+                    Log.w(FLARE_GUARD_AI_TAG, "Startup storage reconcile failed", t)
                 }
             } finally {
                 startupInitCompletion.complete(Unit)
@@ -11271,14 +11297,18 @@ private fun saveDraftSnapshot(
                 DraftSourceResult(File(payload.previousVisibleDraftPath), changed = false)
             !payload.baseBitmapDirty && payload.sourcePath != null ->
                 persistDraftSourceFileIfNeeded(context, payload.sourcePath)
+                    ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "reuse-source-null:${payload.sourcePath}"; return null }
             payload.dirtyBitmapCopy != null ->
                 persistDraftBitmapFile(context, payload.dirtyBitmapCopy)?.let {
                     DraftSourceResult(it, changed = true)
                 }
+                    ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "dirty-bitmap-persist-null"; return null }
             else -> null
-        } ?: return null
+        }?.also { }
+            ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "no-draft-source-result:${payload.sourcePath}/dirty=${payload.baseBitmapDirty}"; return null }
     if (!isCurrent()) {
         if (draftSource.changed) draftSource.file.delete()
+        DraftSaveTestSeam.Registry.lastFailureReasonForTest = "save-draft-not-current"
         return null
     }
     val savedAt = System.currentTimeMillis()
@@ -11294,6 +11324,7 @@ private fun saveDraftSnapshot(
     if (generationResult == null) {
         if (draftSource.changed && isOwnedDraftSource(context, draftSource.file))
             draftSource.file.delete()
+        DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-persist-null"
         return null
     }
     return generationResult.copy(
@@ -11455,25 +11486,30 @@ private fun persistDraftGenerationInternal(
             )
         ) {
             deleteDraftDirectory(context, genDir)
+            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-write-failed"
             return null
         }
         val completedDir = finalizeDraftGeneration(context, genDir, genId)
         if (completedDir == null) {
             deleteDraftDirectory(context, genDir)
+            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-finalize-failed"
             return null
         }
         genDir = completedDir
         val validated = validateDraftGeneration(genDir, genId)
         if (validated == null) {
             deleteDraftDirectory(context, genDir)
+            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-validation-failed"
             return null
         }
         if (!isCurrent()) {
             deleteDraftDirectory(context, genDir)
+            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-not-current"
             return null
         }
         if (currentDraftGenerationId(context) != payload.expectedPointerGenerationId) {
             deleteDraftDirectory(context, genDir)
+            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-pointer-mismatch"
             return null
         }
         val previousDirectory =
@@ -11499,6 +11535,7 @@ private fun persistDraftGenerationInternal(
             )
         if (!publishDraftGeneration(context, genDir.root.name)) {
             deleteDraftDirectory(context, genDir)
+            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-publish-failed"
             return null
         }
         pointerCommitted = true
@@ -11745,7 +11782,7 @@ private const val KEY_NOISE_ENGINE = "noise_engine"
 private const val KEY_DETAIL_ENGINE = "detail_engine"
 private const val KEY_TONE_ENGINE = "tone_engine"
 private const val KEY_HAZE_ENGINE = "haze_engine"
-private const val KEY_DRAFT_SOURCE = "draft_source"
+internal const val KEY_DRAFT_SOURCE = "draft_source"
 private const val KEY_DRAFT_EXPOSURE = "draft_exposure"
 private const val KEY_DRAFT_CONTRAST = "draft_contrast"
 private const val KEY_DRAFT_SHADOWS = "draft_shadows"

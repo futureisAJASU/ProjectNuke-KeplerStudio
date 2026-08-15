@@ -538,14 +538,21 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
         Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { it.eraseColor(color) }
 
     private fun await(predicate: () -> Boolean) {
-        repeat(3000) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        while (System.nanoTime() < deadline) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
+            if (predicate()) return
+            Thread.sleep(5L)
         }
         assertTrue(
-            "predicate did not settle; stages=$leaveStages leave=${lastVm?.editorLeaveState?.value}\n${lastVm?.debugResidentOwnership()}",
+            "predicate did not settle; stages=$leaveStages leave=${lastVm?.editorLeaveState?.value} " +
+                "failure=${lastVm?.lastEditorLeaveFailureForTest} " +
+                "saveReason=${lastVm?.lastDraftSaveFailureReasonForTest} " +
+                "saveStage=${DraftSaveTestSeam.Registry.lastFailureReasonForTest}\n" +
+                lastVm?.debugResidentOwnership(),
             predicate(),
         )
     }

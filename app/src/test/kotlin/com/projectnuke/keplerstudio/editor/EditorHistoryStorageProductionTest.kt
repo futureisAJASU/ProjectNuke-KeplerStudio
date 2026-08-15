@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -184,7 +185,7 @@ class EditorHistoryStorageProductionTest {
         val vm = editor(false, source.absolutePath)
         awaitReady(vm)
 
-        assertTrue(vm.persistDraftSnapshotNow())
+        assertTrue(persistDraftForTest(vm))
         val validated = checkNotNull(validateCurrentDraftGeneration(context))
         assertTrue(validated.manifest.selectionLayers.isEmpty())
         assertEquals(0, validated.maskFiles.size)
@@ -208,17 +209,32 @@ class EditorHistoryStorageProductionTest {
                 activeSelectionLayerId = if (withMask) "mask" else null,
             )
         }
+        awaitInit(vm)
         return vm
     }
 
+    private fun awaitInit(vm: EditorViewModel) {
+        awaitEditorCompletionForTest(
+            description = "startup init must complete",
+            completion = vm.startupInitCompletion,
+            pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+            timeoutMillis = 15_000L,
+        )
+    }
+
     private fun awaitReady(vm: EditorViewModel) {
-        val ready = kotlinx.coroutines.CompletableDeferred<Unit>()
-        val observerScope = kotlinx.coroutines.CoroutineScope(Dispatchers.Default)
-        val observer = observerScope.launch {
-            vm.uiState.collect {
-                if (!it.isBusy && !it.historyBusy) ready.complete(Unit)
+        val ready = CompletableDeferred<Unit>()
+        val observerScope = CoroutineScope(Dispatchers.Default)
+        fun completeIfReady() {
+            if (vm.startupInitCompletion.isCompleted && vm.canEnterEditorAction()) {
+                ready.complete(Unit)
             }
         }
+        val observer =
+            observerScope.launch {
+                vm.startupInitCompletion.invokeOnCompletion { completeIfReady() }
+                vm.uiState.collect { completeIfReady() }
+            }
         try {
             awaitEditorCompletionForTest(
                 description = "editor must become ready",
@@ -231,6 +247,26 @@ class EditorHistoryStorageProductionTest {
             observerScope.cancel()
         }
         assertTrue(vm.canEnterEditorAction())
+    }
+
+    private fun persistDraftForTest(vm: EditorViewModel): Boolean {
+        val callerScope = CoroutineScope(Dispatchers.Default)
+        val deferred = callerScope.async {
+            vm.persistDraftSnapshotNow()
+        }
+        try {
+            awaitEditorCompletionForTest(
+                description = "draft save caller must complete",
+                completion = deferred,
+                timeoutMillis = 30_000L,
+                pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+                diagnostic = { "leave=${vm.editorLeaveState.value}" },
+            )
+            return runBlocking { deferred.await() }
+        } finally {
+            deferred.cancel()
+            callerScope.cancel()
+        }
     }
 
     private fun corruptEntry(entry: EditorHistoryEntry, mutate: (org.json.JSONObject) -> Unit) {

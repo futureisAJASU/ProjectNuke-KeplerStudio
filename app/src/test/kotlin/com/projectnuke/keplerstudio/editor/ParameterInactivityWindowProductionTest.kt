@@ -384,31 +384,38 @@ class ParameterInactivityWindowProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(1000) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        while (System.nanoTime() < deadline) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
+            Thread.sleep(5L)
         }
         assertTrue(vm.canEnterEditorAction())
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(4000) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        while (System.nanoTime() < deadline) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
+            Thread.sleep(5L)
         }
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        repeat(4000) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+        while (System.nanoTime() < deadline) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
+            if (predicate()) return
+            Thread.sleep(5L)
         }
         assertTrue(predicate())
     }

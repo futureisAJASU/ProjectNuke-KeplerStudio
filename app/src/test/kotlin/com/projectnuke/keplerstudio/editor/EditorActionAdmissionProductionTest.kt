@@ -461,11 +461,12 @@ class EditorActionAdmissionProductionTest {
         )
 
     private fun awaitMainUntil(dump: (() -> String)? = null, predicate: () -> Boolean) {
-        repeat(4000) {
+        val deadlineNanos = System.nanoTime() + 15_000_000_000L
+        while (!predicate()) {
+            if (System.nanoTime() > deadlineNanos) break
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
+            Thread.sleep(5L)
         }
         if (!predicate()) {
             System.err.println("AWAIT-TIMEOUT ${dump?.invoke() ?: ""}")

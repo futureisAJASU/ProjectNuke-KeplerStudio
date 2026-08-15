@@ -18,6 +18,9 @@ internal class DraftSaveTestSeam(
         private val lock = Any()
         private var installed: DraftSaveTestSeam? = null
 
+        /** Test-only: why the most recent draft-snapshot persist returned false. */
+        @Volatile internal var lastFailureReasonForTest: String? = null
+
         internal fun install(seam: DraftSaveTestSeam): AutoCloseable {
             synchronized(lock) {
                 check(installed == null) { "Draft save test seam already installed" }

@@ -4,6 +4,10 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -94,7 +98,7 @@ class DraftSelfCancellationProductionTest {
             assertEquals(0, inactivityFired)
             assertFalse("undo flag must still be false before commit", vm.uiState.value.canUndo)
 
-            val saved = vm.persistDraftSnapshotNow()
+            val saved = persistDraftForTest(vm)
             assertTrue("save-and-leave must succeed", saved)
 
             // Draft epoch advanced by exactly one (only the current save)
@@ -141,13 +145,16 @@ class DraftSelfCancellationProductionTest {
         var closed = 0
         val renderer = EditorRenderer.installRendererOverrideForTest { request ->
             val call = renderCalls.incrementAndGet()
-            if (call == 2) {
+            if (request.params.exposure == 0.4f) {
                 pendingGate.await()
             }
             RenderResult.Success(
                 operation = RenderOperation.NativePreview,
                 requestedRoute = NativeRenderRoute.V1,
-                output = if (call == 1) output1 else output2,
+                output = when (request.params.exposure) {
+                    0.4f -> output2
+                    else -> output1
+                },
                 actualRoute = NativeRenderRoute.V1,
                 decision = RenderRouteDecision.FollowDocument,
                 usedDebugOverride = false,
@@ -184,7 +191,7 @@ class DraftSelfCancellationProductionTest {
             assertTrue("transaction remains open", vm.hasOpenParameterGesture())
 
             // save-and-leave cancels the pending 0.4 render and commits 0.2
-            val saved = vm.persistDraftSnapshotNow()
+            val saved = persistDraftForTest(vm)
             assertTrue("manual save must not be canceled", saved)
 
             // 0.4 never adopts
@@ -248,7 +255,7 @@ class DraftSelfCancellationProductionTest {
 
             // save before any adoption: settlement rolls back to start
             val epochBefore = vm.draftEpochForTest()
-            val saved = vm.persistDraftSnapshotNow()
+            val saved = persistDraftForTest(vm)
             assertTrue("save must complete", saved)
             assertEquals(epochBefore + 1L, vm.draftEpochForTest())
 
@@ -352,12 +359,33 @@ class DraftSelfCancellationProductionTest {
         assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
     }
 
+    private fun persistDraftForTest(vm: EditorViewModel): Boolean {
+        val callerScope = CoroutineScope(Dispatchers.Default)
+        val deferred = callerScope.async {
+            vm.persistDraftSnapshotNow()
+        }
+        try {
+            awaitEditorCompletionForTest(
+                description = "draft save caller must complete",
+                completion = deferred,
+                timeoutMillis = 30_000L,
+                pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+                diagnostic = { "leave=${vm.editorLeaveState.value}" },
+            )
+            return runBlocking { deferred.await() }
+        } finally {
+            deferred.cancel()
+            callerScope.cancel()
+        }
+    }
+
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
-        repeat(2000) {
+        val deadlineNanos = System.nanoTime() + 15_000_000_000L
+        while (!predicate()) {
+            if (System.nanoTime() > deadlineNanos) break
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
+            Thread.sleep(5L)
         }
         assertTrue(predicate())
     }

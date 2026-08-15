@@ -4,7 +4,10 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -317,7 +320,7 @@ class ShutdownDraftIntegrityProductionTest {
             vm.updateParams { it.copy(exposure = 0.2f) }
             awaitEvent(vm) { adopted == 1 && vm.hasOpenParameterGesture() }
 
-            val saved = vm.persistDraftSnapshotNow()
+            val saved = persistDraftForTest(vm)
             assertTrue("save-and-leave must succeed", saved)
             val epochAfterSave = vm.draftEpochForTest()
             val validatedBefore = validateCurrentDraftGeneration(context) ?: error("no validated draft")
@@ -462,7 +465,7 @@ class ShutdownDraftIntegrityProductionTest {
             vm.updateParams { it.copy(exposure = 0.4f) }
             awaitEvent(vm) { secondStarted.isCompleted }
 
-            assertTrue(vm.persistDraftSnapshotNow())
+            assertTrue(persistDraftForTest(vm))
             val saved = validateCurrentDraftGeneration(context) ?: error("Draft missing")
             assertEquals(0.2f, saved.manifest.params.exposure)
             assertEquals(0.2f, vm.uiState.value.params.exposure)
@@ -489,7 +492,7 @@ class ShutdownDraftIntegrityProductionTest {
         try {
             vm.updateParams { it.copy(exposure = 0.7f) }
             awaitEvent(vm) { started.isCompleted }
-            assertTrue(vm.persistDraftSnapshotNow())
+            assertTrue(persistDraftForTest(vm))
             val saved = validateCurrentDraftGeneration(context) ?: error("Draft missing")
             assertEquals(0f, saved.manifest.params.exposure)
             assertEquals(0f, vm.uiState.value.params.exposure)
@@ -544,13 +547,14 @@ class ShutdownDraftIntegrityProductionTest {
         val vm = editor(sourceFile.absolutePath)
         val seam = DraftSaveTestSeam()
         val seamHandle = DraftSaveTestSeam.install(seam)
+        val callerScope = CoroutineScope(Dispatchers.Default)
         try {
-            val save = async { vm.persistDraftSnapshotNow() }
+            val save = callerScope.async { vm.persistDraftSnapshotNow() }
             awaitEvent(vm) { seam.reached.isCompleted }
             val epochAtCapture = vm.draftEpochForTest()
             harness.clearViewModels()
             seam.releaseGate.complete(Unit)
-            val saveResult = runCatching { save.await() }.getOrNull()
+            val saveResult = runCatching { runBlocking { save.await() } }.getOrNull()
             assertFalse("active Draft save is canceled during teardown", saveResult == true)
             assertEquals(epochAtCapture + 1L, vm.draftEpochForTest())
             assertFalse(vm.hasActiveDraftSaveJobForTest())
@@ -559,6 +563,7 @@ class ShutdownDraftIntegrityProductionTest {
         } finally {
             seam.releaseGate.complete(Unit)
             seamHandle.close()
+            callerScope.cancel()
             sourceFile.delete()
         }
     }
@@ -706,5 +711,25 @@ class ShutdownDraftIntegrityProductionTest {
             durationMillis = 0L,
             knownTransientBytes = 0L,
         )
+    }
+
+    private fun persistDraftForTest(vm: EditorViewModel): Boolean {
+        val callerScope = CoroutineScope(Dispatchers.Default)
+        val deferred = callerScope.async {
+            vm.persistDraftSnapshotNow()
+        }
+        try {
+            awaitEditorCompletionForTest(
+                description = "draft save caller must complete",
+                completion = deferred,
+                timeoutMillis = 30_000L,
+                pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+                diagnostic = { "leave=${vm.editorLeaveState.value}" },
+            )
+            return runBlocking { deferred.await() }
+        } finally {
+            deferred.cancel()
+            callerScope.cancel()
+        }
     }
 }
