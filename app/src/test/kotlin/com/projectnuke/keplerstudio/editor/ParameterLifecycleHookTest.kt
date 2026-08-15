@@ -18,6 +18,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -29,19 +30,23 @@ class ParameterLifecycleHookTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresent(draftGenerationsRoot(context))
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresent(draftGenerationsRoot(context))
         if (!base.isRecycled) base.recycle()
         if (!output.isRecycled) output.recycle()
+    }
+
+    private fun deleteDirectoryIfPresent(directory: File) {
+        runCatching { if (directory.isDirectory) directory.deleteRecursively() }
     }
 
     private var base: Bitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)

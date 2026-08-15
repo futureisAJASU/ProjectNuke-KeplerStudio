@@ -39,9 +39,9 @@ class StartupStorageReconcilerProductionTest {
     fun cleanStorage() {
         IncomingSourceLiveOwnership.clearForTest()
         harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
-        draftGenerationsRoot(context).deleteRecursively()
-        context.filesDir.resolve("editor_sources").deleteRecursively()
-        context.filesDir.resolve("drafts/current").deleteRecursively()
+        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
+        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_sources"))
+        deleteDirectoryIfPresentForTest(context.filesDir.resolve("drafts/current"))
         context.cacheDir.listFiles()?.forEach { file ->
             if (file.name.startsWith("source_") || file.name.endsWith(".img.staging")) file.delete()
         }

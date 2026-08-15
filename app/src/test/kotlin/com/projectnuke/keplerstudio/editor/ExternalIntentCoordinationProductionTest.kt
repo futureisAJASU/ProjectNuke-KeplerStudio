@@ -37,18 +37,18 @@ class ExternalIntentCoordinationProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
         SelectionPreviewPreparationGateway.resetForTest()
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
     }
 
     private class AdoptedSetup(

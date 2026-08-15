@@ -37,17 +37,17 @@ class ExternalIntentOrderingProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
     }
 
     // Test 1: adopted 0.2 plus a suspended newer 0.4 render in ONE open

@@ -244,23 +244,38 @@ internal fun parseDraftGenerationManifest(json: JSONObject): DraftGenerationMani
                     ?: json.requiredPositiveInt("sourceHeight")
             else json.requiredPositiveInt("thumbnailHeight"),
         params = json.requiredEditParams("params"),
-        correctionEngine = draftCorrectionEngine(json.optionalString("correctionEngine")).name,
+        // v2+ manifests are self describing.  Do not silently turn an
+        // unknown engine/config value into Engine1: that would make a
+        // corrupt generation look restorable and could publish a document
+        // whose semantic state differs from the persisted draft.  v1 is the
+        // only compatibility format that is allowed to use the historical
+        // Engine1 default.
+        correctionEngine =
+            json.strictOptionalEnumName<CorrectionEngine>("correctionEngine")
+                ?: if (formatVersion <= 2) {
+                    // v1/v2 pre-engine manifests did not persist the assigned
+                    // engine.  Their documented compatibility default is
+                    // Engine1; newer manifests must carry the field.
+                    CorrectionEngine.Engine1.name
+                } else {
+                    error("missing correctionEngine")
+                },
         previewEngine =
-            json.optionalEnumName<CorrectionEngine>("previewEngine")
+            json.strictOptionalEnumName<CorrectionEngine>("previewEngine")
                 ?: if (legacyV1) CorrectionEngine.Engine1.name else null,
         previewRoute =
-            json.optionalEnumName<NativeRenderRoute>("previewRoute")
+            json.strictOptionalEnumName<NativeRenderRoute>("previewRoute")
                 ?: if (legacyV1) NativeRenderRoute.V1.name else null,
         requestedRoute =
-            json.optionalEnumName<NativeRenderRoute>("requestedRoute")
-                ?: json.optionalEnumName<NativeRenderRoute>("previewRoute")
+            json.strictOptionalEnumName<NativeRenderRoute>("requestedRoute")
+                ?: json.strictOptionalEnumName<NativeRenderRoute>("previewRoute")
                 ?: if (legacyV1) NativeRenderRoute.V1.name else null,
         previewResultClass =
-            json.optionalEnumName<PreviewResultClass>("previewResultClass")
+            json.strictOptionalEnumName<PreviewResultClass>("previewResultClass")
                 ?: if (legacyV1) PreviewResultClass.V1.name else null,
-        fallbackReason = json.optionalEnumName<RenderFallbackReason>("fallbackReason"),
+        fallbackReason = json.strictOptionalEnumName<RenderFallbackReason>("fallbackReason"),
         renderDecision =
-            json.optionalEnumName<RenderRouteDecision>("renderDecision")
+            json.strictOptionalEnumName<RenderRouteDecision>("renderDecision")
                 ?: if (legacyV1) RenderRouteDecision.FollowDocument.name else null,
         noiseEngine = json.requiredEnum<NoiseEngine>("noiseEngine").name,
         detailEngine = json.requiredEnum<DetailEngine>("detailEngine").name,
@@ -332,8 +347,13 @@ private fun JSONObject.requiredFloat(key: String, range: ClosedFloatingPointRang
 private inline fun <reified T : Enum<T>> JSONObject.requiredEnum(key: String): T =
     enumValueOf<T>(requiredString(key))
 
-private inline fun <reified T : Enum<T>> JSONObject.optionalEnumName(key: String): String? =
-    optionalString(key)?.let { value -> enumValues<T>().firstOrNull { it.name == value }?.name }
+private inline fun <reified T : Enum<T>> JSONObject.strictOptionalEnumName(key: String): String? {
+    if (!has(key) || isNull(key)) return null
+    val value = requiredString(key)
+    return enumValues<T>().firstOrNull { it.name == value }
+        ?.name
+        ?: error("unsupported enum value for $key: $value")
+}
 
 private fun QuickEffectKind.manifestGroup(): Int = when (this) {
     QuickEffectKind.SpotCleanup -> 0

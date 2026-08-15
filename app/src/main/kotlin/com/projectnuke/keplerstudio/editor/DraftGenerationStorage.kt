@@ -203,6 +203,8 @@ internal fun validateDraftGeneration(directory: DraftGenerationDirectory, expect
     if (manifest.sourceWidth <= 0 || manifest.sourceHeight <= 0 || manifest.thumbnailWidth <= 0 || manifest.thumbnailHeight <= 0) return null
     if (manifest.thumbnailWidth > 512 || manifest.thumbnailHeight > 512) return null
     if (manifest.baseContentToken.isBlank() || manifest.sourceIdentity != manifest.baseContentToken) return null
+    if (manifest.algorithmContracts.schemaVersion !in 1..AlgorithmContractSet.SCHEMA_VERSION) return null
+    if (manifest.algorithmContracts.nativeRenderContract?.startsWith("unsupported-contract-schema-") == true) return null
     if (!manifest.hasValidEditorValues()) return null
     val ids = manifest.selectionLayers.map { it.id }
     if (ids.any { it.isBlank() } || ids.toSet().size != ids.size) return null
@@ -276,6 +278,7 @@ private fun decodeBounds(file: File): Pair<Int, Int>? {
 }
 
 private fun DraftGenerationManifest.hasValidEditorValues(): Boolean = runCatching {
+    CorrectionEngine.valueOf(correctionEngine)
     NoiseEngine.valueOf(noiseEngine)
     DetailEngine.valueOf(detailEngine)
     ToneEngine.valueOf(toneEngine)

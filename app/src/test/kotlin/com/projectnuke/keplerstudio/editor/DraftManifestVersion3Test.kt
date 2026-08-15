@@ -104,7 +104,7 @@ class DraftManifestVersion3Test {
     }
 
     @Test
-    fun unknownEngineAndPreviewEnumsUseSafeDefaults() {
+    fun unknownEngineAndPreviewEnumsRejectTheGeneration() {
         val json = baselineManifest().toJson()
         json.put("correctionEngine", "future-engine")
         json.put("previewEngine", "future-engine")
@@ -115,15 +115,7 @@ class DraftManifestVersion3Test {
         json.put("renderDecision", "future-decision")
 
         val parsed = parseDraftGenerationManifest(json)
-        assertNotNull(parsed)
-        val migrated = checkNotNull(parsed)
-        assertEquals(CorrectionEngine.Engine1.name, migrated.correctionEngine)
-        assertNull(migrated.previewEngine)
-        assertNull(migrated.previewRoute)
-        assertNull(migrated.requestedRoute)
-        assertNull(migrated.previewResultClass)
-        assertNull(migrated.fallbackReason)
-        assertNull(migrated.renderDecision)
+        assertNull(parsed)
     }
 
     @Test

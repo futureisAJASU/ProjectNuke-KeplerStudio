@@ -28,17 +28,21 @@ class EditorActionSettlementProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresent(draftGenerationsRoot(context))
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresent(draftGenerationsRoot(context))
+    }
+
+    private fun deleteDirectoryIfPresent(directory: File) {
+        runCatching { if (directory.isDirectory) directory.deleteRecursively() }
     }
 
     private class PendingSetup(

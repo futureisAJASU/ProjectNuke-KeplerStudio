@@ -48,18 +48,22 @@ class ExternalIntentSupersessionProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresent(draftGenerationsRoot(context))
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
-        context.filesDir.resolve("editor_history_v3").deleteRecursively()
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
-        draftGenerationsRoot(context).deleteRecursively()
+        deleteDirectoryIfPresent(draftGenerationsRoot(context))
         ExperimentalLabController.resetForTest()
+    }
+
+    private fun deleteDirectoryIfPresent(directory: File) {
+        runCatching { if (directory.isDirectory) directory.deleteRecursively() }
     }
 
     // Crop: adopted A (0.3) + suspended B (0.5). The first crop invocation must

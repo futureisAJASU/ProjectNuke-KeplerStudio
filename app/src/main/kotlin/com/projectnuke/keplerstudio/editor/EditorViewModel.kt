@@ -4931,6 +4931,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openImage(uri: Uri) {
         if (shuttingDown || editorLeaveLocksActions()) return
+        // A startup Draft restore is a replaceable document operation.  A
+        // user-selected image must be able to supersede it even while the
+        // restore owns a decoded bitmap/session and has published isBusy.
+        // Invalidate before admission so the action is not rejected merely
+        // because the old restore is still preparing its off-state bundle.
+        if (restoreDraftJob?.isActive == true) {
+            invalidateDraftOperations()
+            clearDocumentBusyIfNoExport()
+        }
         val settlement = settleParameterTransactionBeforeExternalEdit()
         if (continueAfterOwnParameterSettlement(settlement) { openImage(uri) }) return
         if (!settleForEditorAction()) return
@@ -7802,6 +7811,7 @@ fun exportPreview() {
         val exportResolution =
             runCatching { ExportResolution.valueOf(manifest.exportResolution) }.getOrNull()
                 ?: return GenerationRestoreOutcome.Invalid(pointer)
+        DraftRestoreTestSeam.capture()?.await(DraftRestoreTestStage.ValidationComplete, pointer)
         updateUiStateAndRecycleReplaced {
             if (restoreToken == restoreDraftToken && it.revision == restoreStartRevision) {
                 it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다")
@@ -7836,6 +7846,7 @@ fun exportPreview() {
                 )
                 ownedBase = decodedBase
             }
+            DraftRestoreTestSeam.capture()?.await(DraftRestoreTestStage.SourceDecoded, pointer)
             val base = checkNotNull(ownedBase)
             val maskPlan =
                 withContext(Dispatchers.IO) {
@@ -7967,6 +7978,7 @@ fun exportPreview() {
                 ownedRendered = checkNotNull(restoreRenderSuccess).output
                 restoreTracker?.track(checkNotNull(ownedRendered), "restoreDraft:rendered")
             }
+            DraftRestoreTestSeam.capture()?.await(DraftRestoreTestStage.RenderCreated, pointer)
             withContext(Dispatchers.IO) {
                 val session =
                     nativeCreateSessionOrTest(
@@ -7975,6 +7987,8 @@ fun exportPreview() {
                 createdSession = session
             }
             if (createdSession == 0L) error("draft native session creation failed")
+            DraftRestoreTestSeam.capture()?.await(DraftRestoreTestStage.NativeSessionCreated, pointer)
+            DraftRestoreTestSeam.capture()?.await(DraftRestoreTestStage.BeforeAdoption, pointer)
             draftSaveMutex.lock()
             restoreSettlementLocked = true
             val pointerStillCurrent =
@@ -8237,6 +8251,8 @@ fun exportPreview() {
                             preferences = DraftPreferencesSnapshot(prefs.all.toMap()),
                             savedAtMillis = draftSavedAt,
                             recovery = resolveDraftRecovery(context, storedSourcePath),
+                            legacyPayloadFingerprint = legacyDraftPayloadFingerprint(context),
+                            generationPointer = currentDraftGenerationId(context),
                         )
                     }
                 }
@@ -8260,13 +8276,28 @@ fun exportPreview() {
         val draftSavedAt = restoreSnapshot.savedAtMillis
         val recovery = restoreSnapshot.recovery
         if (restoreToken != restoreDraftToken) return
-        updateUiStateAndRecycleReplaced {
-            it.copy(
-                draftSavedAtMillis = draftSavedAt,
-                draftSourcePath = recovery.debugInfo.draftSourcePath,
-                recoveryDebugInfo = recovery.debugInfo,
-                showRecoveryDebugCard = true,
-            )
+        fun legacyRestoreIdentityMatches(): Boolean =
+            !shuttingDown &&
+                restoreToken == restoreDraftToken &&
+                restoreStartRevision == _uiState.value.revision &&
+                currentDraftGenerationId(context) == restoreSnapshot.generationPointer &&
+                draftPointerBaseline == restoreSnapshot.generationPointer &&
+                legacyDraftPayloadFingerprint(context) ==
+                    restoreSnapshot.legacyPayloadFingerprint
+        suspend fun legacyRestoreIsCurrent(): Boolean =
+            withContext(Dispatchers.IO) {
+                draftSaveMutex.withLock { legacyRestoreIdentityMatches() }
+            }
+        suspend fun settleStaleLegacyRestore() {
+            if (!shuttingDown && restoreToken == restoreDraftToken) {
+                updateUiStateAndRecycleReplaced {
+                    if (it.revision == restoreStartRevision) it.copy(isBusy = false) else it
+                }
+            }
+        }
+        if (!legacyRestoreIsCurrent()) {
+            settleStaleLegacyRestore()
+            return
         }
         val sourceFile = recovery.sourceFile
         if (sourceFile == null) {
@@ -8314,9 +8345,6 @@ fun exportPreview() {
                 }
                 .getOrNull()
         val engines = _uiState.value.engineSelection()
-        updateUiStateAndRecycleReplaced {
-            it.copy(draftSavedAtMillis = draftSavedAt, draftSourcePath = sourcePath)
-        }
         updateUiStateAndRecycleReplaced {
             it.copy(
                 isBusy = true,
@@ -8383,6 +8411,11 @@ fun exportPreview() {
                 recycleOwnedRestoreBitmaps()
                 return
             }
+            if (!legacyRestoreIsCurrent()) {
+                recycleOwnedRestoreBitmaps()
+                settleStaleLegacyRestore()
+                return
+            }
             createdSession = nativeCreateSessionOrTest(sourcePath)
             tracker.registerNativeSession(
                 handle = createdSession,
@@ -8398,6 +8431,13 @@ fun exportPreview() {
                 recycleOwnedRestoreBitmaps()
                 releaseNativeSessionHandle(createdSession)
                 createdSession = 0L
+                return
+            }
+            if (!legacyRestoreIsCurrent()) {
+                recycleOwnedRestoreBitmaps()
+                releaseNativeSessionHandle(createdSession)
+                createdSession = 0L
+                settleStaleLegacyRestore()
                 return
             }
             val previousSession = nativeSession
@@ -8427,6 +8467,8 @@ fun exportPreview() {
                     exportResolution = exportResolution,
                     draftSavedAtMillis = draftSavedAt,
                     draftSourcePath = sourcePath,
+                    recoveryDebugInfo = recovery.debugInfo,
+                    showRecoveryDebugCard = true,
                     draftBaseContentToken = draftPrefs.getString(KEY_DRAFT_BASE_TOKEN, null),
                     draftGenerationId = null,
                     draftGenerationSourcePath = null,
@@ -8441,19 +8483,28 @@ fun exportPreview() {
                     message =
                         "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4",
                 )
-            nativeSession = createdSession
-            nativeSessionRelease = null
-            if (
-                !commitUiState(
-                    previousState,
-                    nextState,
-                    replaceDocument = true,
-                    adoptedNativeSession = createdSession,
-                )
-            ) {
+            val adopted =
+                draftSaveMutex.withLock {
+                    if (!legacyRestoreIdentityMatches()) {
+                        false
+                    } else {
+                        nativeSession = createdSession
+                        nativeSessionRelease = null
+                        commitUiState(
+                            previousState,
+                            nextState,
+                            replaceDocument = true,
+                            adoptedNativeSession = createdSession,
+                        )
+                    }
+                }
+            if (!adopted) {
                 nativeSession = previousSession
                 nativeSessionRelease = previousSessionRelease
-                error("legacy draft adoption superseded")
+                releaseNativeSessionHandle(createdSession)
+                createdSession = 0L
+                settleStaleLegacyRestore()
+                return
             }
             createdSession = 0L
             preview = null
@@ -9915,11 +9966,15 @@ internal fun EditorViewModel.reserveSelectionMaskCandidateBytes(
     bytes: Long,
     documentLayerCount: Int,
 ): SelectionMaskOwnershipLedger.MaskAdmission =
-    selectionMaskOwnership.reserveDocumentCandidate(
-        owner = owner,
-        bytes = bytes,
-        documentLayerCount = documentLayerCount,
-    )
+    if (MemoryRecoveryTestSeam.capture()?.rejectSelectionMaskAdmission == true) {
+        SelectionMaskOwnershipLedger.MaskAdmission.Rejected("test seam rejected mask admission")
+    } else {
+        selectionMaskOwnership.reserveDocumentCandidate(
+            owner = owner,
+            bytes = bytes,
+            documentLayerCount = documentLayerCount,
+        )
+    }
 
 internal fun EditorViewModel.reserveSelectionMaskCandidate(
     owner: String,
@@ -11069,6 +11124,8 @@ private data class DraftRestoreSnapshot(
     val preferences: DraftPreferencesSnapshot,
     val savedAtMillis: Long?,
     val recovery: DraftRecoveryResolution,
+    val legacyPayloadFingerprint: String,
+    val generationPointer: String?,
 )
 
 private data class DraftPointerSnapshot(val generationId: String?)

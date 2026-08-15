@@ -23,6 +23,10 @@ internal fun yieldToEditorBackgroundForTest() {
     runBlocking { withContext(Dispatchers.Default) { yield() } }
 }
 
+internal fun deleteDirectoryIfPresentForTest(path: File) {
+    runCatching { if (path.isDirectory) path.deleteRecursively() }
+}
+
 /**
  * Waits for a real production completion signal while pumping Robolectric Main.
  *
@@ -120,6 +124,11 @@ internal class OwnedEditorViewModelHarness(
         preClearActions.clear()
         store.clear()
         shadowOf(android.os.Looper.getMainLooper()).idle()
+        // EditorViewModel.onCleared() requests the process-global model
+        // session to unload asynchronously.  Drain that ownership boundary
+        // before this harness is considered closed so a later Robolectric
+        // class cannot observe a stale Closing command from this test.
+        runBlocking { RemasterModelSession.unloadIdleNow() }
         check(editors.none { it.hasActiveViewModelJobsForTest() })
     }
 
@@ -161,6 +170,8 @@ internal class OwnedEditorViewModelHarness(
                 .onFailure { failure = failure ?: it }
             runCatching { check(DraftSaveTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
+            runCatching { check(DraftRestoreTestSeam.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
             runCatching { check(AsyncBusyTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(RemasterModelSession.installedInferenceTestSeamCount() == 0) }
@@ -182,6 +193,9 @@ internal class OwnedEditorViewModelHarness(
                     .onFailure { failure = failure ?: it }
             }
             files.clear()
+            // Test-only retained-memory reservations are process-global.  A
+            // failed/aborted test must not poison the next Robolectric class.
+            RetainedMemoryLedger.resetForTest()
         }
         failure?.let { throw it }
     }
