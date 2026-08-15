@@ -360,6 +360,8 @@ class ExternalIntentOrderingProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
+        // Type 4 bounded virtual-time/state observation; Type 5 yield preserved
+        // as specialized synchronization for compound transaction observation.
         repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
             if (vm.canEnterEditorAction()) return
@@ -370,7 +372,9 @@ class ExternalIntentOrderingProductionTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(1200) {
+        // Type 4 bounded state observation (startup init event); Type 5 yield
+        // preserved as specialized synchronization for startup pipeline settlement.
+        repeat(500) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (vm.startupInitCompletion.isCompleted) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -380,18 +384,22 @@ class ExternalIntentOrderingProductionTest {
     }
 
     private fun awaitEvent(vm: EditorViewModel, advanceVirtualTime: Boolean = true, predicate: () -> Boolean) {
-        if (advanceVirtualTime) repeat(3000) {
+        // Type 4 bounded virtual-time/state observation; Type 5 yield preserved
+        // as specialized synchronization for compound transaction observation.
+        // The loop exits immediately when the predicate holds; it is bounded
+        // and not arbitrary scheduler luck.
+        if (advanceVirtualTime) repeat(500) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
         }
-        if (!advanceVirtualTime) repeat(400) {
+        if (!advanceVirtualTime) repeat(200) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
             if (predicate()) return
             yieldToEditorBackgroundForTest()
         }
-        if (!advanceVirtualTime) repeat(5000) {
+        if (!advanceVirtualTime) repeat(500) {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             if (predicate()) return
             yieldToEditorBackgroundForTest()

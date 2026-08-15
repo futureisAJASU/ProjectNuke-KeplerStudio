@@ -1,14 +1,8 @@
 package com.projectnuke.keplerstudio.editor
 
-import android.app.ActivityManager
-import android.content.Context
-import io.mockk.every
-import io.mockk.mockk
-import io.mockk.mockkStatic
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -17,11 +11,6 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class BitmapMemoryBudgetTest {
-
-    @Before
-    fun setUp() {
-        mockkStatic(Runtime::class)
-    }
 
     @Test
     fun testBytesForArgb8888() {

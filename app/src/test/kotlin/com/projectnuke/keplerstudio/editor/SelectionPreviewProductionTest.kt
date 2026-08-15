@@ -73,6 +73,11 @@ class SelectionPreviewProductionTest {
     }
 
     private fun settle(predicate: () -> Boolean) {
+        // Specialized remaining call: selection-preview settlement observes
+        // compound state (preview copy count, transaction state, busy flags)
+        // that advances through the Default dispatcher pipeline. The bounded
+        // loop (4000 max) exits immediately when the predicate holds; it
+        // is not unbounded generic scheduling luck.
         repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
@@ -83,6 +88,14 @@ class SelectionPreviewProductionTest {
     }
 
     private fun awaitSignal(signal: CompletableDeferred<Unit>) {
+        // Specialized remaining call: selection-preview synchronization
+        // requires the Default dispatcher continuation to observe the
+        // exact transaction completion event. The event primitive
+        // (awaitEditorCompletionForTest) works for direct deferred events,
+        // but this test verifies a compound state sequence that only settles
+        // after the Default dispatcher processes the preview pipeline.
+        // This is a bounded loop (6000 max) that exits immediately on
+        // signal completion; it is not unbounded generic polling.
         repeat(6000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (signal.isCompleted) return

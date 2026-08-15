@@ -2,7 +2,12 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import android.graphics.Bitmap
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -207,16 +212,23 @@ class EditorHistoryStorageProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(400) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(1, TimeUnit.MILLISECONDS)
-            if (vm.canEnterEditorAction()) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
+        val ready = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val observerScope = kotlinx.coroutines.CoroutineScope(Dispatchers.Default)
+        val observer = observerScope.launch {
+            vm.uiState.collect {
+                if (!it.isBusy && !it.historyBusy) ready.complete(Unit)
+            }
         }
-        repeat(5000) {
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            if (vm.canEnterEditorAction()) return
-            yieldToEditorBackgroundForTest()
+        try {
+            awaitEditorCompletionForTest(
+                description = "editor must become ready",
+                completion = ready,
+                pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+                timeoutMillis = 15_000L,
+            )
+        } finally {
+            observer.cancel()
+            observerScope.cancel()
         }
         assertTrue(vm.canEnterEditorAction())
     }

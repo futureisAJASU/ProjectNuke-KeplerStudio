@@ -22,9 +22,10 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -83,6 +84,11 @@ class DraftRestoreProductionTest {
                 completion = firstAdoption,
                 pumpMain = ::drainReadyMain,
                 diagnostic = { parameterDiagnostic(vm1) },
+            )
+            val adoptedRevision = firstAdoption.getCompleted()
+            assertTrue(
+                "adopted revision must match current state",
+                adoptedRevision == vm1.uiState.value.revision,
             )
             assertTrue("first adoption keeps gesture open", vm1.hasOpenParameterGesture())
 
@@ -149,6 +155,11 @@ class DraftRestoreProductionTest {
                 completion = adoption,
                 pumpMain = ::drainReadyMain,
                 diagnostic = { parameterDiagnostic(vm1) },
+            )
+            val adoptedRevision2 = adoption.getCompleted()
+            assertTrue(
+                "adopted revision must match current state",
+                adoptedRevision2 == vm1.uiState.value.revision,
             )
             assertEquals(0.25f, vm1.uiState.value.params.exposure)
             assertFalse("second render settles busy state", vm1.uiState.value.isBusy)
@@ -316,23 +327,21 @@ class DraftRestoreProductionTest {
             "message=${vm.uiState.value.message}"
 
     private fun persistDraftForTest(vm: EditorViewModel): Boolean {
-        val result = CompletableDeferred<Boolean>()
         val callerScope = CoroutineScope(Dispatchers.Default)
-        val caller =
-            callerScope.launch {
-                result.complete(vm.persistDraftSnapshotNow())
-            }
+        val deferred = callerScope.async {
+            vm.persistDraftSnapshotNow()
+        }
         try {
             awaitEditorCompletionForTest(
                 description = "draft save caller must complete",
-                completion = result,
+                completion = deferred,
                 timeoutMillis = 30_000L,
                 pumpMain = ::drainReadyMain,
                 diagnostic = { "leave=${vm.editorLeaveState.value}" },
             )
-            return runBlocking { result.await() }
+            return runBlocking { deferred.await() }
         } finally {
-            caller.cancel()
+            deferred.cancel()
             callerScope.cancel()
         }
     }
