@@ -638,6 +638,7 @@ class DraftRestoreProductionTest {
                 pumpMain = ::drainReadyMain,
             )
             vm2.clearDraft()
+            val clearMaintenanceMessage = vm2.uiState.value.message
             val clearDone = CompletableDeferred<Unit>()
             clearObserverScope = CoroutineScope(Dispatchers.Default)
             clearObserver = clearObserverScope!!.launch {
@@ -657,6 +658,15 @@ class DraftRestoreProductionTest {
             assertEquals("clearDraft releases the unadopted restore session once", 1, nativeReleases.get())
             assertFalse("clearDraft settles restore busy state", vm2.uiState.value.isBusy)
             assertFalse("clearDraft leaves maintenance idle", vm2.uiState.value.maintenanceBusy)
+            assertTrue("clearDraft publishes a final message", vm2.uiState.value.message != null)
+            assertFalse(
+                "late restore settlement cannot restore its loading message",
+                vm2.uiState.value.message == "임시저장된 편집을 불러오는 중입니다",
+            )
+            assertTrue(
+                "clearDraft message survives while maintenance is active",
+                clearMaintenanceMessage != null,
+            )
             assertNull("clearDraft leaves no memory recovery request", vm2.uiState.value.memoryRecoveryRequest)
             assertNull("clearDraft leaves no automatic restore retry", vm2.automaticRetryAttemptForTest())
             assertNull("clearDraft leaves no strong restore retry", vm2.strongRetryAttemptForTest())
@@ -1391,6 +1401,10 @@ class DraftRestoreProductionTest {
             assertEquals("stale failure clears automatic retry attempt", null, vm.automaticRetryAttemptForTest())
             assertEquals("stale failure clears strong retry attempt", null, vm.strongRetryAttemptForTest())
             assertFalse("stale failure publishes no actionable recovery", recoverySeam.recoveryRequested.isCompleted)
+            assertFalse(
+                "stale legacy failure does not leave restore loading message",
+                vm.uiState.value.message == "임시저장된 편집을 불러오는 중입니다",
+            )
         } finally {
             renderRelease.complete(Unit)
             recoverySeam.automaticRelease.complete(Unit)
@@ -1782,6 +1796,10 @@ class DraftRestoreProductionTest {
             assertNull("stale generation failure has no automatic retry", vm2.automaticRetryAttemptForTest())
             assertNull("stale generation failure has no strong retry", vm2.strongRetryAttemptForTest())
             assertFalse("stale generation failure releases restore busy state", vm2.uiState.value.isBusy)
+            assertFalse(
+                "stale generation failure does not leave restore loading message",
+                vm2.uiState.value.message == "임시저장된 편집을 불러오는 중입니다",
+            )
             assertEquals(
                 "stale generation failure leaves editor action admission ready",
                 EditorViewModel.EditorActionAdmission.Ready,
@@ -2039,6 +2057,7 @@ class DraftRestoreProductionTest {
                 },
             )
             assertTrue("OpenImage publishes its busy state", vm2.uiState.value.isBusy)
+            assertEquals("OpenImage owns the visible message", "이미지를 여는 중입니다", vm2.uiState.value.message)
             val openingRevision = vm2.uiState.value.revision
             assertTrue("OpenImage advances revision", openingRevision > 0)
             recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
@@ -2059,6 +2078,7 @@ class DraftRestoreProductionTest {
                 pumpMain = ::drainReadyMain,
             )
             assertTrue("old retry cannot clear OpenImage busy state", vm2.uiState.value.isBusy)
+            assertEquals("old retry cannot overwrite OpenImage message", "이미지를 여는 중입니다", vm2.uiState.value.message)
             openDecodeRelease.complete(Unit)
             awaitEditorCompletionForTest(
                 description = "OpenImage remains current after stale retry settlement",

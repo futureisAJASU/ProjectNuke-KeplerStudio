@@ -827,6 +827,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private data class RestoreBusyPublication(
         val token: Long,
         val revision: Int,
+        val message: String,
         val retryOwner: MemoryRecoveryOwner? = null,
     )
 
@@ -1327,10 +1328,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         },
                     )
                     if (owner.descriptor.action == MemoryRetryAction.RestoreDraft) {
-                        updateUiStateAndRecycleReplaced { it.copy(isBusy = true) }
-                        restoreBusyPublication = RestoreBusyPublication(
-                            token = restoreDraftToken,
-                            revision = owner.descriptor.revision,
+                        publishRestoreBusy(
+                            restoreDraftToken,
+                            owner.descriptor.revision,
+                            if (strong) {
+                                "硫붾え由??뺣━瑜??꾨즺?덉뒿?덈떎. ?묒뾽???ㅼ떆 ?쒕룄?⑸땲??"
+                            } else {
+                                "硫붾え由щ? ?먮룞?쇰줈 ?뺣━?덉뒿?덈떎. ?묒뾽???ㅼ떆 ?쒕룄?⑸땲??"
+                            },
                             retryOwner = owner,
                         )
                     }
@@ -4158,26 +4163,30 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         restoreToken: Long,
         restoreStartRevision: Int,
         message: String,
+        retryOwner: MemoryRecoveryOwner? = null,
     ): Boolean {
-        if (shuttingDown || restoreToken != restoreDraftToken) return false
-        if (_uiState.value.revision != restoreStartRevision) return false
-        updateUiStateAndRecycleReplaced {
+        while (true) {
+            if (shuttingDown || restoreToken != restoreDraftToken) return false
+            val current = _uiState.value
+            if (current.revision != restoreStartRevision) return false
             if (
-                restoreToken == restoreDraftToken &&
-                    it.revision == restoreStartRevision
+                commitUiState(
+                    current,
+                    current.copy(isBusy = true, message = message),
+                )
             ) {
-                it.copy(isBusy = true, message = message)
-            } else it
+                val existing = restoreBusyPublication
+                restoreBusyPublication = RestoreBusyPublication(
+                    token = restoreToken,
+                    revision = restoreStartRevision,
+                    message = message,
+                    retryOwner = retryOwner ?: existing?.takeIf {
+                        it.revision == restoreStartRevision
+                    }?.retryOwner,
+                )
+                return true
+            }
         }
-        val existing = restoreBusyPublication
-        restoreBusyPublication = RestoreBusyPublication(
-            token = restoreToken,
-            revision = restoreStartRevision,
-            retryOwner = existing?.takeIf {
-                it.token == restoreToken && it.revision == restoreStartRevision
-            }?.retryOwner,
-        )
-        return true
     }
 
     private fun settleRestoreBusyPublication(
@@ -4188,8 +4197,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (token != null && publication.token != token) return
         if (revision != null && publication.revision != revision) return
         updateUiStateAndRecycleReplaced { current ->
-            if (current.revision == publication.revision && current.isBusy) {
-                current.copy(isBusy = false)
+            if (current.revision != publication.revision) return@updateUiStateAndRecycleReplaced current
+            val ownsMessage = current.message == publication.message
+            if (current.isBusy || ownsMessage) {
+                current.copy(
+                    isBusy = if (current.isBusy) false else current.isBusy,
+                    message = if (ownsMessage) null else current.message,
+                )
             } else current
         }
         if (restoreBusyPublication == publication) restoreBusyPublication = null
@@ -8418,6 +8432,7 @@ fun exportPreview() {
                         pointerStillCurrent &&
                         draftPointerBaseline == pointer
                 ) {
+                    settleRestoreBusyPublication(restoreToken, restoreStartRevision)
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             isBusy = false,
