@@ -617,7 +617,9 @@ class MemoryRecoveryOwnershipProductionTest {
         editor.openImage(Uri.parse("content://memory-recovery/$session"))
         awaitEvent("open image starts") { editor.openImageJobActiveForTest() }
         awaitEvent("open image settles") {
-            !editor.openImageJobActiveForTest() && !editor.uiState.value.isBusy
+            !editor.openImageJobActiveForTest() &&
+                !editor.uiState.value.isBusy &&
+                !editor.uiState.value.historyBusy
         }
         handle.close()
     }
