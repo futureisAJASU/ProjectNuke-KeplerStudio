@@ -655,6 +655,16 @@ class DraftRestoreProductionTest {
             assertEquals("restore cannot resurrect source", null, vm2.uiState.value.draftGenerationId)
             assertEquals("restore cannot resurrect working source", null, vm2.uiState.value.sourcePath)
             assertEquals("clearDraft releases the unadopted restore session once", 1, nativeReleases.get())
+            assertFalse("clearDraft settles restore busy state", vm2.uiState.value.isBusy)
+            assertFalse("clearDraft leaves maintenance idle", vm2.uiState.value.maintenanceBusy)
+            assertNull("clearDraft leaves no memory recovery request", vm2.uiState.value.memoryRecoveryRequest)
+            assertNull("clearDraft leaves no automatic restore retry", vm2.automaticRetryAttemptForTest())
+            assertNull("clearDraft leaves no strong restore retry", vm2.strongRetryAttemptForTest())
+            assertEquals(
+                "clearDraft leaves editor action admission ready",
+                EditorViewModel.EditorActionAdmission.Ready,
+                vm2.editorActionAdmissionForTest(),
+            )
         } finally {
             release.complete(Unit)
             restoreHandle.close()
@@ -1771,6 +1781,13 @@ class DraftRestoreProductionTest {
             assertNull("stale generation failure cannot publish a recovery request", vm2.uiState.value.memoryRecoveryRequest)
             assertNull("stale generation failure has no automatic retry", vm2.automaticRetryAttemptForTest())
             assertNull("stale generation failure has no strong retry", vm2.strongRetryAttemptForTest())
+            assertFalse("stale generation failure releases restore busy state", vm2.uiState.value.isBusy)
+            assertEquals(
+                "stale generation failure leaves editor action admission ready",
+                EditorViewModel.EditorActionAdmission.Ready,
+                vm2.editorActionAdmissionForTest(),
+            )
+            assertTrue("startup completion settles after stale failure", vm2.startupInitCompletion.isCompleted)
             assertFalse("stale generation failure cannot claim retrying", vm2.uiState.value.message?.contains("다시 시도") == true)
         } finally {
             renderRelease.complete(Unit)
@@ -1937,6 +1954,141 @@ class DraftRestoreProductionTest {
             recoveryHandle?.close()
             sessionFactory?.close()
             renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun cancelledDraftRetryCannotOverwriteRealOpenImageBusyState() = runBlocking {
+        val sourceFile = draftSourceFile("restore-retry-open-image-source.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val attempts = AtomicInteger()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore && attempts.getAndIncrement() == 0) {
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff101820.toInt())
+            }
+        val recoverySeam =
+            MemoryRecoveryTestSeam(
+                parkBeforeDraftRestoreRetry = true,
+                forceCleanupReclaimedResources = true,
+            )
+        val opened = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
+        opened.eraseColor(0xff00aaff.toInt())
+        val openDecodeEntered = CompletableDeferred<Unit>()
+        val openDecodeRelease = CompletableDeferred<Unit>()
+        var recoveryHandle: AutoCloseable? = null
+        var openHandle: AutoCloseable? = null
+        var sessionFactory: AutoCloseable? = null
+        var observerScope: CoroutineScope? = null
+        var observer: kotlinx.coroutines.Job? = null
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation must save", persistDraftForTest(vm1))
+            val generationA = checkNotNull(currentDraftGenerationId(context))
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            openHandle = harness.ownSeam(
+                OpenImageTestSeam.install(
+                    OpenImageTestSeam(
+                        sourceTransactionFactory = { app, _ ->
+                            IncomingSourceTransaction(
+                                app,
+                                inputStreamProvider = { ByteArrayInputStream(byteArrayOf(1, 2, 3)) },
+                            )
+                        },
+                        decode = {
+                            openDecodeEntered.complete(Unit)
+                            openDecodeRelease.await()
+                            opened
+                        },
+                        nativeSessionFactory = { 7401L },
+                    )
+                )
+            )
+            sessionFactory = harness.ownSeam(
+                installNativeSessionFactoryWithReleaseForTest(
+                    factory = { 7400L },
+                    releaser = {},
+                )
+            )
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "draft retry must request memory recovery",
+                completion = recoverySeam.recoveryRequested,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.automaticRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "draft retry must park before execution",
+                completion = recoverySeam.beforeDraftRestoreRetryReached,
+                pumpMain = ::drainReadyMain,
+            )
+            vm2.openImage(Uri.parse("content://restore/retry-open-image"))
+            awaitEditorCompletionForTest(
+                description = "OpenImage enters its decode gate",
+                completion = openDecodeEntered,
+                pumpMain = ::drainReadyMain,
+                diagnostic = {
+                    "busy=${vm2.uiState.value.isBusy} " +
+                        "request=${vm2.uiState.value.memoryRecoveryRequest} " +
+                        "auto=${vm2.automaticRetryAttemptForTest()} " +
+                        "admission=${vm2.editorActionAdmissionForTest()}"
+                },
+            )
+            assertTrue("OpenImage publishes its busy state", vm2.uiState.value.isBusy)
+            val openingRevision = vm2.uiState.value.revision
+            assertTrue("OpenImage advances revision", openingRevision > 0)
+            recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "cancelled draft retry settles while OpenImage is opening",
+                completion = CompletableDeferred<Unit>().also { done ->
+                    observerScope = CoroutineScope(Dispatchers.Default)
+                    observer = observerScope!!.launch {
+                        vm2.uiState.first {
+                            it.revision == openingRevision &&
+                                it.isBusy &&
+                                it.memoryRecoveryRequest == null &&
+                                vm2.automaticRetryAttemptForTest() == null
+                        }
+                        done.complete(Unit)
+                    }
+                },
+                pumpMain = ::drainReadyMain,
+            )
+            assertTrue("old retry cannot clear OpenImage busy state", vm2.uiState.value.isBusy)
+            openDecodeRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "OpenImage remains current after stale retry settlement",
+                completion = CompletableDeferred<Unit>().also { done ->
+                    observer?.cancel()
+                    observerScope?.cancel()
+                    observerScope = CoroutineScope(Dispatchers.Default)
+                    observer = observerScope!!.launch {
+                        vm2.uiState.first { it.previewBitmap === opened && !it.isBusy }
+                        done.complete(Unit)
+                    }
+                },
+                pumpMain = ::drainReadyMain,
+            )
+            assertEquals("OpenImage remains current", opened, vm2.uiState.value.previewBitmap)
+            assertEquals("old retry cannot alter Draft pointer", generationA, currentDraftGenerationId(context))
+            assertNull("OpenImage leaves no memory request", vm2.uiState.value.memoryRecoveryRequest)
+            assertNull("OpenImage leaves no automatic retry", vm2.automaticRetryAttemptForTest())
+            assertNull("OpenImage leaves no strong retry", vm2.strongRetryAttemptForTest())
+        } finally {
+            recoverySeam.automaticRelease.complete(Unit)
+            recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
+            openDecodeRelease.complete(Unit)
+            observer?.cancel()
+            observerScope?.cancel()
+            openHandle?.close()
+            recoveryHandle?.close()
+            sessionFactory?.close()
+            renderer.close()
+            if (!opened.isRecycled) opened.recycle()
             sourceFile.delete()
         }
     }

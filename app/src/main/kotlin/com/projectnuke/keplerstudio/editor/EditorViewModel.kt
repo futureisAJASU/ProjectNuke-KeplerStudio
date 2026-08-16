@@ -824,12 +824,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private data class RestoreBusyPublication(
+        val token: Long,
+        val revision: Int,
+        val retryOwner: MemoryRecoveryOwner? = null,
+    )
+
     private var memoryRecoveryToken: Long = 0L
     private var userMemoryRecoveryOwner: MemoryRecoveryOwner? = null
     private var lastClosedMemoryRecoveryOwner: MemoryRecoveryOwner? = null
     private var trimMemoryCleanupJob: Job? = null
     private var automaticRetryAttempt: MemoryRetryDescriptor? = null
     private var strongRetryAttempt: MemoryRetryDescriptor? = null
+    private var restoreBusyPublication: RestoreBusyPublication? = null
 
     init {
         val persistedEngine = correctionEngineSettings.read()
@@ -1321,6 +1328,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     )
                     if (owner.descriptor.action == MemoryRetryAction.RestoreDraft) {
                         updateUiStateAndRecycleReplaced { it.copy(isBusy = true) }
+                        restoreBusyPublication = RestoreBusyPublication(
+                            token = restoreDraftToken,
+                            revision = owner.descriptor.revision,
+                            retryOwner = owner,
+                        )
                     }
                     if (strong) strongRetryAttempt = owner.descriptor else automaticRetryAttempt = owner.descriptor
                     if (owner.descriptor.action == MemoryRetryAction.RestoreDraft) {
@@ -1438,14 +1450,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         outcome: DraftRestoreRetryOutcome,
     ) {
         clearDraftRetryAttempts(owner.descriptor)
-        val ownsRequest =
-            userMemoryRecoveryOwner === owner &&
-                _uiState.value.memoryRecoveryRequest?.token == owner.descriptor.token
         if (userMemoryRecoveryOwner === owner) {
             closeUserMemoryRecoveryOwner(owner, clearUi = true, clearAttempts = true)
         }
         if (outcome == DraftRestoreRetryOutcome.Restored) return
-        if (ownsRequest || _uiState.value.memoryRecoveryRequest == null) {
+        val ownsRestoreBusyPublication =
+            restoreBusyPublication?.retryOwner === owner &&
+                isDocumentIdentityCurrent(owner.descriptor)
+        if (ownsRestoreBusyPublication) {
+            restoreBusyPublication = null
             updateUiStateAndRecycleReplaced { current ->
                 if (
                     current.memoryRecoveryRequest?.token == owner.descriptor.token ||
@@ -1470,6 +1483,22 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         userMemoryRecoveryOwner = null
         automaticRetryAttempt = null
         strongRetryAttempt = null
+        restoreBusyPublication = null
+    }
+
+    private fun invalidateRestoreDraftRecoveryForDocumentReplacement() {
+        val owner = userMemoryRecoveryOwner
+        if (owner?.descriptor?.action != MemoryRetryAction.RestoreDraft) return
+        owner.close()
+        lastClosedMemoryRecoveryOwner = owner
+        if (userMemoryRecoveryOwner === owner) userMemoryRecoveryOwner = null
+        if (automaticRetryAttempt === owner.descriptor) automaticRetryAttempt = null
+        if (strongRetryAttempt === owner.descriptor) strongRetryAttempt = null
+        updateUiStateAndRecycleReplaced { current ->
+            if (current.memoryRecoveryRequest?.token == owner.descriptor.token) {
+                current.copy(memoryRecoveryRequest = null)
+            } else current
+        }
     }
 
     private fun updateRecoveryUiIfOwned(
@@ -4125,12 +4154,55 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         managedEdits.invalidate()
     }
 
+    private fun publishRestoreBusy(
+        restoreToken: Long,
+        restoreStartRevision: Int,
+        message: String,
+    ): Boolean {
+        if (shuttingDown || restoreToken != restoreDraftToken) return false
+        if (_uiState.value.revision != restoreStartRevision) return false
+        updateUiStateAndRecycleReplaced {
+            if (
+                restoreToken == restoreDraftToken &&
+                    it.revision == restoreStartRevision
+            ) {
+                it.copy(isBusy = true, message = message)
+            } else it
+        }
+        val existing = restoreBusyPublication
+        restoreBusyPublication = RestoreBusyPublication(
+            token = restoreToken,
+            revision = restoreStartRevision,
+            retryOwner = existing?.takeIf {
+                it.token == restoreToken && it.revision == restoreStartRevision
+            }?.retryOwner,
+        )
+        return true
+    }
+
+    private fun settleRestoreBusyPublication(
+        token: Long? = null,
+        revision: Int? = null,
+    ) {
+        val publication = restoreBusyPublication ?: return
+        if (token != null && publication.token != token) return
+        if (revision != null && publication.revision != revision) return
+        updateUiStateAndRecycleReplaced { current ->
+            if (current.revision == publication.revision && current.isBusy) {
+                current.copy(isBusy = false)
+            } else current
+        }
+        if (restoreBusyPublication == publication) restoreBusyPublication = null
+    }
+
     private fun invalidateExport() {
         exportToken += 1L
         exportJob?.cancel()
     }
 
     private fun invalidateDraftOperations() {
+        settleRestoreBusyPublication()
+        invalidateRestoreDraftRecoveryForDocumentReplacement()
         draftOperationEpoch += 1L
         restoreDraftToken += 1L
         restoreDraftJob?.cancel()
@@ -5158,7 +5230,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // restore owns a decoded bitmap/session and has published isBusy.
         // Invalidate before admission so the action is not rejected merely
         // because the old restore is still preparing its off-state bundle.
-        if (restoreDraftJob?.isActive == true) {
+        if (
+            restoreDraftJob?.isActive == true ||
+                userMemoryRecoveryOwner?.descriptor?.action == MemoryRetryAction.RestoreDraft
+        ) {
             invalidateDraftOperations()
             clearDocumentBusyIfNoExport()
         }
@@ -8034,11 +8109,11 @@ fun exportPreview() {
             runCatching { ExportResolution.valueOf(manifest.exportResolution) }.getOrNull()
                 ?: return GenerationRestoreOutcome.Invalid(pointer)
         DraftRestoreTestSeam.capture()?.await(DraftRestoreTestStage.ValidationComplete, pointer)
-        updateUiStateAndRecycleReplaced {
-            if (restoreToken == restoreDraftToken && it.revision == restoreStartRevision) {
-                it.copy(isBusy = true, message = "임시저장된 편집을 불러오는 중입니다")
-            } else it
-        }
+        publishRestoreBusy(
+            restoreToken,
+            restoreStartRevision,
+            "임시저장된 편집을 불러오는 중입니다",
+        )
         var ownedBase: Bitmap? = null
         var ownedRendered: Bitmap? = null
         var restoreRenderSuccess: RenderResult.Success? = null
@@ -8227,7 +8302,7 @@ fun exportPreview() {
                         restoreToken == restoreDraftToken &&
                         _uiState.value.revision == restoreStartRevision
                 ) {
-                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
+                    settleRestoreBusyPublication(restoreToken, restoreStartRevision)
                 }
                 return GenerationRestoreOutcome.Stale
             }
@@ -8313,6 +8388,7 @@ fun exportPreview() {
                 error("draft generation adoption was not confirmed")
             }
             restoreStateAdopted = true
+            restoreBusyPublication = null
             createdSession = 0L
             ownedBase = null
             ownedRendered = null
@@ -8354,6 +8430,7 @@ fun exportPreview() {
                         payload = pointer,
                     )
                 } else {
+                    settleRestoreBusyPublication(restoreToken, restoreStartRevision)
                     return GenerationRestoreOutcome.Stale
                 }
                 return GenerationRestoreOutcome.MemoryRejected(t.requiredBytes)
@@ -8364,7 +8441,7 @@ fun exportPreview() {
                         restoreToken == restoreDraftToken &&
                         _uiState.value.revision == restoreStartRevision
                 ) {
-                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false) }
+                    settleRestoreBusyPublication(restoreToken, restoreStartRevision)
                 }
                 return GenerationRestoreOutcome.Stale
             }
@@ -8373,6 +8450,7 @@ fun exportPreview() {
                     restoreToken == restoreDraftToken &&
                     _uiState.value.revision == restoreStartRevision
             ) {
+                settleRestoreBusyPublication(restoreToken, restoreStartRevision)
                 updateUiStateAndRecycleReplaced {
                     it.copy(isBusy = false, message = "새 임시저장 복구에 실패해 이전 복구 정보를 확인합니다.")
                 }
@@ -8589,9 +8667,7 @@ fun exportPreview() {
             }
         suspend fun settleStaleLegacyRestore() {
             if (!shuttingDown && restoreToken == restoreDraftToken) {
-                updateUiStateAndRecycleReplaced {
-                    if (it.revision == restoreStartRevision) it.copy(isBusy = false) else it
-                }
+                settleRestoreBusyPublication(restoreToken, restoreStartRevision)
             }
         }
         if (!legacyRestoreIsCurrent()) {
@@ -8646,13 +8722,11 @@ fun exportPreview() {
                 }
                 .getOrNull()
         val engines = _uiState.value.engineSelection()
-        updateUiStateAndRecycleReplaced {
-            it.copy(
-                isBusy = true,
-                message =
-                    "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC624\uB294 \uC911\uC785\uB2C8\uB2E4",
-            )
-        }
+        publishRestoreBusy(
+            restoreToken,
+            restoreStartRevision,
+            "\uC784\uC2DC\uC800\uC7A5\uB41C \uD3B8\uC9D1\uC744 \uBD88\uB7EC\uC624\uB294 \uC911\uC785\uB2C8\uB2E4",
+        )
         var preview: Bitmap? = null
         var rendered: Bitmap? = null
         var restoreRenderSuccess: RenderResult.Success? = null
@@ -8813,6 +8887,7 @@ fun exportPreview() {
                 return
             }
             createdSession = 0L
+            restoreBusyPublication = null
             preview = null
             rendered = null
             lastSuccessfullyRenderedParams = params
@@ -8836,6 +8911,7 @@ fun exportPreview() {
                         currentRevision == expectedRestoreRevision) &&
                     legacyRestoreIsCurrent()
             if (isRestoreStillCurrent) {
+                settleRestoreBusyPublication(restoreToken, restoreStartRevision)
                 updateUiStateAndRecycleReplaced {
                     it.copy(
                         isBusy = false,
