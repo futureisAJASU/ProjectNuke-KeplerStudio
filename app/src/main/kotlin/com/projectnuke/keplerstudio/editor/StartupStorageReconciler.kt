@@ -90,7 +90,7 @@ internal fun reconcileStartupArtifacts(
         buildSet {
             context
                 .getSharedPreferences(PREF_NAME_DRAFT, Context.MODE_PRIVATE)
-                .getString(KEY_DRAFT_SOURCE, null)
+                .let { safeDraftPreferenceString(it, KEY_DRAFT_SOURCE) }
                 ?.let { add(File(it)) }
             inProcessSourcePath?.let { add(File(it)) }
         }

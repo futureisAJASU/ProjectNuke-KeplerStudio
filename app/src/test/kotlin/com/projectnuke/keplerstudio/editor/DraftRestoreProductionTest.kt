@@ -4,6 +4,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
 import com.projectnuke.keplerstudio.bridge.installNativeSessionFactoryForTest
+import com.projectnuke.keplerstudio.bridge.installNativeSessionFactoryWithReleaseForTest
 import com.projectnuke.keplerstudio.ui.RemasterModelSession
 import java.io.ByteArrayInputStream
 import kotlinx.coroutines.runBlocking
@@ -199,6 +200,14 @@ class DraftRestoreProductionTest {
             assertEquals("draft generation id restored", pointer, vm2.uiState.value.draftGenerationId)
             assertEquals("restored base token", "restore-base", vm2.uiState.value.baseContentToken)
             assertFalse("Draft restore does not eagerly load Remaster models", RemasterModelSession.isModelLoaded)
+            assertFalse(
+                "Draft restore does not activate SubjectSelection",
+                ModelAvailabilityRegistry.state.value[ModelFeature.SubjectSelection]?.sessionActive == true,
+            )
+            assertFalse(
+                "Draft restore does not activate FlareGuard",
+                ModelAvailabilityRegistry.state.value[ModelFeature.FlareGuard]?.sessionActive == true,
+            )
             assertTrue("restored crop state", vm2.uiState.value.cropState == persistedCrop)
             assertEquals("restored export format", ExportFormat.Png, vm2.uiState.value.exportFormat)
             assertEquals("restored export resolution", ExportResolution.Percent50, vm2.uiState.value.exportResolution)
@@ -319,7 +328,12 @@ class DraftRestoreProductionTest {
             assertEquals("second restored local exposure", -0.21f, secondLayer.localParams.exposure)
             assertEquals("second restored local temperature", 0.09f, secondLayer.localParams.temperature)
             assertEquals("restored active layer id", "restore-mask", vm2.uiState.value.activeSelectionLayerId)
+            assertFalse("adopted masks remain owned by the document", layer.bitmap.isRecycled)
+            assertFalse("second adopted mask remains owned by the document", secondLayer.bitmap.isRecycled)
             awaitReady(vm2)
+            harness.clearViewModels()
+            assertTrue("document teardown releases first adopted mask", layer.bitmap.isRecycled)
+            assertTrue("document teardown releases second adopted mask", secondLayer.bitmap.isRecycled)
         } finally {
             sessionFactory?.close()
             hooks.close()
@@ -965,7 +979,12 @@ class DraftRestoreProductionTest {
             awaitReady(vm1)
             vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
             assertTrue("draft must save", persistDraftForTest(vm1))
-            sessionFactory = installNativeSessionFactoryForTest { 7401L }
+            val nativeReleases = AtomicInteger()
+            sessionFactory =
+                installNativeSessionFactoryWithReleaseForTest(
+                    factory = { 7401L },
+                    releaser = { handle -> if (handle == 7401L) nativeReleases.incrementAndGet() },
+                )
             val vm2 = harness.createEditor()
             awaitEditorCompletionForTest(
                 description = "restore must reach native session before teardown",
@@ -986,9 +1005,40 @@ class DraftRestoreProductionTest {
                     file.name.startsWith("restored_") && file.name.endsWith(".img")
                 }.orEmpty().isEmpty(),
             )
+            assertEquals("stale restore session is released exactly once", 1, nativeReleases.get())
         } finally {
             release.complete(Unit)
             restoreHandle.close()
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun adoptedRestoreSessionReleasesOnlyWhenDocumentOwnerEnds() = runBlocking {
+        val sourceFile = draftSourceFile("restore-adopted-session-source.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val renderer = EditorRenderer.installRendererOverrideForTest { successOutput(0xff0a0b0c.toInt()) }
+        var sessionFactory: AutoCloseable? = null
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("draft must save", persistDraftForTest(vm1))
+            harness.clearViewModels()
+            val nativeReleases = AtomicInteger()
+            sessionFactory =
+                installNativeSessionFactoryWithReleaseForTest(
+                    factory = { 7411L },
+                    releaser = { handle -> if (handle == 7411L) nativeReleases.incrementAndGet() },
+                )
+            val vm2 = harness.createEditor()
+            awaitInit(vm2)
+            assertTrue("restore must adopt a document", vm2.uiState.value.sourcePath != null)
+            assertEquals("adopted restore session is not finalized early", 0, nativeReleases.get())
+            harness.clearViewModels()
+            assertEquals("document owner releases adopted session once", 1, nativeReleases.get())
+        } finally {
             sessionFactory?.close()
             renderer.close()
             sourceFile.delete()
@@ -1085,6 +1135,211 @@ class DraftRestoreProductionTest {
             sourceFile.delete()
             legacySource.delete()
         }
+    }
+
+    @Test
+    fun unrelatedEnginePreferenceDoesNotStaleLegacyRestore() = runBlocking {
+        val sourceFile = draftSourceFile("legacy-unrelated-preference-source.png")
+        val legacyDirectory = context.filesDir.resolve("drafts/current").apply { mkdirs() }
+        val legacySource = legacyDirectory.resolve("source.img")
+        sourceFile.copyTo(legacySource, overwrite = true)
+        context
+            .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_DRAFT_SOURCE, legacySource.absolutePath)
+            .putFloat("draft_exposure", 0.27f)
+            .putString("noise_engine", NoiseEngine.FastEdgeAware.name)
+            .commit()
+        val renderReached = CompletableDeferred<Unit>()
+        val renderRelease = CompletableDeferred<Unit>()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore) {
+                    renderReached.complete(Unit)
+                    renderRelease.await()
+                }
+                successOutput(0xff123456.toInt())
+            }
+        var sessionFactory: AutoCloseable? = null
+        try {
+            sessionFactory = installNativeSessionFactoryForTest { 7521L }
+            val vm = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "legacy restore must capture identity before render",
+                completion = renderReached,
+                pumpMain = ::drainReadyMain,
+            )
+            context
+                .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString("noise_engine", NoiseEngine.GuidedFilter.name)
+                .commit()
+            renderRelease.complete(Unit)
+            awaitInit(vm)
+            assertTrue("unrelated engine preference must not stale legacy restore", vm.uiState.value.sourcePath != null)
+            assertEquals("legacy Draft remains authoritative", 0.27f, vm.uiState.value.params.exposure)
+        } finally {
+            renderRelease.complete(Unit)
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
+            legacySource.delete()
+        }
+    }
+
+    @Test
+    fun unrelatedPreferenceDoesNotStaleLegacyMemoryRetry() = runBlocking {
+        val sourceFile = draftSourceFile("legacy-unrelated-retry-source.png")
+        val legacyDirectory = context.filesDir.resolve("drafts/current").apply { mkdirs() }
+        val legacySource = legacyDirectory.resolve("source.img")
+        sourceFile.copyTo(legacySource, overwrite = true)
+        context
+            .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_DRAFT_SOURCE, legacySource.absolutePath)
+            .putFloat("draft_exposure", 0.38f)
+            .commit()
+        val attempts = AtomicInteger()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore && attempts.getAndIncrement() == 0) {
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff654321.toInt())
+            }
+        val recoverySeam = MemoryRecoveryTestSeam()
+        var recoveryHandle: AutoCloseable? = null
+        var sessionFactory: AutoCloseable? = null
+        try {
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            sessionFactory = installNativeSessionFactoryForTest { 7522L }
+            val vm = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "legacy restore must publish memory recovery",
+                completion = recoverySeam.recoveryRequested,
+                pumpMain = ::drainReadyMain,
+            )
+            val input = recoverySeam.recoveryRequested.getCompleted().input as MemoryRetryInput.Draft
+            assertTrue("legacy retry captures Draft identity", input.legacyIdentity != null)
+            recoverySeam.automaticRelease.complete(Unit)
+            val actionable = CompletableDeferred<Unit>()
+            val actionableObserver =
+                CoroutineScope(Dispatchers.Default).launch {
+                    vm.uiState.first { it.memoryRecoveryRequest != null }
+                    actionable.complete(Unit)
+                }
+            awaitEditorCompletionForTest(
+                description = "legacy memory recovery must become actionable",
+                completion = actionable,
+                pumpMain = ::drainReadyMain,
+            )
+            actionableObserver.cancel()
+            val request = checkNotNull(vm.uiState.value.memoryRecoveryRequest)
+            context
+                .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString("noise_engine", NoiseEngine.GuidedFilter.name)
+                .commit()
+            val cacheBitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+            ThumbnailBitmapCache.acquire("legacy-retry-cache") { cacheBitmap }?.close()
+            vm.retryPendingMemoryRecovery(request.token)
+            awaitEditorCompletionForTest(
+                description = "legacy retry must enter strong cleanup",
+                completion = recoverySeam.strongReached,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.strongRelease.complete(Unit)
+            val restored = CompletableDeferred<Unit>()
+            val restoredObserver =
+                CoroutineScope(Dispatchers.Default).launch {
+                    vm.uiState.first { it.sourcePath != null && !it.isBusy }
+                    restored.complete(Unit)
+                }
+            awaitEditorCompletionForTest(
+                description = "legacy memory retry must restore after unrelated preference change",
+                completion = restored,
+                pumpMain = ::drainReadyMain,
+            )
+            restoredObserver.cancel()
+            assertTrue("legacy retry remains eligible", vm.uiState.value.sourcePath != null)
+            assertEquals("legacy retry restores original Draft", 0.38f, vm.uiState.value.params.exposure)
+        } finally {
+            recoverySeam.automaticRelease.complete(Unit)
+            recoverySeam.strongRelease.complete(Unit)
+            recoveryHandle?.close()
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
+            legacySource.delete()
+        }
+    }
+
+    @Test
+    fun legacySourceAuthorityChangeStalesOldRestore() = runBlocking {
+        val sourceA = draftSourceFile("legacy-source-authority-a.png")
+        val sourceB = draftSourceFile("legacy-source-authority-b.png")
+        val legacyDirectory = context.filesDir.resolve("drafts/current").apply { mkdirs() }
+        val legacySourceA = legacyDirectory.resolve("source-a.img")
+        sourceA.copyTo(legacySourceA, overwrite = true)
+        context
+            .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_DRAFT_SOURCE, legacySourceA.absolutePath)
+            .putFloat("draft_exposure", 0.41f)
+            .commit()
+        val renderReached = CompletableDeferred<Unit>()
+        val renderRelease = CompletableDeferred<Unit>()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore) {
+                    renderReached.complete(Unit)
+                    renderRelease.await()
+                }
+                successOutput(0xff223344.toInt())
+            }
+        var sessionFactory: AutoCloseable? = null
+        try {
+            sessionFactory = installNativeSessionFactoryForTest { 7523L }
+            val vm = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "legacy restore must capture source identity before render",
+                completion = renderReached,
+                pumpMain = ::drainReadyMain,
+            )
+            context
+                .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_DRAFT_SOURCE, sourceB.absolutePath)
+                .commit()
+            renderRelease.complete(Unit)
+            awaitInit(vm)
+            assertEquals("source authority change rejects old restore", null, vm.uiState.value.sourcePath)
+            assertEquals("source authority change does not publish old params", 0f, vm.uiState.value.params.exposure)
+        } finally {
+            renderRelease.complete(Unit)
+            sessionFactory?.close()
+            renderer.close()
+            sourceA.delete()
+            sourceB.delete()
+            legacySourceA.delete()
+        }
+    }
+
+    @Test
+    fun malformedDraftPreferenceTypesDoNotCrashFreshStartup() = runBlocking {
+        val preferences = context.getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+        preferences
+            .edit()
+            .putInt(KEY_DRAFT_GENERATION_ID, 42)
+            .putInt(KEY_DRAFT_SOURCE, 7)
+            .putString("draft_saved_at", "not-a-timestamp")
+            .commit()
+        val vm = harness.createEditor()
+        awaitInit(vm)
+        awaitReady(vm)
+        assertEquals("malformed generation pointer is ignored", null, currentDraftGenerationId(context))
+        assertEquals("malformed legacy source is ignored", null, vm.uiState.value.sourcePath)
+        assertFalse("startup remains settled after malformed preferences", vm.uiState.value.isBusy)
     }
 
     @Test

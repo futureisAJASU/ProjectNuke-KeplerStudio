@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.IntSize
 import com.projectnuke.keplerstudio.BuildConfig
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
 import com.projectnuke.keplerstudio.bridge.nativeCreateSessionOrTest
+import com.projectnuke.keplerstudio.bridge.nativeReleaseSessionOrTest
 import com.projectnuke.keplerstudio.bridge.NativeCorrectionV2Params
 import com.projectnuke.keplerstudio.bridge.NativeScratchPlanner
 import com.projectnuke.keplerstudio.ui.RemasterModelSession
@@ -1128,9 +1129,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 when {
                     input.generationId != null ->
                         currentDraftGenerationId(getApplication<Application>()) == input.generationId
-                    input.legacyPayloadFingerprint != null ->
-                        legacyDraftPayloadFingerprint(getApplication<Application>()) ==
-                            input.legacyPayloadFingerprint
+                    input.legacyIdentity != null ->
+                        legacyDraftIdentity(getApplication<Application>()) == input.legacyIdentity
                     else -> true
                 }
             is MemoryRetryInput.Route ->
@@ -1161,13 +1161,50 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             else -> null
         }
 
-    private fun legacyDraftPayloadFingerprint(context: Context): String =
-        context
-            .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-            .all
-            .entries
-            .sortedBy { it.key }
-            .joinToString(separator = "\u001f") { (key, value) -> "$key=$value" }
+    /**
+     * Identity for the legacy Draft protocol only.  The editor preference file
+     * also stores engine selections and export-history migration state; those
+     * keys are deliberately excluded so an unrelated preference mutation
+     * cannot invalidate a restore or memory retry.  The generation pointer is
+     * retained in the identity because publishing a generation supersedes the
+     * legacy payload even though it shares the same XML file.
+     */
+    private fun legacyDraftIdentity(context: Context): LegacyDraftIdentity {
+        val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        val payloadFingerprint =
+            preferences.all
+                .asSequence()
+                .filter { (key, _) -> key.startsWith("draft_") }
+                .sortedBy { (key, _) -> key }
+                .joinToString(separator = "\u001f") { (key, value) ->
+                    "key=${canonicalIdentityPart(key)};value=${canonicalPreferenceValue(value)}"
+                }
+        return LegacyDraftIdentity(
+            generationPointer = currentDraftGenerationId(context),
+            payloadFingerprint = payloadFingerprint,
+        )
+    }
+
+    private fun canonicalIdentityPart(value: String): String =
+        "${value.length}:$value"
+
+    private fun canonicalPreferenceValue(value: Any?): String =
+        when (value) {
+            null -> "null"
+            is String -> "string:${canonicalIdentityPart(value)}"
+            is Boolean -> "boolean:${if (value) "true" else "false"}"
+            is Int -> "int:$value"
+            is Long -> "long:$value"
+            is Float -> "float:${java.lang.Float.floatToIntBits(value)}"
+            is Double -> "double:${java.lang.Double.doubleToLongBits(value)}"
+            is Set<*> ->
+                "set:" +
+                    value
+                        .map { canonicalPreferenceValue(it) }
+                        .sorted()
+                        .joinToString(separator = ",", prefix = "[", postfix = "]")
+            else -> "${value::class.java.name}:${canonicalIdentityPart(value.toString())}"
+        }
 
     fun retryPendingMemoryRecovery(token: Long) {
         val owner = userMemoryRecoveryOwner?.takeIf {
@@ -1502,7 +1539,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 token,
                 revision,
                 input.generationId,
-                input.legacyPayloadFingerprint,
+                input.legacyIdentity,
             )
         }
         restoreDraftJob = job
@@ -8202,7 +8239,7 @@ fun exportPreview() {
         restoreToken: Long,
         restoreStartRevision: Int,
         expectedDraftGenerationId: String? = null,
-        expectedLegacyPayloadFingerprint: String? = null,
+        expectedLegacyIdentity: LegacyDraftIdentity? = null,
     ) {
         if (
             shuttingDown ||
@@ -8221,10 +8258,8 @@ fun exportPreview() {
         if (generationRestore == GenerationRestoreOutcome.Stale) return
         if (generationRestore is GenerationRestoreOutcome.MemoryRejected) return
         if (
-            expectedLegacyPayloadFingerprint != null &&
-                withContext(Dispatchers.IO) {
-                    legacyDraftPayloadFingerprint(context)
-                } != expectedLegacyPayloadFingerprint
+            expectedLegacyIdentity != null &&
+                withContext(Dispatchers.IO) { legacyDraftIdentity(context) } != expectedLegacyIdentity
         ) {
             updateUiStateAndRecycleReplaced {
                 if (restoreToken == restoreDraftToken && it.revision == restoreStartRevision) {
@@ -8275,14 +8310,15 @@ fun exportPreview() {
                     draftSaveMutex.withLock {
                         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
                         val storedSourcePath =
-                            prefs.getString(KEY_DRAFT_SOURCE, null) ?: return@withLock null
-                        val draftSavedAt = prefs.getLong(KEY_DRAFT_SAVED_AT, 0L).takeIf { it > 0L }
+                            safeDraftPreferenceString(prefs, KEY_DRAFT_SOURCE) ?: return@withLock null
+                        val draftSavedAt =
+                            safeDraftPreferenceLong(prefs, KEY_DRAFT_SAVED_AT)?.takeIf { it > 0L }
                         cleanupDraftTemporaryFiles(context)
                         DraftRestoreSnapshot(
                             preferences = DraftPreferencesSnapshot(prefs.all.toMap()),
                             savedAtMillis = draftSavedAt,
                             recovery = resolveDraftRecovery(context, storedSourcePath),
-                            legacyPayloadFingerprint = legacyDraftPayloadFingerprint(context),
+                            legacyIdentity = legacyDraftIdentity(context),
                             generationPointer = currentDraftGenerationId(context),
                         )
                     }
@@ -8313,8 +8349,7 @@ fun exportPreview() {
                 restoreStartRevision == _uiState.value.revision &&
                 currentDraftGenerationId(context) == restoreSnapshot.generationPointer &&
                 draftPointerBaseline == restoreSnapshot.generationPointer &&
-                legacyDraftPayloadFingerprint(context) ==
-                    restoreSnapshot.legacyPayloadFingerprint
+                legacyDraftIdentity(context) == restoreSnapshot.legacyIdentity
         suspend fun legacyRestoreIsCurrent(): Boolean =
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock { legacyRestoreIdentityMatches() }
@@ -8570,12 +8605,12 @@ fun exportPreview() {
                         MemoryRetryAction.RestoreDraft,
                         t.requiredBytes,
                         retryInput =
-                            withContext(Dispatchers.IO) {
-                                MemoryRetryInput.Draft(
-                                    generationId = null,
-                                    legacyPayloadFingerprint = legacyDraftPayloadFingerprint(context),
-                                )
-                            },
+                        withContext(Dispatchers.IO) {
+                            MemoryRetryInput.Draft(
+                                generationId = null,
+                                legacyIdentity = legacyDraftIdentity(context),
+                            )
+                        },
                     )
                 }
             }
@@ -9121,7 +9156,7 @@ fun exportPreview() {
         if (session != 0L) {
             tracker.unregisterNativeSession(session)
             runCatching {
-                releaseOverride?.invoke(session) ?: NativePhotoCore.nativeReleaseSession(session)
+                releaseOverride?.invoke(session) ?: nativeReleaseSessionOrTest(session)
             }
         }
     }
@@ -9304,7 +9339,7 @@ internal sealed interface MemoryRetryInput {
     data class Rotate(val cropState: CropState) : MemoryRetryInput
     data class Draft(
         val generationId: String?,
-        val legacyPayloadFingerprint: String? = null,
+        val legacyIdentity: LegacyDraftIdentity? = null,
     ) : MemoryRetryInput
     data class Route(val route: String) : MemoryRetryInput
 }
@@ -10250,7 +10285,7 @@ private fun migrateDraftSourceIfNeeded(context: Context, storedSourcePath: Strin
     val draftSource = persistDraftSourceFile(context, storedSource.absolutePath) ?: return null
     if (draftSource.absolutePath != storedSource.absolutePath) {
         val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-        val previousPointer = preferences.getString(KEY_DRAFT_SOURCE, null)
+        val previousPointer = safeDraftPreferenceString(preferences, KEY_DRAFT_SOURCE)
         try {
             check(preferences.edit().putString(KEY_DRAFT_SOURCE, draftSource.absolutePath).commit())
         } catch (failure: Throwable) {
@@ -10396,8 +10431,8 @@ private fun isReusableCommittedDraftSource(context: Context, state: EditorUiStat
     if (!source.isFile) return false
     if (!isSupportedDraftSource(context, source)) return false
     val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-    return sameCanonicalPath(preferences.getString(KEY_DRAFT_SOURCE, null), path) &&
-        preferences.getString(KEY_DRAFT_BASE_TOKEN, null) == state.baseContentToken
+    return sameCanonicalPath(safeDraftPreferenceString(preferences, KEY_DRAFT_SOURCE), path) &&
+        safeDraftPreferenceString(preferences, KEY_DRAFT_BASE_TOKEN) == state.baseContentToken
 }
 
 private fun isSupportedDraftSource(context: Context, source: File): Boolean =
@@ -11156,8 +11191,13 @@ private data class DraftRestoreSnapshot(
     val preferences: DraftPreferencesSnapshot,
     val savedAtMillis: Long?,
     val recovery: DraftRecoveryResolution,
-    val legacyPayloadFingerprint: String,
+    val legacyIdentity: LegacyDraftIdentity,
     val generationPointer: String?,
+)
+
+internal data class LegacyDraftIdentity(
+    val generationPointer: String?,
+    val payloadFingerprint: String,
 )
 
 private data class DraftPointerSnapshot(val generationId: String?)
@@ -11389,14 +11429,16 @@ private fun saveDraftSnapshot(
         when {
             payload.previousVisibleDraftPath?.let(::File)?.isFile == true &&
                 sameCanonicalPath(
-                    context
-                        .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                        .getString(KEY_DRAFT_SOURCE, null),
+                    safeDraftPreferenceString(
+                        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE),
+                        KEY_DRAFT_SOURCE,
+                    ),
                     payload.previousVisibleDraftPath,
                 ) &&
-                context
-                    .getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                    .getString(KEY_DRAFT_BASE_TOKEN, null) == payload.baseContentToken &&
+                safeDraftPreferenceString(
+                    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE),
+                    KEY_DRAFT_BASE_TOKEN,
+                ) == payload.baseContentToken &&
                 isSupportedDraftSource(context, File(payload.previousVisibleDraftPath)) ->
                 DraftSourceResult(File(payload.previousVisibleDraftPath), changed = false)
             !payload.baseBitmapDirty && payload.sourcePath != null ->
@@ -11843,22 +11885,22 @@ private fun loadEngineSelection(context: Context): EngineSelection {
     return EngineSelection(
             noiseEngine =
                 enumValueOrDefault(
-                    prefs.getString(KEY_NOISE_ENGINE, null),
+                    safeDraftPreferenceString(prefs, KEY_NOISE_ENGINE),
                     NoiseEngine.FastEdgeAware,
                 ),
             detailEngine =
                 enumValueOrDefault(
-                    prefs.getString(KEY_DETAIL_ENGINE, null),
+                    safeDraftPreferenceString(prefs, KEY_DETAIL_ENGINE),
                     DetailEngine.MaskedUnsharp,
                 ),
             toneEngine =
                 enumValueOrDefault(
-                    prefs.getString(KEY_TONE_ENGINE, null),
+                    safeDraftPreferenceString(prefs, KEY_TONE_ENGINE),
                     ToneEngine.HistogramAuto,
                 ),
             hazeEngine =
                 enumValueOrDefault(
-                    prefs.getString(KEY_HAZE_ENGINE, null),
+                    safeDraftPreferenceString(prefs, KEY_HAZE_ENGINE),
                     DehazeEngine.FastContrast,
                 ),
         )

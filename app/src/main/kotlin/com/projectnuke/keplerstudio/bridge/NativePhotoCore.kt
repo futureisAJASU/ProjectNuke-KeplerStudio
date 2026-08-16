@@ -336,12 +336,18 @@ private val nativeSessionFactoryTestLock = Any()
 private class NativeSessionFactoryInstallation(
     val generation: Long,
     private val factory: (String) -> Long,
+    private val releaser: ((Long) -> Unit)?,
 ) {
     @Volatile private var active = true
 
     fun create(sourcePath: String): Long {
         check(active) { "native session test owner closed before creation" }
         return factory(sourcePath)
+    }
+
+    fun release(session: Long) {
+        check(active) { "native session test owner closed before release" }
+        releaser?.invoke(session)
     }
 
     fun close() {
@@ -351,8 +357,16 @@ private class NativeSessionFactoryInstallation(
 private var nativeSessionFactoryInstallation: NativeSessionFactoryInstallation? = null
 private val nativeSessionFactoryInstallationGeneration = AtomicLong()
 
-internal fun installNativeSessionFactoryForTest(factory: (String) -> Long): AutoCloseable {
-    val installation = NativeSessionFactoryInstallation(nativeSessionFactoryInstallationGeneration.incrementAndGet(), factory)
+private fun installNativeSessionFactoryInternal(
+    factory: (String) -> Long,
+    releaser: ((Long) -> Unit)? = null,
+): AutoCloseable {
+    val installation =
+        NativeSessionFactoryInstallation(
+            nativeSessionFactoryInstallationGeneration.incrementAndGet(),
+            factory,
+            releaser,
+        )
     synchronized(nativeSessionFactoryTestLock) {
         check(nativeSessionFactoryInstallation == null) { "native session factory test seam already installed" }
         nativeSessionFactoryInstallation = installation
@@ -365,6 +379,14 @@ internal fun installNativeSessionFactoryForTest(factory: (String) -> Long): Auto
     }
 }
 
+internal fun installNativeSessionFactoryForTest(factory: (String) -> Long): AutoCloseable =
+    installNativeSessionFactoryInternal(factory)
+
+internal fun installNativeSessionFactoryWithReleaseForTest(
+    factory: (String) -> Long,
+    releaser: (Long) -> Unit,
+): AutoCloseable = installNativeSessionFactoryInternal(factory, releaser)
+
 internal fun nativeSessionFactoryTestSeamCount(): Int = synchronized(nativeSessionFactoryTestLock) {
     if (nativeSessionFactoryInstallation == null) 0 else 1
 }
@@ -376,6 +398,17 @@ internal fun nativeSessionFactoryTestSeamCount(): Int = synchronized(nativeSessi
 internal fun nativeCreateSessionOrTest(sourcePath: String): Long =
     synchronized(nativeSessionFactoryTestLock) { nativeSessionFactoryInstallation }?.create(sourcePath)
         ?: NativePhotoCore.nativeCreateSession(sourcePath)
+
+/** Release counterpart for [installNativeSessionFactoryForTest]. */
+internal fun nativeReleaseSessionOrTest(session: Long): Boolean {
+    val installation = synchronized(nativeSessionFactoryTestLock) { nativeSessionFactoryInstallation }
+    if (installation != null) {
+        installation.release(session)
+        return true
+    }
+    NativePhotoCore.nativeReleaseSession(session)
+    return false
+}
 
 /**
  * Deterministic in-place flare kernel seam for production tests. When set,

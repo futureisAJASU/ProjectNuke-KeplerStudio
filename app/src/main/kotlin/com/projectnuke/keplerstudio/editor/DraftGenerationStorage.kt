@@ -1,6 +1,7 @@
 package com.projectnuke.keplerstudio.editor
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
@@ -155,9 +156,27 @@ internal fun publishDraftGeneration(context: Context, generationId: String): Boo
     return prefs.edit().putString(KEY_DRAFT_GENERATION_ID, generationId).commit()
 }
 
+/**
+ * SharedPreferences is an untrusted persistence boundary: an older build (or
+ * a manually repaired file) can leave a value with the wrong primitive type.
+ * Reading through [all] keeps recovery conservative without allowing a
+ * ClassCastException to abort fresh-process startup.
+ */
+internal fun safeDraftPreferenceString(
+    preferences: SharedPreferences,
+    key: String,
+): String? = preferences.all[key] as? String
+
+internal fun safeDraftPreferenceLong(
+    preferences: SharedPreferences,
+    key: String,
+): Long? = preferences.all[key] as? Long
+
 internal fun currentDraftGenerationId(context: Context): String? =
-    context.getSharedPreferences(PREF_NAME_DRAFT, Context.MODE_PRIVATE)
-        .getString(KEY_DRAFT_GENERATION_ID, null)
+    safeDraftPreferenceString(
+        context.getSharedPreferences(PREF_NAME_DRAFT, Context.MODE_PRIVATE),
+        KEY_DRAFT_GENERATION_ID,
+    )
 
 internal fun clearCurrentDraftGenerationPointer(context: Context): Boolean =
     context.getSharedPreferences(PREF_NAME_DRAFT, Context.MODE_PRIVATE)
