@@ -10,7 +10,9 @@ internal enum class StartupReconcileDisposition {
     PRESERVED_POINTER,
     PRESERVED_REFERENCED,
     PRESERVED_LIVE_TRANSACTION,
+    PRESERVED_LIVE_RESTORE,
     PRESERVED_DOCUMENT,
+    ALREADY_ABSENT,
     DELETED_STAGING,
     DELETED_UNREFERENCED,
     DELETED_TEMP,
@@ -33,6 +35,7 @@ internal data class StartupReconcileOutcome(
         it.disposition == StartupReconcileDisposition.PRESERVED_POINTER ||
             it.disposition == StartupReconcileDisposition.PRESERVED_REFERENCED ||
             it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION ||
+            it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_RESTORE ||
             it.disposition == StartupReconcileDisposition.PRESERVED_DOCUMENT
     }
     val ignoredCount: Int get() = entries.count { it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN }
@@ -47,6 +50,9 @@ internal class StartupReconcileTestSeam {
     /** Test-only split point after the cache candidate snapshot and before deletion. */
     @Volatile internal var cacheSnapshotReached: CompletableDeferred<Unit>? = null
     @Volatile internal var cacheSnapshotRelease: CompletableDeferred<Unit>? = null
+    /** Test-only split point after the working-source snapshot and before deletion. */
+    @Volatile internal var workingSnapshotReached: CompletableDeferred<Unit>? = null
+    @Volatile internal var workingSnapshotRelease: CompletableDeferred<Unit>? = null
 
     internal companion object Registry {
         private val lock = Any()
@@ -83,7 +89,11 @@ internal fun reconcileStartupArtifacts(
     // The current document is an authoritative in-process root. Register it
     // before taking the reachability snapshot so later deletion checks use the
     // same ownership boundary as IncomingSourceTransaction adoption.
-    inProcessSourcePath?.let { IncomingSourceLiveOwnership.registerDocument(File(it)) }
+    inProcessSourcePath?.let {
+        val source = File(it)
+        IncomingSourceLiveOwnership.registerDocument(source)
+        RestoredWorkingSourceOwnership.registerDocument(source)
+    }
     val entries = mutableListOf<StartupReconcileEntry>()
     val seam = StartupReconcileTestSeam.capture()
     val referenced =
@@ -142,11 +152,14 @@ internal fun reconcileStartupArtifacts(
 
     val workingRoot = runCatching { File(context.filesDir, WORKING_SOURCES_DIR).canonicalFile }.getOrNull()
     if (workingRoot != null) {
-        workingRoot.listFiles()?.forEach { file ->
+        val workingFiles = workingRoot.listFiles()?.toList().orEmpty()
+        seam?.workingSnapshotReached?.complete(Unit)
+        seam?.workingSnapshotRelease?.let { release -> runBlocking { release.await() } }
+        workingFiles.forEach { file ->
             val canonical = runCatching { file.canonicalFile }.getOrNull()
             if (canonical == null || canonical.parentFile != workingRoot) return@forEach
-            if (canonical.name.startsWith(WORKING_SOURCE_PREFIX) && canonical.name.endsWith(WORKING_SOURCE_SUFFIX)) {
-                entries += recordReferencedDeletion(canonical, referenced, StartupReconcileDisposition.DELETED_UNREFERENCED)
+            if (RestoredWorkingSourceOwnership.isOwnedName(canonical.name)) {
+                entries += recordRestoredWorkingSourceDeletion(canonical, referenced)
             } else {
                 entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
             }
@@ -214,6 +227,29 @@ private fun recordIncomingSourceReferencedDeletion(file: File, referenced: Set<F
     return recordIncomingSourceDeletion(canonical, StartupReconcileDisposition.DELETED_UNREFERENCED)
 }
 
+private fun recordRestoredWorkingSourceDeletion(
+    file: File,
+    referenced: Set<File>,
+): StartupReconcileEntry {
+    val canonical = runCatching { file.canonicalFile }.getOrNull()
+        ?: return StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
+    if (canonical in referenced) {
+        return StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_REFERENCED)
+    }
+    return when (RestoredWorkingSourceOwnership.deleteIfUnowned(canonical)) {
+        RestoredWorkingSourceOwnership.DeleteResult.PRESERVED_LIVE_RESTORE ->
+            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_LIVE_RESTORE)
+        RestoredWorkingSourceOwnership.DeleteResult.PRESERVED_DOCUMENT ->
+            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_DOCUMENT)
+        RestoredWorkingSourceOwnership.DeleteResult.DELETED ->
+            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.DELETED_UNREFERENCED)
+        RestoredWorkingSourceOwnership.DeleteResult.ALREADY_ABSENT ->
+            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.ALREADY_ABSENT)
+        RestoredWorkingSourceOwnership.DeleteResult.FAILED ->
+            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
+    }
+}
+
 private fun recordDirectoryDeletion(
     dir: File,
     ownerRoot: File,
@@ -238,7 +274,5 @@ private fun recordDirectoryDeletion(
 }
 
 private const val WORKING_SOURCES_DIR = "editor_sources"
-private const val WORKING_SOURCE_PREFIX = "restored_"
-private const val WORKING_SOURCE_SUFFIX = ".img"
 private const val DRAFT_TEMP_SUFFIX = ".tmp"
 private const val LEGACY_DRAFT_DIR = "drafts/current"

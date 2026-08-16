@@ -38,6 +38,7 @@ class StartupStorageReconcilerProductionTest {
     @Before
     fun cleanStorage() {
         IncomingSourceLiveOwnership.clearForTest()
+        RestoredWorkingSourceOwnership.clearForTest()
         harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
         deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
         deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_sources"))
@@ -52,6 +53,7 @@ class StartupStorageReconcilerProductionTest {
     fun cleanStorageAfter() {
         harness.close()
         IncomingSourceLiveOwnership.clearForTest()
+        RestoredWorkingSourceOwnership.clearForTest()
     }
 
     // Orphan .staging_* directories (crash before finalize) are reclaimed while
@@ -263,6 +265,61 @@ class StartupStorageReconcilerProductionTest {
         assertFalse("released staging is a startup orphan", staging.exists())
         assertFalse("released final is a startup orphan", final.exists())
         assertEquals(2, dead.deletedCount)
+    }
+
+    @Test
+    fun liveAndDeadRestoredWorkingSourcesUseCurrentProcessOwnership() {
+        val live = File(context.filesDir.resolve("editor_sources"), "restored_live.img").apply {
+            parentFile!!.mkdirs()
+            writeText("live")
+        }
+        val dead = File(context.filesDir.resolve("editor_sources"), "restored_dead.img").apply {
+            writeText("dead")
+        }
+        RestoredWorkingSourceOwnership.acquire(live)
+        try {
+            val outcome = reconcileStartupArtifacts(context, null)
+            assertTrue("live restore source must survive", live.exists())
+            assertFalse("dead restore source must be reclaimed", dead.exists())
+            assertTrue(
+                outcome.entries.any {
+                    it.path == live.absolutePath &&
+                        it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_RESTORE
+                },
+            )
+        } finally {
+            RestoredWorkingSourceOwnership.releaseRestore(live)
+            RestoredWorkingSourceOwnership.deleteIfUnowned(live)
+        }
+    }
+
+    @Test
+    fun staleWorkingSnapshotCannotDeleteSourceAcquiredAfterSnapshot() = runBlocking {
+        val candidate = File(context.filesDir.resolve("editor_sources"), "restored_snapshot.img").apply {
+            parentFile!!.mkdirs()
+            writeText("candidate")
+        }
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val seam = StartupReconcileTestSeam().also {
+            it.workingSnapshotReached = reached
+            it.workingSnapshotRelease = release
+        }
+        val installed = StartupReconcileTestSeam.install(seam)
+        try {
+            val reconciliation = async(Dispatchers.Default) { reconcileStartupArtifacts(context, null) }
+            awaitEditorCompletionForTest("working-source reconcile must capture its snapshot", reached)
+            RestoredWorkingSourceOwnership.acquire(candidate)
+            release.complete(Unit)
+            awaitEditorCompletionForTest("working-source reconcile must finish", reconciliation)
+            assertTrue("new owner must win deletion linearization", candidate.exists())
+            assertTrue(RestoredWorkingSourceOwnership.isRestoreOwnedForTest(candidate))
+        } finally {
+            release.complete(Unit)
+            installed.close()
+            RestoredWorkingSourceOwnership.releaseRestore(candidate)
+            RestoredWorkingSourceOwnership.deleteIfUnowned(candidate)
+        }
     }
 
     @Test

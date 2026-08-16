@@ -19,7 +19,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.compose.ui.unit.IntSize
 import com.projectnuke.keplerstudio.BuildConfig
 import com.projectnuke.keplerstudio.bridge.NativePhotoCore
-import com.projectnuke.keplerstudio.bridge.nativeCreateSessionOrTest
+import com.projectnuke.keplerstudio.bridge.nativeCreateSessionHandleOrTest
 import com.projectnuke.keplerstudio.bridge.nativeReleaseSessionOrTest
 import com.projectnuke.keplerstudio.bridge.NativeCorrectionV2Params
 import com.projectnuke.keplerstudio.bridge.NativeScratchPlanner
@@ -1123,6 +1123,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             else -> MemoryRetryInput.Irrelevant
         }
 
+    private fun restoreDraftRetryMessage(strong: Boolean): String =
+        if (strong) {
+            "\uBA54\uBAA8\uB9AC \uC815\uB9AC\uB97C \uC644\uB8CC\uD588\uC2B5\uB2C8\uB2E4. \uC791\uC5C5\uC744 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4."
+        } else {
+            "\uBA54\uBAA8\uB9AC\uB97C \uC790\uB3D9\uC73C\uB85C \uC815\uB9AC\uD588\uC2B5\uB2C8\uB2E4. \uC791\uC5C5\uC744 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4."
+        }
+
     private fun memoryRetryInputIsCurrent(
         descriptor: MemoryRetryDescriptor,
         state: EditorUiState,
@@ -1318,24 +1325,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val retryOk = if (isHistoryAction) historyRetryOk else generalRetryOk
                 if (retryOk) {
                     owner.phase = MemoryRecoveryPhase.Retrying
-                    updateRecoveryUiIfOwned(
-                        owner,
-                        null,
-                        if (strong) {
-                            "메모리 정리를 완료했습니다. 작업을 다시 시도합니다."
+                    val retryMessage =
+                        if (owner.descriptor.action == MemoryRetryAction.RestoreDraft) {
+                            restoreDraftRetryMessage(strong)
+                        } else if (strong) {
+                            "\uBA54\uBAA8\uB9AC \uC815\uB9AC\uB97C \uC644\uB8CC\uD588\uC2B5\uB2C8\uB2E4. \uC791\uC5C5\uC744 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4."
                         } else {
-                            "메모리를 자동으로 정리했습니다. 작업을 다시 시도합니다."
-                        },
-                    )
+                            "\uBA54\uBAA8\uB9AC\uB97C \uC790\uB3D9\uC73C\uB85C \uC815\uB9AC\uD588\uC2B5\uB2C8\uB2E4. \uC791\uC5C5\uC744 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4."
+                        }
+                    updateRecoveryUiIfOwned(owner, null, retryMessage)
+                    MemoryRecoveryTestSeam.capture()?.onRetryUiPublished(retryMessage)
                     if (owner.descriptor.action == MemoryRetryAction.RestoreDraft) {
                         publishRestoreBusy(
                             restoreDraftToken,
                             owner.descriptor.revision,
-                            if (strong) {
-                                "硫붾え由??뺣━瑜??꾨즺?덉뒿?덈떎. ?묒뾽???ㅼ떆 ?쒕룄?⑸땲??"
-                            } else {
-                                "硫붾え由щ? ?먮룞?쇰줈 ?뺣━?덉뒿?덈떎. ?묒뾽???ㅼ떆 ?쒕룄?⑸땲??"
-                            },
+                            retryMessage,
                             retryOwner = owner,
                         )
                     }
@@ -1827,6 +1831,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         replaceDocument: Boolean = false,
         adoptedNativeSession: Long = 0L,
         registerIncomingDocument: Boolean = true,
+        adoptedRestoredWorkingSource: String? = null,
     ): Boolean {
         val settled =
             next.withVisibleNativeContractIfChangedFrom(expected).let {
@@ -1839,6 +1844,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     previousPath = expected.sourcePath,
                     nextPath = settled.sourcePath.takeIf { registerIncomingDocument },
                 )
+                RestoredWorkingSourceOwnership.replaceDocument(
+                    previousPath = expected.sourcePath,
+                    nextPath = settled.sourcePath.takeIf { adoptedRestoredWorkingSource == null },
+                )
+                adoptedRestoredWorkingSource?.let { path ->
+                    RestoredWorkingSourceOwnership.transferToDocument(
+                        File(path),
+                        expected.sourcePath,
+                    )
+                }
             }
             val generation =
                 if (replaceDocument) {
@@ -5325,10 +5340,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     "Opened image with EXIF orientation: ${openedSource.name} preview=${decodedPreview.width}x${decodedPreview.height}",
                 )
                 failureStage = OpenImageFailureStage.NativeSession
-                createdSession =
-                    operationSeam?.nativeSessionFactory?.invoke(openedSource.absolutePath)
-                        ?: nativeCreateSessionOrTest(openedSource.absolutePath)
-                createdSessionRelease = operationSeam?.nativeSessionReleaser
+                if (operationSeam?.nativeSessionFactory != null) {
+                    createdSession = operationSeam.nativeSessionFactory.invoke(openedSource.absolutePath)
+                    createdSessionRelease = operationSeam.nativeSessionReleaser
+                } else {
+                    val creation = nativeCreateSessionHandleOrTest(openedSource.absolutePath)
+                    createdSession = creation.handle
+                    createdSessionRelease = creation.releaseOverride
+                }
                 currentCoroutineContext().ensureActive()
                 tracker.registerNativeSession(
                     handle = createdSession,
@@ -8133,6 +8152,7 @@ fun exportPreview() {
         var restoreRenderSuccess: RenderResult.Success? = null
         val ownedMasks = ArrayList<Bitmap>(validated.maskFiles.size)
         var createdSession = 0L
+        var createdSessionRelease: ((Long) -> Unit)? = null
         var ownedWorkingSource: File? = null
         var restoreSettlementLocked = false
         var restorePreviousBaseline: String? = null
@@ -8291,11 +8311,12 @@ fun exportPreview() {
             }
             DraftRestoreTestSeam.capture()?.await(DraftRestoreTestStage.RenderCreated, pointer)
             withContext(Dispatchers.IO) {
-                val session =
-                    nativeCreateSessionOrTest(
+                val creation =
+                    nativeCreateSessionHandleOrTest(
                         checkNotNull(ownedWorkingSource).absolutePath
                     )
-                createdSession = session
+                createdSession = creation.handle
+                createdSessionRelease = creation.releaseOverride
             }
             if (createdSession == 0L) error("draft native session creation failed")
             DraftRestoreTestSeam.capture()?.await(DraftRestoreTestStage.NativeSessionCreated, pointer)
@@ -8381,7 +8402,7 @@ fun exportPreview() {
             draftPointerBaseline = pointer
             restoreBaselineChanged = true
             nativeSession = createdSession
-            nativeSessionRelease = null
+            nativeSessionRelease = createdSessionRelease
             tracker.registerNativeSession(
                 createdSession,
                 historyCoordinator.currentGeneration(),
@@ -8394,6 +8415,7 @@ fun exportPreview() {
                     nextState,
                     replaceDocument = true,
                     adoptedNativeSession = createdSession,
+                    adoptedRestoredWorkingSource = checkNotNull(ownedWorkingSource).absolutePath,
                 )
             ) {
                 nativeSession = previousSession
@@ -8404,6 +8426,7 @@ fun exportPreview() {
             restoreStateAdopted = true
             restoreBusyPublication = null
             createdSession = 0L
+            createdSessionRelease = null
             ownedBase = null
             ownedRendered = null
             ownedMasks.clear()
@@ -8481,8 +8504,8 @@ fun exportPreview() {
             ownedRendered?.let(cleanup::add)
             ownedMasks.forEach(cleanup::add)
             cleanup.forEach { if (!it.isRecycled) it.recycle() }
-            ownedWorkingSource?.delete()
-            releaseNativeSessionHandle(createdSession)
+            ownedWorkingSource?.let(::releaseAndDeleteRestoredWorkingSource)
+            releaseNativeSessionHandle(createdSession, createdSessionRelease)
             restoreTracker?.end()
             restoreMaskAdmission?.close()
         }
@@ -8722,6 +8745,18 @@ fun exportPreview() {
                 noiseDetailProtection =
                     draftPrefs.getFloat(KEY_DRAFT_NOISE_DETAIL_PROTECTION, 0.50f),
             )
+        if (!params.isValidDraftParams()) {
+            if (!shuttingDown && restoreToken == restoreDraftToken && _uiState.value.revision == restoreStartRevision) {
+                updateUiStateAndRecycleReplaced {
+                    it.copy(
+                        isBusy = false,
+                        message = "\uC784\uC2DC\uC800\uC7A5 \uD3B8\uC9D1 \uAC12\uC774 \uC720\uD6A8\uD558\uC9C0 \uC54A\uC544 \uBCF5\uAD6C\uB97C \uC911\uB2E8\uD588\uC2B5\uB2C8\uB2E4.",
+                    )
+                }
+            }
+            completeRetry(DraftRestoreRetryOutcome.ExactTargetInvalid)
+            return
+        }
         val exportFormat =
             enumValueOrDefault(draftPrefs.getString(KEY_DRAFT_FORMAT, null), ExportFormat.Jpeg)
         val exportResolution =
@@ -8746,6 +8781,7 @@ fun exportPreview() {
         var rendered: Bitmap? = null
         var restoreRenderSuccess: RenderResult.Success? = null
         var createdSession = 0L
+        var createdSessionRelease: ((Long) -> Unit)? = null
         var expectedRestoreRevision: Int? = null
         val restoreTracker =
             beginMemoryTracking(
@@ -8808,7 +8844,9 @@ fun exportPreview() {
                 completeRetry(DraftRestoreRetryOutcome.Stale)
                 return
             }
-            createdSession = nativeCreateSessionOrTest(sourcePath)
+            val creation = nativeCreateSessionHandleOrTest(sourcePath)
+            createdSession = creation.handle
+            createdSessionRelease = creation.releaseOverride
             tracker.registerNativeSession(
                 handle = createdSession,
                 documentGeneration = historyCoordinator.currentGeneration(),
@@ -8821,14 +8859,14 @@ fun exportPreview() {
                     _uiState.value.revision != restoreStartRevision
             ) {
                 recycleOwnedRestoreBitmaps()
-                releaseNativeSessionHandle(createdSession)
+                releaseNativeSessionHandle(createdSession, createdSessionRelease)
                 createdSession = 0L
                 completeRetry(DraftRestoreRetryOutcome.Cancelled)
                 return
             }
             if (!legacyRestoreIsCurrent()) {
                 recycleOwnedRestoreBitmaps()
-                releaseNativeSessionHandle(createdSession)
+                releaseNativeSessionHandle(createdSession, createdSessionRelease)
                 createdSession = 0L
                 settleStaleLegacyRestore()
                 completeRetry(DraftRestoreRetryOutcome.Stale)
@@ -8883,7 +8921,7 @@ fun exportPreview() {
                         false
                     } else {
                         nativeSession = createdSession
-                        nativeSessionRelease = null
+                        nativeSessionRelease = createdSessionRelease
                         commitUiState(
                             previousState,
                             nextState,
@@ -8895,13 +8933,14 @@ fun exportPreview() {
             if (!adopted) {
                 nativeSession = previousSession
                 nativeSessionRelease = previousSessionRelease
-                releaseNativeSessionHandle(createdSession)
+                releaseNativeSessionHandle(createdSession, createdSessionRelease)
                 createdSession = 0L
                 settleStaleLegacyRestore()
                 completeRetry(DraftRestoreRetryOutcome.Stale)
                 return
             }
             createdSession = 0L
+            createdSessionRelease = null
             restoreBusyPublication = null
             preview = null
             rendered = null
@@ -8912,12 +8951,12 @@ fun exportPreview() {
             completeRetry(DraftRestoreRetryOutcome.Restored)
         } catch (ce: CancellationException) {
             recycleOwnedRestoreBitmaps()
-            releaseNativeSessionHandle(createdSession)
+            releaseNativeSessionHandle(createdSession, createdSessionRelease)
             throw ce
         } catch (t: Throwable) {
             if (t is VirtualMachineError || t is ThreadDeath || t is LinkageError) throw t
             recycleOwnedRestoreBitmaps()
-            releaseNativeSessionHandle(createdSession)
+            releaseNativeSessionHandle(createdSession, createdSessionRelease)
             val currentRevision = _uiState.value.revision
             val isRestoreStillCurrent =
                 !shuttingDown &&
@@ -9594,6 +9633,7 @@ fun exportPreview() {
         recycleBitmaps(bitmapLeaseLedger.shutdown())
         tracker.logSnapshot("preTrackerClose")
         tracker.close()
+        uiState.value.sourcePath?.let { RestoredWorkingSourceOwnership.releaseDocument(File(it)) }
         super.onCleared()
     }
 }
@@ -11725,6 +11765,7 @@ private fun copyGenerationSourceToWorkingFile(context: Context, source: File): F
     val directory = File(context.filesDir, "editor_sources").apply { mkdirs() }.canonicalFile
     val destination = File(directory, "restored_${UUID.randomUUID()}.img").canonicalFile
     check(destination.parentFile == directory)
+    RestoredWorkingSourceOwnership.acquire(destination)
     try {
         source.inputStream().use { input ->
             FileOutputStream(destination).use { output ->
@@ -11735,6 +11776,7 @@ private fun copyGenerationSourceToWorkingFile(context: Context, source: File): F
         check(destination.length() > 0L) { "draft working source copy failed" }
         return destination
     } catch (t: Throwable) {
+        RestoredWorkingSourceOwnership.releaseRestore(destination)
         destination.delete()
         throw t
     }
@@ -11748,14 +11790,13 @@ private fun deleteOwnedWorkingSource(context: Context, sourcePath: String?) {
     val source = runCatching { File(sourcePath).canonicalFile }.getOrNull() ?: return
     val ownedDraftSource =
         source.parentFile == filesDirectory &&
-            source.name.startsWith("restored_") &&
-            source.extension == "img"
+            RestoredWorkingSourceOwnership.isOwnedName(source.name)
     val ownedIncomingSource =
         source.parentFile == cacheDirectory &&
             source.name.startsWith("source_") &&
             source.extension == "img"
     if (ownedDraftSource) {
-        source.delete()
+        RestoredWorkingSourceOwnership.deleteIfUnowned(source)
     } else if (
         ownedIncomingSource &&
             IncomingSourceLiveOwnership.deleteIfUnowned(source) == IncomingSourceLiveOwnership.DeleteResult.DELETED
@@ -11763,6 +11804,11 @@ private fun deleteOwnedWorkingSource(context: Context, sourcePath: String?) {
         // Incoming cache sources share the same linearized ownership boundary
         // as startup and manual cache cleanup.
     }
+}
+
+private fun releaseAndDeleteRestoredWorkingSource(source: File) {
+    RestoredWorkingSourceOwnership.releaseRestore(source)
+    RestoredWorkingSourceOwnership.deleteIfUnowned(source)
 }
 
 private fun DraftSavePayload.recycleOwnedBitmaps() {

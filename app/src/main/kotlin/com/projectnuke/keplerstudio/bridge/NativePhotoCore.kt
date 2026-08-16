@@ -346,7 +346,6 @@ private class NativeSessionFactoryInstallation(
     }
 
     fun release(session: Long) {
-        check(active) { "native session test owner closed before release" }
         releaser?.invoke(session)
     }
 
@@ -354,6 +353,10 @@ private class NativeSessionFactoryInstallation(
         active = false
     }
 }
+internal data class NativeSessionCreation(
+    val handle: Long,
+    val releaseOverride: ((Long) -> Unit)?,
+)
 private var nativeSessionFactoryInstallation: NativeSessionFactoryInstallation? = null
 private val nativeSessionFactoryInstallationGeneration = AtomicLong()
 
@@ -396,8 +399,15 @@ internal fun nativeSessionFactoryTestSeamCount(): Int = synchronized(nativeSessi
  * otherwise the native library call.
  */
 internal fun nativeCreateSessionOrTest(sourcePath: String): Long =
-    synchronized(nativeSessionFactoryTestLock) { nativeSessionFactoryInstallation }?.create(sourcePath)
-        ?: NativePhotoCore.nativeCreateSession(sourcePath)
+    nativeCreateSessionHandleOrTest(sourcePath).handle
+
+/** Creates a session and binds its test release owner at the same boundary. */
+internal fun nativeCreateSessionHandleOrTest(sourcePath: String): NativeSessionCreation =
+    synchronized(nativeSessionFactoryTestLock) {
+        nativeSessionFactoryInstallation
+    }?.let { installation ->
+        NativeSessionCreation(installation.create(sourcePath), installation::release)
+    } ?: NativeSessionCreation(NativePhotoCore.nativeCreateSession(sourcePath), null)
 
 /** Release counterpart for [installNativeSessionFactoryForTest]. */
 internal fun nativeReleaseSessionOrTest(session: Long): Boolean {

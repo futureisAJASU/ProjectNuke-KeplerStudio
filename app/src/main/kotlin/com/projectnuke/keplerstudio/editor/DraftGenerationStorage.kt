@@ -322,7 +322,7 @@ private fun DraftGenerationManifest.hasValidEditorValues(): Boolean = runCatchin
     true
 }.getOrDefault(false)
 
-private fun EditParams.isValidDraftParams(): Boolean {
+internal fun EditParams.isValidDraftParams(): Boolean {
     val signed = listOf(exposure, contrast, shadows, highlights, whites, blacks, temperature, tint, saturation, vibrance, clarity, dehaze)
     val unsigned = listOf(sharpness, noiseReduction, luminanceNoiseReduction, colorNoiseReduction, noiseDetailProtection)
     return signed.all { it.isFinite() && it in -1f..1f } && unsigned.all { it.isFinite() && it in 0f..1f }

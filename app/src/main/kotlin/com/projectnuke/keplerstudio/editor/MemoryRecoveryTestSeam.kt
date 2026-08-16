@@ -19,6 +19,7 @@ internal class MemoryRecoveryTestSeam(
     internal val trimReached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val trimRelease: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val recoveryRequested: CompletableDeferred<MemoryRetryDescriptor> = CompletableDeferred(),
+    internal val retryUiPublished: CompletableDeferred<String> = CompletableDeferred(),
     internal val rejectSelectionMaskAdmission: Boolean = false,
     internal val rejectAutoStraightenInputCopy: Boolean = false,
     internal val parkAutoStraightenInputCopy: Boolean = false,
@@ -41,6 +42,10 @@ internal class MemoryRecoveryTestSeam(
         strongEntryCount += 1
         strongReached.complete(descriptor)
         strongRelease.await()
+    }
+
+    internal fun onRetryUiPublished(message: String) {
+        retryUiPublished.complete(message)
     }
 
     internal suspend fun awaitBeforeDraftRestoreRetry(descriptor: MemoryRetryDescriptor) {

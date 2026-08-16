@@ -199,6 +199,10 @@ class DraftRestoreProductionTest {
             assertEquals("restored message", "임시저장된 편집을 불러왔습니다", vm2.uiState.value.message)
             val restoredSource = checkNotNull(vm2.uiState.value.sourcePath)
             assertTrue("working source exists", File(restoredSource).isFile)
+            assertTrue(
+                "adopted restore source is document-owned",
+                RestoredWorkingSourceOwnership.isDocumentOwnedForTest(File(restoredSource)),
+            )
             assertFalse("working source is a fresh copy", restoredSource == sourceFile.absolutePath)
             assertEquals("draft generation id restored", pointer, vm2.uiState.value.draftGenerationId)
             assertEquals("restored base token", "restore-base", vm2.uiState.value.baseContentToken)
@@ -489,6 +493,10 @@ class DraftRestoreProductionTest {
             assertEquals("B remains authoritative after $stage", generationB, currentDraftGenerationId(context))
             workingSourcesAtStage.forEach { path ->
                 assertFalse("stale $stage restore removes its working source", File(path).exists())
+                assertFalse(
+                    "stale $stage restore releases its working-source owner",
+                    RestoredWorkingSourceOwnership.isRestoreOwnedForTest(File(path)),
+                )
             }
             if (stage == DraftRestoreTestStage.NativeSessionCreated ||
                 stage == DraftRestoreTestStage.BeforeAdoption
@@ -683,6 +691,69 @@ class DraftRestoreProductionTest {
             clearObserverScope?.cancel()
             renderer.close()
             sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun nativeSessionReleaseRemainsBoundToCreationInstallation() = runBlocking {
+        val opened = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
+        val releaseA = AtomicInteger()
+        val releaseB = AtomicInteger()
+        var openHandle: AutoCloseable? = null
+        var installationA: AutoCloseable? = null
+        var installationB: AutoCloseable? = null
+        var sourcePath: String? = null
+        try {
+            openHandle =
+                harness.ownSeam(
+                    OpenImageTestSeam.install(
+                        OpenImageTestSeam(
+                            sourceTransactionFactory = { app, _ ->
+                                IncomingSourceTransaction(
+                                    app,
+                                    inputStreamProvider = { ByteArrayInputStream(byteArrayOf(1, 2, 3)) },
+                                    idProvider = { "release-provenance" },
+                                )
+                            },
+                            decode = { opened },
+                        ),
+                    ),
+                )
+            installationA =
+                installNativeSessionFactoryWithReleaseForTest(
+                    factory = { 9101L },
+                    releaser = { handle -> if (handle == 9101L) releaseA.incrementAndGet() },
+                )
+            val vm = harness.createEditor()
+            awaitInit(vm)
+            vm.openImage(Uri.parse("content://release/provenance"))
+            awaitEditorCompletionForTest(
+                description = "OpenImage must adopt the session owned by installation A",
+                completion = CompletableDeferred<Unit>().also { done ->
+                    CoroutineScope(Dispatchers.Default).launch {
+                        vm.uiState.first { !it.isBusy && it.previewBitmap === opened }
+                        sourcePath = vm.uiState.value.sourcePath
+                        done.complete(Unit)
+                    }
+                },
+                pumpMain = ::drainReadyMain,
+            )
+            installationA.close()
+            installationA = null
+            installationB =
+                installNativeSessionFactoryWithReleaseForTest(
+                    factory = { 9102L },
+                    releaser = { handle -> if (handle == 9102L) releaseB.incrementAndGet() },
+                )
+            harness.clearViewModels()
+            assertEquals("session releases through its creation installation", 1, releaseA.get())
+            assertEquals("replacement installation never releases session A", 0, releaseB.get())
+        } finally {
+            installationB?.close()
+            installationA?.close()
+            openHandle?.close()
+            sourcePath?.let { File(it).delete() }
+            if (!opened.isRecycled) opened.recycle()
         }
     }
 
@@ -1311,6 +1382,15 @@ class DraftRestoreProductionTest {
                 pumpMain = ::drainReadyMain,
             )
             recoverySeam.strongRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "strong RestoreDraft retry message must be published",
+                completion = recoverySeam.retryUiPublished,
+                pumpMain = ::drainReadyMain,
+            )
+            assertEquals(
+                "메모리 정리를 완료했습니다. 작업을 다시 시도합니다.",
+                recoverySeam.retryUiPublished.getCompleted(),
+            )
             val restored = CompletableDeferred<Unit>()
             val restoredObserver =
                 CoroutineScope(Dispatchers.Default).launch {
@@ -1663,6 +1743,49 @@ class DraftRestoreProductionTest {
     }
 
     @Test
+    fun invalidLegacyNumericParamsAreRejectedBeforeRenderingOrSessionCreation() = runBlocking {
+        val source = draftSourceFile("legacy-invalid-numeric-source.png")
+        val legacyDirectory = context.filesDir.resolve("drafts/current").apply { mkdirs() }
+        val legacySource = legacyDirectory.resolve("legacy-invalid-numeric.img")
+        source.copyTo(legacySource, overwrite = true)
+        val prefs = context.getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+        val rendererCalls = AtomicInteger(0)
+        val sessionCalls = AtomicInteger(0)
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore) rendererCalls.incrementAndGet()
+                successOutput(0xff102030.toInt())
+            }
+        val sessionFactory = installNativeSessionFactoryForTest {
+            sessionCalls.incrementAndGet()
+            9090L
+        }
+        try {
+            listOf(Float.NaN, Float.POSITIVE_INFINITY, -1.01f, 1.01f).forEach { invalid ->
+                clearCurrentDraftGenerationPointer(context)
+                prefs.edit()
+                    .remove(KEY_DRAFT_SOURCE)
+                    .remove("draft_exposure")
+                    .putString(KEY_DRAFT_SOURCE, legacySource.absolutePath)
+                    .putFloat("draft_exposure", invalid)
+                    .commit()
+                val vm = harness.createEditor()
+                awaitInit(vm)
+                assertNull("invalid legacy params must not adopt a document", vm.uiState.value.sourcePath)
+                assertFalse("invalid legacy restore must settle busy state", vm.uiState.value.isBusy)
+                assertEquals("invalid legacy params must not render", 0, rendererCalls.get())
+                assertEquals("invalid legacy params must not create a native session", 0, sessionCalls.get())
+                harness.clearViewModels()
+            }
+        } finally {
+            sessionFactory.close()
+            renderer.close()
+            legacySource.delete()
+            source.delete()
+        }
+    }
+
+    @Test
     fun malformedCurrentGenerationCannotPartiallyAdoptOrFallThrough() = runBlocking {
         val sourceFile = draftSourceFile("malformed-generation-source.png")
         val vm1 = editor(sourceFile.absolutePath, withMask = false)
@@ -1810,6 +1933,165 @@ class DraftRestoreProductionTest {
         } finally {
             renderRelease.complete(Unit)
             recoveryHandle?.close()
+            renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun automaticRestoreRetryWorkingSourceSurvivesStartupReconciliation() = runBlocking {
+        val sourceFile = draftSourceFile("restore-retry-reconcile-source.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val renderAttempts = AtomicInteger()
+        val sourceDecoded = CompletableDeferred<Unit>()
+        val retrySourceDecoded = CompletableDeferred<Unit>()
+        val retrySourceRelease = CompletableDeferred<Unit>()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore && renderAttempts.getAndIncrement() == 0) {
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff202122.toInt())
+            }
+        val restoreSeam =
+            DraftRestoreTestSeam(
+                onStage = { stage, _ ->
+                    if (stage == DraftRestoreTestStage.SourceDecoded) {
+                        if (!sourceDecoded.isCompleted) {
+                            sourceDecoded.complete(Unit)
+                        } else {
+                            retrySourceDecoded.complete(Unit)
+                            retrySourceRelease.await()
+                        }
+                    }
+                },
+            )
+        val recoverySeam =
+            MemoryRecoveryTestSeam(
+                forceCleanupReclaimedResources = true,
+            )
+        val reconciliationFinished = CompletableDeferred<Unit>()
+        val startupSeam =
+            StartupInitializationTestSeam.install(
+                StartupInitializationTestSeam { stage ->
+                    if (stage == StartupInitializationStage.RECONCILIATION_FINISHED) {
+                        reconciliationFinished.complete(Unit)
+                    }
+                },
+            )
+        var restoreHandle: AutoCloseable? = null
+        var recoveryHandle: AutoCloseable? = null
+        var sessionFactory: AutoCloseable? = null
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation must save", persistDraftForTest(vm1))
+            val deadOrphan = context.filesDir.resolve("editor_sources/restored_dead_retry.img").apply {
+                parentFile?.mkdirs()
+                writeBytes(byteArrayOf(4, 5, 6))
+            }
+            restoreHandle = harness.ownSeam(DraftRestoreTestSeam.install(restoreSeam))
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            sessionFactory = installNativeSessionFactoryForTest { 7902L }
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "initial restore must reach memory rejection",
+                completion = recoverySeam.recoveryRequested,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.automaticRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "automatic RestoreDraft retry message must be published",
+                completion = recoverySeam.retryUiPublished,
+                pumpMain = ::drainReadyMain,
+            )
+            assertEquals(
+                "\uBA54\uBAA8\uB9AC\uB97C \uC790\uB3D9\uC73C\uB85C \uC815\uB9AC\uD588\uC2B5\uB2C8\uB2E4. \uC791\uC5C5\uC744 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4.",
+                recoverySeam.retryUiPublished.getCompleted(),
+            )
+            awaitEditorCompletionForTest(
+                description = "automatic retry must create a working source before adoption",
+                completion = retrySourceDecoded,
+                pumpMain = ::drainReadyMain,
+            )
+            val workingRoot = context.filesDir.resolve("editor_sources")
+            val retrySources =
+                workingRoot.listFiles().orEmpty().filter { RestoredWorkingSourceOwnership.isOwnedName(it.name) }
+            assertEquals("one live retry working source exists", 1, retrySources.size)
+            val retrySource = retrySources.single()
+            assertTrue("retry source is live-owned before adoption", RestoredWorkingSourceOwnership.isRestoreOwnedForTest(retrySource))
+
+            awaitEditorCompletionForTest(
+                description = "startup reconciliation must settle while retry is parked",
+                completion = reconciliationFinished,
+                pumpMain = ::drainReadyMain,
+            )
+            assertTrue("live retry source survives reconciliation", retrySource.isFile)
+            assertFalse("dead retry orphan is reclaimed", deadOrphan.exists())
+
+            retrySourceRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "retry must adopt after reconciliation",
+                completion = vm2.startupInitCompletion,
+                pumpMain = ::drainReadyMain,
+            )
+            awaitEditorCompletionForTest(
+                description = "retry document adoption must settle",
+                completion = CompletableDeferred<Unit>().also { done ->
+                    CoroutineScope(Dispatchers.Default).launch {
+                        vm2.uiState.first { it.sourcePath == retrySource.absolutePath && !it.isBusy }
+                        done.complete(Unit)
+                    }
+                },
+                pumpMain = ::drainReadyMain,
+                diagnostic = {
+                    "source=${vm2.uiState.value.sourcePath} busy=${vm2.uiState.value.isBusy} " +
+                        "request=${vm2.uiState.value.memoryRecoveryRequest} " +
+                        "message=${vm2.uiState.value.message}"
+                },
+            )
+            assertEquals("adopted retry source is current", retrySource.absolutePath, vm2.uiState.value.sourcePath)
+            assertTrue("adopted retry source remains present", retrySource.isFile)
+            assertTrue("adopted retry source is document-owned", RestoredWorkingSourceOwnership.isDocumentOwnedForTest(retrySource))
+        } finally {
+            retrySourceRelease.complete(Unit)
+            startupSeam.close()
+            restoreHandle?.close()
+            recoveryHandle?.close()
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun liveRestoredDocumentSurvivesAnotherViewModelStartupReconcile() = runBlocking {
+        val sourceFile = draftSourceFile("restore-multi-viewmodel-source.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val renderer = EditorRenderer.installRendererOverrideForTest { successOutput(0xff303132.toInt()) }
+        val sessionSequence = AtomicInteger(0)
+        val sessionFactory =
+            installNativeSessionFactoryForTest { 8000L + sessionSequence.incrementAndGet() }
+        try {
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation must save", persistDraftForTest(vm1))
+            val vm2 = harness.createEditor()
+            awaitInit(vm2)
+            val sourceA = File(checkNotNull(vm2.uiState.value.sourcePath))
+            assertTrue("first restored document source exists", sourceA.isFile)
+            assertTrue("first restored document owns source", RestoredWorkingSourceOwnership.isDocumentOwnedForTest(sourceA))
+
+            val vm3 = harness.createEditor()
+            awaitInit(vm3)
+            assertTrue("second startup reconciliation cannot delete live source A", sourceA.isFile)
+            assertTrue("source A remains document-owned", RestoredWorkingSourceOwnership.isDocumentOwnedForTest(sourceA))
+
+            harness.clearViewModels()
+            assertFalse("source is no longer owned after both documents are gone", RestoredWorkingSourceOwnership.isDocumentOwnedForTest(sourceA))
+            reconcileStartupArtifacts(context, null)
+            assertFalse("unowned restored source is reclaimable", sourceA.exists())
+        } finally {
+            sessionFactory.close()
             renderer.close()
             sourceFile.delete()
         }
