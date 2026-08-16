@@ -1323,10 +1323,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         updateUiStateAndRecycleReplaced { it.copy(isBusy = true) }
                     }
                     if (strong) strongRetryAttempt = owner.descriptor else automaticRetryAttempt = owner.descriptor
-                    if (isMemoryRecoveryOwnerCurrent(owner)) {
-                        val retryOutcome = performMemoryRetry(owner.descriptor, owner)
-                        if (owner.descriptor.action == MemoryRetryAction.RestoreDraft) {
-                            when (retryOutcome) {
+                    if (owner.descriptor.action == MemoryRetryAction.RestoreDraft) {
+                        val retryOutcome =
+                            if (isMemoryRecoveryOwnerCurrent(owner)) {
+                                performMemoryRetry(owner.descriptor, owner)
+                                    ?: DraftRestoreRetryOutcome.Stale
+                            } else {
+                                DraftRestoreRetryOutcome.Stale
+                            }
+                        when (retryOutcome) {
                                 DraftRestoreRetryOutcome.MemoryRejected -> {
                                     // The restore failure is arbitrated by requestAllocationRecovery.
                                     // It either transferred this owner to the next retry state or
@@ -1354,10 +1359,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 DraftRestoreRetryOutcome.ExactTargetInvalid,
                                 DraftRestoreRetryOutcome.Cancelled,
                                 -> settleDraftRestoreRetryTerminal(owner, retryOutcome)
-                                null -> Unit
-                            }
-                            return@launch
                         }
+                        return@launch
+                    }
+                    if (isMemoryRecoveryOwnerCurrent(owner)) {
+                        performMemoryRetry(owner.descriptor, owner)
                     }
                     closeUserMemoryRecoveryOwner(owner, clearUi = false, clearAttempts = false)
                 } else if (isMemoryRecoveryOwnerCurrent(owner) && strong) {
@@ -1628,10 +1634,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             MemoryRetryAction.RestoreDraft -> {
                 MemoryRecoveryTestSeam.capture()?.awaitBeforeDraftRestoreRetry(descriptor)
+                if (!isMemoryRecoveryOwnerCurrent(owner)) {
+                    DraftRestoreRetryOutcome.Stale
+                } else {
                 retryDraftRestoreAfterMemory(
                     descriptor.input as? MemoryRetryInput.Draft
                         ?: MemoryRetryInput.Draft(descriptor.payload),
                 )
+                }
             }
             MemoryRetryAction.RotatePreview -> {
                 rotatePreview90()
@@ -1669,10 +1679,16 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     target,
                     completion,
                 )
+                // Every exact retry must settle even if a future restore
+                // branch returns without explicitly reporting an outcome.
+                completion.complete(DraftRestoreRetryOutcome.ExactTargetInvalid)
             } catch (ce: CancellationException) {
                 completion.complete(DraftRestoreRetryOutcome.Cancelled)
             } catch (_: Exception) {
                 completion.complete(DraftRestoreRetryOutcome.ExactTargetInvalid)
+            } catch (t: Throwable) {
+                completion.complete(DraftRestoreRetryOutcome.ExactTargetInvalid)
+                throw t
             }
         }
         restoreDraftJob = job
@@ -8311,15 +8327,20 @@ fun exportPreview() {
         } catch (ce: CancellationException) {
             throw ce
         } catch (t: Throwable) {
+            if (t is VirtualMachineError || t is ThreadDeath || t is LinkageError) throw t
             logDraftSaveFailure(t)
             if (restoreStateAdopted) {
                 return GenerationRestoreOutcome.Restored
             }
             if (t is BitmapAllocationRejectedException) {
+                val pointerStillCurrent =
+                    withContext(Dispatchers.IO) { currentDraftGenerationId(context) == pointer }
                 if (
                     !shuttingDown &&
                         restoreToken == restoreDraftToken &&
-                        _uiState.value.revision == restoreStartRevision
+                        _uiState.value.revision == restoreStartRevision &&
+                        pointerStillCurrent &&
+                        draftPointerBaseline == pointer
                 ) {
                     updateUiStateAndRecycleReplaced {
                         it.copy(
@@ -8332,6 +8353,8 @@ fun exportPreview() {
                         t.requiredBytes,
                         payload = pointer,
                     )
+                } else {
+                    return GenerationRestoreOutcome.Stale
                 }
                 return GenerationRestoreOutcome.MemoryRejected(t.requiredBytes)
             }
@@ -8486,6 +8509,7 @@ fun exportPreview() {
         }
         val restoreSnapshot =
             try {
+                DraftRestoreTestSeam.capture()?.beforeLegacySnapshot()
                 withContext(Dispatchers.IO) {
                     draftSaveMutex.withLock {
                         val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
@@ -8506,8 +8530,20 @@ fun exportPreview() {
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
+                if (t is VirtualMachineError || t is ThreadDeath || t is LinkageError) throw t
                 logDraftSaveFailure(t)
-                if (restoreToken == restoreDraftToken) {
+                val exactTargetStillCurrent =
+                    when (target) {
+                        is DraftRestoreTarget.ExactLegacy ->
+                            withContext(Dispatchers.IO) {
+                                draftSaveMutex.withLock {
+                                    currentDraftGenerationId(context) == null &&
+                                        legacyDraftIdentity(context) == target.identity
+                                }
+                            }
+                        else -> true
+                    }
+                if (restoreToken == restoreDraftToken && exactTargetStillCurrent) {
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             isBusy = false,
@@ -8516,6 +8552,13 @@ fun exportPreview() {
                         )
                     }
                 }
+                completeRetry(
+                    if (restoreToken == restoreDraftToken && exactTargetStillCurrent) {
+                        DraftRestoreRetryOutcome.ExactTargetInvalid
+                    } else {
+                        DraftRestoreRetryOutcome.Stale
+                    }
+                )
                 return
             }
         if (restoreSnapshot == null) {
@@ -8782,6 +8825,7 @@ fun exportPreview() {
             releaseNativeSessionHandle(createdSession)
             throw ce
         } catch (t: Throwable) {
+            if (t is VirtualMachineError || t is ThreadDeath || t is LinkageError) throw t
             recycleOwnedRestoreBitmaps()
             releaseNativeSessionHandle(createdSession)
             val currentRevision = _uiState.value.revision
@@ -8789,7 +8833,8 @@ fun exportPreview() {
                 !shuttingDown &&
                     restoreToken == restoreDraftToken &&
                     (currentRevision == restoreStartRevision ||
-                        currentRevision == expectedRestoreRevision)
+                        currentRevision == expectedRestoreRevision) &&
+                    legacyRestoreIsCurrent()
             if (isRestoreStillCurrent) {
                 updateUiStateAndRecycleReplaced {
                     it.copy(
@@ -8815,6 +8860,7 @@ fun exportPreview() {
                     completeRetry(DraftRestoreRetryOutcome.ExactTargetInvalid)
                 }
             } else {
+                settleStaleLegacyRestore()
                 completeRetry(DraftRestoreRetryOutcome.Stale)
             }
         } finally {

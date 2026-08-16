@@ -11,6 +11,8 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -22,6 +24,7 @@ import org.robolectric.annotation.Config
 import java.io.File
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1361,17 +1364,6 @@ class DraftRestoreProductionTest {
                 .putFloat("draft_exposure", 0.77f)
                 .commit()
             renderRelease.complete(Unit)
-            awaitEditorCompletionForTest(
-                description = "legacy memory failure must publish its operation descriptor",
-                completion = recoverySeam.recoveryRequested,
-                pumpMain = ::drainReadyMain,
-            )
-            assertTrue(
-                "failed legacy operation must carry an exact legacy identity",
-                (recoverySeam.recoveryRequested.getCompleted().input as MemoryRetryInput.Draft)
-                    .legacyIdentity != null,
-            )
-            recoverySeam.automaticRelease.complete(Unit)
             val settled = CompletableDeferred<Unit>()
             val observer =
                 CoroutineScope(Dispatchers.Default).launch {
@@ -1388,6 +1380,7 @@ class DraftRestoreProductionTest {
             assertEquals("stale failure cannot publish changed legacy params", 0f, vm.uiState.value.params.exposure)
             assertEquals("stale failure clears automatic retry attempt", null, vm.automaticRetryAttemptForTest())
             assertEquals("stale failure clears strong retry attempt", null, vm.strongRetryAttemptForTest())
+            assertFalse("stale failure publishes no actionable recovery", recoverySeam.recoveryRequested.isCompleted)
         } finally {
             renderRelease.complete(Unit)
             recoverySeam.automaticRelease.complete(Unit)
@@ -1397,6 +1390,183 @@ class DraftRestoreProductionTest {
             sourceA.delete()
             sourceB.delete()
             legacySource.delete()
+        }
+    }
+
+    @Test
+    fun exactLegacyRetrySnapshotFailureSettlesWithoutHanging() = runBlocking {
+        val sourceFile = draftSourceFile("legacy-retry-snapshot-failure.png")
+        val legacyDirectory = context.filesDir.resolve("drafts/current").apply { mkdirs() }
+        val legacySource = legacyDirectory.resolve("legacy-retry-snapshot-failure.img")
+        sourceFile.copyTo(legacySource, overwrite = true)
+        context
+            .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_DRAFT_GENERATION_ID)
+            .putString(KEY_DRAFT_SOURCE, legacySource.absolutePath)
+            .putFloat("draft_exposure", 0.46f)
+            .commit()
+        val failSnapshot = AtomicBoolean(false)
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore) {
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff4a4b4c.toInt())
+            }
+        val restoreSeam =
+            DraftRestoreTestSeam.install(
+                DraftRestoreTestSeam(
+                    onBeforeLegacySnapshot = {
+                        if (failSnapshot.get()) error("deterministic legacy snapshot failure")
+                    },
+                ),
+            )
+        val recoverySeam =
+            MemoryRecoveryTestSeam(forceCleanupReclaimedResources = true)
+        var recoveryHandle: AutoCloseable? = null
+        var sessionFactory: AutoCloseable? = null
+        try {
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            sessionFactory = installNativeSessionFactoryForTest { 7831L }
+            val vm = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "legacy snapshot failure retry must request recovery",
+                completion = recoverySeam.recoveryRequested,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.automaticRelease.complete(Unit)
+            val actionable = CompletableDeferred<Unit>()
+            val actionableObserver =
+                CoroutineScope(Dispatchers.Default).launch {
+                    vm.uiState.first { it.memoryRecoveryRequest != null }
+                    actionable.complete(Unit)
+                }
+            awaitEditorCompletionForTest(
+                description = "legacy snapshot failure retry must become actionable",
+                completion = actionable,
+                pumpMain = ::drainReadyMain,
+            )
+            actionableObserver.cancel()
+            val request = checkNotNull(vm.uiState.value.memoryRecoveryRequest)
+            failSnapshot.set(true)
+            vm.retryPendingMemoryRecovery(request.token)
+            awaitEditorCompletionForTest(
+                description = "legacy snapshot failure retry must enter strong cleanup",
+                completion = recoverySeam.strongReached,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.strongRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "legacy snapshot failure retry must settle",
+                completion = CompletableDeferred<Unit>().also { completion ->
+                    CoroutineScope(Dispatchers.Default).launch {
+                        vm.uiState.first { !it.isBusy && it.memoryRecoveryRequest == null }
+                        completion.complete(Unit)
+                    }
+                },
+                pumpMain = ::drainReadyMain,
+            )
+            assertNull("snapshot failure cannot adopt a partial Draft", vm.uiState.value.sourcePath)
+            assertNull("snapshot failure clears automatic retry", vm.automaticRetryAttemptForTest())
+            assertNull("snapshot failure clears strong retry", vm.strongRetryAttemptForTest())
+            assertFalse("snapshot failure leaves no retrying message", vm.uiState.value.message?.contains("다시 시도") == true)
+            assertTrue("legacy source remains recoverable", legacySource.exists())
+        } finally {
+            recoverySeam.automaticRelease.complete(Unit)
+            recoverySeam.strongRelease.complete(Unit)
+            recoveryHandle?.close()
+            restoreSeam.close()
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
+            legacySource.delete()
+        }
+    }
+
+    @Test
+    fun restoreDraftRepeatedMemoryRejectionUsesExistingArbitration() = runBlocking {
+        val sourceFile = draftSourceFile("restore-repeated-memory-rejection.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val attempts = AtomicInteger()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore && attempts.getAndIncrement() < 3) {
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff5a5b5c.toInt())
+            }
+        val recoverySeam =
+            MemoryRecoveryTestSeam(forceCleanupReclaimedResources = true)
+        var recoveryHandle: AutoCloseable? = null
+        var sessionFactory: AutoCloseable? = null
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation must save", persistDraftForTest(vm1))
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            sessionFactory = installNativeSessionFactoryForTest { 7832L }
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "restore retry test must publish initial recovery",
+                completion = recoverySeam.recoveryRequested,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.automaticRelease.complete(Unit)
+            val automaticFailure = CompletableDeferred<Unit>()
+            val automaticFailureObserver =
+                CoroutineScope(Dispatchers.Default).launch {
+                    vm2.uiState.first {
+                        it.memoryRecoveryRequest != null &&
+                            !it.isBusy &&
+                            vm2.automaticRetryAttemptForTest() == null
+                    }
+                    automaticFailure.complete(Unit)
+                }
+            awaitEditorCompletionForTest(
+                description = "repeated automatic restore failure must transfer to user recovery",
+                completion = automaticFailure,
+                pumpMain = ::drainReadyMain,
+                diagnostic = {
+                    "busy=${vm2.uiState.value.isBusy} request=${vm2.uiState.value.memoryRecoveryRequest} " +
+                        "auto=${vm2.automaticRetryAttemptForTest()} strong=${vm2.strongRetryAttemptForTest()} " +
+                        "phase=${vm2.memoryRecoveryOwnerPhaseForTest()} attempts=${attempts.get()}"
+                },
+            )
+            automaticFailureObserver.cancel()
+            vm2.retryPendingMemoryRecovery(checkNotNull(vm2.uiState.value.memoryRecoveryRequest).token)
+            awaitEditorCompletionForTest(
+                description = "repeated strong restore failure must enter cleanup",
+                completion = recoverySeam.strongReached,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.strongRelease.complete(Unit)
+            val terminal = CompletableDeferred<Unit>()
+            val terminalObserver =
+                CoroutineScope(Dispatchers.Default).launch {
+                    vm2.uiState.first {
+                        !it.isBusy &&
+                            it.memoryRecoveryRequest == null &&
+                            vm2.strongRetryAttemptForTest() == null
+                    }
+                    terminal.complete(Unit)
+                }
+            awaitEditorCompletionForTest(
+                description = "repeated strong restore failure must settle",
+                completion = terminal,
+                pumpMain = ::drainReadyMain,
+            )
+            terminalObserver.cancel()
+            assertNull("repeated failure cannot partially adopt Draft", vm2.uiState.value.sourcePath)
+            assertNotNull("terminal memory failure reports a message", vm2.uiState.value.message)
+            assertFalse("terminal message does not claim retrying", vm2.uiState.value.message?.contains("다시 시도") == true)
+        } finally {
+            recoverySeam.automaticRelease.complete(Unit)
+            recoverySeam.strongRelease.complete(Unit)
+            recoveryHandle?.close()
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
         }
     }
 
@@ -1557,6 +1727,55 @@ class DraftRestoreProductionTest {
             assertEquals("stale retry cannot create source", null, vm2.uiState.value.sourcePath)
         } finally {
             seamHandle?.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun generationMemoryFailureAfterPointerReplacementPublishesNoStaleRecovery() = runBlocking {
+        val sourceFile = draftSourceFile("generation-stale-memory-failure.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val renderReached = CompletableDeferred<Unit>()
+        val renderRelease = CompletableDeferred<Unit>()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore) {
+                    renderReached.complete(Unit)
+                    renderRelease.await()
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff202122.toInt())
+            }
+        val recoverySeam = MemoryRecoveryTestSeam()
+        var recoveryHandle: AutoCloseable? = null
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation A must save", persistDraftForTest(vm1))
+            val generationA = checkNotNull(currentDraftGenerationId(context))
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "generation restore must reach memory-failure boundary",
+                completion = renderReached,
+                pumpMain = ::drainReadyMain,
+            )
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params.copy(exposure = 0.83f))
+            vm1.acknowledgeEditorLeave()
+            assertTrue("generation B must publish", persistDraftForTest(vm1))
+            val generationB = checkNotNull(currentDraftGenerationId(context))
+            assertTrue(generationA != generationB)
+            renderRelease.complete(Unit)
+            awaitInit(vm2)
+            assertEquals("new generation remains authoritative", generationB, currentDraftGenerationId(context))
+            assertNull("stale generation failure cannot publish a recovery request", vm2.uiState.value.memoryRecoveryRequest)
+            assertNull("stale generation failure has no automatic retry", vm2.automaticRetryAttemptForTest())
+            assertNull("stale generation failure has no strong retry", vm2.strongRetryAttemptForTest())
+            assertFalse("stale generation failure cannot claim retrying", vm2.uiState.value.message?.contains("다시 시도") == true)
+        } finally {
+            renderRelease.complete(Unit)
+            recoveryHandle?.close()
+            renderer.close()
             sourceFile.delete()
         }
     }

@@ -17,10 +17,15 @@ internal enum class DraftRestoreTestStage {
 }
 
 internal class DraftRestoreTestSeam(
+    internal val onBeforeLegacySnapshot: (suspend () -> Unit)? = null,
     internal val onStage: (suspend (DraftRestoreTestStage, String) -> Unit)? = null,
 ) {
     internal suspend fun await(stage: DraftRestoreTestStage, generationId: String) {
         onStage?.invoke(stage, generationId)
+    }
+
+    internal suspend fun beforeLegacySnapshot() {
+        onBeforeLegacySnapshot?.invoke()
     }
 
     internal companion object Registry {
