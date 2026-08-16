@@ -443,7 +443,20 @@ class DraftRestoreProductionTest {
                     }
                 )
             )
-        val sessionFactory = harness.ownSeam(installNativeSessionFactoryForTest { 7301L })
+        val nativeReleases = AtomicInteger()
+        val sessionFactory =
+            harness.ownSeam(
+                if (stage == DraftRestoreTestStage.NativeSessionCreated ||
+                    stage == DraftRestoreTestStage.BeforeAdoption
+                ) {
+                    installNativeSessionFactoryWithReleaseForTest(
+                        factory = { 7301L },
+                        releaser = { handle -> if (handle == 7301L) nativeReleases.incrementAndGet() },
+                    )
+                } else {
+                    installNativeSessionFactoryForTest { 7301L }
+                }
+            )
         try {
             awaitReady(vm1)
             vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
@@ -473,6 +486,11 @@ class DraftRestoreProductionTest {
             assertEquals("B remains authoritative after $stage", generationB, currentDraftGenerationId(context))
             workingSourcesAtStage.forEach { path ->
                 assertFalse("stale $stage restore removes its working source", File(path).exists())
+            }
+            if (stage == DraftRestoreTestStage.NativeSessionCreated ||
+                stage == DraftRestoreTestStage.BeforeAdoption
+            ) {
+                assertEquals("stale $stage restore releases its session exactly once", 1, nativeReleases.get())
             }
         } finally {
             release.complete(Unit)
