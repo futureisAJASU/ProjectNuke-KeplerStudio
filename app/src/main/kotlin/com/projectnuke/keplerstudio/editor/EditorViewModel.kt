@@ -1171,8 +1171,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun legacyDraftIdentity(context: Context): LegacyDraftIdentity {
         val preferences = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        val values = preferences.all.toMap()
         val payloadFingerprint =
-            preferences.all
+            values
                 .asSequence()
                 .filter { (key, _) -> key.startsWith("draft_") }
                 .sortedBy { (key, _) -> key }
@@ -1180,7 +1181,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     "key=${canonicalIdentityPart(key)};value=${canonicalPreferenceValue(value)}"
                 }
         return LegacyDraftIdentity(
-            generationPointer = currentDraftGenerationId(context),
+            generationPointer = values[KEY_DRAFT_GENERATION_ID] as? String,
             payloadFingerprint = payloadFingerprint,
         )
     }
@@ -1428,6 +1429,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (!ownerCurrent()) return staleResult()
         MemoryRecoveryTestSeam.capture()?.let { it.cleanupStarted += 1 }
         var reclaimedResources = false
+        if (MemoryRecoveryTestSeam.capture()?.forceCleanupReclaimedResources == true) {
+            reclaimedResources = true
+        }
         if (!ownerCurrent()) return staleResult()
         if (strong && BuildConfig.DEBUG) {
             val hadComparison =
@@ -1502,7 +1506,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
-    private fun performMemoryRetry(
+    private suspend fun performMemoryRetry(
         descriptor: MemoryRetryDescriptor,
         owner: MemoryRecoveryOwner,
     ) {
@@ -1519,11 +1523,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             MemoryRetryAction.ApplySelectionNative -> applyActiveSelectionLocalEditNativeBaked()
             MemoryRetryAction.ExportPreview -> exportPreview()
             MemoryRetryAction.OpenImage -> descriptor.payload?.let { openImage(Uri.parse(it)) }
-            MemoryRetryAction.RestoreDraft ->
+            MemoryRetryAction.RestoreDraft -> {
+                MemoryRecoveryTestSeam.capture()?.awaitBeforeDraftRestoreRetry(descriptor)
                 retryDraftRestoreAfterMemory(
                     descriptor.input as? MemoryRetryInput.Draft
                         ?: MemoryRetryInput.Draft(descriptor.payload),
                 )
+            }
             MemoryRetryAction.RotatePreview -> rotatePreview90()
             MemoryRetryAction.HistoryUndo -> descriptor.payload?.let { navigateHistory(true, it) }
             MemoryRetryAction.HistoryRedo -> descriptor.payload?.let { navigateHistory(false, it) }
@@ -1533,13 +1539,18 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun retryDraftRestoreAfterMemory(input: MemoryRetryInput.Draft) {
         val token = ++restoreDraftToken
         val revision = _uiState.value.revision
+        val target =
+            when {
+                input.generationId != null -> DraftRestoreTarget.ExactGeneration(input.generationId)
+                input.legacyIdentity != null -> DraftRestoreTarget.ExactLegacy(input.legacyIdentity)
+                else -> DraftRestoreTarget.CurrentStartup
+            }
         val job = viewModelScope.launch {
             restoreDraftIfAvailable(
                 getApplication<Application>(),
                 token,
                 revision,
-                input.generationId,
-                input.legacyIdentity,
+                target,
             )
         }
         restoreDraftJob = job
@@ -8238,8 +8249,7 @@ fun exportPreview() {
         context: Context,
         restoreToken: Long,
         restoreStartRevision: Int,
-        expectedDraftGenerationId: String? = null,
-        expectedLegacyIdentity: LegacyDraftIdentity? = null,
+        target: DraftRestoreTarget = DraftRestoreTarget.CurrentStartup,
     ) {
         if (
             shuttingDown ||
@@ -8248,19 +8258,37 @@ fun exportPreview() {
         )
             return
         val generationRestore =
-            restoreCurrentDraftGeneration(
-                context,
-                restoreToken,
-                restoreStartRevision,
-                expectedDraftGenerationId,
-            )
+            when (target) {
+                DraftRestoreTarget.CurrentStartup ->
+                    restoreCurrentDraftGeneration(context, restoreToken, restoreStartRevision)
+                is DraftRestoreTarget.ExactGeneration ->
+                    restoreCurrentDraftGeneration(
+                        context,
+                        restoreToken,
+                        restoreStartRevision,
+                        target.generationId,
+                    )
+                is DraftRestoreTarget.ExactLegacy -> GenerationRestoreOutcome.Absent
+            }
         if (generationRestore == GenerationRestoreOutcome.Restored) return
         if (generationRestore == GenerationRestoreOutcome.Stale) return
         if (generationRestore is GenerationRestoreOutcome.MemoryRejected) return
-        if (
-            expectedLegacyIdentity != null &&
-                withContext(Dispatchers.IO) { legacyDraftIdentity(context) } != expectedLegacyIdentity
-        ) {
+        if (target is DraftRestoreTarget.ExactGeneration) {
+            if (!shuttingDown && restoreToken == restoreDraftToken &&
+                restoreStartRevision == _uiState.value.revision) {
+                updateUiStateAndRecycleReplaced {
+                    if (it.revision == restoreStartRevision) it.copy(isBusy = false) else it
+                }
+            }
+            return
+        }
+        if (target is DraftRestoreTarget.ExactLegacy &&
+            withContext(Dispatchers.IO) {
+                draftSaveMutex.withLock {
+                    currentDraftGenerationId(context) == null &&
+                        legacyDraftIdentity(context) == target.identity
+                }
+            }.not()) {
             updateUiStateAndRecycleReplaced {
                 if (restoreToken == restoreDraftToken && it.revision == restoreStartRevision) {
                     it.copy(isBusy = false)
@@ -8268,7 +8296,7 @@ fun exportPreview() {
             }
             return
         }
-        if (generationRestore is GenerationRestoreOutcome.Invalid) {
+        if (target == DraftRestoreTarget.CurrentStartup && generationRestore is GenerationRestoreOutcome.Invalid) {
             val cleared =
                 withContext(Dispatchers.IO) {
                     draftSaveMutex.withLock {
@@ -8343,10 +8371,14 @@ fun exportPreview() {
         val draftSavedAt = restoreSnapshot.savedAtMillis
         val recovery = restoreSnapshot.recovery
         if (restoreToken != restoreDraftToken) return
+        val exactLegacyIdentity = (target as? DraftRestoreTarget.ExactLegacy)?.identity
         fun legacyRestoreIdentityMatches(): Boolean =
             !shuttingDown &&
                 restoreToken == restoreDraftToken &&
                 restoreStartRevision == _uiState.value.revision &&
+                (exactLegacyIdentity == null ||
+                    (currentDraftGenerationId(context) == null &&
+                        legacyDraftIdentity(context) == exactLegacyIdentity)) &&
                 currentDraftGenerationId(context) == restoreSnapshot.generationPointer &&
                 draftPointerBaseline == restoreSnapshot.generationPointer &&
                 legacyDraftIdentity(context) == restoreSnapshot.legacyIdentity
@@ -11201,6 +11233,14 @@ internal data class LegacyDraftIdentity(
 )
 
 private data class DraftPointerSnapshot(val generationId: String?)
+
+private sealed interface DraftRestoreTarget {
+    data object CurrentStartup : DraftRestoreTarget
+
+    data class ExactGeneration(val generationId: String) : DraftRestoreTarget
+
+    data class ExactLegacy(val identity: LegacyDraftIdentity) : DraftRestoreTarget
+}
 
 private sealed class GenerationRestoreOutcome {
     data object Restored : GenerationRestoreOutcome()

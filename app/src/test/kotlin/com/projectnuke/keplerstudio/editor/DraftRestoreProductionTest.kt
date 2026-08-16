@@ -412,8 +412,10 @@ class DraftRestoreProductionTest {
     fun pointerReplacementAtValidationRenderAndSessionBoundariesIsInert() = runBlocking {
         listOf(
             DraftRestoreTestStage.ValidationComplete,
+            DraftRestoreTestStage.SourceDecoded,
             DraftRestoreTestStage.RenderCreated,
             DraftRestoreTestStage.NativeSessionCreated,
+            DraftRestoreTestStage.BeforeAdoption,
         ).forEach { stage ->
             assertPointerReplacementAtRestoreStage(stage)
         }
@@ -454,6 +456,10 @@ class DraftRestoreProductionTest {
                 completion = reached,
                 pumpMain = ::drainReadyMain,
             )
+            val workingSourcesAtStage =
+                context.filesDir.resolve("editor_sources").listFiles { file ->
+                    file.name.startsWith("restored_") && file.name.endsWith(".img")
+                }.orEmpty().map { it.absolutePath }
             vm1.updateUiState {
                 it.copy(params = it.params.copy(exposure = 0.81f), revision = it.revision + 1)
             }
@@ -465,6 +471,9 @@ class DraftRestoreProductionTest {
             awaitInit(vm2)
             assertEquals("stale $stage restore must not adopt", null, vm2.uiState.value.draftGenerationId)
             assertEquals("B remains authoritative after $stage", generationB, currentDraftGenerationId(context))
+            workingSourcesAtStage.forEach { path ->
+                assertFalse("stale $stage restore removes its working source", File(path).exists())
+            }
         } finally {
             release.complete(Unit)
             restoreHandle.close()
@@ -492,7 +501,7 @@ class DraftRestoreProductionTest {
             harness.ownSeam(
                 DraftRestoreTestSeam.install(
                     DraftRestoreTestSeam { stage, _ ->
-                        if (stage == DraftRestoreTestStage.SourceDecoded) {
+                        if (stage == DraftRestoreTestStage.NativeSessionCreated) {
                             reached.complete(Unit)
                             release.await()
                         }
@@ -518,6 +527,7 @@ class DraftRestoreProductionTest {
                 )
             )
         var sessionFactory: AutoCloseable? = null
+        val nativeReleases = AtomicInteger()
         var observerScope: CoroutineScope? = null
         var observer: kotlinx.coroutines.Job? = null
         try {
@@ -525,7 +535,11 @@ class DraftRestoreProductionTest {
             vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
             assertTrue("draft must save", persistDraftForTest(vm1))
             // Recreate the ViewModel after the persisted generation exists.
-            sessionFactory = installNativeSessionFactoryForTest { 7200L }
+            sessionFactory =
+                installNativeSessionFactoryWithReleaseForTest(
+                    factory = { 7200L },
+                    releaser = { handle -> if (handle == 7200L) nativeReleases.incrementAndGet() },
+                )
             val vm2 = harness.createEditor()
             observerScope = CoroutineScope(Dispatchers.Default)
             observer = observerScope!!.launch {
@@ -533,7 +547,7 @@ class DraftRestoreProductionTest {
                 openedDone.complete(Unit)
             }
             awaitEditorCompletionForTest(
-                description = "restore must reach source decode before OpenImage",
+                description = "restore must reach native session before OpenImage",
                 completion = reached,
                 pumpMain = ::drainReadyMain,
             )
@@ -546,6 +560,7 @@ class DraftRestoreProductionTest {
             )
             assertEquals("OpenImage remains current", opened, vm2.uiState.value.previewBitmap)
             assertEquals("OpenImage clears restored draft identity", null, vm2.uiState.value.draftGenerationId)
+            assertEquals("superseded restore session releases exactly once", 1, nativeReleases.get())
             awaitInit(vm2)
             assertTrue("startup completion settles after supersession", vm2.startupInitCompletion.isCompleted)
         } finally {
@@ -1432,6 +1447,316 @@ class DraftRestoreProductionTest {
         } finally {
             seamHandle?.close()
             sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun exactGenerationRetryNeverFallsBackToLegacyWhenGenerationBecomesInvalid() = runBlocking {
+        val sourceFile = draftSourceFile("restore-exact-generation-invalid.png")
+        val legacySource = context.filesDir.resolve("drafts/current/exact-legacy-source.img").apply {
+            parentFile?.mkdirs()
+            sourceFile.copyTo(this, overwrite = true)
+        }
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val attempts = AtomicInteger()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore && attempts.getAndIncrement() == 0) {
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff0a0b0c.toInt())
+            }
+        val recoverySeam =
+            MemoryRecoveryTestSeam(parkBeforeDraftRestoreRetry = true)
+        var recoveryHandle: AutoCloseable? = null
+        var sessionFactory: AutoCloseable? = null
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation A must save", persistDraftForTest(vm1))
+            val generationA = checkNotNull(currentDraftGenerationId(context))
+            context.getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_DRAFT_SOURCE, legacySource.absolutePath)
+                .putFloat("draft_exposure", 0.91f)
+                .commit()
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            sessionFactory = installNativeSessionFactoryForTest { 7811L }
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "exact generation retry must request recovery",
+                completion = recoverySeam.recoveryRequested,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.automaticRelease.complete(Unit)
+            val actionable = CompletableDeferred<Unit>()
+            val actionableObserver = CoroutineScope(Dispatchers.Default).launch {
+                vm2.uiState.first { it.memoryRecoveryRequest != null }
+                actionable.complete(Unit)
+            }
+            awaitEditorCompletionForTest(
+                description = "exact generation retry must become actionable",
+                completion = actionable,
+                pumpMain = ::drainReadyMain,
+            )
+            actionableObserver.cancel()
+            val request = checkNotNull(vm2.uiState.value.memoryRecoveryRequest)
+            val cacheBitmap = Bitmap.createBitmap(4, 4, Bitmap.Config.ARGB_8888)
+            ThumbnailBitmapCache.acquire("exact-generation-invalid-cache") { cacheBitmap }?.close()
+            vm2.retryPendingMemoryRecovery(request.token)
+            awaitEditorCompletionForTest(
+                description = "exact generation retry must enter cleanup",
+                completion = recoverySeam.strongReached,
+                pumpMain = ::drainReadyMain,
+            )
+            val generationDirectory = checkNotNull(findDraftGenerationDirectory(context, generationA))
+            generationDirectory.sourceFile.writeBytes(byteArrayOf(1, 3, 5, 7))
+            recoverySeam.strongRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "exact generation retry must park before target execution",
+                completion = recoverySeam.beforeDraftRestoreRetryReached,
+                pumpMain = ::drainReadyMain,
+            )
+            assertEquals("retry remains bound to A", generationA, currentDraftGenerationId(context))
+            recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
+            val settled = CompletableDeferred<Unit>()
+            val settledObserver = CoroutineScope(Dispatchers.Default).launch {
+                vm2.uiState.first { !it.isBusy && it.memoryRecoveryRequest == null }
+                settled.complete(Unit)
+            }
+            awaitEditorCompletionForTest(
+                description = "invalid exact generation retry must settle",
+                completion = settled,
+                pumpMain = ::drainReadyMain,
+            )
+            settledObserver.cancel()
+            assertEquals("invalid exact retry cannot adopt legacy", null, vm2.uiState.value.sourcePath)
+            assertEquals("invalid exact retry cannot publish legacy params", 0f, vm2.uiState.value.params.exposure)
+            assertEquals("exact retry leaves unrelated pointer untouched", generationA, currentDraftGenerationId(context))
+        } finally {
+            recoverySeam.automaticRelease.complete(Unit)
+            recoverySeam.strongRelease.complete(Unit)
+            recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
+            recoveryHandle?.close()
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
+            legacySource.delete()
+        }
+    }
+
+    @Test
+    fun exactGenerationRetrySucceedsWhenGenerationRemainsExactAndValid() = runBlocking {
+        val sourceFile = draftSourceFile("restore-exact-generation-valid.png")
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val attempts = AtomicInteger()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore && attempts.getAndIncrement() == 0) {
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff101112.toInt())
+            }
+        val recoverySeam =
+            MemoryRecoveryTestSeam(
+                parkBeforeDraftRestoreRetry = true,
+                forceCleanupReclaimedResources = true,
+            )
+        var recoveryHandle: AutoCloseable? = null
+        var sessionFactory: AutoCloseable? = null
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation A must save", persistDraftForTest(vm1))
+            val generationA = checkNotNull(currentDraftGenerationId(context))
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            sessionFactory = installNativeSessionFactoryForTest { 7812L }
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "positive exact generation retry must request recovery",
+                completion = recoverySeam.recoveryRequested,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.automaticRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "positive exact generation retry must reach target boundary",
+                completion = recoverySeam.beforeDraftRestoreRetryReached,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
+            val restored = CompletableDeferred<Unit>()
+            val restoredObserver = CoroutineScope(Dispatchers.Default).launch {
+                vm2.uiState.first { it.draftGenerationId == generationA && !it.isBusy }
+                restored.complete(Unit)
+            }
+            awaitEditorCompletionForTest(
+                description = "positive exact generation retry must restore A",
+                completion = restored,
+                pumpMain = ::drainReadyMain,
+            )
+            restoredObserver.cancel()
+            assertEquals("exact generation retry restores A", generationA, vm2.uiState.value.draftGenerationId)
+            assertEquals("exact generation retry publishes source", false, vm2.uiState.value.sourcePath == null)
+        } finally {
+            recoverySeam.automaticRelease.complete(Unit)
+            recoveryHandle?.close()
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    @Test
+    fun exactGenerationRetryWithMissingPointerNeverFallsBackToLegacy() = runBlocking {
+        val sourceFile = draftSourceFile("restore-exact-generation-absent.png")
+        val legacySource = context.filesDir.resolve("drafts/current/exact-absent-legacy-source.img").apply {
+            parentFile?.mkdirs()
+            sourceFile.copyTo(this, overwrite = true)
+        }
+        val vm1 = editor(sourceFile.absolutePath, withMask = false)
+        val attempts = AtomicInteger()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore && attempts.getAndIncrement() == 0) {
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff131415.toInt())
+            }
+        val recoverySeam =
+            MemoryRecoveryTestSeam(
+                parkBeforeDraftRestoreRetry = true,
+                forceCleanupReclaimedResources = true,
+            )
+        var recoveryHandle: AutoCloseable? = null
+        var sessionFactory: AutoCloseable? = null
+        try {
+            awaitReady(vm1)
+            vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
+            assertTrue("generation A must save", persistDraftForTest(vm1))
+            val generationA = checkNotNull(currentDraftGenerationId(context))
+            context.getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_DRAFT_SOURCE, legacySource.absolutePath)
+                .putFloat("draft_exposure", 0.92f)
+                .commit()
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            sessionFactory = installNativeSessionFactoryForTest { 7813L }
+            val vm2 = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "absent-pointer exact retry must request recovery",
+                completion = recoverySeam.recoveryRequested,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.automaticRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "absent-pointer exact retry must park before target execution",
+                completion = recoverySeam.beforeDraftRestoreRetryReached,
+                pumpMain = ::drainReadyMain,
+            )
+            clearCurrentDraftGenerationPointer(context)
+            recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
+            val settled = CompletableDeferred<Unit>()
+            val settledObserver = CoroutineScope(Dispatchers.Default).launch {
+                vm2.uiState.first { !it.isBusy && it.memoryRecoveryRequest == null }
+                settled.complete(Unit)
+            }
+            awaitEditorCompletionForTest(
+                description = "absent exact generation retry must settle",
+                completion = settled,
+                pumpMain = ::drainReadyMain,
+            )
+            settledObserver.cancel()
+            assertEquals("absent exact retry cannot adopt legacy", null, vm2.uiState.value.sourcePath)
+            assertEquals("absent exact retry cannot publish legacy params", 0f, vm2.uiState.value.params.exposure)
+            assertEquals("pointer remains absent", null, currentDraftGenerationId(context))
+            assertTrue("A was the exact retry target", generationA.isNotEmpty())
+        } finally {
+            recoverySeam.automaticRelease.complete(Unit)
+            recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
+            recoveryHandle?.close()
+            sessionFactory?.close()
+            renderer.close()
+            sourceFile.delete()
+            legacySource.delete()
+        }
+    }
+
+    @Test
+    fun exactLegacyRetryNeverAdoptsGenerationPublishedAfterRetryOwnership() = runBlocking {
+        val sourceA = draftSourceFile("restore-exact-legacy-a.png")
+        val sourceB = draftSourceFile("restore-exact-legacy-b.png")
+        val legacySource = context.filesDir.resolve("drafts/current/exact-legacy-a.img").apply {
+            parentFile?.mkdirs()
+            sourceA.copyTo(this, overwrite = true)
+        }
+        val publisher = editor(sourceB.absolutePath, withMask = false)
+        val attempts = AtomicInteger()
+        val renderer =
+            EditorRenderer.installRendererOverrideForTest { request ->
+                if (request.operation == RenderOperation.DraftRestore && attempts.getAndIncrement() == 0) {
+                    throw BitmapAllocationRejectedException(1L)
+                }
+                successOutput(0xff161718.toInt())
+            }
+        val recoverySeam =
+            MemoryRecoveryTestSeam(
+                parkBeforeDraftRestoreRetry = true,
+                forceCleanupReclaimedResources = true,
+            )
+        var recoveryHandle: AutoCloseable? = null
+        var sessionFactory: AutoCloseable? = null
+        try {
+            awaitReady(publisher)
+            context.getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .remove(KEY_DRAFT_GENERATION_ID)
+                .putString(KEY_DRAFT_SOURCE, legacySource.absolutePath)
+                .putFloat("draft_exposure", 0.93f)
+                .commit()
+            recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
+            sessionFactory = installNativeSessionFactoryForTest { 7814L }
+            val legacyRetryVm = harness.createEditor()
+            awaitEditorCompletionForTest(
+                description = "exact legacy retry must request recovery",
+                completion = recoverySeam.recoveryRequested,
+                pumpMain = ::drainReadyMain,
+            )
+            recoverySeam.automaticRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                description = "exact legacy retry must park before target execution",
+                completion = recoverySeam.beforeDraftRestoreRetryReached,
+                pumpMain = ::drainReadyMain,
+            )
+            publisher.markParamsSuccessfullyRendered(publisher.uiState.value.params)
+            assertTrue("new generation B must publish", persistDraftForTest(publisher))
+            val generationB = checkNotNull(currentDraftGenerationId(context))
+            recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
+            val settled = CompletableDeferred<Unit>()
+            val settledObserver = CoroutineScope(Dispatchers.Default).launch {
+                legacyRetryVm.uiState.first { !it.isBusy && it.memoryRecoveryRequest == null }
+                settled.complete(Unit)
+            }
+            awaitEditorCompletionForTest(
+                description = "stale exact legacy retry must settle",
+                completion = settled,
+                pumpMain = ::drainReadyMain,
+            )
+            settledObserver.cancel()
+            assertEquals("legacy retry cannot adopt generation B", null, legacyRetryVm.uiState.value.sourcePath)
+            assertEquals("generation B remains authoritative", generationB, currentDraftGenerationId(context))
+            val independent = harness.createEditor()
+            awaitInit(independent)
+            assertEquals("independent startup restores B", generationB, independent.uiState.value.draftGenerationId)
+            assertTrue("independent B source exists", independent.uiState.value.sourcePath != null)
+        } finally {
+            recoverySeam.automaticRelease.complete(Unit)
+            recoverySeam.beforeDraftRestoreRetryRelease.complete(Unit)
+            recoveryHandle?.close()
+            sessionFactory?.close()
+            renderer.close()
+            sourceA.delete()
+            sourceB.delete()
+            legacySource.delete()
         }
     }
 

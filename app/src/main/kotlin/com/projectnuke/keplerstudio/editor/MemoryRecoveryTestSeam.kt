@@ -12,6 +12,10 @@ internal class MemoryRecoveryTestSeam(
     internal val automaticRelease: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val strongReached: CompletableDeferred<MemoryRetryDescriptor> = CompletableDeferred(),
     internal val strongRelease: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val beforeDraftRestoreRetryReached: CompletableDeferred<MemoryRetryDescriptor> = CompletableDeferred(),
+    internal val beforeDraftRestoreRetryRelease: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val parkBeforeDraftRestoreRetry: Boolean = false,
+    internal val forceCleanupReclaimedResources: Boolean = false,
     internal val trimReached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val trimRelease: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val recoveryRequested: CompletableDeferred<MemoryRetryDescriptor> = CompletableDeferred(),
@@ -39,6 +43,12 @@ internal class MemoryRecoveryTestSeam(
         strongRelease.await()
     }
 
+    internal suspend fun awaitBeforeDraftRestoreRetry(descriptor: MemoryRetryDescriptor) {
+        if (!parkBeforeDraftRestoreRetry) return
+        beforeDraftRestoreRetryReached.complete(descriptor)
+        beforeDraftRestoreRetryRelease.await()
+    }
+
     internal suspend fun awaitBeforeTrimCleanup() {
         trimReached.complete(Unit)
         trimRelease.await()
@@ -61,6 +71,7 @@ internal class MemoryRecoveryTestSeam(
             return AutoCloseable {
                 seam.automaticRelease.complete(Unit)
                 seam.strongRelease.complete(Unit)
+                seam.beforeDraftRestoreRetryRelease.complete(Unit)
                 seam.trimRelease.complete(Unit)
                 seam.autoStraightenInputCopyRelease.complete(Unit)
                 synchronized(lock) {
