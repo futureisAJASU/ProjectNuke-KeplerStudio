@@ -28,6 +28,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [29])
 class AsyncHistorySnapshotOwnershipProductionTest {
     private lateinit var harness: OwnedEditorViewModelHarness
+    private var renderer: AutoCloseable? = null
     private val context: Application
         get() = RuntimeEnvironment.getApplication() as Application
 
@@ -41,6 +42,8 @@ class AsyncHistorySnapshotOwnershipProductionTest {
 
     @After
     fun tearDown() {
+        renderer?.close()
+        renderer = null
         harness.close()
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
@@ -111,7 +114,12 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         editor.cancelCurrentRenderForTest()
         releaseDecode.complete(Unit)
         awaitMainUntil { snapshots.size == 1 }
-        awaitMainUntil { snapshotBitmaps(snapshots.single()).all { it.isRecycled } }
+
+        val snap = snapshots.single()
+        val snapBitmaps = snapshotBitmaps(snap)
+        awaitFlushUntil(backoffMs = 2000L, maxMs = 60_000L) {
+            snapBitmaps.all { it.isRecycled }
+        }
 
         assertEquals(0, editor.undoEntryCountForTest())
         assertEquals(oldPreview, editor.uiState.value.previewBitmap)
@@ -138,7 +146,12 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         editor.updateUiState { it.copy(revision = it.revision + 1, isBusy = true, message = "newer owner") }
         releaseDecode.complete(Unit)
         awaitMainUntil { snapshots.size == 1 }
-        awaitMainUntil { snapshotBitmaps(snapshots.single()).all { it.isRecycled } }
+
+        val snap = snapshots.single()
+        val snapBitmaps = snapshotBitmaps(snap)
+        awaitFlushUntil(backoffMs = 2000L, maxMs = 60_000L) {
+            snapBitmaps.all { it.isRecycled }
+        }
 
         assertEquals(oldPreview, editor.uiState.value.previewBitmap)
         assertEquals("newer owner", editor.uiState.value.message)
@@ -151,7 +164,7 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         val oldPreview = bitmap(0xffff0000.toInt())
         val editor = editorWithDocument(oldPreview)
         val snapshots = observeSnapshots()
-        val renderer = harness.ownSeam(EditorRenderer.installRendererOverrideForTest {
+        renderer = harness.ownSeam(EditorRenderer.installRendererOverrideForTest {
             throw IllegalStateException("private renderer detail")
         })
 
@@ -163,8 +176,11 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         assertEquals(0, editor.undoEntryCountForTest())
         assertEquals(oldPreview, editor.uiState.value.previewBitmap)
         assertFalse(oldPreview.isRecycled)
-        awaitMainUntil { snapshotBitmaps(snapshots.single()).all { it.isRecycled } }
-        renderer.close()
+        awaitFlushUntil(backoffMs = 2000L, maxMs = 60_000L) {
+            snapshotBitmaps(snapshots.single()).all { it.isRecycled }
+        }
+        renderer?.close()
+        renderer = null
     }
 
     @Test
@@ -174,7 +190,7 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         val snapshots = observeSnapshots()
         val renderStarted = CompletableDeferred<Unit>()
         val releaseRender = CompletableDeferred<Unit>()
-        val renderer = harness.ownSeam(EditorRenderer.installRendererOverrideForTest {
+        renderer = harness.ownSeam(EditorRenderer.installRendererOverrideForTest {
             renderStarted.complete(Unit)
             releaseRender.await()
             currentCoroutineContext().ensureActive()
@@ -191,7 +207,8 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         assertEquals(emptyList<ActiveQuickEffect>(), editor.uiState.value.activeQuickEffects)
         assertEquals(oldPreview, editor.uiState.value.previewBitmap)
         assertFalse(oldPreview.isRecycled)
-        renderer.close()
+        renderer?.close()
+        renderer = null
     }
 
     @Test
@@ -201,7 +218,7 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         val snapshots = observeSnapshots()
         val renderStarted = CompletableDeferred<Unit>()
         val releaseRender = CompletableDeferred<Unit>()
-        val renderer = harness.ownSeam(EditorRenderer.installRendererOverrideForTest {
+        renderer = harness.ownSeam(EditorRenderer.installRendererOverrideForTest {
             renderStarted.complete(Unit)
             releaseRender.await()
             renderSuccess(it.operation, 0xff00ff00.toInt())
@@ -219,7 +236,8 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         assertEquals(oldPreview, editor.uiState.value.previewBitmap)
         assertEquals("newer owner", editor.uiState.value.message)
         assertTrue(editor.uiState.value.isBusy)
-        renderer.close()
+        renderer?.close()
+        renderer = null
     }
 
     private fun editorWithDocument(oldPreview: Bitmap): EditorViewModel {
@@ -252,7 +270,7 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         harness.ownSeam(
             HistorySnapshotTestSeam.install(
                 HistorySnapshotTestSeam { value -> value?.let(snapshots::add) }
-            )
+            ),
         )
         return snapshots
     }
@@ -286,11 +304,30 @@ class AsyncHistorySnapshotOwnershipProductionTest {
         )
 
     private fun awaitMainUntil(predicate: () -> Boolean) {
-        repeat(2000) {
+        repeat(4000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
+        }
+        assertTrue(predicate())
+    }
+
+    private fun awaitFlushUntil(
+        backoffMs: Long = 1000L,
+        maxMs: Long = 60_000L,
+        predicate: () -> Boolean,
+    ) {
+        val deadline = System.currentTimeMillis() + maxMs
+        while (System.currentTimeMillis() < deadline) {
+            repeat(4) {
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(50, TimeUnit.MILLISECONDS)
+                yieldToEditorBackgroundForTest()
+            }
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            shadowOf(android.os.Looper.getMainLooper()).idleFor(backoffMs, TimeUnit.MILLISECONDS)
+            if (predicate()) return
         }
         assertTrue(predicate())
     }

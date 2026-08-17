@@ -178,6 +178,33 @@ internal fun currentDraftGenerationId(context: Context): String? =
         KEY_DRAFT_GENERATION_ID,
     )
 
+internal fun readCurrentDraftGenerationId(context: Context): String? = currentDraftGenerationId(context)
+
+internal fun deleteAllDraftGenerationsExcept(
+    context: Context,
+    keep: File?,
+    extraPreserveGenerationId: String? = null,
+) {
+    val root = draftGenerationsRoot(context).canonicalFile
+    val kept = keep?.let { runCatching { it.canonicalFile }.getOrNull() }
+    val preserveIds =
+        buildSet {
+            kept?.let { add(it.name) }
+            extraPreserveGenerationId?.let { add(it) }
+        }
+    root.listFiles()?.forEach { dir ->
+        val contained = runCatching { dir.canonicalFile }.getOrNull()
+        if (contained?.parentFile == root && contained.isDirectory &&
+            contained != kept &&
+            !preserveIds.contains(contained.name) &&
+            (contained.name.startsWith(DRAFT_GENERATION_DIR_PREFIX) ||
+                contained.name.startsWith(DRAFT_GENERATION_STAGING_PREFIX))
+        ) {
+            deleteDraftDirectory(context, DraftGenerationDirectory(contained))
+        }
+    }
+}
+
 internal fun clearCurrentDraftGenerationPointer(context: Context): Boolean =
     context.getSharedPreferences(PREF_NAME_DRAFT, Context.MODE_PRIVATE)
         .edit().remove(KEY_DRAFT_GENERATION_ID).commit()

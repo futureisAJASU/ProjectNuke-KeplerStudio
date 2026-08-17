@@ -11562,7 +11562,7 @@ private fun writeHeifToUri(context: Context, uri: Uri, bitmap: Bitmap) {
     }
 }
 
-private data class DraftSaveResult(
+internal data class DraftSaveResult(
     val generationId: String,
     val generationDirectory: File,
     val sourcePath: String,

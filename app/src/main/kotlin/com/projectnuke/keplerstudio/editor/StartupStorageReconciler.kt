@@ -3,7 +3,8 @@ package com.projectnuke.keplerstudio.editor
 import android.content.Context
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /** How a startup reconcile pass classified one artifact. */
 internal enum class StartupReconcileDisposition {
@@ -81,19 +82,16 @@ internal class StartupReconcileTestSeam {
  * the draft generation pointer, `KEY_DRAFT_SOURCE`, or the live in-process
  * document source path. Never throws; per-item failures are recorded as
  * FAILED_DELETION and logged by the caller.
+ *
+ * Document ownership is established by actual openImage/restore/document
+ * transitions in [commitUiState], not by reconciler registration.
+ * The in-process source path is tracked only in this pass's `referenced`
+ * set for deletion-safety decisions.
  */
-internal fun reconcileStartupArtifacts(
+internal suspend fun reconcileStartupArtifacts(
     context: Context,
     inProcessSourcePath: String?,
 ): StartupReconcileOutcome {
-    // The current document is an authoritative in-process root. Register it
-    // before taking the reachability snapshot so later deletion checks use the
-    // same ownership boundary as IncomingSourceTransaction adoption.
-    inProcessSourcePath?.let {
-        val source = File(it)
-        IncomingSourceLiveOwnership.registerDocument(source)
-        RestoredWorkingSourceOwnership.registerDocument(source)
-    }
     val entries = mutableListOf<StartupReconcileEntry>()
     val seam = StartupReconcileTestSeam.capture()
     val referenced =
@@ -106,14 +104,19 @@ internal fun reconcileStartupArtifacts(
         }
             .mapNotNull { runCatching { it.canonicalFile }.getOrNull() }
             .toSet()
-    val pointer = currentDraftGenerationId(context)
 
-    val generationsRoot =
-        runCatching { draftGenerationsRoot(context).canonicalFile }.getOrNull()
+    val pointer = withContext(Dispatchers.IO) {
+        DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
+    }
+
+    val generationsRoot = runCatching { draftGenerationsRoot(context).canonicalFile }.getOrNull()
     if (generationsRoot != null) {
-        generationsRoot.listFiles()?.forEach { dir ->
+        val listedDirs = runCatching { generationsRoot.listFiles()?.toList() }.getOrNull().orEmpty()
+        val deleteQueue = mutableListOf<Pair<File, StartupReconcileDisposition>>()
+        listedDirs.forEach { dir ->
             val canonical = runCatching { dir.canonicalFile }.getOrNull()
-            if (canonical == null || canonical.parentFile != generationsRoot || !canonical.isDirectory) return@forEach
+            if (canonical == null || canonical.parentFile != generationsRoot || !canonical.isDirectory)
+                return@forEach
             when {
                 canonical.name == pointer -> {
                     entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_POINTER)
@@ -124,11 +127,32 @@ internal fun reconcileStartupArtifacts(
                     }
                 }
                 canonical.name.startsWith(DRAFT_GENERATION_STAGING_PREFIX) ->
-                    entries += recordDirectoryDeletion(canonical, generationsRoot, StartupReconcileDisposition.DELETED_STAGING)
-                canonical.name.startsWith(DRAFT_GENERATION_DIR_PREFIX) ->
-                    entries += recordDirectoryDeletion(canonical, generationsRoot, StartupReconcileDisposition.DELETED_UNREFERENCED)
+                    deleteQueue.add(canonical to StartupReconcileDisposition.DELETED_STAGING)
+                canonical.name.startsWith(DRAFT_GENERATION_DIR_PREFIX) -> {
+                    // Check pointer freshness under coordinator read lock before
+                    // deciding; a concurrent save may have made this the current pointer.
+                    val isCurrentUnderLock =
+                        withContext(Dispatchers.IO) {
+                            DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
+                        } == canonical.name
+                    if (isCurrentUnderLock) {
+                        entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_POINTER)
+                        canonical.listFiles()?.forEach { file ->
+                            if (file.name.endsWith(DRAFT_TEMP_SUFFIX)) {
+                                entries += recordDeletion(file, StartupReconcileDisposition.DELETED_TEMP)
+                            }
+                        }
+                    } else {
+                        deleteQueue.add(canonical to StartupReconcileDisposition.DELETED_UNREFERENCED)
+                    }
+                }
                 else -> entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
             }
+        }
+        // Pass the snapshot pointer so each individual deletion can revalidate
+        // under the write lock before mutating the generation tree.
+        deleteQueue.forEach { (dir, disp) ->
+            entries += recordDirectoryDeletion(context, dir, generationsRoot, disp, pointer)
         }
     }
 
@@ -136,7 +160,9 @@ internal fun reconcileStartupArtifacts(
     if (cacheRoot != null) {
         val cacheFiles = cacheRoot.listFiles()?.toList().orEmpty()
         seam?.cacheSnapshotReached?.complete(Unit)
-        seam?.cacheSnapshotRelease?.let { release -> runBlocking { release.await() } }
+        seam?.cacheSnapshotRelease?.let { release ->
+            withContext(Dispatchers.IO) { runCatching { release.await() } }
+        }
         cacheFiles.forEach { file ->
             val canonical = runCatching { file.canonicalFile }.getOrNull()
             if (canonical == null || canonical.parentFile != cacheRoot) return@forEach
@@ -154,7 +180,9 @@ internal fun reconcileStartupArtifacts(
     if (workingRoot != null) {
         val workingFiles = workingRoot.listFiles()?.toList().orEmpty()
         seam?.workingSnapshotReached?.complete(Unit)
-        seam?.workingSnapshotRelease?.let { release -> runBlocking { release.await() } }
+        seam?.workingSnapshotRelease?.let { release ->
+            withContext(Dispatchers.IO) { runCatching { release.await() } }
+        }
         workingFiles.forEach { file ->
             val canonical = runCatching { file.canonicalFile }.getOrNull()
             if (canonical == null || canonical.parentFile != workingRoot) return@forEach
@@ -168,10 +196,6 @@ internal fun reconcileStartupArtifacts(
 
     val legacyRoot = runCatching { File(context.filesDir, LEGACY_DRAFT_DIR).canonicalFile }.getOrNull()
     if (legacyRoot != null) {
-        // The legacy working directory is the live draft source home: `source_*.img`
-        // files may be the active document's source (bitmap-dirty drafts) or a legacy
-        // draft's source, and at startup their ownership cannot be proven, so they are
-        // preserved. Only temporary staging files are provably garbage.
         legacyRoot.listFiles()?.forEach { file ->
             val canonical = runCatching { file.canonicalFile }.getOrNull()
             if (canonical == null || canonical.parentFile != legacyRoot) return@forEach
@@ -188,6 +212,47 @@ internal fun reconcileStartupArtifacts(
     return outcome
 }
 
+private suspend fun recordDirectoryDeletion(
+    context: Context,
+    dir: File,
+    ownerRoot: File,
+    disposition: StartupReconcileDisposition,
+    snapshotPointer: String? = null,
+): StartupReconcileEntry {
+    val canonical = runCatching { dir.canonicalFile }.getOrNull()
+    if (canonical == null || canonical.parentFile != ownerRoot) {
+        return StartupReconcileEntry(dir.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
+    }
+    return try {
+        withContext(Dispatchers.IO) {
+            DraftStorageCoordinator.withWriteLock {
+val dirName = canonical.name
+        if (!canonical.isDirectory) {
+            return@withWriteLock StartupReconcileEntry(
+                canonical.absolutePath,
+                StartupReconcileDisposition.FAILED_DELETION,
+            )
+        }
+        val shouldSkip =
+            dirName.startsWith(DRAFT_GENERATION_DIR_PREFIX) &&
+                (
+                    (snapshotPointer != null && dirName == snapshotPointer) ||
+                        (snapshotPointer == null && dirName == currentDraftGenerationId(context))
+                    )
+        if (!shouldSkip) {
+            canonical.listFiles()?.forEach { file ->
+                check(file.delete()) { "failed to delete draft generation file: ${file.absolutePath}" }
+            }
+            check(canonical.delete()) { "failed to delete draft generation directory: ${canonical.absolutePath}" }
+        }
+        StartupReconcileEntry(canonical.absolutePath, if (shouldSkip) StartupReconcileDisposition.PRESERVED_POINTER else disposition)
+            }
+        }
+    } catch (t: Throwable) {
+        StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
+    }
+}
+
 private fun recordDeletion(file: File, disposition: StartupReconcileDisposition): StartupReconcileEntry {
     val deleted = runCatching { file.delete() }.getOrDefault(false)
     return StartupReconcileEntry(
@@ -201,7 +266,8 @@ private fun recordReferencedDeletion(
     referenced: Set<File>,
     deletionDisposition: StartupReconcileDisposition,
 ): StartupReconcileEntry {
-    val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
+    val canonical = runCatching { file.canonicalFile }.getOrNull()
+        ?: return StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
     return if (canonical in referenced) {
         StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_REFERENCED)
     } else {
@@ -248,29 +314,6 @@ private fun recordRestoredWorkingSourceDeletion(
         RestoredWorkingSourceOwnership.DeleteResult.FAILED ->
             StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
     }
-}
-
-private fun recordDirectoryDeletion(
-    dir: File,
-    ownerRoot: File,
-    disposition: StartupReconcileDisposition,
-): StartupReconcileEntry {
-    val canonical = runCatching { dir.canonicalFile }.getOrNull()
-    if (canonical == null || canonical.parentFile != ownerRoot) {
-        return StartupReconcileEntry(dir.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
-    }
-    val deleted =
-        runCatching {
-            canonical.listFiles()?.forEach { file ->
-                check(file.delete()) { "failed to delete draft generation file: ${file.absolutePath}" }
-            }
-            check(canonical.delete()) { "failed to delete draft generation directory: ${canonical.absolutePath}" }
-            true
-        }.getOrDefault(false)
-    return StartupReconcileEntry(
-        canonical.absolutePath,
-        if (deleted) disposition else StartupReconcileDisposition.FAILED_DELETION,
-    )
 }
 
 private const val WORKING_SOURCES_DIR = "editor_sources"

@@ -59,7 +59,7 @@ class StartupStorageReconcilerProductionTest {
     // Orphan .staging_* directories (crash before finalize) are reclaimed while
     // the pointer generation is preserved.
     @Test
-    fun orphanStagingDirsDeletedWhilePointerGenerationPreserved() {
+    fun orphanStagingDirsDeletedWhilePointerGenerationPreserved() = runBlocking {
         val generations = draftGenerationsRoot(context)
         val pointerDir = File(generations, "gen_current").apply { mkdirs() }
         File(pointerDir, "complete").writeText("ok")
@@ -79,10 +79,8 @@ class StartupStorageReconcilerProductionTest {
         assertEquals(0, outcome.failedCount)
     }
 
-    // A finalized-but-unpublished generation (crash between finalize and pointer
-    // publish) is reclaimed; the pointer generation survives.
     @Test
-    fun unreferencedFinalGenerationDeletedWhilePointerPreserved() {
+    fun unreferencedFinalGenerationDeletedWhilePointerPreserved() = runBlocking {
         val generations = draftGenerationsRoot(context)
         val pointerDir = File(generations, "gen_current").apply { mkdirs() }
         File(pointerDir, "complete").writeText("ok")
@@ -101,7 +99,7 @@ class StartupStorageReconcilerProductionTest {
 
     // A pointer naming a missing directory never suppresses cleanup and never crashes.
     @Test
-    fun brokenPointerDeletesOrphansWithoutCrash() {
+    fun brokenPointerDeletesOrphansWithoutCrash() = runBlocking {
         val generations = draftGenerationsRoot(context)
         val orphan = File(generations, "gen_orphan").apply { mkdirs() }
         File(orphan, "complete").writeText("ok")
@@ -116,7 +114,7 @@ class StartupStorageReconcilerProductionTest {
 
     // Cache staging files are always reclaimed even when the final file is referenced.
     @Test
-    fun cacheStagingDeletedEvenWhenFinalIsReferenced() {
+    fun cacheStagingDeletedEvenWhenFinalIsReferenced() = runBlocking {
         val referenced = File(context.cacheDir, "source_keep.img").apply { writeText("final") }
         val staging = File(context.cacheDir, "source_keep.img.staging").apply { writeText("partial") }
         prefs().edit().putString(KEY_DRAFT_SOURCE, referenced.absolutePath).commit()
@@ -132,7 +130,7 @@ class StartupStorageReconcilerProductionTest {
 
     // Unreferenced cache finals and restore working copies are reclaimed.
     @Test
-    fun unreferencedCacheFinalsAndWorkingSourcesDeleted() {
+    fun unreferencedCacheFinalsAndWorkingSourcesDeleted() = runBlocking {
         val cacheA = File(context.cacheDir, "source_a.img").apply { writeText("a") }
         val cacheB = File(context.cacheDir, "source_b.img").apply { writeText("b") }
         val working = File(context.filesDir.resolve("editor_sources"), "restored_x.img")
@@ -151,7 +149,7 @@ class StartupStorageReconcilerProductionTest {
     // Both the legacy pref reference and the live in-process source path preserve
     // their files; lookalikes are still reclaimed.
     @Test
-    fun prefAndInProcessReferencedSourcesPreserved() {
+    fun prefAndInProcessReferencedSourcesPreserved() = runBlocking {
         val cacheRef = File(context.cacheDir, "source_keep.img").apply { writeText("k") }
         val cacheOrphan = File(context.cacheDir, "source_orphan.img").apply { writeText("o") }
         val workingRef = File(context.filesDir.resolve("editor_sources"), "restored_live.img")
@@ -173,7 +171,7 @@ class StartupStorageReconcilerProductionTest {
     // because at startup they may be the active document's source (bitmap-dirty
     // drafts) or a legacy draft's source and ownership cannot be proven.
     @Test
-    fun legacyCurrentTempsDeletedSourcesPreserved() {
+    fun legacyCurrentTempsDeletedSourcesPreserved() = runBlocking {
         val legacy = context.filesDir.resolve("drafts/current").apply { mkdirs() }
         val tmp = File(legacy, "source.img.tmp").apply { writeText("t") }
         val orphanSource = File(legacy, "source_orphan.img").apply { writeText("o") }
@@ -193,7 +191,7 @@ class StartupStorageReconcilerProductionTest {
     // Stale uuid-suffixed temps inside the pointer generation are reclaimed while
     // manifest-declared payloads stay intact.
     @Test
-    fun staleTempsInsidePointerGenerationDeletedWhilePayloadsIntact() {
+    fun staleTempsInsidePointerGenerationDeletedWhilePayloadsIntact() = runBlocking {
         val generations = draftGenerationsRoot(context)
         val pointerDir = File(generations, "gen_current").apply { mkdirs() }
         val temp1 = File(pointerDir, "source.uuid1.tmp").apply { writeText("t1") }
@@ -214,7 +212,7 @@ class StartupStorageReconcilerProductionTest {
 
     // Reconciliation is idempotent: a second pass deletes nothing new.
     @Test
-    fun secondPassDeletesNothing() {
+    fun secondPassDeletesNothing() = runBlocking {
         val generations = draftGenerationsRoot(context)
         val pointerDir = File(generations, "gen_current").apply { mkdirs() }
         File(pointerDir, "complete").writeText("ok")
@@ -234,7 +232,7 @@ class StartupStorageReconcilerProductionTest {
 
     // Foreign files and directories matching no owned pattern are ignored.
     @Test
-    fun foreignFilesIgnoredAndUntouched() {
+    fun foreignFilesIgnoredAndUntouched() = runBlocking {
         val generations = draftGenerationsRoot(context)
         val foreignDir = File(generations, "other_dir").apply { mkdirs() }
         File(foreignDir, "data").writeText("d")
@@ -249,7 +247,7 @@ class StartupStorageReconcilerProductionTest {
     }
 
     @Test
-    fun liveIncomingStagingAndFinalArePreservedUntilOwnershipEnds() {
+    fun liveIncomingStagingAndFinalArePreservedUntilOwnershipEnds() = runBlocking {
         val staging = File(context.cacheDir, IncomingSourceArtifactNames.stagingName("live")).apply { writeText("partial") }
         val final = File(context.cacheDir, IncomingSourceArtifactNames.finalName("live")).apply { writeText("final") }
         IncomingSourceLiveOwnership.register(staging, final)
@@ -268,7 +266,7 @@ class StartupStorageReconcilerProductionTest {
     }
 
     @Test
-    fun liveAndDeadRestoredWorkingSourcesUseCurrentProcessOwnership() {
+    fun liveAndDeadRestoredWorkingSourcesUseCurrentProcessOwnership() = runBlocking {
         val live = File(context.filesDir.resolve("editor_sources"), "restored_live.img").apply {
             parentFile!!.mkdirs()
             writeText("live")
@@ -323,7 +321,7 @@ class StartupStorageReconcilerProductionTest {
     }
 
     @Test
-    fun unknownImgStagingIsNotClaimedByIncomingSourceCleanup() {
+    fun unknownImgStagingIsNotClaimedByIncomingSourceCleanup() = runBlocking {
         val unknown = File(context.cacheDir, "unrelated.img.staging").apply { writeText("foreign") }
 
         val outcome = reconcileStartupArtifacts(context, null)
