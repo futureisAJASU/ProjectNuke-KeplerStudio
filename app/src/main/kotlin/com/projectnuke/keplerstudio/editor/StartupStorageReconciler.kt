@@ -233,11 +233,12 @@ val dirName = canonical.name
                 StartupReconcileDisposition.FAILED_DELETION,
             )
         }
+        val actualCurrent = currentDraftGenerationId(context)
         val shouldSkip =
             dirName.startsWith(DRAFT_GENERATION_DIR_PREFIX) &&
                 (
-                    (snapshotPointer != null && dirName == snapshotPointer) ||
-                        (snapshotPointer == null && dirName == currentDraftGenerationId(context))
+                    dirName == snapshotPointer ||
+                        dirName == actualCurrent
                     )
         if (!shouldSkip) {
             canonical.listFiles()?.forEach { file ->

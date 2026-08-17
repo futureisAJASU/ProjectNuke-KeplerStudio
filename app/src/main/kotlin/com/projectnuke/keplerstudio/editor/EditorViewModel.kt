@@ -1478,13 +1478,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             restoreBusyPublication = null
             updateUiStateAndRecycleReplaced { current ->
                 val ownsMessage = current.message == publication.message
-                if (
-                    current.memoryRecoveryRequest?.token == owner.descriptor.token ||
-                        (current.memoryRecoveryRequest == null && ownsMessage)
-                ) {
+                // Busyg ownership is independent: the retry owns the busy state
+                // whenever the publication hasn't been superseded and the document
+                // identity hasn't changed.
+                val ownsBusy = current.isBusy && publication.retryOwner === owner && isDocumentIdentityCurrent(owner.descriptor)
+                if (ownsBusy || ownsMessage || current.memoryRecoveryRequest?.token == owner.descriptor.token) {
                     current.copy(
-                        memoryRecoveryRequest = null,
-                        isBusy = if (ownsMessage) false else current.isBusy,
+                        memoryRecoveryRequest = if (current.memoryRecoveryRequest?.token == owner.descriptor.token) null else current.memoryRecoveryRequest,
+                        isBusy = if (ownsBusy) false else current.isBusy,
                         message = if (ownsMessage) draftRestoreRetryTerminalMessage(outcome) else current.message,
                     )
                 } else current
@@ -4236,9 +4237,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         updateUiStateAndRecycleReplaced { current ->
             if (current.revision != publication.revision) return@updateUiStateAndRecycleReplaced current
             val ownsMessage = current.message == publication.message
-            if (current.isBusy || ownsMessage) {
+            val ownsBusy = current.isBusy
+            // Independent busy ownership: always clear busy when the publication
+            // hasn't been superseded (token/revision match) and busy is true.
+            if (ownsBusy || ownsMessage) {
                 current.copy(
-                    isBusy = if (current.isBusy) false else current.isBusy,
+                    isBusy = if (ownsBusy) false else current.isBusy,
                     message = if (ownsMessage) null else current.message,
                 )
             } else current
@@ -5112,7 +5116,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 draftSaveJob === owningJob &&
                 isDraftResultCurrent(saved)
         if (!current) {
-            withContext(Dispatchers.IO) { rollbackCommittedDraft(context, saved) }
+            DraftStorageCoordinator.rollbackCommittedDraft(context, saved)
             return false
         }
         val previousBaseline = draftPointerBaseline
@@ -5122,7 +5126,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             val expected = _uiState.value
             if (!draftResultMatchesDocumentState(saved, expected)) {
                 draftPointerBaseline = previousBaseline
-                withContext(Dispatchers.IO) { rollbackCommittedDraft(context, saved) }
+                DraftStorageCoordinator.rollbackCommittedDraft(context, saved)
                 return false
             }
             val next =
@@ -5138,10 +5142,20 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         saved.expectedPointerGenerationId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
         withContext(Dispatchers.IO) {
-            runCatching { persistLegacyDraftCompatibility(context, payload, saved) }
-                .onFailure(::logDraftSaveFailure)
-            runCatching { deleteAllDraftGenerationsExcept(context, saved.generationDirectory) }
-                .onFailure(::logDraftSaveFailure)
+            DraftStorageCoordinator.withWriteLock {
+                val actualPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
+                runCatching {
+                    // Only write legacy compatibility when the saved generation is still authoritative
+                    val currentPointer = currentDraftGenerationId(context)
+                    if (currentPointer == saved.generationId) {
+                        persistLegacyDraftCompatibility(context, payload, saved)
+                    }
+                }.onFailure(::logDraftSaveFailure)
+                runCatching {
+                    // Always preserve actual authoritative current pointer + saved directory
+                    DraftStorageCoordinator.deleteAllExcept(context, saved.generationDirectory)
+                }.onFailure(::logDraftSaveFailure)
+            }
         }
         return true
     }
@@ -6884,7 +6898,7 @@ fun exportPreview() {
                     withContext(Dispatchers.IO) {
                         draftSaveMutex.withLock {
                             if (clearEpoch != draftOperationEpoch) return@withLock false
-                            val expectedPointer = currentDraftGenerationId(context)
+                            val expectedPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
                             val expectedBaseline = draftPointerBaseline
                             if (expectedPointer != expectedBaseline) return@withLock false
                             // Capture one stable visible state snapshot
@@ -6894,8 +6908,8 @@ fun exportPreview() {
                             val prefs =
                                 context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
                             val prevPrefs = snapshotDraftPreferences(prefs)
-                            // Clear pointer and baseline
-                            if (!clearCurrentDraftGenerationPointer(context)) return@withLock false
+                            // Clear pointer and baseline (global storage mutation)
+                            if (!DraftStorageCoordinator.clearPointer(context)) return@withLock false
                             draftPointerBaseline = null
                             // Clear legacy prefs
                             val committed =
@@ -6942,7 +6956,7 @@ fun exportPreview() {
                                 }
                                 val pointerRestored =
                                     if (expectedPointer != null) {
-                                        publishDraftGeneration(context, expectedPointer)
+                                        DraftStorageCoordinator.publishGeneration(context, expectedPointer)
                                     } else {
                                         true
                                     }
@@ -6951,7 +6965,7 @@ fun exportPreview() {
                                         IllegalStateException("clearDraft pointer rollback failed")
                                     )
                                 }
-                                val currentPointer = currentDraftGenerationId(context)
+                                val currentPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
                                 draftPointerBaseline = currentPointer
                                 return@withLock false
                             }
@@ -7016,7 +7030,7 @@ fun exportPreview() {
                                     }
                                     val pointerRestored =
                                         if (expectedPointer != null) {
-                                            publishDraftGeneration(context, expectedPointer)
+                                            DraftStorageCoordinator.publishGeneration(context, expectedPointer)
                                         } else {
                                             true
                                         }
@@ -7027,7 +7041,7 @@ fun exportPreview() {
                                             )
                                         )
                                     }
-                                    val currentPointer = currentDraftGenerationId(context)
+                                    val currentPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
                                     draftPointerBaseline = currentPointer
                                     return@withLock false
                                 }
@@ -7082,8 +7096,8 @@ fun exportPreview() {
                                 }
                                 .onFailure { logDraftSaveFailure(it) }
                             runCatching {
-                                    expectedPointer?.let { deleteDraftGenerationById(context, it) }
-                                }
+                                expectedPointer?.let { DraftStorageCoordinator.deleteById(context, it) }
+                            }
                                 .onFailure { logDraftSaveFailure(it) }
                             runCatching {
                                     val thumbFile = persistentDraftThumbnailFile(context)
@@ -8739,6 +8753,12 @@ fun exportPreview() {
         val sourceFile = recovery.sourceFile
         if (sourceFile == null) {
             val missingDraftMessage = "임시 저장 원본을 찾을 수 없습니다. 기존 임시 저장 파일이 삭제되어 복구할 수 없습니다."
+            // Option A: update both visible message and the publication record
+            // so that terminal settlement treats them as the same owner.
+            val publication = restoreBusyPublication
+            if (publication != null && publication.retryOwner === userMemoryRecoveryOwner) {
+                restoreBusyPublication = publication.copy(message = missingDraftMessage)
+            }
             updateUiStateAndRecycleReplaced { it.copy(message = missingDraftMessage) }
             completeRetry(DraftRestoreRetryOutcome.ExactTargetMissing)
             return
@@ -10819,7 +10839,7 @@ private fun copyFileAtomically(source: File, destination: File) {
     }
 }
 
-private fun isOwnedDraftSource(context: Context, file: File): Boolean {
+internal fun isOwnedDraftSource(context: Context, file: File): Boolean {
     val directory = persistentDraftDirectory(context).canonicalFile
     val candidate = runCatching { file.canonicalFile }.getOrNull() ?: return false
     return candidate.parentFile == directory &&
@@ -11851,7 +11871,7 @@ private fun draftSourceIdentity(path: String?): String? {
         .getOrNull()
 }
 
-private fun saveDraftSnapshot(
+private suspend fun saveDraftSnapshot(
     context: Context,
     payload: DraftSavePayload,
     isCurrent: () -> Boolean,
@@ -11963,7 +11983,7 @@ private fun persistLegacyDraftCompatibility(
     }
 }
 
-private fun persistDraftGenerationInternal(
+private suspend fun persistDraftGenerationInternal(
     context: Context,
     payload: DraftSavePayload,
     draftSourceFile: File,
@@ -12066,35 +12086,37 @@ private fun persistDraftGenerationInternal(
             DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-write-failed"
             return null
         }
-        val completedDir = finalizeDraftGeneration(context, genDir, genId)
-        if (completedDir == null) {
-            deleteDraftDirectory(context, genDir)
-            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-finalize-failed"
-            return null
-        }
-        genDir = completedDir
-        val validated = validateDraftGeneration(genDir, genId)
-        if (validated == null) {
-            deleteDraftDirectory(context, genDir)
-            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-validation-failed"
-            return null
-        }
-        if (!isCurrent()) {
-            deleteDraftDirectory(context, genDir)
-            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-not-current"
-            return null
-        }
-        if (currentDraftGenerationId(context) != payload.expectedPointerGenerationId) {
-            deleteDraftDirectory(context, genDir)
-            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-pointer-mismatch"
-            return null
-        }
-        val previousDirectory =
-            payload.expectedPointerGenerationId?.let {
+        // The entire persistent storage transaction — from finalize through
+        // pointer publication — must be serialized by the global coordinator.
+        val completedDir = DraftStorageCoordinator.withWriteLock {
+            val finalized = DraftStorageCoordinator.finalizeGeneration(context, genDir, genId)
+            if (finalized == null) {
+                deleteDraftDirectory(context, genDir)
+                DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-finalize-failed"
+                return@withWriteLock null
+            }
+            genDir = finalized
+            val validated = validateDraftGeneration(genDir, genId)
+            if (validated == null) {
+                deleteDraftDirectory(context, genDir)
+                DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-validation-failed"
+                return@withWriteLock null
+            }
+            if (!isCurrent()) {
+                deleteDraftDirectory(context, genDir)
+                DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-not-current"
+                return@withWriteLock null
+            }
+            val pointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
+            if (pointer != payload.expectedPointerGenerationId) {
+                deleteDraftDirectory(context, genDir)
+                DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-pointer-mismatch"
+                return@withWriteLock null
+            }
+            val previousDirectory = payload.expectedPointerGenerationId?.let {
                 findDraftGenerationDirectory(context, it)?.root
             }
-        pendingResult =
-            DraftSaveResult(
+            val result = DraftSaveResult(
                 generationId = genDir.root.name,
                 generationDirectory = genDir.root,
                 sourcePath = validated.sourceFile.absolutePath,
@@ -12110,16 +12132,20 @@ private fun persistDraftGenerationInternal(
                 previousDraftPath = payload.previousVisibleDraftPath,
                 originalSourcePath = payload.sourcePath,
             )
-        if (!publishDraftGeneration(context, genDir.root.name)) {
-            deleteDraftDirectory(context, genDir)
-            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-publish-failed"
-            return null
+            if (!DraftStorageCoordinator.publishGeneration(context, genDir.root.name)) {
+                deleteDraftDirectory(context, genDir)
+                DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-publish-failed"
+                return@withWriteLock null
+            }
+            result.copy(pointerPublished = true)
         }
+        if (completedDir == null) return null
+        pendingResult = completedDir
         pointerCommitted = true
-        return checkNotNull(pendingResult).copy(pointerPublished = true)
+        return completedDir
     } catch (t: Throwable) {
         if (pointerCommitted && pendingResult != null) {
-            rollbackCommittedDraft(
+            DraftStorageCoordinator.rollbackCommittedDraft(
                 context,
                 checkNotNull(pendingResult).copy(pointerPublished = true),
             )

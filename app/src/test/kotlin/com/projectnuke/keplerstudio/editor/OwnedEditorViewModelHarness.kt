@@ -90,17 +90,19 @@ internal fun awaitEditorReadyForTest(
 ) {
     val ready = CompletableDeferred<Unit>()
     val observerScope = CoroutineScope(Dispatchers.Default)
-    fun completeIfReady() {
-        if (vm.startupInitCompletion.isCompleted && vm.canEnterEditorActionPure()) {
-            ready.complete(Unit)
-        }
+    // OPTION 2: observers are wake-up only; authoritative admission evaluation
+    // must occur on the Robolectric Main/test thread.
+    val startupHandle = vm.startupInitCompletion.invokeOnCompletion {
+        if (!ready.isCompleted) ready.complete(Unit)
     }
     val startupObserver = observerScope.launch {
-        vm.startupInitCompletion.invokeOnCompletion { completeIfReady() }
-        completeIfReady()
+        // Wake-up observer: does not evaluate admission.
     }
     val stateObserver = observerScope.launch {
-        vm.uiState.collect { completeIfReady() }
+        vm.uiState.collect {
+            // Wake-up only: never evaluate admission from Default.
+            if (!ready.isCompleted) ready.complete(Unit)
+        }
     }
     try {
         awaitEditorCompletionForTest(
@@ -109,16 +111,23 @@ internal fun awaitEditorReadyForTest(
             timeoutMillis = timeoutMillis,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idle()
-                completeIfReady()
+                val admission = runCatching { vm.canEnterEditorActionPure() }.getOrDefault(false)
+                val initDone = vm.startupInitCompletion.isCompleted
+                if (initDone && admission && !ready.isCompleted) {
+                    ready.complete(Unit)
+                }
             },
             diagnostic = diagnostic,
         )
     } finally {
+        startupHandle.dispose()
         startupObserver.cancel()
         stateObserver.cancel()
         observerScope.cancel()
     }
-    check(vm.canEnterEditorActionPure()) { diagnostic() }
+    // Final authoritative evaluation on Main/test thread.
+    shadowOf(android.os.Looper.getMainLooper()).idle()
+    check(vm.startupInitCompletion.isCompleted && vm.canEnterEditorActionPure()) { diagnostic() }
 }
 
 /** Specialized pre-startup wait for tests that intentionally exercise an
@@ -133,10 +142,12 @@ internal fun awaitEditorActionAdmissionForTest(
 ) {
     val ready = CompletableDeferred<Unit>()
     val scope = CoroutineScope(Dispatchers.Default)
-    fun completeIfReady() {
-        if (vm.canEnterEditorActionPure()) ready.complete(Unit)
+    val observer = scope.launch {
+        vm.uiState.collect {
+            // Wake-up only: never evaluate admission from Default.
+            if (!ready.isCompleted) ready.complete(Unit)
+        }
     }
-    val observer = scope.launch { vm.uiState.collect { completeIfReady() } }
     try {
         awaitEditorCompletionForTest(
             description = "editor action admission must become ready",
@@ -144,7 +155,10 @@ internal fun awaitEditorActionAdmissionForTest(
             timeoutMillis = timeoutMillis,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idle()
-                completeIfReady()
+                val admission = runCatching { vm.canEnterEditorActionPure() }.getOrDefault(false)
+                if (admission && !ready.isCompleted) {
+                    ready.complete(Unit)
+                }
             },
             diagnostic = diagnostic,
         )

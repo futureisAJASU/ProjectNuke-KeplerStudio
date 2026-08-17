@@ -31,12 +31,76 @@ internal object DraftStorageCoordinator {
     private val globalStorageLock = Mutex()
 
     // -----------------------------------------------------------------------
-    // Generation write path — staged allocation, write, finalize, publish
+    // Unsafe primitives — ONLY callable while owning [globalStorageLock]
+    // -----------------------------------------------------------------------
+
+    internal suspend fun rollbackCommittedDraftUnsafe(context: Context, saved: DraftSaveResult) {
+        withContext(ioDispatcher) {
+            if (!saved.pointerPublished) {
+                deleteDraftDirectory(context, DraftGenerationDirectory(saved.generationDirectory))
+                return@withContext
+            }
+            val pointer = currentDraftGenerationId(context)
+            if (pointer == saved.generationId) {
+                val previousIsComplete = runCatching {
+                    saved.expectedPointerGenerationId != null &&
+                        saved.previousGenerationDirectory?.let { directory ->
+                            findDraftGenerationDirectory(context, saved.expectedPointerGenerationId)
+                                ?.root
+                                ?.canonicalFile == directory.canonicalFile
+                        } == true
+                }.getOrDefault(false)
+                val restoredPrevious = previousIsComplete &&
+                    publishDraftGeneration(context, checkNotNull(saved.expectedPointerGenerationId))
+                val rolledBack = restoredPrevious || clearCurrentDraftGenerationPointer(context)
+                if (!rolledBack || currentDraftGenerationId(context) == saved.generationId) return@withContext
+            }
+            if (currentDraftGenerationId(context) != saved.generationId) {
+                deleteDraftDirectory(context, DraftGenerationDirectory(saved.generationDirectory))
+                saved.compatibilitySourceFile
+                    ?.takeIf { saved.compatibilitySourceChanged && isOwnedDraftSource(context, it) }
+                    ?.delete()
+            }
+        }
+    }
+
+    internal fun deleteGenerationUnsafe(context: Context, generationId: String) {
+        deleteDraftGenerationById(context, generationId)
+    }
+
+    internal suspend fun publishGenerationUnsafe(context: Context, generationId: String): Boolean =
+        withContext(ioDispatcher) { publishDraftGeneration(context, generationId) }
+
+    internal suspend fun clearPointerUnsafe(context: Context): Boolean =
+        withContext(ioDispatcher) { clearCurrentDraftGenerationPointer(context) }
+
+    internal fun readCurrentPointerUnsafe(context: Context): String? =
+        currentDraftGenerationId(context)
+
+    internal suspend fun findByGenerationIdUnsafe(context: Context, generationId: String): DraftGenerationDirectory? =
+        withContext(ioDispatcher) { findDraftGenerationDirectory(context, generationId) }
+
+    internal suspend fun validateCurrentGenerationUnsafe(context: Context): ValidatedDraftGeneration? =
+        withContext(ioDispatcher) { validateCurrentDraftGeneration(context) }
+
+    internal suspend fun finalizeGenerationUnsafe(context: Context, staging: DraftGenerationDirectory, generationId: String): DraftGenerationDirectory? =
+        withContext(ioDispatcher) { finalizeDraftGeneration(context, staging, generationId) }
+
+    internal suspend fun deleteAllExceptUnsafe(context: Context, keepDirectory: File?, extraPreserveGenerationId: String? = null) {
+        withContext(ioDispatcher) {
+            deleteAllDraftGenerationsExcept(context, keepDirectory, extraPreserveGenerationId)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Generation write path — protected by [globalStorageLock]
     // -----------------------------------------------------------------------
 
     suspend fun newStagingGeneration(context: Context): DraftGenerationDirectory? =
-        withContext(ioDispatcher) {
-            runCatching { newDraftGenerationDirectory(context) }.getOrNull()
+        globalStorageLock.withLock {
+            withContext(ioDispatcher) {
+                runCatching { newDraftGenerationDirectory(context) }.getOrNull()
+            }
         }
 
     suspend fun finalizeGeneration(
@@ -79,17 +143,37 @@ internal object DraftStorageCoordinator {
         }
 
     // -----------------------------------------------------------------------
-    // Destructive cleanup
+    // Destructive cleanup — protected by [globalStorageLock]
     // -----------------------------------------------------------------------
 
     suspend fun deleteAllExcept(
         context: Context,
         keepDirectory: File?,
+        extraPreserveGenerationId: String? = null,
     ) {
         globalStorageLock.withLock {
-            val actualPointer = readCurrentPointerUnsafe(context)
+            val actualPointer = currentDraftGenerationId(context)
             withContext(ioDispatcher) {
-                deleteAllDraftGenerationsExcept(context, keepDirectory, actualPointer)
+                val preserveIds = mutableSetOf<String>()
+                keepDirectory?.let { file ->
+                    runCatching { file.canonicalFile }.getOrNull()?.name?.let { preserveIds.add(it) }
+                }
+                actualPointer?.let { preserveIds.add(it) }
+                extraPreserveGenerationId?.let { preserveIds.add(it) }
+                // Custom conservative deletion: never delete the actual current pointer
+                val root = runCatching { draftGenerationsRoot(context).canonicalFile }.getOrNull()
+                val kept = keepDirectory?.let { runCatching { it.canonicalFile }.getOrNull() }
+                root?.listFiles()?.forEach { dir ->
+                    val contained = runCatching { dir.canonicalFile }.getOrNull()
+                    if (contained == null || contained.parentFile != root || !contained.isDirectory) return@forEach
+                    if (contained == kept) return@forEach
+                    val dirName = contained.name
+                    if (!preserveIds.contains(dirName) &&
+                        (dirName.startsWith(DRAFT_GENERATION_DIR_PREFIX) || dirName.startsWith(DRAFT_GENERATION_STAGING_PREFIX))
+                    ) {
+                        deleteDraftDirectory(context, DraftGenerationDirectory(contained))
+                    }
+                }
             }
         }
     }
@@ -102,12 +186,12 @@ internal object DraftStorageCoordinator {
 
     suspend fun rollbackCommittedDraft(context: Context, saved: DraftSaveResult) {
         globalStorageLock.withLock {
-            withContext(ioDispatcher) { rollbackCommittedDraft(context, saved) }
+            rollbackCommittedDraftUnsafe(context, saved)
         }
     }
 
     // -----------------------------------------------------------------------
-    // Blocking sync wrappers — safe for pre-viewModel init reads
+    // Blocking sync wrappers — safe ONLY for pre-viewModel init reads
     // -----------------------------------------------------------------------
 
     fun readCurrentPointerBlocking(context: Context): String? =
@@ -117,7 +201,7 @@ internal object DraftStorageCoordinator {
         runCatching { findCurrentDraftGenerationDirectory(context) }.getOrNull()
 
     // -----------------------------------------------------------------------
-    // Internal — locked pointer snapshot without outer reentrancy
+    // Storage transaction helpers
     // -----------------------------------------------------------------------
 
     internal suspend fun <T> withWriteLock(block: suspend () -> T): T =
@@ -126,22 +210,11 @@ internal object DraftStorageCoordinator {
     internal suspend fun <T> withReadLock(block: suspend () -> T): T =
         globalStorageLock.withLock { block() }
 
-    private fun readCurrentPointerUnsafe(context: Context): String? =
-        runCatching { currentDraftGenerationId(context) }.getOrNull()
-
     // -----------------------------------------------------------------------
-    // Coordinator lifecycle — App scope owns init/teardown via [resetForTest]
+    // Coordinator lifecycle
     // -----------------------------------------------------------------------
-
-    @Volatile
-    private var initialized = false
-
-    fun install(context: Context) {
-        if (initialized) return
-        initialized = true
-    }
 
     fun resetForTest() {
-        initialized = false
+        // No-op: the coordinator owns no mutable state beyond the mutex.
     }
 }
