@@ -44,13 +44,26 @@ class DraftRestoreProductionTest {
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_sources"))
+        RestoredWorkingSourceOwnership.clearForTest()
         clearCurrentDraftGenerationPointer(context)
         deleteDirectoryIfPresent(draftGenerationsRoot(context))
     }
 
     @After
     fun cleanDraftAfter() {
-        harness.close()
+        var failure: Throwable? = null
+        try {
+            harness.close()
+            assertEquals("restore working-source ownership must settle", 0, RestoredWorkingSourceOwnership.restoreOwnedCountForTest())
+            assertEquals("document working-source ownership must settle", 0, RestoredWorkingSourceOwnership.documentOwnedCountForTest())
+        } catch (t: Throwable) {
+            failure = t
+        }
+        // Test isolation is deliberately last: production ownership is checked
+        // before the emergency registry reset can hide a leak.
+        RestoredWorkingSourceOwnership.clearForTest()
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_sources"))
         context
             .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
             .edit()
@@ -60,6 +73,7 @@ class DraftRestoreProductionTest {
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
         clearCurrentDraftGenerationPointer(context)
         deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        failure?.let { throw it }
     }
 
     // Test 1: a saved draft generation is actually restored into a fresh
@@ -630,6 +644,9 @@ class DraftRestoreProductionTest {
         val nativeReleases = AtomicInteger()
         var clearObserverScope: CoroutineScope? = null
         var clearObserver: kotlinx.coroutines.Job? = null
+        val clearMaintenanceReached = CompletableDeferred<Unit>()
+        val clearMaintenanceRelease = CompletableDeferred<Unit>()
+        var clearSeam: AutoCloseable? = null
         try {
             awaitReady(vm1)
             vm1.markParamsSuccessfullyRendered(vm1.uiState.value.params)
@@ -640,13 +657,29 @@ class DraftRestoreProductionTest {
                     releaser = { handle -> if (handle == 7301L) nativeReleases.incrementAndGet() },
                 )
             val vm2 = harness.createEditor()
+            clearSeam =
+                harness.ownSeam(
+                    ClearDraftTestSeam.install(
+                        ClearDraftTestSeam {
+                            clearMaintenanceReached.complete(Unit)
+                            clearMaintenanceRelease.await()
+                        }
+                    )
+                )
             awaitEditorCompletionForTest(
                 description = "restore must reach source decode before clear",
                 completion = reached,
                 pumpMain = ::drainReadyMain,
             )
             vm2.clearDraft()
-            val clearMaintenanceMessage = vm2.uiState.value.message
+            awaitEditorCompletionForTest(
+                description = "clearDraft maintenance publication must be visible",
+                completion = clearMaintenanceReached,
+                pumpMain = ::drainReadyMain,
+            )
+            val clearMaintenanceMessage = "임시 저장을 삭제하는 중입니다"
+            assertTrue(vm2.uiState.value.maintenanceBusy)
+            assertEquals(clearMaintenanceMessage, vm2.uiState.value.message)
             val clearDone = CompletableDeferred<Unit>()
             clearObserverScope = CoroutineScope(Dispatchers.Default)
             clearObserver = clearObserverScope!!.launch {
@@ -654,6 +687,12 @@ class DraftRestoreProductionTest {
                 clearDone.complete(Unit)
             }
             release.complete(Unit)
+            // Keep the maintenance owner active while the cancelled restore
+            // publishes its terminal settlement.
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertTrue(vm2.uiState.value.maintenanceBusy)
+            assertEquals(clearMaintenanceMessage, vm2.uiState.value.message)
+            clearMaintenanceRelease.complete(Unit)
             awaitEditorCompletionForTest(
                 description = "clearDraft must settle",
                 completion = clearDone,
@@ -666,15 +705,11 @@ class DraftRestoreProductionTest {
             assertEquals("clearDraft releases the unadopted restore session once", 1, nativeReleases.get())
             assertFalse("clearDraft settles restore busy state", vm2.uiState.value.isBusy)
             assertFalse("clearDraft leaves maintenance idle", vm2.uiState.value.maintenanceBusy)
-            assertTrue("clearDraft publishes a final message", vm2.uiState.value.message != null)
-            assertFalse(
-                "late restore settlement cannot restore its loading message",
-                vm2.uiState.value.message == "임시저장된 편집을 불러오는 중입니다",
+            assertEquals(
+                "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다",
+                vm2.uiState.value.message,
             )
-            assertTrue(
-                "clearDraft message survives while maintenance is active",
-                clearMaintenanceMessage != null,
-            )
+            assertFalse("late restore settlement cannot restore its loading message", vm2.uiState.value.message == "임시저장된 편집을 불러오는 중입니다")
             assertNull("clearDraft leaves no memory recovery request", vm2.uiState.value.memoryRecoveryRequest)
             assertNull("clearDraft leaves no automatic restore retry", vm2.automaticRetryAttemptForTest())
             assertNull("clearDraft leaves no strong restore retry", vm2.strongRetryAttemptForTest())
@@ -685,7 +720,9 @@ class DraftRestoreProductionTest {
             )
         } finally {
             release.complete(Unit)
+            clearMaintenanceRelease.complete(Unit)
             restoreHandle.close()
+            clearSeam?.close()
             sessionFactory?.close()
             clearObserver?.cancel()
             clearObserverScope?.cancel()
@@ -953,7 +990,7 @@ class DraftRestoreProductionTest {
                 pumpMain = ::drainReadyMain,
             )
             assertFalse("startup history remains pending", vm2.startupInitCompletion.isCompleted)
-            awaitReady(vm2)
+            awaitEditorActionAdmissionForTest(vm2)
             assertEquals("OpenImage is admitted while startup history is parked", EditorViewModel.EditorActionAdmission.Ready, vm2.editorActionAdmissionForTest())
             observer = CoroutineScope(Dispatchers.Default).launch {
                 vm2.uiState.first { it.previewBitmap === opened }
@@ -1990,6 +2027,11 @@ class DraftRestoreProductionTest {
                 parentFile?.mkdirs()
                 writeBytes(byteArrayOf(4, 5, 6))
             }
+            val workingSourcesBeforeRetry =
+                context.filesDir.resolve("editor_sources").listFiles().orEmpty()
+                    .filter { RestoredWorkingSourceOwnership.isOwnedName(it.name) }
+                    .map { it.canonicalPath }
+                    .toSet()
             restoreHandle = harness.ownSeam(DraftRestoreTestSeam.install(restoreSeam))
             recoveryHandle = harness.ownSeam(MemoryRecoveryTestSeam.install(recoverySeam))
             sessionFactory = installNativeSessionFactoryForTest { 7902L }
@@ -2016,8 +2058,11 @@ class DraftRestoreProductionTest {
             )
             val workingRoot = context.filesDir.resolve("editor_sources")
             val retrySources =
-                workingRoot.listFiles().orEmpty().filter { RestoredWorkingSourceOwnership.isOwnedName(it.name) }
-            assertEquals("one live retry working source exists", 1, retrySources.size)
+                workingRoot.listFiles().orEmpty().filter {
+                    RestoredWorkingSourceOwnership.isOwnedName(it.name) &&
+                        it.canonicalPath !in workingSourcesBeforeRetry
+                }
+            assertEquals("one newly-created live retry working source exists", 1, retrySources.size)
             val retrySource = retrySources.single()
             assertTrue("retry source is live-owned before adoption", RestoredWorkingSourceOwnership.isRestoreOwnedForTest(retrySource))
 
@@ -2182,6 +2227,11 @@ class DraftRestoreProductionTest {
             assertEquals("exact retry leaves unrelated pointer untouched", generationA, currentDraftGenerationId(context))
             assertEquals("invalid exact retry clears automatic attempt", null, vm2.automaticRetryAttemptForTest())
             assertEquals("invalid exact retry clears strong attempt", null, vm2.strongRetryAttemptForTest())
+            assertEquals(
+                "invalid exact retry reports an invalid target",
+                "임시저장 복구 데이터가 유효하지 않아 복구를 중단했습니다.",
+                vm2.uiState.value.message,
+            )
             assertFalse("invalid exact retry does not claim another retry", vm2.uiState.value.message?.contains("다시 시도") == true)
         } finally {
             recoverySeam.automaticRelease.complete(Unit)
@@ -2461,6 +2511,11 @@ class DraftRestoreProductionTest {
             assertTrue("A was the exact retry target", generationA.isNotEmpty())
             assertEquals("absent exact retry clears automatic attempt", null, vm2.automaticRetryAttemptForTest())
             assertEquals("absent exact retry clears strong attempt", null, vm2.strongRetryAttemptForTest())
+            assertEquals(
+                "absent exact retry reports a superseded target",
+                "임시저장 복구 대상이 변경되어 복구 시도를 중단했습니다.",
+                vm2.uiState.value.message,
+            )
             assertFalse("absent exact retry does not claim another retry", vm2.uiState.value.message?.contains("다시 시도") == true)
         } finally {
             recoverySeam.automaticRelease.complete(Unit)
@@ -2538,6 +2593,11 @@ class DraftRestoreProductionTest {
             assertEquals("generation B remains authoritative", generationB, currentDraftGenerationId(context))
             assertEquals("stale legacy retry clears automatic attempt", null, legacyRetryVm.automaticRetryAttemptForTest())
             assertEquals("stale legacy retry clears strong attempt", null, legacyRetryVm.strongRetryAttemptForTest())
+            assertEquals(
+                "stale legacy retry reports a superseded target",
+                "임시저장 복구 대상이 변경되어 복구 시도를 중단했습니다.",
+                legacyRetryVm.uiState.value.message,
+            )
             assertFalse("stale legacy retry does not claim another retry", legacyRetryVm.uiState.value.message?.contains("다시 시도") == true)
             val independent = harness.createEditor()
             awaitInit(independent)
@@ -2847,27 +2907,12 @@ class DraftRestoreProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        val ready = CompletableDeferred<Unit>()
-        val observerScope = CoroutineScope(Dispatchers.Default)
-        val observer =
-            observerScope.launch {
-                vm.uiState.first { !it.isBusy && !it.historyBusy }
-                ready.complete(Unit)
-            }
-        try {
-            awaitEditorCompletionForTest(
-                description = "editor must become ready",
-                completion = ready,
-                pumpMain = ::drainReadyMain,
-            )
-        } finally {
-            observer.cancel()
-            observerScope.cancel()
-        }
-        assertTrue(
-            "editor must become ready: admission=${vm.editorActionAdmissionForTest()} " +
-                "historyBusy=${vm.historyActivityBusyForTest()}",
-            vm.canEnterEditorAction(),
+        awaitEditorReadyForTest(
+            vm,
+            diagnostic = {
+                "busy=${vm.uiState.value.isBusy} historyBusy=${vm.uiState.value.historyBusy} " +
+                    "admission=${vm.editorActionAdmissionForTest()}"
+            },
         )
     }
 

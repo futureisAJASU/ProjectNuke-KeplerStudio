@@ -84,6 +84,14 @@ internal object RestoredWorkingSourceOwnership {
         canonical(path) in documentPaths
     }
 
+    internal fun restoreOwnedCountForTest(): Int = synchronized(lock) { restorePaths.size }
+
+    internal fun documentOwnedCountForTest(): Int = synchronized(lock) { documentPaths.size }
+
+    internal fun snapshotForTest(): Set<String> = synchronized(lock) {
+        (restorePaths + documentPaths).toSet()
+    }
+
     internal fun clearForTest() = synchronized(lock) {
         restorePaths.clear()
         documentPaths.clear()

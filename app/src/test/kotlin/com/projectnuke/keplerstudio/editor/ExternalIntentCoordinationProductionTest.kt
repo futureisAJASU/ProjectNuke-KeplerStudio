@@ -489,13 +489,7 @@ class ExternalIntentCoordinationProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(400) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
-            if (vm.canEnterEditorActionPure()) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue(vm.canEnterEditorActionPure())
+        awaitEditorReadyForTest(vm)
     }
 
     private fun awaitInit(vm: EditorViewModel) {

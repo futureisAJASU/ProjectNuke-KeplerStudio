@@ -600,7 +600,7 @@ class MemoryRecoveryOwnershipProductionTest {
     private var nativeReleases: Int = 0
 
     private fun openDocument(editor: EditorViewModel, color: Int, session: Long) {
-        awaitEvent { editor.startupInitCompletion.isCompleted && editor.canEnterEditorActionPure() }
+        awaitEditorReadyForTest(editor)
         val seam =
             OpenImageTestSeam(
                 sourceTransactionFactory = { app, _ ->
@@ -618,8 +618,7 @@ class MemoryRecoveryOwnershipProductionTest {
         awaitEvent("open image starts") { editor.openImageJobActiveForTest() }
         awaitEvent("open image settles") {
             !editor.openImageJobActiveForTest() &&
-                !editor.uiState.value.isBusy &&
-                !editor.uiState.value.historyBusy
+                editor.canEnterEditorActionPure()
         }
         handle.close()
     }

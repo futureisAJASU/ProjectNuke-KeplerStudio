@@ -672,22 +672,22 @@ class ExternalIntentSupersessionProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        repeat(200) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
-            if (vm.canEnterEditorAction()) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-        }
-        assertTrue(vm.canEnterEditorAction())
+        awaitEditorReadyForTest(vm)
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(2000) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (vm.startupInitCompletion.isCompleted) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
+        awaitEditorCompletionForTest(
+            description = "startup init must complete",
+            completion = vm.startupInitCompletion,
+            pumpMain = {
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+            },
+            diagnostic = {
+                "busy=${vm.uiState.value.isBusy} historyBusy=${vm.uiState.value.historyBusy} " +
+                    "admission=${vm.editorActionAdmissionForTest()}"
+            },
+        )
     }
 
     private fun awaitEvent(vm: EditorViewModel, advanceVirtualTime: Boolean = true, predicate: () -> Boolean) {

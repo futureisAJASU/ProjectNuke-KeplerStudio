@@ -223,30 +223,7 @@ class EditorHistoryStorageProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        val ready = CompletableDeferred<Unit>()
-        val observerScope = CoroutineScope(Dispatchers.Default)
-        fun completeIfReady() {
-            if (vm.startupInitCompletion.isCompleted && vm.canEnterEditorAction()) {
-                ready.complete(Unit)
-            }
-        }
-        val observer =
-            observerScope.launch {
-                vm.startupInitCompletion.invokeOnCompletion { completeIfReady() }
-                vm.uiState.collect { completeIfReady() }
-            }
-        try {
-            awaitEditorCompletionForTest(
-                description = "editor must become ready",
-                completion = ready,
-                pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
-                timeoutMillis = 15_000L,
-            )
-        } finally {
-            observer.cancel()
-            observerScope.cancel()
-        }
-        assertTrue(vm.canEnterEditorAction())
+        awaitEditorReadyForTest(vm)
     }
 
     private fun persistDraftForTest(vm: EditorViewModel): Boolean {

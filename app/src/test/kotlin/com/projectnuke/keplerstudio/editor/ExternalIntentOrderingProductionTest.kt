@@ -403,8 +403,7 @@ class ExternalIntentOrderingProductionTest {
     }
 
     private fun awaitReady(vm: EditorViewModel) {
-        awaitState("editor must become ready", vm) { !it.isBusy && !it.historyBusy }
-        assertTrue("editor action admission must be ready", vm.canEnterEditorAction())
+        awaitEditorReadyForTest(vm) { editorDiagnostic(vm) }
     }
 
     private fun awaitInit(vm: EditorViewModel) {

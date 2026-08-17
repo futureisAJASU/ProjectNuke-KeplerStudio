@@ -341,7 +341,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal val savedExportHistoryRevisionForTest: Long
         get() = savedExportHistoryStore.revision
 
-    /** Completes after engine setup, Draft restore/supersession, history, and reconciliation settle. */
+    /**
+     * Completes when the startup coordinator's own phases settle: the initial
+     * Draft restore/supersession, saved-export history load, and startup
+     * reconciliation. A later automatic RestoreDraft memory retry is a
+     * replaceable child operation and may outlive this signal; interactive
+     * readiness is instead [canEnterEditorActionPure].
+     */
     internal val startupInitCompletion = CompletableDeferred<Unit>()
 
     private val savedExportHistoryMutex = Mutex()
@@ -1463,26 +1469,42 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             closeUserMemoryRecoveryOwner(owner, clearUi = true, clearAttempts = true)
         }
         if (outcome == DraftRestoreRetryOutcome.Restored) return
-        val ownsRestoreBusyPublication =
-            restoreBusyPublication?.retryOwner === owner &&
+        val publication = restoreBusyPublication
+        if (
+            publication != null &&
+                publication.retryOwner === owner &&
                 isDocumentIdentityCurrent(owner.descriptor)
-        if (ownsRestoreBusyPublication) {
+        ) {
             restoreBusyPublication = null
             updateUiStateAndRecycleReplaced { current ->
+                val ownsMessage = current.message == publication.message
                 if (
                     current.memoryRecoveryRequest?.token == owner.descriptor.token ||
-                        current.memoryRecoveryRequest == null
+                        (current.memoryRecoveryRequest == null && ownsMessage)
                 ) {
                     current.copy(
                         memoryRecoveryRequest = null,
-                        isBusy = false,
-                        message =
-                            "Draft 복구 대상이 변경되어 해당 복구 시도를 중단했습니다.",
+                        isBusy = if (ownsMessage) false else current.isBusy,
+                        message = if (ownsMessage) draftRestoreRetryTerminalMessage(outcome) else current.message,
                     )
                 } else current
             }
         }
     }
+
+    private fun draftRestoreRetryTerminalMessage(outcome: DraftRestoreRetryOutcome): String? =
+        when (outcome) {
+            DraftRestoreRetryOutcome.Stale ->
+                "임시저장 복구 대상이 변경되어 복구 시도를 중단했습니다."
+            DraftRestoreRetryOutcome.ExactTargetMissing ->
+                "임시저장 복구 데이터를 찾을 수 없어 복구를 중단했습니다."
+            DraftRestoreRetryOutcome.ExactTargetInvalid ->
+                "임시저장 복구 데이터가 유효하지 않아 복구를 중단했습니다."
+            DraftRestoreRetryOutcome.Cancelled -> null
+            DraftRestoreRetryOutcome.Restored,
+            DraftRestoreRetryOutcome.MemoryRejected,
+            -> null
+        }
 
     private fun invalidateMemoryRecoveryForDocumentReplacement() {
         userMemoryRecoveryOwner?.let { owner ->
@@ -6856,6 +6878,7 @@ fun exportPreview() {
         val clearEpoch = draftOperationEpoch
         viewModelScope.launch {
             try {
+                ClearDraftTestSeam.capture()?.beforeStorageClear?.invoke()
                 draftSaveJob?.cancelAndJoin()
                 val cleared =
                     withContext(Dispatchers.IO) {
@@ -11777,7 +11800,7 @@ private fun copyGenerationSourceToWorkingFile(context: Context, source: File): F
         return destination
     } catch (t: Throwable) {
         RestoredWorkingSourceOwnership.releaseRestore(destination)
-        destination.delete()
+        RestoredWorkingSourceOwnership.deleteIfUnowned(destination)
         throw t
     }
 }

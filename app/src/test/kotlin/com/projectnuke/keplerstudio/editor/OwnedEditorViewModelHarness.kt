@@ -5,9 +5,14 @@ import androidx.lifecycle.ViewModelStore
 import com.projectnuke.keplerstudio.ui.RemasterModelSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
+import kotlinx.coroutines.flow.collect
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.CountDownLatch
@@ -67,6 +72,85 @@ internal fun awaitEditorCompletionForTest(
         }
     } finally {
         completionHandle.dispose()
+    }
+}
+
+/**
+ * Waits for the actual interactive-action contract, not merely a quiet
+ * `isBusy` flag. Startup completion is coordinator-scoped; admission also
+ * accounts for history and other production-owned activity.
+ */
+internal fun awaitEditorReadyForTest(
+    vm: EditorViewModel,
+    timeoutMillis: Long = 15_000L,
+    diagnostic: () -> String = {
+        "busy=${vm.uiState.value.isBusy} historyBusy=${vm.uiState.value.historyBusy} " +
+            "admission=${vm.editorActionAdmissionForTest()}"
+    },
+) {
+    val ready = CompletableDeferred<Unit>()
+    val observerScope = CoroutineScope(Dispatchers.Default)
+    fun completeIfReady() {
+        if (vm.startupInitCompletion.isCompleted && vm.canEnterEditorActionPure()) {
+            ready.complete(Unit)
+        }
+    }
+    val startupObserver = observerScope.launch {
+        vm.startupInitCompletion.invokeOnCompletion { completeIfReady() }
+        completeIfReady()
+    }
+    val stateObserver = observerScope.launch {
+        vm.uiState.collect { completeIfReady() }
+    }
+    try {
+        awaitEditorCompletionForTest(
+            description = "editor must become action-ready",
+            completion = ready,
+            timeoutMillis = timeoutMillis,
+            pumpMain = {
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+                completeIfReady()
+            },
+            diagnostic = diagnostic,
+        )
+    } finally {
+        startupObserver.cancel()
+        stateObserver.cancel()
+        observerScope.cancel()
+    }
+    check(vm.canEnterEditorActionPure()) { diagnostic() }
+}
+
+/** Specialized pre-startup wait for tests that intentionally exercise an
+ * action while the startup coordinator is parked. */
+internal fun awaitEditorActionAdmissionForTest(
+    vm: EditorViewModel,
+    timeoutMillis: Long = 15_000L,
+    diagnostic: () -> String = {
+        "busy=${vm.uiState.value.isBusy} historyBusy=${vm.uiState.value.historyBusy} " +
+            "admission=${vm.editorActionAdmissionForTest()}"
+    },
+) {
+    val ready = CompletableDeferred<Unit>()
+    val scope = CoroutineScope(Dispatchers.Default)
+    fun completeIfReady() {
+        if (vm.canEnterEditorActionPure()) ready.complete(Unit)
+    }
+    val observer = scope.launch { vm.uiState.collect { completeIfReady() } }
+    try {
+        awaitEditorCompletionForTest(
+            description = "editor action admission must become ready",
+            completion = ready,
+            timeoutMillis = timeoutMillis,
+            pumpMain = {
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+                completeIfReady()
+            },
+            diagnostic = diagnostic,
+        )
+    } finally {
+        observer.cancel()
+        scope.cancel()
     }
 }
 
@@ -171,6 +255,8 @@ internal class OwnedEditorViewModelHarness(
             runCatching { check(DraftSaveTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(DraftRestoreTestSeam.installedForTestCount() == 0) }
+                .onFailure { failure = failure ?: it }
+            runCatching { check(ClearDraftTestSeam.installedForTest() == 0) }
                 .onFailure { failure = failure ?: it }
             runCatching { check(StartupInitializationTestSeam.installedForTestCount() == 0) }
                 .onFailure { failure = failure ?: it }
