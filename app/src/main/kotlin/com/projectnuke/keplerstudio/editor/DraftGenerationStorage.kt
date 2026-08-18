@@ -35,7 +35,7 @@ internal fun draftGenerationsRoot(context: Context): File =
 
 internal fun newDraftGenerationDirectory(context: Context): DraftGenerationDirectory {
     val root = draftGenerationsRoot(context)
-    val genDir = File(root, "$DRAFT_GENERATION_STAGING_PREFIX${UUID.randomUUID()}")
+    val genDir = File(root, "$EditorViewModel.DRAFT_GENERATION_STAGING_PREFIX${UUID.randomUUID()}")
     genDir.mkdirs()
     return DraftGenerationDirectory(genDir)
 }
@@ -43,7 +43,7 @@ internal fun newDraftGenerationDirectory(context: Context): DraftGenerationDirec
 internal fun finalizeDraftGeneration(context: Context, staging: DraftGenerationDirectory, generationId: String): DraftGenerationDirectory? {
     val root = draftGenerationsRoot(context).canonicalFile
     val source = runCatching { staging.root.canonicalFile }.getOrNull() ?: return null
-    val target = runCatching { File(root, "$DRAFT_GENERATION_DIR_PREFIX$generationId").canonicalFile }.getOrNull() ?: return null
+    val target = runCatching { File(root, "$EditorViewModel.DRAFT_GENERATION_DIR_PREFIX$generationId").canonicalFile }.getOrNull() ?: return null
     if (source.parentFile != root || target.parentFile != root || !staging.completionFile.isFile || target.exists()) return null
     return if (source.renameTo(target)) DraftGenerationDirectory(target) else null
 }
@@ -96,7 +96,7 @@ internal fun writeDraftGeneration(
         val thumbnail = if (thumbnailWidth == editedPreviewCopy.width && thumbnailHeight == editedPreviewCopy.height) {
             editedPreviewCopy
         } else {
-            createScaledBitmapOrThrow(editedPreviewCopy, thumbnailWidth, thumbnailHeight, true)
+            EditorViewModel.createScaledBitmapOrThrow(editedPreviewCopy, thumbnailWidth, thumbnailHeight, true)
         }
         val tempThumb = File(genDir.root, "thumbnail.${UUID.randomUUID()}.tmp")
         try {
@@ -144,18 +144,18 @@ internal fun deleteDraftDirectory(context: Context, directory: DraftGenerationDi
     if (target.parentFile != root) return
     target.listFiles()?.forEach { file ->
         val deleted = file.delete()
-        if (!deleted) Log.w(FLARE_GUARD_AI_TAG, "Failed to delete draft generation file: ${file.absolutePath}")
+        if (!deleted) Log.w(EditorViewModel.FLARE_GUARD_AI_TAG, "Failed to delete draft generation file: ${file.absolutePath}")
     }
     val deleted = target.delete()
-    if (!deleted) Log.w(FLARE_GUARD_AI_TAG, "Failed to delete draft generation directory: ${target.absolutePath}")
+    if (!deleted) Log.w(EditorViewModel.FLARE_GUARD_AI_TAG, "Failed to delete draft generation directory: ${target.absolutePath}")
 }
 
 internal fun publishDraftGeneration(context: Context, generationId: String): Boolean {
     val root = draftGenerationsRoot(context).canonicalFile
     val candidate = File(root, generationId).canonicalFile
     if (candidate.parentFile != root || !candidate.isDirectory || !DraftGenerationDirectory(candidate).completionFile.isFile) return false
-    val prefs = context.getSharedPreferences(PREF_NAME_DRAFT, Context.MODE_PRIVATE)
-    return prefs.edit().putString(KEY_DRAFT_GENERATION_ID, generationId).commit()
+    val prefs = context.getSharedPreferences(EditorViewModel.PREF_NAME_DRAFT, Context.MODE_PRIVATE)
+    return prefs.edit().putString(EditorViewModel.KEY_DRAFT_GENERATION_ID, generationId).commit()
 }
 
 /**
@@ -176,8 +176,8 @@ internal fun safeDraftPreferenceLong(
 
 internal fun currentDraftGenerationId(context: Context): String? =
     safeDraftPreferenceString(
-        context.getSharedPreferences(PREF_NAME_DRAFT, Context.MODE_PRIVATE),
-        KEY_DRAFT_GENERATION_ID,
+        context.getSharedPreferences(EditorViewModel.PREF_NAME_DRAFT, Context.MODE_PRIVATE),
+        EditorViewModel.KEY_DRAFT_GENERATION_ID,
     )
 
 internal fun readCurrentDraftGenerationId(context: Context): String? = currentDraftGenerationId(context)
@@ -199,8 +199,8 @@ internal fun deleteAllDraftGenerationsExcept(
         if (contained?.parentFile == root && contained.isDirectory &&
             contained != kept &&
             !preserveIds.contains(contained.name) &&
-            (contained.name.startsWith(DRAFT_GENERATION_DIR_PREFIX) ||
-                contained.name.startsWith(DRAFT_GENERATION_STAGING_PREFIX))
+            (contained.name.startsWith(EditorViewModel.DRAFT_GENERATION_DIR_PREFIX) ||
+                contained.name.startsWith(EditorViewModel.DRAFT_GENERATION_STAGING_PREFIX))
         ) {
             deleteDraftDirectory(context, DraftGenerationDirectory(contained))
         }
@@ -208,8 +208,8 @@ internal fun deleteAllDraftGenerationsExcept(
 }
 
 internal fun clearCurrentDraftGenerationPointer(context: Context): Boolean =
-    context.getSharedPreferences(PREF_NAME_DRAFT, Context.MODE_PRIVATE)
-        .edit().remove(KEY_DRAFT_GENERATION_ID).commit()
+    context.getSharedPreferences(EditorViewModel.PREF_NAME_DRAFT, Context.MODE_PRIVATE)
+        .edit().remove(EditorViewModel.KEY_DRAFT_GENERATION_ID).commit()
 
 internal fun findCurrentDraftGenerationDirectory(context: Context): DraftGenerationDirectory? {
     val id = currentDraftGenerationId(context) ?: return null
@@ -220,7 +220,7 @@ internal fun findCurrentDraftGenerationDirectory(context: Context): DraftGenerat
 }
 
 internal fun findDraftGenerationDirectory(context: Context, generationId: String): DraftGenerationDirectory? {
-    if (!generationId.startsWith(DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(generationId)) return null
+    if (!generationId.startsWith(EditorViewModel.DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(generationId)) return null
     val root = draftGenerationsRoot(context).canonicalFile
     val dir = runCatching { File(root, generationId).canonicalFile }.getOrNull() ?: return null
     if (dir.parentFile != root || !dir.isDirectory) return null
@@ -229,7 +229,7 @@ internal fun findDraftGenerationDirectory(context: Context, generationId: String
 }
 
 internal fun deleteDraftGenerationById(context: Context, generationId: String) {
-    if (!generationId.startsWith(DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(generationId)) return
+    if (!generationId.startsWith(EditorViewModel.DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(generationId)) return
     val root = draftGenerationsRoot(context).canonicalFile
     val directory = runCatching { File(root, generationId).canonicalFile }.getOrNull() ?: return
     if (directory.parentFile == root && directory.isDirectory && currentDraftGenerationId(context) != generationId) {
@@ -239,9 +239,9 @@ internal fun deleteDraftGenerationById(context: Context, generationId: String) {
 
 internal fun validateCurrentDraftGeneration(context: Context): ValidatedDraftGeneration? {
     val pointer = currentDraftGenerationId(context) ?: return null
-    if (!pointer.startsWith(DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(pointer)) return null
+    if (!pointer.startsWith(EditorViewModel.DRAFT_GENERATION_DIR_PREFIX) || !isSafeDraftBasename(pointer)) return null
     val directory = findCurrentDraftGenerationDirectory(context) ?: return null
-    return validateDraftGeneration(directory, pointer.removePrefix(DRAFT_GENERATION_DIR_PREFIX))
+    return validateDraftGeneration(directory, pointer.removePrefix(EditorViewModel.DRAFT_GENERATION_DIR_PREFIX))
 }
 
 internal fun validateDraftGeneration(directory: DraftGenerationDirectory, expectedId: String): ValidatedDraftGeneration? = runCatching {
@@ -293,7 +293,7 @@ internal fun deleteAllDraftGenerationsExcept(context: Context, keep: File?) {
     root.listFiles()?.forEach { dir ->
         val contained = runCatching { dir.canonicalFile }.getOrNull()
         if (contained?.parentFile == root && contained.isDirectory && contained != kept &&
-            (contained.name.startsWith(DRAFT_GENERATION_DIR_PREFIX) || contained.name.startsWith(DRAFT_GENERATION_STAGING_PREFIX))) {
+            (contained.name.startsWith(EditorViewModel.DRAFT_GENERATION_DIR_PREFIX) || contained.name.startsWith(EditorViewModel.DRAFT_GENERATION_STAGING_PREFIX))) {
             deleteDraftDirectory(context, DraftGenerationDirectory(contained))
         }
     }

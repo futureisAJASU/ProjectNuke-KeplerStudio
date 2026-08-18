@@ -149,7 +149,7 @@ internal object DraftStorageCoordinator {
             if (file.name.endsWith(".tmp")) {
                 val deleted = file.delete()
                 if (!deleted) {
-                    logDraftSaveFailure(
+                    EditorViewModel.logDraftSaveFailure(
                         IllegalStateException("failed to delete temp file: ${file.absolutePath}")
                     )
                     overallSuccess = false
@@ -157,8 +157,8 @@ internal object DraftStorageCoordinator {
                 continue
             }
 
-            val matchesLegacySource = canonical != null && prevPrefs[KEY_DRAFT_SOURCE] as? String != null &&
-                runCatching { File(prevPrefs[KEY_DRAFT_SOURCE] as String).canonicalFile }.getOrNull() == canonical
+            val matchesLegacySource = canonical != null && prevPrefs[EditorViewModel.KEY_DRAFT_SOURCE] as? String != null &&
+                runCatching { File(prevPrefs[EditorViewModel.KEY_DRAFT_SOURCE] as String).canonicalFile }.getOrNull() == canonical
 
             val isOwnedDraft = matchesLegacySource && isOwnedDraftSource(context, file)
 
