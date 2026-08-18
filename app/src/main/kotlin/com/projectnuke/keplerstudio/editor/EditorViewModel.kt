@@ -74,13 +74,13 @@ import kotlinx.coroutines.yield
 import org.json.JSONObject
 
 private const val HISTORY_BUSY_MESSAGE =
-    "편집 기록을 정리하는 중입니다. 잠시 후 다시 시도해 주세요."
+    "?�집 기록???�리?�는 중입?�다. ?�시 ???�시 ?�도??주세??"
 private const val HISTORY_MEMORY_MESSAGE =
-    "메모리가 부족하여 되돌리기 기록을 저장하지 못했습니다. 편집은 계속할 수 있습니다."
+    "메모리�? 부족하???�돌리기 기록???�?�하지 못했?�니?? ?�집?� 계속?????�습?�다."
 private const val HISTORY_STORAGE_FAILURE_MESSAGE =
-    "편집은 적용했지만 되돌리기 기록을 저장소에 저장하지 못했습니다."
+    "?�집?� ?�용?��?�??�돌리기 기록???�?�소???�?�하지 못했?�니??"
 private const val HISTORY_STORAGE_BUDGET_MESSAGE =
-    "편집은 적용했지만 되돌리기 기록 저장 공간이 부족하여 이번 기록을 유지하지 못했습니다."
+    "?�집?� ?�용?��?�??�돌리기 기록 ?�??공간??부족하???�번 기록???��??��? 못했?�니??"
 
 internal class PendingHistorySnapshot(
     private val deferred: CompletableDeferred<EditorHistorySnapshot?>,
@@ -438,7 +438,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /**
      * Deferred history-snapshot capture for the active brush stroke. Off-Main because the
      * full Exact snapshot copies previewBitmap + originalPreviewBitmap + every layer bitmap.
-     * The painter does not need the snapshot — it paints into a separately owned layer bitmap
+     * The painter does not need the snapshot ??it paints into a separately owned layer bitmap
      * installed synchronously in [beginBrushStroke]. The snapshot is only consumed on finish
      * or cancel, which settles asynchronously without blocking Main.
      */
@@ -522,7 +522,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
      * [Rendering] means a render for the latest requested revision is in
      * flight, [Adopted] means the latest adopted revision is retained and no
      * render is in flight. Multiple sequential adoptions in one gesture move
-     * the phase Rendering → Adopted → Rendering → Adopted without ever
+     * the phase Rendering ??Adopted ??Rendering ??Adopted without ever
      * touching the terminal state.
      */
     internal enum class ParamRenderPhase {
@@ -893,7 +893,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val base = start.originalPreviewBitmap ?: start.previewBitmap
         if (base == null) {
             start.close()
-            updateUiState { it.copy(message = "브러시 마스크를 만들 이미지가 없습니다.") }
+            updateUiState { it.copy(message = "브러??마스?��? 만들 ?��?지가 ?�습?�다.") }
             return
         }
         val reservation =
@@ -914,7 +914,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     BitmapMemoryBudget.bytes(base.width, base.height),
                 )
             } else {
-                updateUiState { it.copy(message = "선택 마스크 메모리가 부족합니다.") }
+                updateUiState { it.copy(message = "?�택 마스??메모리�? 부족합?�다.") }
             }
             return
         }
@@ -939,7 +939,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         val layer =
                             SelectionLayer(
                                 id = "sel_" + UUID.randomUUID().toString().take(8),
-                                name = "브러시 마스크 ${live.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
+                                name = "브러??마스??${live.selectionLayers.count { it.kind == SelectionLayerKind.Brush } + 1}",
                                 kind = SelectionLayerKind.Brush,
                                 bitmap = preparedMask,
                             )
@@ -949,7 +949,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 activeSelectionLayerId = layer.id,
                                 revision = it.revision + 1,
                                 isBusy = false,
-                                message = "브러시 마스크를 만들었습니다.",
+                                message = "브러??마스?��? 만들?�습?�다.",
                             )
                         }
                         mask = null
@@ -970,7 +970,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 withContext(Dispatchers.Main) {
                     val live = uiState.value
                     if (live.sourcePath == start.identity.sourcePath && live.baseContentToken == start.identity.baseContentToken) {
-                        updateUiState { it.copy(isBusy = false, message = "브러시 마스크를 만들지 못했습니다.") }
+                        updateUiState { it.copy(isBusy = false, message = "브러??마스?��? 만들지 못했?�니??") }
                         if (allowRecovery && failure is BitmapAllocationRejectedException) {
                             requestAllocationRecovery(MemoryRetryAction.CreateBrushSelection, failure.requiredBytes)
                         }
@@ -1086,7 +1086,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 memoryRecoveryRequest = null,
                 isBusy = false,
-                message = "정리 후에도 현재 작업에 필요한 메모리를 확보하지 못했습니다. 이미지와 적용된 편집은 안전하게 유지됩니다.",
+                message = "?�리 ?�에???�재 ?�업???�요??메모리�? ?�보?��? 못했?�니?? ?��?지?� ?�용???�집?� ?�전?�게 ?��??�니??",
             )
         }
     }
@@ -1109,7 +1109,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 memoryRecoveryRequest =
                     MemoryRecoveryRequest(currentFailure.token, mayMoveOldHistory = true),
                 isBusy = false,
-                message = "현재 작업에 더 많은 메모리가 필요합니다.",
+                message = "?�재 ?�업????많�? 메모리�? ?�요?�니??",
             )
         }
     }
@@ -1397,7 +1397,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     updateRecoveryUiIfOwned(
                         owner,
                         null,
-                        "정리 후에도 현재 작업에 필요한 메모리를 확보하지 못했습니다. 이미지와 적용된 편집은 안전하게 유지됩니다.",
+                        "?�리 ?�에???�재 ?�업???�요??메모리�? ?�보?��? 못했?�니?? ?��?지?� ?�용???�집?� ?�전?�게 ?��??�니??",
                     )
                     closeUserMemoryRecoveryOwner(owner, clearUi = false, clearAttempts = true)
                 } else if (isMemoryRecoveryOwnerCurrent(owner)) {
@@ -1405,7 +1405,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     updateRecoveryUiIfOwned(
                         owner,
                         MemoryRecoveryRequest(owner.descriptor.token, mayMoveOldHistory = true),
-                        "현재 작업에 더 많은 메모리가 필요합니다.",
+                        "?�재 ?�업????많�? 메모리�? ?�요?�니??",
                     )
                 }
             } finally {
@@ -1496,11 +1496,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun draftRestoreRetryTerminalMessage(outcome: DraftRestoreRetryOutcome): String? =
         when (outcome) {
             DraftRestoreRetryOutcome.Stale ->
-                "임시저장 복구 대상이 변경되어 복구 시도를 중단했습니다."
+                "?�시?�??복구 ?�?�이 변경되??복구 ?�도�?중단?�습?�다."
             DraftRestoreRetryOutcome.ExactTargetMissing ->
-                "임시저장 복구 데이터를 찾을 수 없어 복구를 중단했습니다."
+                "?�시?�??복구 ?�이?��? 찾을 ???�어 복구�?중단?�습?�다."
             DraftRestoreRetryOutcome.ExactTargetInvalid ->
-                "임시저장 복구 데이터가 유효하지 않아 복구를 중단했습니다."
+                "?�시?�??복구 ?�이?��? ?�효?��? ?�아 복구�?중단?�습?�다."
             DraftRestoreRetryOutcome.Cancelled -> null
             DraftRestoreRetryOutcome.Restored,
             DraftRestoreRetryOutcome.MemoryRejected,
@@ -1995,7 +1995,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         ) return
         prepareForMaskInteraction()
         if (brushTransactionState != BrushTransactionState.Idle || brushSettlementJob?.isActive == true) {
-            updateUiState { it.copy(message = "브러시 작업이 끝난 뒤 다시 시도해 주세요.") }
+            updateUiState { it.copy(message = "브러???�업???�난 ???�시 ?�도??주세??") }
             return
         }
         if (!canEnterEditorActionAfterSettlement()) return
@@ -2125,9 +2125,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                             renderResult.decision ==
                                                 RenderRouteDecision.RuntimeFallbackToV1
                                         ) {
-                                            "엔진 2 처리에 실패해 이번 결과만 엔진 1로 표시합니다."
+                                            "?�진 2 처리???�패???�번 결과�??�진 1�??�시?�니??"
                                         } else {
-                                            "${engine.displayName} 활성"
+                                            "${engine.displayName} ?�성"
                                         },
                                 )
                             }
@@ -2147,7 +2147,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                             requestedEngine = engine,
                                             result = renderResult,
                                         ),
-                                    message = "엔진 전환에 실패했습니다: ${renderResult.message}",
+                                    message = "?�진 ?�환???�패?�습?�다: ${renderResult.message}",
                                 )
                             }
                         }
@@ -2159,7 +2159,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     isBusy = false,
                                     correctionEngineState =
                                         it.correctionEngineState.copy(pendingEngine = null),
-                                    message = "엔진 전환이 취소되었습니다.",
+                                    message = "?�진 ?�환??취소?�었?�니??",
                                 )
                             }
                         }
@@ -2256,7 +2256,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val selectedEngines = state.engineSelection()
         if (mode == DebugComparisonMode.ProcessingEngines && selectedEngines == referenceEngines) {
             updateUiStateAndRecycleReplaced {
-                it.copy(message = "세부 보정 방식에서 비교할 대체 알고리즘을 먼저 선택해 주세요.")
+                it.copy(message = "?��? 보정 방식?�서 비교???��??�고리즘??먼�? ?�택??주세??")
             }
             return
         }
@@ -2273,7 +2273,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
         if (state.isBusy || state.maintenanceBusy) {
             updateUiStateAndRecycleReplaced {
-                it.copy(message = "현재 작업이 끝난 뒤 비교를 생성해 주세요.")
+                it.copy(message = "?�재 ?�업???�난 ??비교�??�성??주세??")
             }
             return
         }
@@ -2298,9 +2298,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     message =
                         if (editorResolution) {
-                            "편집 해상도 비교에 필요한 메모리를 확보할 수 없습니다."
+                            "?�집 ?�상??비교???�요??메모리�? ?�보?????�습?�다."
                         } else {
-                            "비교 미리보기에 필요한 메모리를 확보할 수 없습니다."
+                            "비교 미리보기???�요??메모리�? ?�보?????�습?�다."
                         }
                 )
             }
@@ -2340,7 +2340,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             ownedLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
             comparisonTracker?.end()
             updateUiStateAndRecycleReplaced {
-                it.copy(message = "비교 입력을 준비하지 못했습니다: ${t.message ?: "메모리 부족"}")
+                it.copy(message = "비교 ?�력??준비하지 못했?�니?? ${t.message ?: "메모�?부�?}")
             }
             return
         }
@@ -2392,9 +2392,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 message =
                     when {
                         mode == DebugComparisonMode.ProcessingEngines ->
-                            "기본·선택 알고리즘 비교 미리보기를 생성하는 중입니다."
-                        editorResolution -> "편집 해상도 비교 준비 중 · V1 단계"
-                        else -> "V1·V2 비교 미리보기를 생성하는 중입니다."
+                            "기본·?�택 ?�고리즘 비교 미리보기�??�성?�는 중입?�다."
+                        editorResolution -> "?�집 ?�상??비교 준�?�?· V1 ?�계"
+                        else -> "V1·V2 비교 미리보기�??�성?�는 중입?�다."
                     },
             )
         }
@@ -2419,11 +2419,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                             message =
                                                 when {
                                                     mode == DebugComparisonMode.ProcessingEngines ->
-                                                        "기본·선택 알고리즘 비교 처리 중 · 선택 단계"
+                                                        "기본·?�택 ?�고리즘 비교 처리 �?· ?�택 ?�계"
                                                     editorResolution ->
-                                                        "편집 해상도 비교 처리 중 · V2 단계"
+                                                        "?�집 ?�상??비교 처리 �?· V2 ?�계"
                                                     else ->
-                                                        "V1·V2 비교 미리보기 처리 중 · V2 단계"
+                                                        "V1·V2 비교 미리보기 처리 �?· V2 ?�계"
                                                 }
                                         )
                                     }
@@ -2533,14 +2533,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 baseProvenance = state.baseProvenance,
                                 algorithmDecision =
                                     if (mode == DebugComparisonMode.ProcessingEngines) {
-                                        "기본 처리 → ${selectedEngines.compactLabel()}"
+                                        "기본 처리 ??${selectedEngines.compactLabel()}"
                                     } else {
-                                        "동일 문서 V1·V2"
+                                        "?�일 문서 V1·V2"
                                     },
                                 baselineLabel =
                                     if (mode == DebugComparisonMode.ProcessingEngines) "기본 처리" else "V1",
                                 experimentalLabel =
-                                    if (mode == DebugComparisonMode.ProcessingEngines) "선택 처리" else "V2",
+                                    if (mode == DebugComparisonMode.ProcessingEngines) "?�택 처리" else "V2",
                                 knownTransientBytes = requiredBytes,
                                 durationMillis = pair.first.durationMillis + pair.second.durationMillis,
                             )
@@ -2562,9 +2562,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 message =
                                     when {
                                         mode == DebugComparisonMode.ProcessingEngines ->
-                                            "기본·선택 알고리즘 비교 미리보기를 생성했습니다."
-                                        editorResolution -> "편집 해상도 V1·V2 비교를 생성했습니다."
-                                        else -> "V1·V2 비교 미리보기를 생성했습니다."
+                                            "기본·?�택 ?�고리즘 비교 미리보기�??�성?�습?�다."
+                                        editorResolution -> "?�집 ?�상??V1·V2 비교�??�성?�습?�다."
+                                        else -> "V1·V2 비교 미리보기�??�성?�습?�다."
                                     },
                             )
                         } else {
@@ -2578,7 +2578,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         updateUiStateAndRecycleReplaced {
                             it.copy(
                                 comparisonBusy = false,
-                                message = "비교 미리보기 생성에 실패했습니다: ${t.message ?: "알 수 없는 오류"}",
+                                message = "비교 미리보기 ?�성???�패?�습?�다: ${t.message ?: "?????�는 ?�류"}",
                             )
                         }
                     }
@@ -2606,7 +2606,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (!BuildConfig.DEBUG || !(_uiState.value.comparisonBusy)) return
         invalidateComparison()
         updateUiStateAndRecycleReplaced {
-            it.copy(message = "V1·V2 비교 생성을 취소했습니다.")
+            it.copy(message = "V1·V2 비교 ?�성??취소?�습?�다.")
         }
     }
 
@@ -2907,7 +2907,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (brushTransactionState == BrushTransactionState.Finishing ||
             brushTransactionState == BrushTransactionState.Cancelling
         ) {
-            updateUiState { it.copy(message = "브러시 작업이 마무리되는 중입니다. 잠시 후 다시 시도해 주세요.") }
+            updateUiState { it.copy(message = "브러???�업??마무리되??중입?�다. ?�시 ???�시 ?�도??주세??") }
             return false
         }
         if (brushTransactionState != BrushTransactionState.Idle) cancelBrushStroke()
@@ -3357,7 +3357,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 restoreSelectionParamTransactionFields(transaction)
                 transaction.snapshot?.let(::recycleHistorySnapshot)
                 transaction.snapshot = null
-                updateUiState { it.copy(message = "실행 취소 기록을 준비하지 못해 선택 편집을 적용하지 않았습니다.") }
+                updateUiState { it.copy(message = "?�행 취소 기록??준비하지 못해 ?�택 ?�집???�용?��? ?�았?�니??") }
                 clearSelectionParamTransaction(transaction)
                 return
             }
@@ -3660,7 +3660,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (producerLease == null) {
             reservation.close()
             leased.close()
-            updateUiState { it.copy(message = "브러시 준비에 실패했습니다.") }
+            updateUiState { it.copy(message = "브러??준비에 ?�패?�습?�다.") }
             return false
         }
         brushStartSnapshot = leased
@@ -3691,7 +3691,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val preparationSeam = BrushPreparationTestSeam.capture()
         brushIdentity = transactionIdentity
         brushWorkingMask = null
-        // Defer the full Exact history snapshot bitmap copies to a worker — copying
+        // Defer the full Exact history snapshot bitmap copies to a worker ??copying
         // previewBitmap + originalPreviewBitmap + every layer bitmap on Main blocks the
         // gesture thread. Finish/cancel await this job before touching brushingSnapshot.
         brushSnapshotJob =
@@ -4019,7 +4019,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private fun settleBrushPreparationFailure(strokeId: Long) {
         if (brushIdentity?.strokeId != strokeId) return
         clearBrushTransaction(strokeId)
-        if (!shuttingDown) updateUiState { it.copy(message = "브러시 준비에 실패했습니다.") }
+        if (!shuttingDown) updateUiState { it.copy(message = "브러??준비에 ?�패?�습?�다.") }
     }
 
     internal fun finishBrushStroke() {
@@ -4456,7 +4456,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 throw CancellationException()
             } catch (_: Throwable) {
                 withContext(Dispatchers.Main) {
-                    if (!shuttingDown) updateUiState { it.copy(message = "선택 마스크 편집에 실패했습니다.") }
+                    if (!shuttingDown) updateUiState { it.copy(message = "?�택 마스???�집???�패?�습?�다.") }
                 }
             } finally {
                 replacement?.takeIf { !it.isRecycled }?.recycle()
@@ -5248,7 +5248,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     lastSavedExportHistoryFailureForTest = failure
                     Log.e("KeplerStudio.History", "saved export history startup failed", failure)
                     updateUiStateAndRecycleReplaced {
-                        it.copy(message = "내보낸 사진 기록을 불러오지 못했습니다.")
+                        it.copy(message = "?�보???�진 기록??불러?��? 못했?�니??")
                     }
                 }
                 StartupInitializationTestSeam.capture()?.onStage?.invoke(
@@ -5508,10 +5508,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun openImageFailureMessage(stage: OpenImageFailureStage): String =
         when (stage) {
-            OpenImageFailureStage.Source -> "선택한 이미지 파일을 읽지 못했습니다."
-            OpenImageFailureStage.Decode -> "이미지를 디코딩하지 못했습니다."
-            OpenImageFailureStage.NativeSession -> "이미지 처리 세션을 시작하지 못했습니다."
-            OpenImageFailureStage.Adoption -> "이미지를 열지 못했습니다."
+            OpenImageFailureStage.Source -> "?�택???��?지 ?�일???��? 못했?�니??"
+            OpenImageFailureStage.Decode -> "?��?지�??�코?�하지 못했?�니??"
+            OpenImageFailureStage.NativeSession -> "?��?지 처리 ?�션???�작?��? 못했?�니??"
+            OpenImageFailureStage.Adoption -> "?��?지�??��? 못했?�니??"
         }
 
     fun updateParams(transform: (EditParams) -> EditParams) {
@@ -5559,7 +5559,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         updateUiState { it.copy(params = next, revision = nextRevision, isBusy = true) }
-        updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
+        updateUiState { it.copy(message = "미리보기�??�더링하??중입?�다.") }
         renderJob?.cancel()
         activeParamRenderRevision = nextRevision
         val tracker = beginMemoryTracking(
@@ -5723,7 +5723,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val current = _uiState.value
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
-            updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정을 적용할 이미지가 없습니다") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "?�동 보정???�용???��?지가 ?�습?�다") }
             return
         }
         val sourcePath = current.sourcePath
@@ -5746,14 +5746,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     autoEnhanceTracker?.end()
                     undoSnapshot?.let(::recycleHistorySnapshot)
                     undoSnapshot = null
-                    updateUiStateAndRecycleReplaced { it.copy(message = "자동 보정 준비에 실패했습니다.") }
+                    updateUiStateAndRecycleReplaced { it.copy(message = "?�동 보정 준비에 ?�패?�습?�다.") }
                     return
                 }
         autoEnhanceTracker?.track(ownedBase, "applyAutoEnhance:ownedBase")
         val nextRevision = startRevision + 1
         renderJob?.cancel()
         updateUiStateAndRecycleReplaced {
-            it.copy(isBusy = true, revision = nextRevision, message = "자동 보정값을 분석하는 중입니다")
+            it.copy(isBusy = true, revision = nextRevision, message = "?�동 보정값을 분석?�는 중입?�다")
         }
         launchManagedEditWithPreparedResources({ operationToken ->
             var rendered: Bitmap? = null
@@ -5797,7 +5797,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     current.correctionEngineState.documentEngine,
                                     checkNotNull(renderSuccess),
                                 ),
-                            message = "자동 보정이 적용되었습니다",
+                            message = "?�동 보정???�용?�었?�니??,
                         )
                     }
                     rendered = null
@@ -5827,7 +5827,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                     updateUiStateAndRecycleReplaced {
-                        it.copy(isBusy = false, message = "자동 보정에 실패했습니다: ${t.message}")
+                        it.copy(isBusy = false, message = "?�동 보정???�패?�습?�다: ${t.message}")
                     }
                 } else if (isManagedEditTokenCurrent(operationToken)) {
                     updateUiState { it.copy(isBusy = false) }
@@ -5851,19 +5851,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setNoiseEngine(engine: NoiseEngine) {
-        applyEngineChange(noiseEngine = engine, message = "노이즈 감소 엔진이 ${engine.label}으로 설정되었습니다")
+        applyEngineChange(noiseEngine = engine, message = "?�이�?감소 ?�진??${engine.label}?�로 ?�정?�었?�니??)
     }
 
     fun setDetailEngine(engine: DetailEngine) {
-        applyEngineChange(detailEngine = engine, message = "디테일 엔진이 ${engine.label}으로 설정되었습니다")
+        applyEngineChange(detailEngine = engine, message = "?�테???�진??${engine.label}?�로 ?�정?�었?�니??)
     }
 
     fun setToneEngine(engine: ToneEngine) {
-        applyEngineChange(toneEngine = engine, message = "톤 엔진이 ${engine.label}으로 설정되었습니다")
+        applyEngineChange(toneEngine = engine, message = "???�진??${engine.label}?�로 ?�정?�었?�니??)
     }
 
     fun setHazeEngine(engine: DehazeEngine) {
-        applyEngineChange(hazeEngine = engine, message = "디헤이즈 엔진이 ${engine.label}으로 설정되었습니다")
+        applyEngineChange(hazeEngine = engine, message = "?�헤?�즈 ?�진??${engine.label}?�로 ?�정?�었?�니??)
     }
 
     private fun applyEngineChange(
@@ -5919,7 +5919,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     engineTracker?.end()
                     undoSnapshot?.let(::recycleHistorySnapshot)
                     undoSnapshot = null
-                    updateUiStateAndRecycleReplaced { it.copy(message = "처리 엔진 변경 준비에 실패했습니다.") }
+                    updateUiStateAndRecycleReplaced { it.copy(message = "처리 ?�진 변�?준비에 ?�패?�습?�다.") }
                     return
                 }
         engineTracker?.track(checkNotNull(ownedBase), "applyEngineChange:ownedBase")
@@ -5934,7 +5934,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 revision = nextRevision,
                 isBusy = true,
-                message = "$message. 미리보기를 다시 렌더링하는 중입니다",
+                message = "$message. 미리보기�??�시 ?�더링하??중입?�다",
             )
         }
         renderJob?.cancel()
@@ -6010,7 +6010,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                     updateUiStateAndRecycleReplaced {
-                        it.copy(isBusy = false, message = "미리보기 렌더링에 실패했습니다: ${t.message}")
+                        it.copy(isBusy = false, message = "미리보기 ?�더링에 ?�패?�습?�다: ${t.message}")
                     }
                 } else if (isManagedEditTokenCurrent(operationToken)) {
                     updateUiState { it.copy(isBusy = false) }
@@ -6044,7 +6044,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val sourcePath = current.sourcePath
         if (sourcePath == null) {
             startSnapshot.close()
-            updateUiStateAndRecycleReplaced { it.copy(message = "초기화할 이미지가 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "초기?�할 ?��?지가 ?�습?�다.") }
             return
         }
         val baseContentToken = current.baseContentToken
@@ -6063,7 +6063,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         invalidateExport()
         var decoded: Bitmap? = null
         updateUiStateAndRecycleReplaced {
-            it.copy(isBusy = true, revision = nextRevision, message = "초기화하는 중입니다")
+            it.copy(isBusy = true, revision = nextRevision, message = "초기?�하??중입?�다")
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
             var undoSnapshotOwned: OwnedHistorySnapshot? = null
@@ -6109,7 +6109,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     visiblePreview = VisiblePreviewState.Original,
                                     lastRenderFailure = null,
                                 ),
-                            message = "초기화가 완료되었습니다",
+                            message = "초기?��? ?�료?�었?�니??,
                         )
                     }
                     decoded = null
@@ -6139,7 +6139,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                     updateUiStateAndRecycleReplaced {
-                        it.copy(isBusy = false, message = "초기화에 실패했습니다.")
+                        it.copy(isBusy = false, message = "초기?�에 ?�패?�습?�다.")
                     }
                 } else if (isManagedEditTokenCurrent(operationToken)) {
                     updateUiState { it.copy(isBusy = false) }
@@ -6184,7 +6184,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             return PresetApplyResult.Rejected
         val basePreview = current.originalPreviewBitmap ?: current.previewBitmap
         if (basePreview == null) {
-            updateUiStateAndRecycleReplaced { it.copy(message = "적용할 이미지가 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "?�용???��?지가 ?�습?�다.") }
             return PresetApplyResult.Rejected
         }
         if (params == current.params && look == current.presetLook) {
@@ -6204,7 +6204,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     presetTracker?.end()
                     undoSnapshot?.let(::recycleHistorySnapshot)
                     undoSnapshot = null
-                    updateUiStateAndRecycleReplaced { it.copy(message = "프리셋 적용 준비에 실패했습니다.") }
+                    updateUiStateAndRecycleReplaced { it.copy(message = "?�리???�용 준비에 ?�패?�습?�다.") }
                     return PresetApplyResult.Rejected
                 }
         presetTracker?.track(checkNotNull(ownedBase), "applyPresetLook:ownedBase")
@@ -6288,7 +6288,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                     updateUiStateAndRecycleReplaced {
-                        it.copy(isBusy = false, message = "프로필 적용에 실패했습니다.")
+                        it.copy(isBusy = false, message = "?�로???�용???�패?�습?�다.")
                     }
                 } else if (isManagedEditTokenCurrent(operationToken)) {
                     updateUiState { it.copy(isBusy = false) }
@@ -6314,14 +6314,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setExportFormat(format: ExportFormat) {
         updateUiStateAndRecycleReplaced {
-            it.copy(exportFormat = format, message = "파일 형식이 ${format.label}로 설정되었습니다")
+            it.copy(exportFormat = format, message = "?�일 ?�식??${format.label}�??�정?�었?�니??)
         }
         scheduleDraftAutosave()
     }
 
     fun setExportResolution(resolution: ExportResolution) {
         updateUiStateAndRecycleReplaced {
-            it.copy(exportResolution = resolution, message = "해상도가 ${resolution.label}로 설정되었습니다")
+            it.copy(exportResolution = resolution, message = "?�상?��? ${resolution.label}�??�정?�었?�니??)
         }
         scheduleDraftAutosave()
     }
@@ -6344,7 +6344,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             savedExports = result.items,
                             message =
                                 if (it.isBusy) it.message
-                                else "내보낸 사진 기록 자동 정리가 ${retention.label}으로 설정되었습니다",
+                                else "?�보???�진 기록 ?�동 ?�리가 ${retention.label}?�로 ?�정?�었?�니??,
                         )
                 }
             } catch (ce: CancellationException) {
@@ -6353,7 +6353,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 lastSavedExportHistoryFailureForTest = failure
                 Log.e("KeplerStudio.History", "saved export history retention failed", failure)
                 updateUiStateAndRecycleReplaced {
-                    it.copy(message = "내보낸 사진 기록 보관 정책을 저장하지 못했습니다.")
+                    it.copy(message = "?�보???�진 기록 보�? ?�책???�?�하지 못했?�니??")
                 }
             }
         }
@@ -6365,7 +6365,7 @@ fun exportPreview() {
         val state = _uiState.value
         val sourcePath = state.sourcePath
         val exportBusyMessage =
-            "${state.exportFormat.label} 형식, ${state.exportResolution.label} 목표 해상도로 내보내는 중입니다."
+            "${state.exportFormat.label} ?�식, ${state.exportResolution.label} 목표 ?�상?�로 ?�보?�는 중입?�다."
         if (sourcePath == null) {
             val missingMsg =
                 "\uB0B0\ub9AC\ubc88\uc6d0 \uc774\ubbf8\uc9c0\uAC00 \uC5C5\uC2B5\uB2C8\uB2E4"
@@ -6409,7 +6409,7 @@ fun exportPreview() {
             ownedExportLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
             exportPrepareTracker?.end()
             updateUiStateAndRecycleReplaced {
-                it.copy(message = "선택 마스크를 내보내기용으로 준비하지 못했습니다.")
+                it.copy(message = "?�택 마스?��? ?�보?�기?�으�?준비하지 못했?�니??")
             }
             if (failure is BitmapAllocationRejectedException) {
                 requestAllocationRecovery(
@@ -6444,7 +6444,7 @@ fun exportPreview() {
                 exportPrepareTracker?.end()
                 exportPrepareTracker = null
                 updateUiStateAndRecycleReplaced {
-                    it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.")
+                    it.copy(message = "메모리�? 부족하???�재 ?�상?�로 ?�보?????�습?�다. ?�른 ?�상???�는 ?��?지�??�용??주세??")
                 }
                 requestAllocationRecovery(
                     MemoryRetryAction.ExportPreview,
@@ -6463,7 +6463,7 @@ fun exportPreview() {
                         exportPrepareTracker?.end()
                         exportPrepareTracker = null
                         updateUiStateAndRecycleReplaced {
-                            it.copy(message = "메모리가 부족하여 내보내기를 준비하지 못했습니다.")
+                            it.copy(message = "메모리�? 부족하???�보?�기�?준비하지 못했?�니??")
                         }
                         if (failure is BitmapAllocationRejectedException)
                             requestAllocationRecovery(
@@ -6482,7 +6482,7 @@ fun exportPreview() {
             exportPrepareTracker?.end()
             exportPrepareTracker = null
             updateUiStateAndRecycleReplaced {
-                it.copy(message = "메모리가 부족하여 현재 해상도로 내보낼 수 없습니다. 다른 해상도 또는 이미지를 사용해 주세요.")
+                it.copy(message = "메모리�? 부족하???�재 ?�상?�로 ?�보?????�습?�다. ?�른 ?�상???�는 ?��?지�??�용??주세??")
             }
             requestAllocationRecovery(
                 MemoryRetryAction.ExportPreview,
@@ -6742,7 +6742,7 @@ fun exportPreview() {
                                             current.copy(
                                                 savedExports = merged,
                                                 message =
-                                                    "이미지가 Gallery > Pictures/KeplerStudio에 저장되었고, 앱 내 내보낸 사진 기록에도 추가되었습니다.",
+                                                    "?��?지가 Gallery > Pictures/KeplerStudio???�?�되?�고, ?????�보???�진 기록?�도 추�??�었?�니??",
                                             )
                                         } else {
                                             current.copy(savedExports = merged)
@@ -6756,7 +6756,7 @@ fun exportPreview() {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
                                                 message =
-                                                    "이미지는 갤러리에 저장되었지만 앱 내 내보낸 사진 기록을 저장하지 못했습니다.",
+                                                    "?��?지??갤러리에 ?�?�되?��?�??????�보???�진 기록???�?�하지 못했?�니??",
                                             )
                                         }
                                     }
@@ -6769,7 +6769,7 @@ fun exportPreview() {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
                                                 message =
-                                                    "이미지를 내보내지 못했습니다.",
+                                                    "?��?지�??�보?��? 못했?�니??",
                                             )
                                         }
                                     }
@@ -6791,7 +6791,7 @@ fun exportPreview() {
                                         updateUiStateAndRecycleReplaced { current ->
                                             current.copy(
                                                 message =
-                                                    "이미지를 내보내지 못했으며 임시 파일을 정리하지 못했습니다.",
+                                                    "?��?지�??�보?��? 못했?�며 ?�시 ?�일???�리?��? 못했?�니??",
                                             )
                                         }
                                     }
@@ -6803,7 +6803,7 @@ fun exportPreview() {
                                     // token hasn't been superseded by a newer
                                     // export (revision-only mutation), this
                                     // stale owner must clear its own busy state
-                                    // — no newer owner exists to take it over.
+                                    // ??no newer owner exists to take it over.
                                     releaseExportBusyIfOwned(exportIdentity)
                                 }
                             }
@@ -6823,7 +6823,7 @@ fun exportPreview() {
                         if (isCurrentExportForUi(exportIdentity)) {
                             updateUiStateAndRecycleReplaced { current ->
                                 current.copy(
-                                    message = "이미지를 내보내지 못했습니다.",
+                                    message = "?��?지�??�보?��? 못했?�니??",
                                 )
                             }
                         }
@@ -6885,8 +6885,101 @@ fun exportPreview() {
         }
     }
 
+    private fun rollbackCommittedDraft(context: Context, pointer: String, prevPrefs: Map<String, Any?>): Boolean {
+        // Implementation for rolling back a committed draft
+        val restoredPointer = DraftStorageCoordinator.publishGenerationUnsafe(context, pointer)
+        if (!restoredPointer) return false
+
+        val prefs = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit()
+        val restoredPrefs = prevPrefs.entries.fold(prefs) { edit, (key, value) ->
+            when (value) {
+                null -> edit.remove(key)
+                is String -> edit.putString(key, value)
+                is Int -> edit.putInt(key, value)
+                is Long -> edit.putLong(key, value)
+                is Float -> edit.putFloat(key, value)
+                is Boolean -> edit.putBoolean(key, value)
+                else -> edit.remove(key)
+            }
+        }.commit()
+
+        restoredPointer && restoredPrefs
+    }
+
+    private fun deleteAllExceptUnsafe(context: Context, keep: String): Boolean {
+        val dir = DraftStorageCoordinator.persistentDraftDirectory(context)
+        val files = dir.listFiles() ?: return true
+
+        var success = true
+        for (file in files) {
+            if (file.name == keep || file.name.startsWith("$keep.")) {
+                continue
+            }
+            if (file.name.endsWith(".tmp")) {
+                val deleted = file.delete()
+                if (!deleted) {
+                    logDraftSaveFailure(IllegalStateException("failed to delete temp file: ${file.absolutePath}"))
+                    success = false
+                }
+            }
+        }
+        return success
+    }
+
+    @WorkerThread
+    private fun cleanupLegacySources(context: Context, prevPrefs: Map<String, Any?>, liveSourcePath: String?): Boolean {
+        val dir = DraftStorageCoordinator.persistentDraftDirectory(context)
+        val files = dir.listFiles() ?: return true
+
+        var overallSuccess = true
+        for (file in files) {
+            // Skip current file
+            if (file.name == DraftStorageCoordinator.readCurrentPointerUnsafe(context) ||
+                file.name.startsWith("${DraftStorageCoordinator.readCurrentPointerUnsafe(context)}")) {
+                continue
+            }
+
+            // Skip files that are not legacy sources
+            if (prevPrefs[KEY_DRAFT_SOURCE] as? String != file.absolutePath &&
+                prevPrefs[KEY_DRAFT_BASE_VERSION_LEGACY] as? String != file.name) {
+                continue
+            }
+
+            // Skip live source file
+            if (liveSourcePath != null && File(liveSourcePath).canonicalFile == file.canonicalFile) {
+                continue
+            }
+
+            // Delete the legacy source
+            val deleted = file.delete()
+            if (!deleted) {
+                logDraftSaveFailure(IllegalStateException("failed to delete legacy source: ${file.absolutePath}"))
+                overallSuccess = false
+            }
+        }
+
+        return overallSuccess
+    }
+
+    @WorkerThread
+    private fun isOwnedDraftSource(context: Context, file: File): Boolean {
+        // Implementation to check if a file is an owned draft source
+        val currentPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
+        val generation = DraftStorageCoordinator.readGenerationUnsafe(context, currentPointer)
+
+        return generation?.sourcePath == file.absolutePath
+    }
+
+    companion object {
+        @WorkerThread
+        internal fun logDraftSaveFailure(t: Throwable) {
+            // Implementation for logging draft save failures
+            Log.e("EditorViewModel", "Draft save failed", t)
+        }
+    }
+
     fun clearDraft() {
-        if (!beginMaintenance("임시 저장을 삭제하는 중입니다")) return
+        if (!beginMaintenance("?�시 ?�?�을 ??��?�는 중입?�다")) return
         val context = getApplication<Application>()
         invalidateDraftOperations()
         val clearEpoch = draftOperationEpoch
@@ -6898,218 +6991,67 @@ fun exportPreview() {
                     withContext(Dispatchers.IO) {
                         draftSaveMutex.withLock {
                             if (clearEpoch != draftOperationEpoch) return@withLock false
-                            val expectedPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
-                            val expectedBaseline = draftPointerBaseline
-                            if (expectedPointer != expectedBaseline) return@withLock false
-                            // Capture one stable visible state snapshot
-                            val visibleBefore = _uiState.value
-                            val liveSourcePath = visibleBefore.sourcePath
-                            // Snapshot previous prefs for rollback
-                            val prefs =
-                                context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-                            val prevPrefs = snapshotDraftPreferences(prefs)
-                            // Clear pointer and baseline (global storage mutation)
-                            if (!DraftStorageCoordinator.withWriteLock {
-                                    DraftStorageCoordinator.clearPointerUnsafe(context)
-                                }) return@withLock false
-                            draftPointerBaseline = null
-                            // Clear legacy prefs
-                            val committed =
-                                prefs
-                                    .edit()
-                                    .remove(KEY_DRAFT_SOURCE)
-                                    .remove(KEY_DRAFT_EXPOSURE)
-                                    .remove(KEY_DRAFT_CONTRAST)
-                                    .remove(KEY_DRAFT_SHADOWS)
-                                    .remove(KEY_DRAFT_HIGHLIGHTS)
-                                    .remove(KEY_DRAFT_WHITES)
-                                    .remove(KEY_DRAFT_BLACKS)
-                                    .remove(KEY_DRAFT_TEMPERATURE)
-                                    .remove(KEY_DRAFT_TINT)
-                                    .remove(KEY_DRAFT_SATURATION)
-                                    .remove(KEY_DRAFT_VIBRANCE)
-                                    .remove(KEY_DRAFT_CLARITY)
-                                    .remove(KEY_DRAFT_DEHAZE)
-                                    .remove(KEY_DRAFT_SHARPNESS)
-                                    .remove(KEY_DRAFT_NOISE_REDUCTION)
-                                    .remove(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION)
-                                    .remove(KEY_DRAFT_COLOR_NOISE_REDUCTION)
-                                    .remove(KEY_DRAFT_NOISE_DETAIL_PROTECTION)
-                                    .remove(KEY_DRAFT_FORMAT)
-                                    .remove(KEY_DRAFT_RESOLUTION)
-                                    .remove(KEY_DRAFT_LOOK)
-                                    .remove(KEY_DRAFT_QUICK_EFFECTS)
-                                    .remove(KEY_DRAFT_BASE_TOKEN)
-                                    .remove(KEY_DRAFT_BASE_VERSION_LEGACY)
-                                    .remove(KEY_DRAFT_GENERATION_ID)
-                                    .remove(KEY_DRAFT_SAVED_AT)
-                                    .commit()
-                            if (!committed) {
-                                val prefsRestored =
-                                    restoreDraftPreferencesOrThrow(
-                                        prefs,
-                                        prevPrefs,
-                                        IllegalStateException("failed to clear draft prefs"),
-                                    )
-                                if (!prefsRestored) {
-                                    logDraftSaveFailure(
-                                        IllegalStateException("clearDraft pref rollback failed")
-                                    )
-                                }
-                                    val pointerRestored =
+                            // All storage operations under single global lock
+                            DraftStorageCoordinator.withWriteLock {
+                                val expectedPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
+                                val expectedBaseline = draftPointerBaseline
+                                if (expectedPointer != expectedBaseline) return@withLock false
+                                // Capture one stable visible state snapshot
+                                val visibleBefore = _uiState.value
+                                val liveSourcePath = visibleBefore.sourcePath
+                                // Snapshot previous prefs for rollback
+                                val prefs =
+                                    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+                                val prevPrefs = snapshotDraftPreferences(prefs)
+                                // Clear pointer and baseline
+                                if (!DraftStorageCoordinator.clearPointerUnsafe(context)) return@withLock false
+                                draftPointerBaseline = null
+                                // Clear legacy prefs
+                                val committed =
+                                    prefs
+                                        .edit()
+                                        .remove(KEY_DRAFT_SOURCE)
+                                        .remove(KEY_DRAFT_EXPOSURE)
+                                        .remove(KEY_DRAFT_CONTRAST)
+                                        .remove(KEY_DRAFT_SHADOWS)
+                                        .remove(KEY_DRAFT_HIGHLIGHTS)
+                                        .remove(KEY_DRAFT_WHITES)
+                                        .remove(KEY_DRAFT_BLACKS)
+                                        .remove(KEY_DRAFT_TEMPERATURE)
+                                        .remove(KEY_DRAFT_TINT)
+                                        .remove(KEY_DRAFT_SATURATION)
+                                        .remove(KEY_DRAFT_VIBRANCE)
+                                        .remove(KEY_DRAFT_CLARITY)
+                                        .remove(KEY_DRAFT_DEHAZE)
+                                        .remove(KEY_DRAFT_SHARPNESS)
+                                        .remove(KEY_DRAFT_NOISE_REDUCTION)
+                                        .remove(KEY_DRAFT_LUMINANCE_NOISE_REDUCTION)
+                                        .remove(KEY_DRAFT_COLOR_NOISE_REDUCTION)
+                                        .remove(KEY_DRAFT_NOISE_DETAIL_PROTECTION)
+                                        .remove(KEY_DRAFT_FORMAT)
+                                        .remove(KEY_DRAFT_RESOLUTION)
+                                        .remove(KEY_DRAFT_LOOK)
+                                        .remove(KEY_DRAFT_QUICK_EFFECTS)
+                                        .remove(KEY_DRAFT_BASE_TOKEN)
+                                        .remove(KEY_DRAFT_BASE_VERSION_LEGACY)
+                                        .remove(KEY_DRAFT_GENERATION_ID)
+                                        .remove(KEY_DRAFT_SAVED_AT)
+                                        .commit()
+                                if (!committed) {
+                                    // Attempt rollback of pointer
                                     if (expectedPointer != null) {
-                                        runCatching {
-                                            DraftStorageCoordinator.withWriteLock {
-                                                DraftStorageCoordinator.publishGenerationUnsafe(context, expectedPointer)
-                                            }
-                                        }.getOrDefault(false)
-                                    } else {
-                                        true
+                                        DraftStorageCoordinator.publishGenerationUnsafe(context, expectedPointer)
                                     }
-                                if (!pointerRestored) {
-                                    logDraftSaveFailure(
-                                        IllegalStateException("clearDraft pointer rollback failed")
-                                    )
-                                }
-                                val currentPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
-                                draftPointerBaseline = currentPointer
-                                return@withLock false
-                            }
-                            // Clear visible Draft metadata with explicit CAS - complete identity
-                            var adopted = false
-                            var state = _uiState.value
-                            while (!adopted) {
-                                // Already-cleared succeeds only when ALL fields are empty
-                                if (
-                                    state.draftSavedAtMillis == null &&
-                                        state.draftSourcePath == null &&
-                                        state.draftBaseContentToken == null &&
-                                        state.draftGenerationId == null &&
-                                        state.draftGenerationSourcePath == null &&
-                                        state.draftGenerationThumbnailPath == null &&
-                                        state.recoveryDebugInfo == null &&
-                                        state.showRecoveryDebugCard == false
-                                ) {
-                                    adopted = true
-                                } else if (
-                                    state.draftSavedAtMillis == visibleBefore.draftSavedAtMillis &&
-                                        state.draftSourcePath == visibleBefore.draftSourcePath &&
-                                        state.draftBaseContentToken ==
-                                            visibleBefore.draftBaseContentToken &&
-                                        state.draftGenerationId ==
-                                            visibleBefore.draftGenerationId &&
-                                        state.draftGenerationSourcePath ==
-                                            visibleBefore.draftGenerationSourcePath &&
-                                        state.draftGenerationThumbnailPath ==
-                                            visibleBefore.draftGenerationThumbnailPath &&
-                                        state.recoveryDebugInfo ==
-                                            visibleBefore.recoveryDebugInfo &&
-                                        state.showRecoveryDebugCard ==
-                                            visibleBefore.showRecoveryDebugCard
-                                ) {
-                                    val updated =
-                                        state.copy(
-                                            draftSavedAtMillis = null,
-                                            draftSourcePath = null,
-                                            draftBaseContentToken = null,
-                                            draftGenerationId = null,
-                                            draftGenerationSourcePath = null,
-                                            draftGenerationThumbnailPath = null,
-                                            recoveryDebugInfo = null,
-                                            showRecoveryDebugCard = false,
-                                        )
-                                    adopted = commitUiState(state, updated)
-                                } else {
-                                    // State changed - rollback
-                                    val prefsRestored =
-                                        restoreDraftPreferencesOrThrow(
-                                            prefs,
-                                            prevPrefs,
-                                            IllegalStateException("clear superseded"),
-                                        )
-                                    if (!prefsRestored) {
-                                        logDraftSaveFailure(
-                                            IllegalStateException(
-                                                "clearDraft supersession pref rollback failed"
-                                            )
-                                        )
-                                    }
-                                    val pointerRestored =
-                                        if (expectedPointer != null) {
-                                        DraftStorageCoordinator.withWriteLock {
-                                            DraftStorageCoordinator.publishGenerationUnsafe(context, expectedPointer)
-                                        }
-                                        } else {
-                                            true
-                                        }
-                                    if (!pointerRestored) {
-                                        logDraftSaveFailure(
-                                            IllegalStateException(
-                                                "clearDraft supersession pointer rollback failed"
-                                            )
-                                        )
-                                    }
-                                    val currentPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
-                                    draftPointerBaseline = currentPointer
                                     return@withLock false
                                 }
-                                state = _uiState.value
-                            }
-// Capture legacy Draft source from prefs for thumbnail invalidation
-                            val legacyDraftSourcePath = prevPrefs[KEY_DRAFT_SOURCE] as? String
-                            // Durable clear succeeded — cleanup legacy directory under global lock
-                            val liveSourceCanonical =
-                                liveSourcePath?.let {
-                                    runCatching { File(it).canonicalFile }.getOrNull()
-                                }
-                            val legacyDraftSourceCanonical =
-                                legacyDraftSourcePath?.let {
-                                    runCatching { File(it).canonicalFile }.getOrNull()
-                                }
-                            DraftStorageCoordinator.withWriteLock {
-                                runCatching {
-                                    persistentDraftDirectory(context).listFiles()?.forEach { file ->
-                                        val canonical =
-                                            runCatching { file.canonicalFile }.getOrNull()
-                                        val isLiveSource =
-                                            canonical != null &&
-                                                liveSourceCanonical != null &&
-                                                canonical == liveSourceCanonical
-                                        if (isLiveSource) return@forEach
-                                        if (file.name.endsWith(".tmp")) {
-                                            val deleted = file.delete()
-                                            if (!deleted)
-                                                logDraftSaveFailure(
-                                                    IllegalStateException(
-                                                        "failed to delete temp file: ${file.absolutePath}"
-                                                    )
-                                                )
-                                            return@forEach
-                                        }
-                                        val matchesLegacySource =
-                                            canonical != null &&
-                                                legacyDraftSourceCanonical != null &&
-                                                canonical == legacyDraftSourceCanonical
-                                        val isOwnedDraft =
-                                            matchesLegacySource && isOwnedDraftSource(context, file)
-                                        if (matchesLegacySource && isOwnedDraft) {
-                                            val deleted = file.delete()
-                                            if (!deleted)
-                                                logDraftSaveFailure(
-                                                    IllegalStateException(
-                                                        "failed to delete legacy draft source: ${file.absolutePath}"
-                                                    )
-                                                )
-                                        }
-                                    }
-                                }
-                                .onFailure { logDraftSaveFailure(it) }
-                                // Also delete the generation directory under the same lock
-                                expectedPointer?.let {
+                                // Only after successful logical clear, perform cleanup
+                                val cleanupSuccess = DraftStorageCoordinator.cleanupLegacySources(context, prevPrefs, liveSourcePath)
+                                val generationSuccess = expectedPointer?.let {
                                     DraftStorageCoordinator.deleteGenerationUnsafe(context, it)
-                                }
-                            }
-                            runCatching {
+                                } ?: true
+                                cleanupSuccess && generationSuccess
+                                // Invalidate caches
+                                runCatching {
                                     val thumbFile = persistentDraftThumbnailFile(context)
                                     if (thumbFile.isFile) {
                                         val deleted = thumbFile.delete()
@@ -7121,30 +7063,29 @@ fun exportPreview() {
                                             )
                                     }
                                 }
-                                .onFailure { logDraftSaveFailure(it) }
-                            runCatching {
+                                runCatching {
                                     expectedPointer?.let {
                                         ThumbnailBitmapCache.invalidate("draft:$it")
                                     }
-                                    legacyDraftSourcePath?.let {
+                                    prevPrefs[KEY_DRAFT_SOURCE]?.let {
                                         ThumbnailBitmapCache.invalidate("draft:legacy:$it")
                                     }
                                 }
-                                .onFailure { logDraftSaveFailure(it) }
-                            true
+                                true
+                            }
                         }
                     }
                 if (!cleared) {
                     updateUiStateAndRecycleReplaced {
                         if (clearEpoch == draftOperationEpoch && !it.isBusy)
-                            it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.")
+                            it.copy(message = "?�시 ?�????��???�패?�습?�다. 기존 ?�시 ?�?�을 ?��??�니??")
                         else it
                     }
                     return@launch
                 }
                 updateUiStateAndRecycleReplaced {
                     if (clearEpoch != draftOperationEpoch) it
-                    else it.copy(message = "자동복구용 임시저장 기록을 삭제했습니다. 현재 편집 화면은 유지됩니다")
+                    else it.copy(message = "?�동복구???�시?�??기록????��?�습?�다. ?�재 ?�집 ?�면?� ?��??�니??)
                 }
             } catch (ce: CancellationException) {
                 throw ce
@@ -7152,7 +7093,7 @@ fun exportPreview() {
                 logDraftSaveFailure(t)
                 updateUiStateAndRecycleReplaced {
                     if (clearEpoch == draftOperationEpoch && !it.isBusy)
-                        it.copy(message = "임시 저장 삭제에 실패했습니다. 기존 임시 저장을 유지합니다.")
+                        it.copy(message = "?�시 ?�????��???�패?�습?�다. 기존 ?�시 ?�?�을 ?��??�니??")
                     else it
                 }
             } finally {
@@ -7166,7 +7107,7 @@ fun exportPreview() {
     }
 
     fun cleanupOldTemporarySources() {
-        if (!beginMaintenance("오래된 임시 원본을 정리하는 중입니다")) return
+        if (!beginMaintenance("?�래???�시 ?�본???�리?�는 중입?�다")) return
         val context = getApplication<Application>()
         val activeSourcePath = _uiState.value.sourcePath
         viewModelScope.launch {
@@ -7176,13 +7117,13 @@ fun exportPreview() {
                         cleanupTemporarySourceFiles(context, activeSourcePath = activeSourcePath)
                     }
                 updateUiStateAndRecycleReplaced {
-                    it.copy(message = "7일이 지난 임시 원본 캐시를 정리했습니다. 삭제된 파일: ${removedCount}개")
+                    it.copy(message = "7?�이 지???�시 ?�본 캐시�??�리?�습?�다. ??��???�일: ${removedCount}�?)
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
                 updateUiStateAndRecycleReplaced {
-                    it.copy(message = "임시 원본 정리에 실패했습니다: ${t.message ?: "알 수 없는 오류"}")
+                    it.copy(message = "?�시 ?�본 ?�리???�패?�습?�다: ${t.message ?: "?????�는 ?�류"}")
                 }
             } finally {
                 finishMaintenance()
@@ -7191,7 +7132,7 @@ fun exportPreview() {
     }
 
     fun clearSavedExports() {
-        if (!beginMaintenance("저장 기록을 비우는 중입니다")) return
+        if (!beginMaintenance("?�??기록??비우??중입?�다")) return
         val context = getApplication<Application>()
         viewModelScope.launch {
             try {
@@ -7206,14 +7147,14 @@ fun exportPreview() {
                         it.copy(
                             savedExports = result.items,
                             message =
-                                if (it.isBusy) it.message else "내보낸 사진 기록을 모두 비웠습니다. 갤러리 파일은 삭제되지 않습니다",
+                                if (it.isBusy) it.message else "?�보???�진 기록??모두 비웠?�니?? 갤러�??�일?� ??��?��? ?�습?�다",
                         )
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
                 updateUiStateAndRecycleReplaced {
-                    it.copy(message = "저장 기록을 비우지 못했습니다: ${t.message ?: "알 수 없는 오류"}")
+                    it.copy(message = "?�??기록??비우지 못했?�니?? ${t.message ?: "?????�는 ?�류"}")
                 }
             } finally {
                 finishMaintenance()
@@ -7222,7 +7163,7 @@ fun exportPreview() {
     }
 
     fun removeSavedExport(uriString: String) {
-        if (!beginMaintenance("저장 기록을 삭제하는 중입니다")) return
+        if (!beginMaintenance("?�??기록????��?�는 중입?�다")) return
         val context = getApplication<Application>()
         viewModelScope.launch {
             try {
@@ -7238,14 +7179,14 @@ fun exportPreview() {
                             savedExports = result.items,
                             message =
                                 if (it.isBusy) it.message
-                                else "선택한 내보낸 사진 기록을 삭제했습니다. 갤러리 파일은 삭제되지 않습니다",
+                                else "?�택???�보???�진 기록????��?�습?�다. 갤러�??�일?� ??��?��? ?�습?�다",
                         )
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
                 updateUiStateAndRecycleReplaced {
-                    it.copy(message = "저장 기록 삭제에 실패했습니다: ${t.message ?: "알 수 없는 오류"}")
+                    it.copy(message = "?�??기록 ??��???�패?�습?�다: ${t.message ?: "?????�는 ?�류"}")
                 }
             } finally {
                 finishMaintenance()
@@ -7277,7 +7218,7 @@ fun exportPreview() {
                 viewportHeight = safeViewportHeight,
             )
         updateUiStateAndRecycleReplaced { it.copy(viewport = settled) }
-        // TODO v0.2: viewport가 scale 임계값 이상이면 ROI 타일 렌더 Job 발행.
+        // TODO v0.2: viewport가 scale ?�계�??�상?�면 ROI ?�???�더 Job 발행.
     }
 
     fun undoEdit() = navigateHistory(undo = true)
@@ -7301,7 +7242,7 @@ fun exportPreview() {
         val flags = historyCoordinator.flags()
         if ((undo && !flags.canUndo) || (!undo && !flags.canRedo)) {
             updateUiStateAndRecycleReplaced {
-                it.copy(message = if (undo) "되돌리기 편집 기록이 없습니다." else "다시 실행할 편집 기록이 없습니다.")
+                it.copy(message = if (undo) "?�돌리기 ?�집 기록???�습?�다." else "?�시 ?�행???�집 기록???�습?�다.")
             }
             return
         }
@@ -7317,7 +7258,7 @@ fun exportPreview() {
             )
         activeHistoryNavigation = navigationIdentity
         updateUiStateAndRecycleReplaced {
-            it.copy(isBusy = true, message = "저장된 편집 기록을 불러오는 중입니다.")
+            it.copy(isBusy = true, message = "?�?�된 ?�집 기록??불러?�는 중입?�다.")
         }
         val navTracker =
             beginMemoryTracking(
@@ -7353,7 +7294,7 @@ fun exportPreview() {
                                 }
                             },
                             adopt = { snapshot ->
-                                val prefix = if (undo) "이전 편집 상태를 적용했습니다" else "다음 편집 상태를 적용했습니다"
+                                val prefix = if (undo) "?�전 ?�집 ?�태�??�용?�습?�다" else "?�음 ?�집 ?�태�??�용?�습?�다"
                                 if (historyNavigationSeam?.rejectAdoption == true) {
                                     false
                                 } else {
@@ -7375,7 +7316,7 @@ fun exportPreview() {
                                 it.copy(
                                     isBusy = false,
                                     message =
-                                        if (undo) "되돌리기 편집 기록이 없습니다." else "다시 실행할 편집 기록이 없습니다.",
+                                        if (undo) "?�돌리기 ?�집 기록???�습?�다." else "?�시 ?�행???�집 기록???�습?�다.",
                                 )
                             }
                         is HistoryNavigationResult.Busy,
@@ -7411,7 +7352,7 @@ fun exportPreview() {
                         updateUiStateAndRecycleReplaced {
                             it.copy(
                                 isBusy = false,
-                                message = "저장된 편집 기록을 불러오지 못했습니다. 현재 편집과 기록은 유지됩니다.",
+                                message = "?�?�된 ?�집 기록??불러?��? 못했?�니?? ?�재 ?�집�?기록?� ?��??�니??",
                             )
                         }
                 } finally {
@@ -7465,7 +7406,7 @@ fun exportPreview() {
         else {
             clearRedoAfterAdoptedEdit(onRegistered)
             updateUiStateAndRecycleReplaced {
-                it.copy(message = "편집은 적용했지만 메모리가 부족하여 이번 되돌리기 기록은 저장하지 못했습니다.")
+                it.copy(message = "?�집?� ?�용?��?�?메모리�? 부족하???�번 ?�돌리기 기록?� ?�?�하지 못했?�니??")
             }
             false
         }
@@ -7621,40 +7562,40 @@ fun exportPreview() {
 
     fun applySpotCleanup() {
         applyNativeSpecialEffects(
-            title = "기본 정리",
-            failureMessage = "기본 정리 적용에 실패했습니다.",
+            title = "기본 ?�리",
+            failureMessage = "기본 ?�리 ?�용???�패?�습?�다.",
             effect = ActiveQuickEffect(QuickEffectKind.SpotCleanup),
         )
     }
 
     fun applyChromaticAberrationReduction() {
         applyNativeSpecialEffects(
-            title = "색수차 완화",
-            failureMessage = "색수차 완화 적용에 실패했습니다.",
+            title = "?�수�??�화",
+            failureMessage = "?�수�??�화 ?�용???�패?�습?�다.",
             effect = ActiveQuickEffect(QuickEffectKind.ChromaticAberrationReduction),
         )
     }
 
     fun applyVignetteCorrection() {
         applyNativeSpecialEffects(
-            title = "주변부 어두움 완화",
-            failureMessage = "주변부 어두움 완화 적용에 실패했습니다.",
+            title = "주�?부 ?�두?� ?�화",
+            failureMessage = "주�?부 ?�두?� ?�화 ?�용???�패?�습?�다.",
             effect = ActiveQuickEffect(QuickEffectKind.VignetteCorrection),
         )
     }
 
     fun applyOpticsCorrection() {
         applyNativeSpecialEffects(
-            title = "통합 광학 보정",
-            failureMessage = "통합 광학 보정 적용에 실패했습니다.",
+            title = "?�합 광학 보정",
+            failureMessage = "?�합 광학 보정 ?�용???�패?�습?�다.",
             effect = ActiveQuickEffect(QuickEffectKind.OpticsCorrection),
         )
     }
 
     fun applySoftBlur(strength: Float = 0.32f) {
         applyNativeSpecialEffects(
-            title = "부드러운 흐림",
-            failureMessage = "부드러운 흐림 적용에 실패했습니다.",
+            title = "부?�러???�림",
+            failureMessage = "부?�러???�림 ?�용???�패?�습?�다.",
             effect =
                 ActiveQuickEffect(
                     kind = QuickEffectKind.SoftBlur,
@@ -7681,7 +7622,7 @@ fun exportPreview() {
         val baseOriginal = startSnapshot.originalPreviewBitmap ?: startSnapshot.previewBitmap
         if (baseOriginal == null || baseOriginal.isRecycled) {
             startSnapshot.close()
-            updateUiStateAndRecycleReplaced { it.copy(message = "적용할 이미지가 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "?�용???��?지가 ?�습?�다.") }
             return
         }
         val currentQuickEffects = current.activeQuickEffects
@@ -7703,7 +7644,7 @@ fun exportPreview() {
         val nextRevision = startRevision + 1
         renderJob?.cancel()
         updateUiStateAndRecycleReplaced {
-            it.copy(isBusy = true, revision = nextRevision, message = "$title 적용 중입니다.")
+            it.copy(isBusy = true, revision = nextRevision, message = "$title ?�용 중입?�다.")
         }
         launchManagedRenderWithPreparedResources({ operationToken ->
             var undoSnapshotOwned: OwnedHistorySnapshot? = null
@@ -7761,9 +7702,9 @@ fun exportPreview() {
                                 if (
                                     requestedQuickEffects.any { active -> active.matches(effect) }
                                 ) {
-                                    "$title 적용했습니다. 다시 누르면 해제할 수 있습니다."
+                                    "$title ?�용?�습?�다. ?�시 ?�르�??�제?????�습?�다."
                                 } else {
-                                    "$title 적용을 해제했습니다."
+                                    "$title ?�용???�제?�습?�다."
                                 },
                         )
                     }
@@ -7845,13 +7786,13 @@ fun exportPreview() {
                 }
         if (baseOriginal.isRecycled) {
             startSnapshot.close()
-            updateUiStateAndRecycleReplaced { it.copy(message = "번짐 완화를 적용할 이미지가 없습니다.") }
+            updateUiStateAndRecycleReplaced { it.copy(message = "번짐 ?�화�??�용???��?지가 ?�습?�다.") }
             return
         }
         val label =
             when (mode) {
-                FlareGuardMode.NightLight -> "번짐 영역 감지"
-                FlareGuardMode.DaySun -> "태양 번짐 영역 감지"
+                FlareGuardMode.NightLight -> "번짐 ?�역 감�?"
+                FlareGuardMode.DaySun -> "?�양 번짐 ?�역 감�?"
             }
         val nextRevision = current.revision + 1
         var pendingHistory: PendingHistorySnapshot? =
@@ -7869,8 +7810,8 @@ fun exportPreview() {
             it.copy(
                 isBusy = true,
                 revision = nextRevision,
-                message = "$label 처리 중입니다.",
-                flareGuardRuntimeStatus = "플레어 마스크 모델 상태를 확인하는 중입니다.",
+                message = "$label 처리 중입?�다.",
+                flareGuardRuntimeStatus = "?�레??마스??모델 ?�태�??�인?�는 중입?�다.",
             )
         }
         Log.i(
@@ -8116,8 +8057,8 @@ fun exportPreview() {
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             isBusy = false,
-                            message = "번짐 영역 감지에 실패했습니다.",
-                            flareGuardRuntimeStatus = "번짐 영역 감지에 실패했습니다.",
+                            message = "번짐 ?�역 감�????�패?�습?�다.",
+                            flareGuardRuntimeStatus = "번짐 ?�역 감�????�패?�습?�다.",
                         )
                     }
                 } else if (isManagedEditTokenCurrent(operationToken)) {
@@ -8192,7 +8133,7 @@ fun exportPreview() {
         publishRestoreBusy(
             restoreToken,
             restoreStartRevision,
-            "임시저장된 편집을 불러오는 중입니다",
+            "?�시?�?�된 ?�집??불러?�는 중입?�다",
         )
         var ownedBase: Bitmap? = null
         var ownedRendered: Bitmap? = null
@@ -8438,9 +8379,9 @@ fun exportPreview() {
                     revision = nextRevision,
                     message =
                         if (checkNotNull(restoreRenderSuccess).migratedFromAlgorithmVersion != null) {
-                            "임시저장 편집을 현재 알고리즘으로 마이그레이션했습니다."
+                            "?�시?�???�집???�재 ?�고리즘?�로 마이그레?�션?�습?�다."
                         } else {
-                            "임시저장된 편집을 불러왔습니다"
+                            "?�시?�?�된 ?�집??불러?�습?�다"
                         },
                 )
             val previousSession = nativeSession
@@ -8506,7 +8447,7 @@ fun exportPreview() {
                     updateUiStateAndRecycleReplaced {
                         it.copy(
                             isBusy = false,
-                            message = "메모리가 부족하여 임시저장 복구를 완료하지 못했습니다. 기존 편집과 임시저장은 안전합니다.",
+                            message = "메모리�? 부족하???�시?�??복구�??�료?��? 못했?�니?? 기존 ?�집�??�시?�?��? ?�전?�니??",
                         )
                     }
                     requestAllocationRecovery(
@@ -8537,7 +8478,7 @@ fun exportPreview() {
             ) {
                 settleRestoreBusyPublication(restoreToken, restoreStartRevision)
                 updateUiStateAndRecycleReplaced {
-                    it.copy(isBusy = false, message = "새 임시저장 복구에 실패해 이전 복구 정보를 확인합니다.")
+                    it.copy(isBusy = false, message = "???�시?�??복구???�패???�전 복구 ?�보�??�인?�니??")
                 }
             }
             return GenerationRestoreOutcome.Invalid(pointer)
@@ -8660,7 +8601,7 @@ fun exportPreview() {
             if (!cleared) {
                 updateUiStateAndRecycleReplaced {
                     if (restoreToken == restoreDraftToken && it.revision == restoreStartRevision) {
-                        it.copy(isBusy = false, message = "손상된 임시저장 포인터를 정리하지 못했습니다.")
+                        it.copy(isBusy = false, message = "?�상???�시?�???�인?��? ?�리?��? 못했?�니??")
                     } else it
                 }
                 completeRetry(DraftRestoreRetryOutcome.ExactTargetInvalid)
@@ -8762,7 +8703,7 @@ fun exportPreview() {
         }
         val sourceFile = recovery.sourceFile
         if (sourceFile == null) {
-            val missingDraftMessage = "임시 저장 원본을 찾을 수 없습니다. 기존 임시 저장 파일이 삭제되어 복구할 수 없습니다."
+            val missingDraftMessage = "?�시 ?�???�본??찾을 ???�습?�다. 기존 ?�시 ?�???�일????��?�어 복구?????�습?�다."
             // Option A: update both visible message and the publication record
             // so that terminal settlement treats them as the same owner.
             val publication = restoreBusyPublication
@@ -9141,7 +9082,7 @@ fun exportPreview() {
      *
      * **At least one adopted preview exists:**
      * 1. Commit the before-history snapshot immediately (exactly once).
-     * 2. Commit the latest ADOPTED revision only — pending renders for newer
+     * 2. Commit the latest ADOPTED revision only ??pending renders for newer
      *    requested revisions are cancelled and never influence the commit.
      * 3. Retain matching params and pixels.
      * 4. Update lastSuccessfullyRenderedParams to the adopted params.
@@ -9822,7 +9763,7 @@ internal data class MemoryCleanupResult(
     val historyRecoveryCompleted: Boolean,
     /** Whether the protected disk budget was satisfied after eligible eviction. */
     val historyDiskBudgetSatisfied: Boolean,
-    /** True when the history operation was busy or superseded — result is not retry-safe. */
+    /** True when the history operation was busy or superseded ??result is not retry-safe. */
     val historyRecoverySuperseded: Boolean,
     val ownerStillCurrent: Boolean = true,
 )
@@ -10281,7 +10222,7 @@ private fun buildHistoryAppliedMessage(
         return "$prefix: ${changedParams.take(3).joinToString(", ")}"
     }
     if (current.correctionEngineState.documentEngine != target.correctionEngine) {
-        return "$prefix: ${target.correctionEngine.displayName} 문서 상태"
+        return "$prefix: ${target.correctionEngine.displayName} 문서 ?�태"
     }
     if (
         current.correctionEngineState.previewRoute != target.previewRoute ||
@@ -10289,12 +10230,12 @@ private fun buildHistoryAppliedMessage(
     ) {
         val routeLabel =
             when (target.previewResultClass) {
-                PreviewResultClass.Original -> "원본"
-                PreviewResultClass.V2FallbackToV1 -> "엔진 1 폴백"
-                PreviewResultClass.DebugForcedV1 -> "개발자 지정 엔진 1"
-                PreviewResultClass.DebugForcedV2 -> "개발자 지정 엔진 2"
-                PreviewResultClass.V2 -> "엔진 2"
-                PreviewResultClass.V1 -> "엔진 1"
+                PreviewResultClass.Original -> "?�본"
+                PreviewResultClass.V2FallbackToV1 -> "?�진 1 ?�백"
+                PreviewResultClass.DebugForcedV1 -> "개발??지???�진 1"
+                PreviewResultClass.DebugForcedV2 -> "개발??지???�진 2"
+                PreviewResultClass.V2 -> "?�진 2"
+                PreviewResultClass.V1 -> "?�진 1"
                 else -> "미리보기"
             }
         return "$prefix: $routeLabel"
@@ -10314,7 +10255,7 @@ private fun buildHistoryAppliedMessage(
             current.previewBitmap !== target.previewBitmap ||
             current.originalPreviewBitmap !== target.originalPreviewBitmap
     return if (changedImageState) {
-        "$prefix: 이미지 상태 변경"
+        "$prefix: ?��?지 ?�태 변�?
     } else {
         prefix
     }
@@ -10323,30 +10264,30 @@ private fun buildHistoryAppliedMessage(
 private fun historyParamSummaries(current: EditParams, target: EditParams): List<String> =
     listOfNotNull(
         historyExposureSummary(current.exposure, target.exposure),
-        historySliderSummary("대비", current.contrast, target.contrast),
-        historySliderSummary("하이라이트", current.highlights, target.highlights),
-        historySliderSummary("그림자", current.shadows, target.shadows),
-        historySliderSummary("화이트", current.whites, target.whites),
+        historySliderSummary("?��?, current.contrast, target.contrast),
+        historySliderSummary("?�이?�이??, current.highlights, target.highlights),
+        historySliderSummary("그림??, current.shadows, target.shadows),
+        historySliderSummary("?�이??, current.whites, target.whites),
         historySliderSummary("블랙", current.blacks, target.blacks),
-        historySliderSummary("색온도", current.temperature, target.temperature),
-        historySliderSummary("색조", current.tint, target.tint),
+        historySliderSummary("?�온??, current.temperature, target.temperature),
+        historySliderSummary("?�조", current.tint, target.tint),
         historySliderSummary("채도", current.saturation, target.saturation),
-        historySliderSummary("생동감", current.vibrance, target.vibrance),
-        historySliderSummary("명료도", current.clarity, target.clarity),
-        historySliderSummary("디헤이즈", current.dehaze, target.dehaze),
-        historySliderSummary("선명도", current.sharpness, target.sharpness),
+        historySliderSummary("?�동�?, current.vibrance, target.vibrance),
+        historySliderSummary("명료??, current.clarity, target.clarity),
+        historySliderSummary("?�헤?�즈", current.dehaze, target.dehaze),
+        historySliderSummary("?�명??, current.sharpness, target.sharpness),
         historyAbsoluteSliderSummary(
-            "노이즈 감소",
+            "?�이�?감소",
             current.luminanceNoiseReduction,
             target.luminanceNoiseReduction,
         ),
         historyAbsoluteSliderSummary(
-            "색상 노이즈 감소",
+            "?�상 ?�이�?감소",
             current.colorNoiseReduction,
             target.colorNoiseReduction,
         ),
         historyAbsoluteSliderSummary(
-            "디테일 보호",
+            "?�테??보호",
             current.noiseDetailProtection,
             target.noiseDetailProtection,
         ),
@@ -10355,7 +10296,7 @@ private fun historyParamSummaries(current: EditParams, target: EditParams): List
 private fun historyExposureSummary(current: Float, target: Float): String? {
     if (!historyValueChanged(current, target)) return null
     val value = historySignedValue(target)
-    return "노출 $value"
+    return "?�출 $value"
 }
 
 private fun historySliderSummary(label: String, current: Float, target: Float): String? {
@@ -10379,7 +10320,7 @@ private fun historySignedValue(value: Float): String =
 internal fun EditorViewModel.acquireEditorSnapshot(tag: String): LeasedEditorSnapshot? =
     if (hasActiveBrushStroke() || selectionParamTransaction != null) {
         updateUiState {
-            it.copy(message = "현재 브러시 또는 선택 미리보기가 마무리되는 중입니다.")
+            it.copy(message = "?�재 브러???�는 ?�택 미리보기가 마무리되??중입?�다.")
         }
         null
     }
@@ -10909,7 +10850,7 @@ private fun saveDraftThumbnailFile(context: Context, source: File) {
     }
 }
 
-private fun logDraftSaveFailure(t: Throwable) {
+internal fun logDraftSaveFailure(t: Throwable) {
     Log.w(FLARE_GUARD_AI_TAG, "Draft autosave failed", t)
 }
 
@@ -10931,7 +10872,7 @@ private fun decodeSampledMutableBitmap(
 ): TrackedDecode {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(path, bounds)
-    require(bounds.outWidth > 0 && bounds.outHeight > 0) { "지원하지 않는 이미지이거나 디코딩에 실패했습니다" }
+    require(bounds.outWidth > 0 && bounds.outHeight > 0) { "지?�하지 ?�는 ?��?지?�거???�코?�에 ?�패?�습?�다" }
     var sample = 1
     val longest = max(bounds.outWidth, bounds.outHeight)
     while (longest / sample > maxSide) sample *= 2
@@ -10952,7 +10893,7 @@ private fun decodeSampledMutableBitmap(
     var decoded: Bitmap? = null
     var decodedEdge = 0L
     try {
-        decoded = requireNotNull(BitmapFactory.decodeFile(path, options)) { "미리보기 디코딩에 실패했습니다" }
+        decoded = requireNotNull(BitmapFactory.decodeFile(path, options)) { "미리보기 ?�코?�에 ?�패?�습?�다" }
         if (decoded!!.config == Bitmap.Config.ARGB_8888 && decoded!!.isMutable) {
             return TrackedDecode(decoded!!, diagnostics?.track(decoded!!, "decode:source") ?: 0L)
         }
@@ -11517,7 +11458,7 @@ private fun createExportPendingRow(
         }
     val uri =
         resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-            ?: error("저장 위치를 만들 수 없습니다")
+            ?: error("?�???�치�?만들 ???�습?�다")
     return uri
 }
 
@@ -11557,20 +11498,20 @@ private fun writeCompressedBitmapToUri(
             ExportFormat.Jpeg -> Bitmap.CompressFormat.JPEG
             ExportFormat.Png -> Bitmap.CompressFormat.PNG
             ExportFormat.Webp -> Bitmap.CompressFormat.WEBP
-            ExportFormat.Heif -> error("HEIF는 별도 인코더를 사용합니다")
+            ExportFormat.Heif -> error("HEIF??별도 ?�코?��? ?�용?�니??)
         }
     val quality = if (format == ExportFormat.Png) 100 else 95
     context.contentResolver.openOutputStream(uri)?.use { output ->
-        check(bitmap.compress(compressFormat, quality, output)) { "이미지 압축에 실패했습니다" }
-    } ?: error("저장 스트림을 열 수 없습니다")
+        check(bitmap.compress(compressFormat, quality, output)) { "?��?지 ?�축???�패?�습?�다" }
+    } ?: error("?�???�트림을 ?????�습?�다")
 }
 
 private fun writeHeifToUri(context: Context, uri: Uri, bitmap: Bitmap) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-        error("HEIF 저장은 Android 9 이상에서 지원됩니다")
+        error("HEIF ?�?��? Android 9 ?�상?�서 지?�됩?�다")
     }
     val descriptor =
-        context.contentResolver.openFileDescriptor(uri, "w") ?: error("HEIF 저장 스트림을 열 수 없습니다")
+        context.contentResolver.openFileDescriptor(uri, "w") ?: error("HEIF ?�???�트림을 ?????�습?�다")
     descriptor.use { pfd ->
         val writer =
             HeifWriter.Builder(
@@ -12100,7 +12041,7 @@ private suspend fun persistDraftGenerationInternal(
             DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-write-failed"
             return null
         }
-        // Finalize, validate, and publish — all under the outer global lock from saveDraftSnapshot
+        // Finalize, validate, and publish ??all under the outer global lock from saveDraftSnapshot
         val finalized = DraftStorageCoordinator.finalizeGenerationUnsafe(context, genDir, genId)
         if (finalized == null) {
             deleteDraftDirectory(context, genDir)

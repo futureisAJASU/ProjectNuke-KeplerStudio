@@ -11,6 +11,8 @@ import java.util.UUID
 import org.json.JSONObject
 
 internal const val DRAFT_COMPLETION_FILE_NAME = "complete"
+internal const val DRAFT_MANIFEST_FILE_NAME = "manifest.json"
+internal const val DRAFT_FORMAT_VERSION = 4
 
 internal data class DraftGenerationDirectory(val root: File) {
     val manifestFile get() = File(root, DRAFT_MANIFEST_FILE_NAME)
