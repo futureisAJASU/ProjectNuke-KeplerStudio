@@ -387,6 +387,78 @@ class DraftPersistentStorageArbitrationProductionTest {
         assertEquals("Current pointer B must survive reconciliation", genB, finalPtr)
     }
 
+    /** MANDATORY: Pointer-publication cancellation boundary regression. */
+    @Test
+    fun pointerPublicationCancellationRegression() = runBlocking {
+        // Create previous valid generation A and candidate B.
+        val vmA = initEditorForDraft(harness1, "cancel-reg-A")
+        awaitReadiness(vmA)
+        assertTrue(awaitSave(vmA, "save A"))
+        vmA.acknowledgeEditorLeave()
+        val genA = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
+        assertNotNull("A must exist", genA)
+
+        // Create candidate B (simulated publication stage).
+        val vmB = initEditorForDraft(harness2, "cancel-reg-B")
+        awaitReadiness(vmB)
+        vmB.updateUiState { it.copy(
+            draftGenerationId = genA,
+            draftSavedAtMillis = System.currentTimeMillis(),
+            draftSourcePath = genA,
+        ) }
+        vmB.draftPointerBaseline = genA
+        assertTrue(awaitSave(vmB, "save B"))
+        vmB.acknowledgeEditorLeave()
+        val genB = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
+        assertNotNull("B must exist", genB)
+        assertNotEquals("B must be different from A", genA, genB)
+
+        // Physical publication of B completes (pointer committed).
+        val publishedBDir = draftGenerationsRoot(context).resolve(genB!!)
+        assertTrue("B directory must exist after publication", publishedBDir.isDirectory)
+
+        // Force cancellation at publication return boundary: rollback to A.
+        // The coordinator must maintain exactly one coherent alternative.
+        val rollbackResult = DraftStorageCoordinator.rollbackCommittedDraftUnsafe(context, DraftSaveResult(
+            pointerPublished = true,
+            generationId = genB,
+            generationDirectory = DraftGenerationDirectory(publishedBDir),
+            expectedPointerGenerationId = genA,
+            previousGenerationDirectory = DraftGenerationDirectory(draftGenerationsRoot(context).resolve(genA)),
+        ))
+
+        // Verify final persistent state: either A or B must be coherent, never invalid/missing.
+        val finalPtr = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
+        val finalGenDir = finalPtr?.let { draftGenerationsRoot(context).resolve(it) }
+
+        assertTrue(
+            "Pointer must reference either A or B after cancellation boundary",
+            finalPtr == genA || finalPtr == genB
+        )
+
+        if (finalPtr == genB) {
+            assertTrue("If pointer == B, B must exist and validate", publishedBDir.isDirectory)
+        } else if (finalPtr == genA) {
+            val dirA = draftGenerationsRoot(context).resolve(genA)
+            assertTrue("If pointer == A, A must exist", dirA.isDirectory)
+        }
+
+        // Forbidden states: pointer references missing/invalid generation.
+        assertNotNull("Pointer must never be null after boundary", finalPtr)
+        assertTrue("Pointer must never reference missing directory", finalGenDir?.isDirectory == true)
+
+        // Verify no orphaned pointer references exist outside A/B.
+        val allFiles = draftGenerationsRoot(context).listFiles() ?: emptyArray()
+        for (f in allFiles) {
+            if (f.isDirectory) {
+                assertTrue(
+                    "Every directory must match final pointer or be a staging prefix",
+                    f.name == finalPtr || f.name.startsWith(DRAFT_GENERATION_STAGING_PREFIX)
+                )
+            }
+        }
+    }
+
     private fun draftGenerationsRoot(context: android.content.Context): java.io.File {
         return java.io.File(context.filesDir, "drafts/generations")
     }
