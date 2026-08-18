@@ -17,6 +17,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.ArrayBlockingQueue
 import org.robolectric.Shadows.shadowOf
 
 /**
@@ -89,19 +90,17 @@ internal fun awaitEditorReadyForTest(
     },
 ) {
     val ready = CompletableDeferred<Unit>()
+    val wake = ArrayBlockingQueue<Unit>(1)
     val observerScope = CoroutineScope(Dispatchers.Default)
     // OPTION 2: observers are wake-up only; authoritative admission evaluation
     // must occur on the Robolectric Main/test thread.
     val startupHandle = vm.startupInitCompletion.invokeOnCompletion {
-        if (!ready.isCompleted) ready.complete(Unit)
-    }
-    val startupObserver = observerScope.launch {
-        // Wake-up observer: does not evaluate admission.
+        try { wake.put(Unit) } catch (_: InterruptedException) { }
     }
     val stateObserver = observerScope.launch {
         vm.uiState.collect {
             // Wake-up only: never evaluate admission from Default.
-            if (!ready.isCompleted) ready.complete(Unit)
+            try { wake.put(Unit) } catch (_: InterruptedException) { }
         }
     }
     try {
@@ -113,6 +112,11 @@ internal fun awaitEditorReadyForTest(
                 shadowOf(android.os.Looper.getMainLooper()).idle()
                 val admission = runCatching { vm.canEnterEditorActionPure() }.getOrDefault(false)
                 val initDone = vm.startupInitCompletion.isCompleted
+                // Pump any queued wake-up signals so the loop continues.
+                while (true) {
+                    val signal = wake.poll()
+                    if (signal == null) break
+                }
                 if (initDone && admission && !ready.isCompleted) {
                     ready.complete(Unit)
                 }
@@ -121,7 +125,6 @@ internal fun awaitEditorReadyForTest(
         )
     } finally {
         startupHandle.dispose()
-        startupObserver.cancel()
         stateObserver.cancel()
         observerScope.cancel()
     }
@@ -141,11 +144,12 @@ internal fun awaitEditorActionAdmissionForTest(
     },
 ) {
     val ready = CompletableDeferred<Unit>()
+    val wake = ArrayBlockingQueue<Unit>(1)
     val scope = CoroutineScope(Dispatchers.Default)
     val observer = scope.launch {
         vm.uiState.collect {
             // Wake-up only: never evaluate admission from Default.
-            if (!ready.isCompleted) ready.complete(Unit)
+            try { wake.put(Unit) } catch (_: InterruptedException) { }
         }
     }
     try {
@@ -156,6 +160,11 @@ internal fun awaitEditorActionAdmissionForTest(
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idle()
                 val admission = runCatching { vm.canEnterEditorActionPure() }.getOrDefault(false)
+                // Drain queued wake-up signals.
+                while (true) {
+                    val signal = wake.poll()
+                    if (signal == null) break
+                }
                 if (admission && !ready.isCompleted) {
                     ready.complete(Unit)
                 }

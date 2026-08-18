@@ -196,13 +196,17 @@ internal suspend fun reconcileStartupArtifacts(
 
     val legacyRoot = runCatching { File(context.filesDir, LEGACY_DRAFT_DIR).canonicalFile }.getOrNull()
     if (legacyRoot != null) {
-        legacyRoot.listFiles()?.forEach { file ->
-            val canonical = runCatching { file.canonicalFile }.getOrNull()
-            if (canonical == null || canonical.parentFile != legacyRoot) return@forEach
-            if (canonical.name.endsWith(DRAFT_TEMP_SUFFIX)) {
-                entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_TEMP)
-            } else {
-                entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
+        withContext(Dispatchers.IO) {
+            DraftStorageCoordinator.withWriteLock {
+                legacyRoot.listFiles()?.forEach { file ->
+                    val canonical = runCatching { file.canonicalFile }.getOrNull()
+                    if (canonical == null || canonical.parentFile != legacyRoot) return@forEach
+                    if (canonical.name.endsWith(DRAFT_TEMP_SUFFIX)) {
+                        entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_TEMP)
+                    } else {
+                        entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
+                    }
+                }
             }
         }
     }

@@ -546,7 +546,7 @@ class ShutdownDraftIntegrityProductionTest {
         val sourceFile = draftSourceFile("clear-draft-save.png")
         val vm = editor(sourceFile.absolutePath)
         val seam = DraftSaveTestSeam()
-        val seamHandle = DraftSaveTestSeam.install(seam)
+        val seamHandle = DraftSaveTestSeam.install(vm, seam)
         val callerScope = CoroutineScope(Dispatchers.Default)
         try {
             val save = callerScope.async { vm.persistDraftSnapshotNow() }

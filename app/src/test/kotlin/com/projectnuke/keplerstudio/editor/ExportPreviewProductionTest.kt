@@ -205,7 +205,7 @@ class ExportPreviewProductionTest {
         val editor = editorWithDirtyBase(baseBitmapDirty = false)
         installSeam(rows, history)
         val draftSeam = DraftSaveTestSeam()
-        harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+        harness.ownSeam(DraftSaveTestSeam.install(editor, draftSeam))
         editor.exportPreview()
         awaitMainUntil { rows.encodeStarted.isCompleted && editor.uiState.value.isBusy }
 
@@ -238,7 +238,7 @@ class ExportPreviewProductionTest {
         val editor = editorWithDirtyBase(baseBitmapDirty = false)
         installSeam(rows, history)
         val draftSeam = DraftSaveTestSeam(failure = IllegalStateException("final draft failure"))
-        val draftHandle = harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+        val draftHandle = harness.ownSeam(DraftSaveTestSeam.install(editor, draftSeam))
 
         editor.exportPreview()
         awaitMainUntil { rows.encodeStarted.isCompleted && editor.uiState.value.isBusy }

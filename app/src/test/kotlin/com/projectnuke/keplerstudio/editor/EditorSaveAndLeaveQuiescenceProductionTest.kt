@@ -168,7 +168,7 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
         val seam = AsyncBusyTestSeam()
         val draftSeam = DraftSaveTestSeam()
         harness.ownSeam(AsyncBusyTestSeam.install(seam))
-        harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+        harness.ownSeam(DraftSaveTestSeam.install(vm, draftSeam))
         val startRevision = vm.uiState.value.revision
         val startOverlay = vm.uiState.value.showSelectionOverlay
         assertTrue(
@@ -199,7 +199,7 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
         val source = sourceFile("leave-caller-cancellation.png")
         val vm = editorWithDocument(source)
         val seam = DraftSaveTestSeam()
-        harness.ownSeam(DraftSaveTestSeam.install(seam))
+        harness.ownSeam(DraftSaveTestSeam.install(vm, seam))
 
         val caller = async { vm.persistDraftSnapshotNow() }
         await { seam.reached.isCompleted }
@@ -217,7 +217,7 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
         val source = sourceFile("leave-repeated.png")
         val vm = editorWithDocument(source)
         val seam = DraftSaveTestSeam()
-        harness.ownSeam(DraftSaveTestSeam.install(seam))
+        harness.ownSeam(DraftSaveTestSeam.install(vm, seam))
 
         val first = vm.requestSaveAndLeave()
         await { seam.reached.isCompleted }
@@ -237,7 +237,7 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
         val seam = DraftSaveTestSeam(failure = IllegalStateException("test publication failure"))
         val seamHandle =
             harness.ownSeam(
-                DraftSaveTestSeam.install(seam)
+                DraftSaveTestSeam.install(vm, seam)
             )
 
         vm.requestSaveAndLeave()
@@ -418,7 +418,7 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
             vm.updateActiveSelectionParamsLive { it.copy(exposure = 0.35f) }
             await { transaction.succeeded && vm.currentSelectionParamTransaction() === transaction }
             val draftSeam = DraftSaveTestSeam()
-            harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+harness.ownSeam(DraftSaveTestSeam.install(vm, draftSeam))
 
             vm.requestSaveAndLeave()
             await { draftSeam.reached.isCompleted }
@@ -444,7 +444,7 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
         await { recovery.automaticReached.isCompleted }
 
         val draftSeam = DraftSaveTestSeam()
-        harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+        harness.ownSeam(DraftSaveTestSeam.install(vm, draftSeam))
         vm.requestSaveAndLeave()
         await { draftSeam.reached.isCompleted }
         draftSeam.releaseGate.complete(Unit)
@@ -461,7 +461,7 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
         val source = sourceFile("leave-admission.png")
         val vm = editorWithDocument(source)
         val seam = DraftSaveTestSeam()
-        harness.ownSeam(DraftSaveTestSeam.install(seam))
+        harness.ownSeam(DraftSaveTestSeam.install(vm, seam))
         vm.requestSaveAndLeave()
         await { seam.reached.isCompleted }
         val before = vm.uiState.value
@@ -483,7 +483,7 @@ class EditorSaveAndLeaveQuiescenceProductionTest {
         val source = sourceFile("leave-shutdown.png")
         val vm = editorWithDocument(source)
         val seam = DraftSaveTestSeam()
-        harness.ownSeam(DraftSaveTestSeam.install(seam))
+        harness.ownSeam(DraftSaveTestSeam.install(vm, seam))
         vm.requestSaveAndLeave()
         await { seam.reached.isCompleted }
         harness.beforeClear { seam.releaseGate.complete(Unit) }

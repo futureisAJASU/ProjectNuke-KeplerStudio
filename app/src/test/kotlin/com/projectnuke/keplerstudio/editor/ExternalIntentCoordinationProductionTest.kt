@@ -222,7 +222,7 @@ class ExternalIntentCoordinationProductionTest {
             )
 
             val draftSeam = DraftSaveTestSeam()
-            harness.ownSeam(DraftSaveTestSeam.install(draftSeam))
+            harness.ownSeam(DraftSaveTestSeam.install(vm, draftSeam))
             vm.requestSaveAndLeave()
             gate.releaseGate.complete(Unit)
             assertTrue(awaitEvent(vm) { draftSeam.reached.isCompleted })

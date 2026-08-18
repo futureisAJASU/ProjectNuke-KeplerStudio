@@ -88,7 +88,24 @@ internal object DraftStorageCoordinator {
 
     internal suspend fun deleteAllExceptUnsafe(context: Context, keepDirectory: File?, extraPreserveGenerationId: String? = null) {
         withContext(ioDispatcher) {
-            deleteAllDraftGenerationsExcept(context, keepDirectory, extraPreserveGenerationId)
+            val actualPointer = currentDraftGenerationId(context)
+            val root = runCatching { draftGenerationsRoot(context).canonicalFile }.getOrNull()
+            val kept = keepDirectory?.let { runCatching { it.canonicalFile }.getOrNull() }
+            val preserveIds = mutableSetOf<String>()
+            kept?.let { runCatching { it.name }.getOrNull()?.let { name -> preserveIds.add(name) } }
+            actualPointer?.let { preserveIds.add(it) }
+            extraPreserveGenerationId?.let { preserveIds.add(it) }
+            root?.listFiles()?.forEach { dir ->
+                val contained = runCatching { dir.canonicalFile }.getOrNull()
+                if (contained == null || contained.parentFile != root || !contained.isDirectory) return@forEach
+                if (contained == kept) return@forEach
+                val dirName = contained.name
+                if (!preserveIds.contains(dirName) &&
+                    (dirName.startsWith(DRAFT_GENERATION_DIR_PREFIX) || dirName.startsWith(DRAFT_GENERATION_STAGING_PREFIX))
+                ) {
+                    deleteDraftDirectory(context, DraftGenerationDirectory(contained))
+                }
+            }
         }
     }
 
@@ -103,92 +120,31 @@ internal object DraftStorageCoordinator {
             }
         }
 
-    suspend fun finalizeGeneration(
-        context: Context,
-        staging: DraftGenerationDirectory,
-        generationId: String,
-    ): DraftGenerationDirectory? = globalStorageLock.withLock {
-        withContext(ioDispatcher) { finalizeDraftGeneration(context, staging, generationId) }
-    }
-
-    suspend fun publishGeneration(context: Context, generationId: String): Boolean =
-        globalStorageLock.withLock {
-            withContext(ioDispatcher) { publishDraftGeneration(context, generationId) }
-        }
-
-    suspend fun findByGenerationId(
-        context: Context,
-        generationId: String,
-    ): DraftGenerationDirectory? = globalStorageLock.withLock {
-        withContext(ioDispatcher) { findDraftGenerationDirectory(context, generationId) }
-    }
-
     // -----------------------------------------------------------------------
-    // Pointer — read, clear, validate
+    // Pointer / validation — ONLY inside withWriteLock / withReadLock
     // -----------------------------------------------------------------------
 
-    suspend fun readCurrentPointer(context: Context): String? =
-        globalStorageLock.withLock {
-            withContext(ioDispatcher) { currentDraftGenerationId(context) }
-        }
-
-    suspend fun clearPointer(context: Context): Boolean =
-        globalStorageLock.withLock {
-            withContext(ioDispatcher) { clearCurrentDraftGenerationPointer(context) }
-        }
-
-    suspend fun validateCurrentGeneration(context: Context): ValidatedDraftGeneration? =
-        globalStorageLock.withLock {
-            withContext(ioDispatcher) { validateCurrentDraftGeneration(context) }
-        }
-
     // -----------------------------------------------------------------------
-    // Destructive cleanup — protected by [globalStorageLock]
+    // Transaction helpers — these are the ONLY public entry points
     // -----------------------------------------------------------------------
-
-    suspend fun deleteAllExcept(
-        context: Context,
-        keepDirectory: File?,
-        extraPreserveGenerationId: String? = null,
-    ) {
-        globalStorageLock.withLock {
-            val actualPointer = currentDraftGenerationId(context)
-            withContext(ioDispatcher) {
-                val preserveIds = mutableSetOf<String>()
-                keepDirectory?.let { file ->
-                    runCatching { file.canonicalFile }.getOrNull()?.name?.let { preserveIds.add(it) }
-                }
-                actualPointer?.let { preserveIds.add(it) }
-                extraPreserveGenerationId?.let { preserveIds.add(it) }
-                // Custom conservative deletion: never delete the actual current pointer
-                val root = runCatching { draftGenerationsRoot(context).canonicalFile }.getOrNull()
-                val kept = keepDirectory?.let { runCatching { it.canonicalFile }.getOrNull() }
-                root?.listFiles()?.forEach { dir ->
-                    val contained = runCatching { dir.canonicalFile }.getOrNull()
-                    if (contained == null || contained.parentFile != root || !contained.isDirectory) return@forEach
-                    if (contained == kept) return@forEach
-                    val dirName = contained.name
-                    if (!preserveIds.contains(dirName) &&
-                        (dirName.startsWith(DRAFT_GENERATION_DIR_PREFIX) || dirName.startsWith(DRAFT_GENERATION_STAGING_PREFIX))
-                    ) {
-                        deleteDraftDirectory(context, DraftGenerationDirectory(contained))
-                    }
-                }
-            }
-        }
-    }
-
-    suspend fun deleteById(context: Context, generationId: String) {
-        globalStorageLock.withLock {
-            withContext(ioDispatcher) { deleteDraftGenerationById(context, generationId) }
-        }
-    }
 
     suspend fun rollbackCommittedDraft(context: Context, saved: DraftSaveResult) {
         globalStorageLock.withLock {
             rollbackCommittedDraftUnsafe(context, saved)
         }
     }
+
+    /** Exact compare-and-mutate transaction for invalid-generation cleanup. */
+    suspend fun clearInvalidGenerationIfCurrent(context: Context, invalidId: String): Boolean =
+        withWriteLock {
+            val current = currentDraftGenerationId(context)
+            if (current != invalidId) return@withWriteLock false
+            val cleared = runCatching { clearCurrentDraftGenerationPointer(context) }.getOrDefault(false)
+            if (cleared) {
+                runCatching { deleteDraftGenerationById(context, invalidId) }
+            }
+            cleared
+        }
 
     // -----------------------------------------------------------------------
     // Blocking sync wrappers — safe ONLY for pre-viewModel init reads

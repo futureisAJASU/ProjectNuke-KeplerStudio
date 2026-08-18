@@ -16,26 +16,26 @@ internal class DraftSaveTestSeam(
 
     internal companion object Registry {
         private val lock = Any()
-        private var installed: DraftSaveTestSeam? = null
+        private val installed = mutableMapOf<EditorViewModel, DraftSaveTestSeam>()
 
         /** Test-only: why the most recent draft-snapshot persist returned false. */
         @Volatile internal var lastFailureReasonForTest: String? = null
 
-        internal fun install(seam: DraftSaveTestSeam): AutoCloseable {
+        internal fun install(vm: EditorViewModel, seam: DraftSaveTestSeam): AutoCloseable {
             synchronized(lock) {
-                check(installed == null) { "Draft save test seam already installed" }
-                installed = seam
+                check(!installed.containsKey(vm)) { "Draft save test seam already installed for VM" }
+                installed[vm] = seam
             }
             return AutoCloseable {
                 seam.releaseGate.complete(Unit)
                 synchronized(lock) {
-                    if (installed === seam) installed = null
+                    installed.remove(vm, seam)
                 }
             }
         }
 
-        internal fun capture(): DraftSaveTestSeam? = synchronized(lock) { installed }
+        internal fun capture(vm: EditorViewModel): DraftSaveTestSeam? = synchronized(lock) { installed[vm] }
 
-        internal fun installedForTestCount(): Int = synchronized(lock) { if (installed == null) 0 else 1 }
+        internal fun installedForTestCount(): Int = synchronized(lock) { installed.size }
     }
 }
