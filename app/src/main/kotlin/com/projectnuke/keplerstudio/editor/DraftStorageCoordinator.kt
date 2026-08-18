@@ -165,7 +165,7 @@ internal object DraftStorageCoordinator {
             if (matchesLegacySource && isOwnedDraft) {
                 val deleted = file.delete()
                 if (!deleted) {
-                    logDraftSaveFailure(
+                    EditorViewModel.logDraftSaveFailure(
                         IllegalStateException("failed to delete legacy draft source: ${file.absolutePath}")
                     )
                     overallSuccess = false
