@@ -11903,16 +11903,16 @@ private suspend fun saveDraftSnapshot(
                 isSupportedDraftSource(context, File(payload.previousVisibleDraftPath)) ->
                 DraftSourceResult(File(payload.previousVisibleDraftPath), changed = false)
             !payload.baseBitmapDirty && payload.sourcePath != null ->
-                persistDraftSourceFileIfNeeded(context, payload.sourcePath)
-                    ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "reuse-source-null:${payload.sourcePath}"; return null }
-            payload.dirtyBitmapCopy != null ->
-                persistDraftBitmapFile(context, payload.dirtyBitmapCopy)?.let {
-                    DraftSourceResult(it, changed = true)
-                }
-                    ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "dirty-bitmap-persist-null"; return null }
-            else -> null
-        }?.also { }
-            ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "no-draft-source-result:${payload.sourcePath}/dirty=${payload.baseBitmapDirty}"; return null }
+                    persistDraftSourceFileIfNeeded(context, payload.sourcePath)
+                        ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "reuse-source-null:${payload.sourcePath}"; return null }
+                payload.dirtyBitmapCopy != null ->
+                    persistDraftBitmapFile(context, payload.dirtyBitmapCopy)?.let {
+                        DraftSourceResult(it, changed = true)
+                    }
+                        ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "dirty-bitmap-persist-null"; return null }
+                else -> null
+            }?.also { }
+                ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "no-draft-source-result:${payload.sourcePath}/dirty=${payload.baseBitmapDirty}"; return null }
 
     return DraftStorageCoordinator.withWriteLock {
         if (!isCurrent()) {
