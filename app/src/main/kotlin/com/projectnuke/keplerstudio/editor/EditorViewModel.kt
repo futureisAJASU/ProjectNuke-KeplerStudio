@@ -5001,6 +5001,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     DraftPointerSnapshot(diskPointer)
                 }
             } ?: run { lastDraftSaveFailureReasonForTest = "epoch-or-pointer-mismatch"; return false }
+        testSeam?.parkIfRequested(DraftSaveStage.BeforeStorageTransaction)
         settleParameterTransaction(reason)
         val draftSnapshot = acquireEditorSnapshot("draftSave")
             ?: run { lastDraftSaveFailureReasonForTest = "snapshot-acquire-failed"; return false }
@@ -5064,24 +5065,39 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         try {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
+                    testSeam?.parkIfRequested(DraftSaveStage.StorageTransactionAcquired)
                     committed =
-                        saveDraftSnapshot(context, payload) {
+                        saveDraftSnapshot(context, payload, testSeam) {
                             owningJob?.isActive != false &&
                                 !shuttingDown &&
                                 isDraftPayloadCurrent(payload)
                         }
                     committed?.let { saved ->
-                        // Publication is predicate-guarded up to the pointer commit.
-                        // Post-commit UI/old-generation settlement remains cancellable:
-                        // teardown must not retain a ViewModel-owned coroutine. A valid
-                        // committed pointer is recoverable on the next process start.
-                        settled = settleCommittedDraft(context, saved, payload, owningJob)
+                        settled = settleCommittedDraft(context, saved, payload, owningJob, testSeam)
                     }
                 }
             }
         } catch (_: CancellationException) {
-            // A published pointer must be settled even when dispatcher return delivers
-            // cancellation.
+            committed?.let { saved ->
+                withContext(NonCancellable) {
+                    try {
+                        DraftStorageCoordinator.withWriteLock {
+                            val actualPointer = currentDraftGenerationId(context)
+                            if (actualPointer == saved.generationId) {
+                                persistLegacyDraftCompatibility(context, payload, saved)
+                            }
+                            DraftStorageCoordinator.deleteAllExceptUnsafe(
+                                context,
+                                saved.generationDirectory,
+                                saved.expectedPointerGenerationId,
+                            )
+                        }
+                    } catch (t: Throwable) {
+                        logDraftSaveFailure(t)
+                    }
+                }
+            }
+            throw CancellationException("Draft save cancelled during publication settlement")
         } catch (t: Throwable) {
             logDraftSaveFailure(t)
         }
@@ -5110,6 +5126,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         saved: DraftSaveResult,
         payload: DraftSavePayload,
         owningJob: Job?,
+        testSeam: DraftSaveTestSeam?,
     ): Boolean {
         val current =
             owningJob?.isActive != false &&
@@ -5141,6 +5158,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             adopted = commitUiState(expected, next)
         }
         saved.expectedPointerGenerationId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
+        testSeam?.parkIfRequested(DraftSaveStage.BeforePostCommitCleanup)
         withContext(Dispatchers.IO) {
             DraftStorageCoordinator.withWriteLock {
                 val actualPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
@@ -11887,43 +11905,42 @@ private fun draftSourceIdentity(path: String?): String? {
 private suspend fun saveDraftSnapshot(
     context: Context,
     payload: DraftSavePayload,
+    testSeam: DraftSaveTestSeam?,
     isCurrent: () -> Boolean,
 ): DraftSaveResult? {
-    val draftSource =
-        when {
-            payload.previousVisibleDraftPath?.let(::File)?.isFile == true &&
-                sameCanonicalPath(
-                    safeDraftPreferenceString(
-                        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE),
-                        KEY_DRAFT_SOURCE,
-                    ),
-                    payload.previousVisibleDraftPath,
-                ) &&
-                safeDraftPreferenceString(
-                    context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE),
-                    KEY_DRAFT_BASE_TOKEN,
-                ) == payload.baseContentToken &&
-                isSupportedDraftSource(context, File(payload.previousVisibleDraftPath)) ->
-                DraftSourceResult(File(payload.previousVisibleDraftPath), changed = false)
-            !payload.baseBitmapDirty && payload.sourcePath != null ->
-                persistDraftSourceFileIfNeeded(context, payload.sourcePath)
-                    ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "reuse-source-null:${payload.sourcePath}"; return null }
-            payload.dirtyBitmapCopy != null ->
-                persistDraftBitmapFile(context, payload.dirtyBitmapCopy)?.let {
-                    DraftSourceResult(it, changed = true)
-                }
-                    ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "dirty-bitmap-persist-null"; return null }
-            else -> null
-        }?.also { }
-            ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "no-draft-source-result:${payload.sourcePath}/dirty=${payload.baseBitmapDirty}"; return null }
-
     return DraftStorageCoordinator.withWriteLock {
         if (!isCurrent()) {
-            if (draftSource.changed && isOwnedDraftSource(context, draftSource.file))
-                draftSource.file.delete()
             DraftSaveTestSeam.Registry.lastFailureReasonForTest = "save-draft-not-current"
             return@withWriteLock null
         }
+        val draftSource =
+            when {
+                payload.previousVisibleDraftPath?.let(::File)?.isFile == true &&
+                    sameCanonicalPath(
+                        safeDraftPreferenceString(
+                            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE),
+                            KEY_DRAFT_SOURCE,
+                        ),
+                        payload.previousVisibleDraftPath,
+                    ) &&
+                    safeDraftPreferenceString(
+                        context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE),
+                        KEY_DRAFT_BASE_TOKEN,
+                    ) == payload.baseContentToken &&
+                    isSupportedDraftSource(context, File(payload.previousVisibleDraftPath)) ->
+                    DraftSourceResult(File(payload.previousVisibleDraftPath), changed = false)
+                !payload.baseBitmapDirty && payload.sourcePath != null ->
+                    persistDraftSourceFileIfNeeded(context, payload.sourcePath)
+                        ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "reuse-source-null:${payload.sourcePath}"; return@withWriteLock null }
+                payload.dirtyBitmapCopy != null ->
+                    persistDraftBitmapFile(context, payload.dirtyBitmapCopy)?.let {
+                        DraftSourceResult(it, changed = true)
+                    }
+                        ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "dirty-bitmap-persist-null"; return@withWriteLock null }
+                else -> null
+            }?.also { }
+                ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "no-draft-source-result:${payload.sourcePath}/dirty=${payload.baseBitmapDirty}"; return@withWriteLock null }
+        testSeam?.parkIfRequested(DraftSaveStage.CompatibilitySourceVisible)
         val savedAt = System.currentTimeMillis()
         val generationResult =
             persistDraftGenerationInternal(
@@ -11933,6 +11950,7 @@ private suspend fun saveDraftSnapshot(
                 savedAt = savedAt,
                 dirtyBitmapCopy = payload.dirtyBitmapCopy,
                 isCurrent = isCurrent,
+                testSeam = testSeam,
             )
         if (generationResult == null) {
             if (draftSource.changed && isOwnedDraftSource(context, draftSource.file))
@@ -12007,11 +12025,14 @@ private suspend fun persistDraftGenerationInternal(
     savedAt: Long,
     dirtyBitmapCopy: Bitmap?,
     isCurrent: () -> Boolean,
+    testSeam: DraftSaveTestSeam?,
 ): DraftSaveResult? {
     val genId = UUID.randomUUID().toString()
     var genDir = newDraftGenerationDirectory(context)
     var pendingResult: DraftSaveResult? = null
     var pointerCommitted = false
+    var result: DraftSaveResult? = null
+    var durablePublication = false
     try {
         if (!isCurrent()) return null
         val maskEntries =
@@ -12110,6 +12131,7 @@ private suspend fun persistDraftGenerationInternal(
             DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-finalize-failed"
             return null
         }
+        testSeam?.parkIfRequested(DraftSaveStage.GenerationFinalizedBeforePublish)
         genDir = finalized
         val validated = validateDraftGeneration(genDir, genId)
         if (validated == null) {
@@ -12131,7 +12153,7 @@ private suspend fun persistDraftGenerationInternal(
         val previousDirectory = payload.expectedPointerGenerationId?.let {
             findDraftGenerationDirectory(context, it)?.root
         }
-        val result = DraftSaveResult(
+        result = DraftSaveResult(
             generationId = genDir.root.name,
             generationDirectory = genDir.root,
             sourcePath = validated.sourceFile.absolutePath,
@@ -12147,57 +12169,56 @@ private suspend fun persistDraftGenerationInternal(
             previousDraftPath = payload.previousVisibleDraftPath,
             originalSourcePath = payload.sourcePath,
         )
-        if (!DraftStorageCoordinator.publishGenerationUnsafe(context, genDir.root.name)) {
+        val published = withContext(NonCancellable) {
+            DraftStorageCoordinator.publishGenerationUnsafe(context, genDir.root.name)
+        }
+        if (!published) {
             deleteDraftDirectory(context, genDir)
             DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-publish-failed"
             return null
         }
+        val actualPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
+        durablePublication = actualPointer == genDir.root.name
+        if (!durablePublication) {
+            deleteDraftDirectory(context, genDir)
+            DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-publish-failed"
+            return null
+        }
+        testSeam?.parkIfRequested(DraftSaveStage.PointerPublished)
+        testSeam?.parkIfRequested(DraftSaveStage.PointerPersistedBeforeSettlement)
         val completedDir = result.copy(pointerPublished = true)
         pendingResult = completedDir
         pointerCommitted = true
         return completedDir
+    } catch (ce: CancellationException) {
+        if (durablePublication) {
+            val saved = pendingResult ?: result?.copy(pointerPublished = true)
+            if (saved != null) {
+                try {
+                    DraftStorageCoordinator.rollbackCommittedDraftUnsafe(context, saved)
+                } catch (t: Throwable) {
+                    logDraftSaveFailure(t)
+                }
+            }
+        } else {
+            deleteDraftDirectory(context, genDir)
+        }
+        throw ce
     } catch (t: Throwable) {
-        if (pointerCommitted && pendingResult != null) {
-            DraftStorageCoordinator.rollbackCommittedDraft(
-                context,
-                checkNotNull(pendingResult).copy(pointerPublished = true),
-            )
+        if (durablePublication) {
+            val saved = pendingResult ?: result?.copy(pointerPublished = true)
+            if (saved != null) {
+                try {
+                    DraftStorageCoordinator.rollbackCommittedDraftUnsafe(context, saved)
+                } catch (t2: Throwable) {
+                    logDraftSaveFailure(t2)
+                }
+            }
         } else {
             deleteDraftDirectory(context, genDir)
         }
         Log.w(FLARE_GUARD_AI_TAG, "Draft generation save failed", t)
         return null
-    }
-}
-
-private fun rollbackCommittedDraft(context: Context, saved: DraftSaveResult) {
-    if (!saved.pointerPublished) {
-        deleteDraftDirectory(context, DraftGenerationDirectory(saved.generationDirectory))
-        return
-    }
-    val pointer = currentDraftGenerationId(context)
-    if (pointer == saved.generationId) {
-        val previousIsComplete =
-            runCatching {
-                    saved.expectedPointerGenerationId != null &&
-                        saved.previousGenerationDirectory?.let { directory ->
-                            findDraftGenerationDirectory(context, saved.expectedPointerGenerationId)
-                                ?.root
-                                ?.canonicalFile == directory.canonicalFile
-                        } == true
-                }
-                .getOrDefault(false)
-        val restoredPrevious =
-            previousIsComplete &&
-                publishDraftGeneration(context, checkNotNull(saved.expectedPointerGenerationId))
-        val rolledBack = restoredPrevious || clearCurrentDraftGenerationPointer(context)
-        if (!rolledBack || currentDraftGenerationId(context) == saved.generationId) return
-    }
-    if (currentDraftGenerationId(context) != saved.generationId) {
-        deleteDraftDirectory(context, DraftGenerationDirectory(saved.generationDirectory))
-        saved.compatibilitySourceFile
-            ?.takeIf { saved.compatibilitySourceChanged && isOwnedDraftSource(context, it) }
-            ?.delete()
     }
 }
 

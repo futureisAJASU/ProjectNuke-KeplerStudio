@@ -103,7 +103,7 @@ class DraftPersistentStorageArbitrationProductionTest {
     }
 
     private fun sourceFile(harness: OwnedEditorViewModelHarness, sourceName: String): java.io.File {
-        val source = java.io.File(context.filesDir, "drafts/current/source_$sourceName.img")
+        val source = java.io.File(context.cacheDir, "test_sources/source_$sourceName.img")
         source.parentFile?.mkdirs()
         val image = createTestBitmap()
         source.outputStream().use { check(image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)) }
@@ -175,7 +175,10 @@ class DraftPersistentStorageArbitrationProductionTest {
 
         // First save to establish a baseline pointer
         val initialSave = awaitSave(vm1, "initial save")
-        assertTrue("Initial save must succeed", initialSave)
+        assertTrue(
+            "Initial save must succeed: reason=${vm1.lastDraftSaveFailureReasonForTest} stage=${DraftSaveTestSeam.Registry.lastFailureReasonForTest}",
+            initialSave
+        )
         vm1.acknowledgeEditorLeave()
         val baselinePtr = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
         assertNotNull(baselinePtr)

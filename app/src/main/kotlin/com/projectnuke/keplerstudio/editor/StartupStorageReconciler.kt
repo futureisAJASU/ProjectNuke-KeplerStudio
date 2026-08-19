@@ -201,10 +201,18 @@ internal suspend fun reconcileStartupArtifacts(
                 legacyRoot.listFiles()?.forEach { file ->
                     val canonical = runCatching { file.canonicalFile }.getOrNull()
                     if (canonical == null || canonical.parentFile != legacyRoot) return@forEach
-                    if (canonical.name.endsWith(DRAFT_TEMP_SUFFIX)) {
-                        entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_TEMP)
-                    } else {
-                        entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
+                    when {
+                        canonical.name.endsWith(DRAFT_TEMP_SUFFIX) ->
+                            entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_TEMP)
+                        canonical.name.startsWith("source_") && canonical.extension == "img" -> {
+                            if (referenced.any { it.name == canonical.name }) {
+                                entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_REFERENCED)
+                            } else {
+                                entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_UNREFERENCED)
+                            }
+                        }
+                        else ->
+                            entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
                     }
                 }
             }

@@ -110,17 +110,6 @@ internal object DraftStorageCoordinator {
     }
 
     // -----------------------------------------------------------------------
-    // Generation write path — protected by [globalStorageLock]
-    // -----------------------------------------------------------------------
-
-    suspend fun newStagingGeneration(context: Context): DraftGenerationDirectory? =
-        globalStorageLock.withLock {
-            withContext(ioDispatcher) {
-                runCatching { newDraftGenerationDirectory(context) }.getOrNull()
-            }
-        }
-
-    // -----------------------------------------------------------------------
     // Pointer / validation — ONLY inside withWriteLock / withReadLock
     // -----------------------------------------------------------------------
 

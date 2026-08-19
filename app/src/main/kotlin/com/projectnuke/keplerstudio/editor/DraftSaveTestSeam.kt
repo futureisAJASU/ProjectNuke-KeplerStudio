@@ -2,16 +2,36 @@ package com.projectnuke.keplerstudio.editor
 
 import kotlinx.coroutines.CompletableDeferred
 
+/** Exact owner-bound parking stages for deterministic Draft-save tests. */
+internal enum class DraftSaveStage {
+    BeforeStorageTransaction,
+    StorageTransactionAcquired,
+    CompatibilitySourceVisible,
+    GenerationFinalizedBeforePublish,
+    PointerPublished,
+    PointerPersistedBeforeSettlement,
+    BeforePostCommitCleanup,
+}
+
 /** Scoped owner gate captured by one Draft operation; test-only when uninstalled. */
 internal class DraftSaveTestSeam(
-    internal val reached: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val parkAt: DraftSaveStage? = null,
     internal val releaseGate: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val reached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val failure: Throwable? = null,
 ) {
     internal suspend fun awaitRelease() {
         reached.complete(Unit)
         releaseGate.await()
         failure?.let { throw it }
+    }
+
+    internal suspend fun parkIfRequested(stage: DraftSaveStage) {
+        if (stage == parkAt) {
+            reached.complete(Unit)
+            releaseGate.await()
+            failure?.let { throw it }
+        }
     }
 
     internal companion object Registry {

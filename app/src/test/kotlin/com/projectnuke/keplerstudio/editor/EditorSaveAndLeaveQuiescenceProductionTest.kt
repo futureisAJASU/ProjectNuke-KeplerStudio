@@ -526,7 +526,7 @@ harness.ownSeam(DraftSaveTestSeam.install(vm, draftSeam))
     }
 
     private fun sourceFile(name: String): File {
-        val source = context.filesDir.resolve("drafts/current/source_$name.img")
+        val source = context.cacheDir.resolve("test_sources/source_$name.img")
         source.parentFile?.mkdirs()
         val image = bitmap(0xff00aa44.toInt(), 8, 4)
         source.outputStream().use { check(image.compress(Bitmap.CompressFormat.PNG, 100, it)) }
