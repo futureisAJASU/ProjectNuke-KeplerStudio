@@ -5001,6 +5001,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     DraftPointerSnapshot(diskPointer)
                 }
             } ?: run { lastDraftSaveFailureReasonForTest = "epoch-or-pointer-mismatch"; return false }
+        testSeam?.beforeStorageReached?.complete(Unit)
         testSeam?.parkIfRequested(DraftSaveStage.BeforeStorageTransaction)
         settleParameterTransaction(reason)
         val draftSnapshot = acquireEditorSnapshot("draftSave")
@@ -5008,7 +5009,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val draftState = draftSnapshot.state
         ParameterLifecycleTestHook.notifyDraftCaptureBegan(draftEpoch)
         try {
-            testSeam?.awaitRelease()
+            if (testSeam != null && testSeam.parkAt == null) testSeam.awaitRelease()
         } catch (failure: Throwable) {
             draftSnapshot.close()
             throw failure
@@ -5065,7 +5066,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         try {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
-                    testSeam?.parkIfRequested(DraftSaveStage.StorageTransactionAcquired)
                     committed =
                         saveDraftSnapshot(context, payload, testSeam) {
                             owningJob?.isActive != false &&
@@ -6914,15 +6914,17 @@ fun exportPreview() {
         val clearEpoch = draftOperationEpoch
         viewModelScope.launch {
             try {
-                ClearDraftTestSeam.capture()?.beforeStorageClear?.invoke()
+                ClearDraftTestSeam.capture(this@EditorViewModel)?.beforeStorageClear?.invoke()
                 draftSaveJob?.cancelAndJoin()
                 val cleared =
                     withContext(Dispatchers.IO) {
-                        draftSaveMutex.withLock {
-                            if (clearEpoch != draftOperationEpoch) return@withLock false
+                        draftSaveMutex.withLock draftLock@{
+                            DraftStorageCoordinator.withWriteLock {
+                            ClearDraftTestSeam.capture(this@EditorViewModel)?.atStorageTransaction?.invoke()
+                            if (clearEpoch != draftOperationEpoch) return@withWriteLock false
                             val expectedPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
                             val expectedBaseline = draftPointerBaseline
-                            if (expectedPointer != expectedBaseline) return@withLock false
+                            if (expectedPointer != expectedBaseline) return@withWriteLock false
                             // Capture one stable visible state snapshot
                             val visibleBefore = _uiState.value
                             val liveSourcePath = visibleBefore.sourcePath
@@ -6931,9 +6933,7 @@ fun exportPreview() {
                                 context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
                             val prevPrefs = snapshotDraftPreferences(prefs)
                             // Clear pointer and baseline (global storage mutation)
-                            if (!DraftStorageCoordinator.withWriteLock {
-                                    DraftStorageCoordinator.clearPointerUnsafe(context)
-                                }) return@withLock false
+                            if (!DraftStorageCoordinator.clearPointerUnsafe(context)) return@withWriteLock false
                             draftPointerBaseline = null
                             // Clear legacy prefs
                             val committed =
@@ -6981,9 +6981,7 @@ fun exportPreview() {
                                     val pointerRestored =
                                     if (expectedPointer != null) {
                                         runCatching {
-                                            DraftStorageCoordinator.withWriteLock {
-                                                DraftStorageCoordinator.publishGenerationUnsafe(context, expectedPointer)
-                                            }
+                                            DraftStorageCoordinator.publishGenerationUnsafe(context, expectedPointer)
                                         }.getOrDefault(false)
                                     } else {
                                         true
@@ -6995,7 +6993,7 @@ fun exportPreview() {
                                 }
                                 val currentPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
                                 draftPointerBaseline = currentPointer
-                                return@withLock false
+                                return@withWriteLock false
                             }
                             // Clear visible Draft metadata with explicit CAS - complete identity
                             var adopted = false
@@ -7058,9 +7056,7 @@ fun exportPreview() {
                                     }
                                     val pointerRestored =
                                         if (expectedPointer != null) {
-                                        DraftStorageCoordinator.withWriteLock {
-                                            DraftStorageCoordinator.publishGenerationUnsafe(context, expectedPointer)
-                                        }
+                                        DraftStorageCoordinator.publishGenerationUnsafe(context, expectedPointer)
                                         } else {
                                             true
                                         }
@@ -7073,7 +7069,7 @@ fun exportPreview() {
                                     }
                                     val currentPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
                                     draftPointerBaseline = currentPointer
-                                    return@withLock false
+                                    return@withWriteLock false
                                 }
                                 state = _uiState.value
                             }
@@ -7088,8 +7084,7 @@ fun exportPreview() {
                                 legacyDraftSourcePath?.let {
                                     runCatching { File(it).canonicalFile }.getOrNull()
                                 }
-                            DraftStorageCoordinator.withWriteLock {
-                                runCatching {
+                            runCatching {
                                     persistentDraftDirectory(context).listFiles()?.forEach { file ->
                                         val canonical =
                                             runCatching { file.canonicalFile }.getOrNull()
@@ -7124,12 +7119,11 @@ fun exportPreview() {
                                                 )
                                         }
                                     }
-                                }
-                                .onFailure { logDraftSaveFailure(it) }
-                                // Also delete the generation directory under the same lock
-                                expectedPointer?.let {
-                                    DraftStorageCoordinator.deleteGenerationUnsafe(context, it)
-                                }
+                            }
+                            .onFailure { logDraftSaveFailure(it) }
+                            // Also delete the generation directory under the same lock
+                            expectedPointer?.let {
+                                DraftStorageCoordinator.deleteGenerationUnsafe(context, it)
                             }
                             runCatching {
                                     val thumbFile = persistentDraftThumbnailFile(context)
@@ -7154,6 +7148,7 @@ fun exportPreview() {
                                 }
                                 .onFailure { logDraftSaveFailure(it) }
                             true
+                            }
                         }
                     }
                 if (!cleared) {
@@ -8656,6 +8651,10 @@ fun exportPreview() {
             return
         }
         if (target == DraftRestoreTarget.CurrentStartup && generationRestore is GenerationRestoreOutcome.Invalid) {
+            DraftRestoreTestSeam.capture()?.await(
+                DraftRestoreTestStage.CurrentStartupInvalidBeforeCleanup,
+                generationRestore.generationId,
+            )
             val cleared =
                 withContext(Dispatchers.IO) {
                     draftSaveMutex.withLock {
@@ -8664,19 +8663,12 @@ fun exportPreview() {
                                 restoreStartRevision != _uiState.value.revision
                         )
                             return@withLock false
-                        val actualPointer = currentDraftGenerationId(context)
-                        if (actualPointer != generationRestore.generationId) {
-                            draftPointerBaseline =
-                                when {
-                                    actualPointer == null -> null
-                                    validateCurrentDraftGeneration(context) != null -> actualPointer
-                                    else -> actualPointer
-                                }
-                            return@withLock false
+                        DraftStorageCoordinator.clearInvalidGenerationIfCurrent(
+                            context,
+                            generationRestore.generationId,
+                        ).also { cleared ->
+                            if (cleared) draftPointerBaseline = null
                         }
-                        if (!clearCurrentDraftGenerationPointer(context)) return@withLock false
-                        draftPointerBaseline = null
-                        true
                     }
                 }
             if (!cleared) {
@@ -8687,9 +8679,6 @@ fun exportPreview() {
                 }
                 completeRetry(DraftRestoreRetryOutcome.ExactTargetInvalid)
                 return
-            }
-            withContext(Dispatchers.IO) {
-                deleteDraftGenerationById(context, generationRestore.generationId)
             }
         }
         val restoreSnapshot =
@@ -11909,6 +11898,7 @@ private suspend fun saveDraftSnapshot(
     isCurrent: () -> Boolean,
 ): DraftSaveResult? {
     return DraftStorageCoordinator.withWriteLock {
+        testSeam?.parkIfRequested(DraftSaveStage.StorageTransactionAcquired)
         if (!isCurrent()) {
             DraftSaveTestSeam.Registry.lastFailureReasonForTest = "save-draft-not-current"
             return@withWriteLock null
@@ -12184,6 +12174,7 @@ private suspend fun persistDraftGenerationInternal(
             DraftSaveTestSeam.Registry.lastFailureReasonForTest = "generation-publish-failed"
             return null
         }
+        testSeam?.pointerPersistedGenerationId?.complete(genDir.root.name)
         testSeam?.parkIfRequested(DraftSaveStage.PointerPublished)
         testSeam?.parkIfRequested(DraftSaveStage.PointerPersistedBeforeSettlement)
         val completedDir = result.copy(pointerPublished = true)
@@ -12194,10 +12185,12 @@ private suspend fun persistDraftGenerationInternal(
         if (durablePublication) {
             val saved = pendingResult ?: result?.copy(pointerPublished = true)
             if (saved != null) {
-                try {
-                    DraftStorageCoordinator.rollbackCommittedDraftUnsafe(context, saved)
-                } catch (t: Throwable) {
-                    logDraftSaveFailure(t)
+                withContext(NonCancellable) {
+                    try {
+                        DraftStorageCoordinator.rollbackCommittedDraftUnsafe(context, saved)
+                    } catch (t: Throwable) {
+                        logDraftSaveFailure(t)
+                    }
                 }
             }
         } else {

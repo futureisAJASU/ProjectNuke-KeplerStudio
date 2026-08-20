@@ -2,62 +2,42 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import android.graphics.Bitmap
-import android.net.Uri
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
 import org.junit.After
-import org.junit.Assert.*
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
-import java.io.File
-import java.util.Collections
-import kotlin.collections.mutableListOf
-import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
 class DraftPersistentStorageArbitrationProductionTest {
-
     private lateinit var harness1: OwnedEditorViewModelHarness
     private lateinit var harness2: OwnedEditorViewModelHarness
     private val context: Application
         get() = RuntimeEnvironment.getApplication() as Application
 
-    private fun awaitConditionLocalLocal(predicate: () -> Boolean) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
-        while (System.nanoTime() < deadline) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
-            if (predicate()) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-            if (predicate()) return
-            Thread.sleep(5L)
-        }
-        assertTrue(
-            "predicate did not settle; saveStage=${DraftSaveTestSeam.Registry.lastFailureReasonForTest}",
-            predicate()
-        )
-    }
-
     @Before
     fun setUp() {
-        // Install BitmapCopyTestSeam once for the test class
-        val bitmapCopySeam = BitmapCopyTestSeam.install()
-        seamHandlesForCleanup.add(bitmapCopySeam)
-        harness1 = OwnedEditorViewModelHarness(context, installBitmapCopySeam = false)
-        harness2 = OwnedEditorViewModelHarness(context, installBitmapCopySeam = false)
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
+        harness1 = OwnedEditorViewModelHarness(context)
+        harness2 = OwnedEditorViewModelHarness(context)
+        context.getSharedPreferences(PREF_NAME_DRAFT, 0).edit().clear().commit()
         clearCurrentDraftGenerationPointer(context)
         deleteDirectoryIfPresent(draftGenerationsRoot(context))
         deleteDirectoryIfPresent(persistentDraftDirectory(context))
@@ -65,32 +45,33 @@ class DraftPersistentStorageArbitrationProductionTest {
 
     @After
     fun tearDown() {
-        seamHandlesForCleanup.forEach { it.close() }
-        seamHandlesForCleanup.clear()
         harness1.close()
         harness2.close()
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
+        context.getSharedPreferences(PREF_NAME_DRAFT, 0).edit().clear().commit()
         clearCurrentDraftGenerationPointer(context)
         deleteDirectoryIfPresent(draftGenerationsRoot(context))
         deleteDirectoryIfPresent(persistentDraftDirectory(context))
     }
 
-    private val seamHandlesForCleanup = mutableListOf<AutoCloseable>()
-
-    private fun deleteDirectoryIfPresent(directory: java.io.File) {
-        runCatching { if (directory.isDirectory) directory.deleteRecursively() }
-    }
-
-    /** Create a minimal test bitmap. */
     private fun createTestBitmap(): Bitmap =
-        Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff00aa44.toInt()) }
+        Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(0xff00aa44.toInt())
+        }
 
-    /** Initialize a VM with a real source file - matches EditorSaveAndLeaveQuiescenceProductionTest pattern. */
-    private fun initEditorForDraft(harness: OwnedEditorViewModelHarness, sourceName: String): EditorViewModel {
+    private fun initEditorForDraft(
+        harness: OwnedEditorViewModelHarness,
+        sourceName: String,
+    ): EditorViewModel {
         val vm = harness.createEditor()
-        awaitConditionLocal { vm.startupInitCompletion.isCompleted }
-        val base = createTestBitmap()
-        val source = sourceFile(harness, sourceName)
+        awaitEditorReadyForTest(vm)
+        val source = File(context.cacheDir, "test_sources/source_$sourceName.img")
+        source.parentFile?.mkdirs()
+        val sourceBitmap = createTestBitmap()
+        source.outputStream().use {
+            check(sourceBitmap.compress(Bitmap.CompressFormat.PNG, 100, it))
+        }
+        sourceBitmap.recycle()
+        harness.own(source)
         vm.updateUiState {
             it.copy(
                 sourcePath = source.absolutePath,
@@ -102,422 +83,475 @@ class DraftPersistentStorageArbitrationProductionTest {
         return vm
     }
 
-    private fun sourceFile(harness: OwnedEditorViewModelHarness, sourceName: String): java.io.File {
-        val source = java.io.File(context.cacheDir, "test_sources/source_$sourceName.img")
-        source.parentFile?.mkdirs()
-        val image = createTestBitmap()
-        source.outputStream().use { check(image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)) }
-        image.recycle()
-        return harness.own(source)
+    private fun launchSave(vm: EditorViewModel): Pair<CoroutineScope, Deferred<Boolean>> {
+        val scope = CoroutineScope(Dispatchers.Default)
+        return scope to scope.async { vm.persistDraftSnapshotNow() }
     }
 
-    private fun awaitConditionLocal(
-        diagnostic: () -> String = { "" },
-        predicate: () -> Boolean,
-    ) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
-        while (System.nanoTime() < deadline) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(10, TimeUnit.MILLISECONDS)
-            if (predicate()) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-            if (predicate()) return
-            Thread.sleep(5L)
-        }
-        assertTrue(
-            "predicate did not settle; saveStage=${DraftSaveTestSeam.Registry.lastFailureReasonForTest}; ${diagnostic()}",
-            predicate()
-        )
-    }
-
-    private fun awaitReadiness(vm: EditorViewModel) {
-        awaitConditionLocal { vm.canEnterEditorActionPure() }
-    }
-
-    private fun awaitSave(vm: EditorViewModel, description: String = "draft save"): Boolean {
-        val callerScope = CoroutineScope(Dispatchers.Default)
-        val deferred = callerScope.async { vm.persistDraftSnapshotNow() }
-        try {
-            awaitEditorCompletionForTest(
-                description = "$description caller must complete",
-                completion = deferred,
-                timeoutMillis = 30_000L,
-                pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
-                diagnostic = { "leave=${vm.editorLeaveState.value}" },
-            )
-            return runBlocking { deferred.await() }
-        } finally {
-            deferred.cancel()
-            callerScope.cancel()
-        }
-    }
-
-    private fun <T> awaitDeferredCompletion(
-        deferred: Deferred<T>,
-        description: String,
-    ): T {
-        awaitEditorCompletionForTest(
-            description = description,
-            completion = deferred,
-            timeoutMillis = 30_000L,
-            pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
-        )
+    private fun <T> awaitDeferred(deferred: Deferred<T>, description: String): T {
+        awaitEditorCompletionForTest(description, deferred, timeoutMillis = 30_000L)
         return runBlocking { deferred.await() }
     }
 
-    /** Scenario 1: SAME-BASELINE REAL SAVES */
-    @Test
-    fun sameBaselineRealSavesExactlyOneWinner() = runBlocking {
-        val vm1 = initEditorForDraft(harness1, "vm1-source")
-        val vm2 = initEditorForDraft(harness2, "vm2-source")
-        awaitReadiness(vm1)
-        awaitReadiness(vm2)
+    private fun awaitSignal(signal: CompletableDeferred<Unit>, description: String) {
+        awaitEditorCompletionForTest(description, signal, timeoutMillis = 30_000L)
+    }
 
-        // First save to establish a baseline pointer
-        val initialSave = awaitSave(vm1, "initial save")
+    private fun finishSave(vm: EditorViewModel, scope: CoroutineScope, save: Deferred<Boolean>): Boolean {
+        return try {
+            awaitDeferred(save, "draft save caller must complete").also {
+                vm.acknowledgeEditorLeave()
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    private suspend fun currentPointer(): String? =
+        DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
+
+    private suspend fun validatedCurrent() =
+        DraftStorageCoordinator.withReadLock { validateCurrentDraftGeneration(context) }
+
+    private fun generationDirectories(): List<File> =
+        draftGenerationsRoot(context).listFiles()?.filter {
+            it.isDirectory && it.name.startsWith(DRAFT_GENERATION_DIR_PREFIX)
+        }.orEmpty()
+
+    private fun assertNoDraftStagingOrTempFiles() {
         assertTrue(
-            "Initial save must succeed: reason=${vm1.lastDraftSaveFailureReasonForTest} stage=${DraftSaveTestSeam.Registry.lastFailureReasonForTest}",
-            initialSave
-        )
-        vm1.acknowledgeEditorLeave()
-        val baselinePtr = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull(baselinePtr)
-
-        // Reset both VMs to same baseline state
-        vm1.updateUiState { it.copy(
-            draftGenerationId = baselinePtr,
-            draftSavedAtMillis = System.currentTimeMillis(),
-            draftSourcePath = baselinePtr,
-        ) }
-        vm2.updateUiState { it.copy(
-            draftGenerationId = baselinePtr,
-            draftSavedAtMillis = System.currentTimeMillis(),
-            draftSourcePath = baselinePtr,
-        ) }
-        vm1.draftPointerBaseline = baselinePtr
-        vm2.draftPointerBaseline = baselinePtr
-
-        // VM 1 saves first - park at seam
-        val seam1 = DraftSaveTestSeam()
-        val handle1 = harness1.ownSeam(DraftSaveTestSeam.install(vm1, seam1))
-        val save1 = CoroutineScope(Dispatchers.Default).async { vm1.persistDraftSnapshotNow() }
-        awaitConditionLocal { seam1.reached.isCompleted }
-
-        // VM 2 starts from the same baseline while VM 1 is still parked.
-        val seam2 = DraftSaveTestSeam()
-        val handle2 = harness2.ownSeam(DraftSaveTestSeam.install(vm2, seam2))
-        val save2 = CoroutineScope(Dispatchers.Default).async { vm2.persistDraftSnapshotNow() }
-        awaitConditionLocal(
-            predicate = { seam2.reached.isCompleted },
-            diagnostic = {
-                "saveCompleted=${save2.isCompleted} failure=${vm2.lastDraftSaveFailureReasonForTest} " +
-                    "leave=${vm2.editorLeaveState.value} pointerBaseline=${vm2.draftPointerBaseline} " +
-                    "diskPointer=${DraftStorageCoordinator.readCurrentPointerUnsafe(context)}"
+            "draft generation staging must be empty",
+            draftGenerationsRoot(context).listFiles().orEmpty().none {
+                it.name.startsWith(DRAFT_GENERATION_STAGING_PREFIX)
             },
         )
-
-        // Release VM 1 first; VM 2 must then lose the baseline arbitration.
-        handle1.close()
-        val result1 = awaitDeferredCompletion(save1, "first save caller must complete")
-        assertTrue("First save must succeed", result1)
-        vm1.acknowledgeEditorLeave()
-
-        handle2.close()
-        val result2 = awaitDeferredCompletion(save2, "second save caller must complete")
-        assertFalse("Second save must fail due to stale baseline", result2)
-
-        // Verify exactly one winner committed on top of the baseline.
-        val pointer = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull(pointer)
-        val generations = draftGenerationsRoot(context).listFiles()?.filter {
-            it.name.startsWith(DRAFT_GENERATION_DIR_PREFIX)
-        } ?: emptyList()
-        assertEquals("Baseline plus exactly one committed winner", 2, generations.size)
-        assertTrue("Pointer must reference the winning generation", generations.any { it.name == pointer })
-    }
-
-    /** Scenario 2: OLD SAVE CLEANUP VS NEWER COMMIT */
-    @Test
-    fun oldSaveCleanupVsNewerCommit() = runBlocking {
-        val vmA = initEditorForDraft(harness1, "vmA")
-        val vmB = initEditorForDraft(harness2, "vmB")
-        awaitReadiness(vmA)
-        awaitReadiness(vmB)
-
-        // VM A saves first - park it at the seam
-        val seamA = DraftSaveTestSeam()
-        val handleA = harness1.ownSeam(DraftSaveTestSeam.install(vmA, seamA))
-        val saveA = CoroutineScope(Dispatchers.Default).async { vmA.persistDraftSnapshotNow() }
-        awaitConditionLocal { seamA.reached.isCompleted }
-        handleA.close()
-        val resultA = awaitDeferredCompletion(saveA, "VM A save caller must complete")
-        assertTrue("VM A save must succeed", resultA)
-        vmA.acknowledgeEditorLeave()
-
-        val generationA = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull(generationA)
-
-        // VM B starts save from A's generation - park it at the seam
-        vmB.draftPointerBaseline = generationA
-        val seamB = DraftSaveTestSeam()
-        val handleB = harness2.ownSeam(DraftSaveTestSeam.install(vmB, seamB))
-        val saveB = CoroutineScope(Dispatchers.Default).async { vmB.persistDraftSnapshotNow() }
-        awaitConditionLocal { seamB.reached.isCompleted }
-        handleB.close()
-        val resultB = awaitDeferredCompletion(saveB, "VM B save caller must complete")
         assertTrue(
-            "VM B save must succeed: failure=${vmB.lastDraftSaveFailureReasonForTest} " +
-                "stage=${DraftSaveTestSeam.Registry.lastFailureReasonForTest} " +
-                "leave=${vmB.editorLeaveState.value} baseline=${vmB.draftPointerBaseline} " +
-                "pointer=${DraftStorageCoordinator.readCurrentPointerUnsafe(context)}",
-            resultB,
+            "draft temporary files must be empty",
+            draftGenerationsRoot(context).walkTopDown().none {
+                it.isFile && it.name.endsWith(".tmp")
+            },
         )
-        vmB.acknowledgeEditorLeave()
-
-        val generationB = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull(generationB)
-        val genB = generationB!!
-        assertNotEquals("Pointer must advance to B", generationA, genB)
-
-        // Verify B validates and A cannot delete B
-        val validatedB = DraftStorageCoordinator.withReadLock {
-            validateCurrentDraftGeneration(context)
-        }
-        assertNotNull("Generation B must validate", validatedB)
-        assertTrue("B directory must exist", findDraftGenerationDirectory(context, genB)?.root?.exists() == true)
     }
 
-    /** Scenario 3: REAL SAVE VS STARTUP RECONCILIATION */
-    @Test
-    fun realSaveVsStartupReconciliationOrdering() = runBlocking {
-        val vm = initEditorForDraft(harness1, "save-first")
-        awaitReadiness(vm)
+    private suspend fun assertCurrentValid(expected: String? = null) {
+        val pointer = currentPointer()
+        if (expected != null) assertEquals(expected, pointer)
+        assertNotNull("current pointer must exist", pointer)
+        assertNotNull("current generation must validate", validatedCurrent())
+        assertTrue("current generation directory must exist", pointer?.let {
+            draftGenerationsRoot(context).resolve(it).isDirectory
+        } == true)
+    }
 
-        // Save-first: start save, park at seam, run reconciliation
+    /** Scenario 1: two real saves capture the same baseline before either is released. */
+    @Test
+    fun sameBaselineRealSavesHaveExactlyOneWinner() = runBlocking {
+        val vm1 = initEditorForDraft(harness1, "same-baseline-a")
+        val vm2 = initEditorForDraft(harness2, "same-baseline-b")
+        val initial = launchSave(vm1)
+        assertTrue(finishSave(vm1, initial.first, initial.second))
+        val baseline = checkNotNull(currentPointer())
+        vm2.draftPointerBaseline = baseline
+
         val seam1 = DraftSaveTestSeam()
-        val handle1 = harness1.ownSeam(DraftSaveTestSeam.install(vm, seam1))
-        val save1 = CoroutineScope(Dispatchers.Default).async { vm.persistDraftSnapshotNow() }
-        awaitConditionLocal { seam1.reached.isCompleted }
-
-        // Run reconciliation while save is parked at global transaction
-        val reconcilerResult = reconcileStartupArtifacts(context, vm.uiState.value.sourcePath)
-        assertEquals("Reconciliation must preserve save's generation", 0, reconcilerResult.deletedCount)
-
-        // Release save
-        handle1.close()
-        val result1 = awaitDeferredCompletion(save1, "save-first caller must complete")
-        assertTrue("Save must succeed after reconciliation", result1)
-        vm.acknowledgeEditorLeave()
-
-        // Reconciliation-first: new VM, run reconciliation first
-        val vm2 = initEditorForDraft(harness2, "reconcile-first")
-        awaitReadiness(vm2)
-
         val seam2 = DraftSaveTestSeam()
+        val handle1 = harness1.ownSeam(DraftSaveTestSeam.install(vm1, seam1))
         val handle2 = harness2.ownSeam(DraftSaveTestSeam.install(vm2, seam2))
-        val save2 = CoroutineScope(Dispatchers.Default).async { vm2.persistDraftSnapshotNow() }
+        val save1 = launchSave(vm1)
+        var save2: Pair<CoroutineScope, Deferred<Boolean>>? = null
+        try {
+            awaitSignal(seam1.reached, "save A must reach the generic pre-storage gate")
+            save2 = launchSave(vm2)
+            awaitSignal(seam2.reached, "save B must capture the same baseline")
+            assertEquals("both saves must see baseline A", baseline, currentPointer())
 
-        // Run reconciliation while save is parked
-        awaitConditionLocal { seam2.reached.isCompleted }
-        val reconcilerResult2 = reconcileStartupArtifacts(context, vm2.uiState.value.sourcePath)
-        assertEquals("Reconciliation must wait for save's global transaction", 0, reconcilerResult2.deletedCount)
-
-        // Release save
-        handle2.close()
-        val result2 = awaitDeferredCompletion(save2, "reconciliation-first caller must complete")
-        assertTrue("Save must succeed after reconciliation-first", result2)
-        vm2.acknowledgeEditorLeave()
+            seam1.releaseGate.complete(Unit)
+            val result1 = finishSave(vm1, save1.first, save1.second)
+            val save2Value = checkNotNull(save2)
+            seam2.releaseGate.complete(Unit)
+            val result2 = finishSave(vm2, save2Value.first, save2Value.second)
+            assertTrue("exactly one real save must win", result1.xor(result2))
+            assertCurrentValid()
+            assertEquals("baseline plus one winner", 2, generationDirectories().size)
+            assertNoDraftStagingOrTempFiles()
+            val current = checkNotNull(validatedCurrent())
+            assertEquals(
+                "compatibility state must belong to the winner",
+                current.manifest.baseContentToken,
+                context.getSharedPreferences(PREF_NAME_DRAFT, 0).getString("draft_base_token", null),
+            )
+        } finally {
+            seam1.releaseGate.complete(Unit)
+            seam2.releaseGate.complete(Unit)
+            handle1.close()
+            handle2.close()
+        }
     }
 
-    /** Scenario 4: REAL clearDraft VS REAL SAVE */
+    /** Scenario 2: A parks after post-commit publication; B commits before A cleanup resumes. */
     @Test
-    fun realClearDraftVsRealSaveRace() = runBlocking {
-        val vmA = initEditorForDraft(harness1, "clear-vm")
-        val vmB = initEditorForDraft(harness2, "save-vm")
-        awaitReadiness(vmA)
-        awaitReadiness(vmB)
+    fun oldSaveCleanupCannotUndoNewerCommit() = runBlocking {
+        val vmA = initEditorForDraft(harness1, "cleanup-a")
+        val vmB = initEditorForDraft(harness2, "cleanup-b")
+        val first = launchSave(vmA)
+        assertTrue(finishSave(vmA, first.first, first.second))
+        val generationBeforeA = checkNotNull(currentPointer())
+        vmB.draftPointerBaseline = generationBeforeA
 
-        // First save to establish a pointer
-        val initialSave = awaitSave(vmA, "initial save")
-        assertTrue("Initial save must succeed", initialSave)
-        vmA.acknowledgeEditorLeave()
-        val initialPtr = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull(initialPtr)
+        val seamA = DraftSaveTestSeam(parkAt = DraftSaveStage.BeforePostCommitCleanup)
+        val handleA = harness1.ownSeam(DraftSaveTestSeam.install(vmA, seamA))
+        val saveA = launchSave(vmA)
+        try {
+            awaitSignal(seamA.reached, "A must reach post-commit cleanup")
+            val generationA = checkNotNull(currentPointer())
+            assertNotEquals(generationBeforeA, generationA)
 
-        // Park clearDraft and save at their respective global transactions
+            vmB.draftPointerBaseline = generationA
+            val saveB = launchSave(vmB)
+            assertTrue(finishSave(vmB, saveB.first, saveB.second))
+            val generationB = checkNotNull(currentPointer())
+            assertNotEquals(generationA, generationB)
+            assertCurrentValid(generationB)
+
+            seamA.releaseGate.complete(Unit)
+            assertTrue(finishSave(vmA, saveA.first, saveA.second))
+            assertCurrentValid(generationB)
+            val current = checkNotNull(validatedCurrent())
+            assertEquals(
+                "A cleanup must not republish A compatibility state",
+                current.manifest.baseContentToken,
+                context.getSharedPreferences(PREF_NAME_DRAFT, 0).getString("draft_base_token", null),
+            )
+            assertNoDraftStagingOrTempFiles()
+        } finally {
+            seamA.releaseGate.complete(Unit)
+            handleA.close()
+        }
+    }
+
+    /** Scenario 3: save-first and reconciliation-first use different production boundaries. */
+    @Test
+    fun realSaveAndReconciliationUseBothOrderings() = runBlocking {
+        val saveFirstVm = initEditorForDraft(harness1, "reconcile-save-first")
+        val saveFirstSaveSeam = DraftSaveTestSeam(parkAt = DraftSaveStage.CompatibilitySourceVisible)
+        val saveFirstSaveHandle = harness1.ownSeam(
+            DraftSaveTestSeam.install(saveFirstVm, saveFirstSaveSeam),
+        )
+        val saveFirstReconcileSeam = StartupReconcileTestSeam().also {
+            it.pointerReadAttempted = CompletableDeferred()
+        }
+        val saveFirstReconcileHandle = harness1.ownSeam(
+            StartupReconcileTestSeam.install(saveFirstReconcileSeam),
+        )
+        val saveFirst = launchSave(saveFirstVm)
+        try {
+            awaitSignal(
+                saveFirstSaveSeam.reached,
+                "save-first must park after its compatibility source is visible under the global lock",
+            )
+            val reconciliation = CoroutineScope(Dispatchers.Default).async {
+                reconcileStartupArtifacts(context, saveFirstVm.uiState.value.sourcePath)
+            }
+            awaitSignal(
+                checkNotNull(saveFirstReconcileSeam.pointerReadAttempted),
+                "save-first reconciliation must attempt its global pointer read",
+            )
+            assertFalse("reconciliation must not pass the save-owned transaction", reconciliation.isCompleted)
+            saveFirstSaveSeam.releaseGate.complete(Unit)
+            assertTrue(finishSave(saveFirstVm, saveFirst.first, saveFirst.second))
+            awaitDeferred(reconciliation, "save-first reconciliation must settle")
+        } finally {
+            saveFirstSaveSeam.releaseGate.complete(Unit)
+            saveFirstSaveHandle.close()
+            saveFirstReconcileHandle.close()
+        }
+
+        val vmA = initEditorForDraft(harness1, "reconcile-first-a")
+        val vmB = initEditorForDraft(harness2, "reconcile-first-b")
+        val saveA = launchSave(vmA)
+        assertTrue(finishSave(vmA, saveA.first, saveA.second))
+        val generationA = checkNotNull(currentPointer())
+        vmB.draftPointerBaseline = generationA
+        val saveB = launchSave(vmB)
+        assertTrue(finishSave(vmB, saveB.first, saveB.second))
+        val generationB = checkNotNull(currentPointer())
+        assertNotEquals(generationA, generationB)
+        DraftStorageCoordinator.withWriteLock {
+            check(DraftStorageCoordinator.publishGenerationUnsafe(context, generationA))
+        }
+        assertCurrentValid(generationA)
+
+        val reconcileFirstSeam = StartupReconcileTestSeam().also {
+            it.generationDeletionCandidateId = generationB
+            it.generationDeletionAuthorityReached = CompletableDeferred()
+            it.generationDeletionAuthorityRelease = CompletableDeferred()
+        }
+        val reconcileFirstHandle = harness1.ownSeam(StartupReconcileTestSeam.install(reconcileFirstSeam))
+        val saveAtAuthority = DraftSaveTestSeam(parkAt = DraftSaveStage.StorageTransactionAcquired)
+        val saveAtAuthorityHandle = harness2.ownSeam(
+            DraftSaveTestSeam.install(vmB, saveAtAuthority),
+        )
+        val reconciliationFirst = CoroutineScope(Dispatchers.Default).async {
+            reconcileStartupArtifacts(context, vmA.uiState.value.sourcePath)
+        }
+        var saveAfterReconciliation: Pair<CoroutineScope, Deferred<Boolean>>? = null
+        try {
+            awaitSignal(
+                checkNotNull(reconcileFirstSeam.generationDeletionAuthorityReached),
+                "reconciliation-first must own the real generation mutation lock",
+            )
+            vmB.draftPointerBaseline = generationA
+            saveAfterReconciliation = launchSave(vmB)
+            awaitSignal(
+                saveAtAuthority.beforeStorageReached,
+                "save must start before reconciliation is released",
+            )
+            assertFalse(
+                "save must not acquire storage while reconciliation owns it",
+                saveAtAuthority.reached.isCompleted,
+            )
+            checkNotNull(reconcileFirstSeam.generationDeletionAuthorityRelease).complete(Unit)
+            awaitSignal(saveAtAuthority.reached, "save must acquire storage after reconciliation releases")
+            saveAtAuthority.releaseGate.complete(Unit)
+            val saveAfterValue = checkNotNull(saveAfterReconciliation)
+            assertTrue(finishSave(vmB, saveAfterValue.first, saveAfterValue.second))
+            awaitDeferred(reconciliationFirst, "reconciliation-first must settle")
+        } finally {
+            reconcileFirstSeam.generationDeletionAuthorityRelease?.complete(Unit)
+            saveAtAuthority.releaseGate.complete(Unit)
+            reconcileFirstHandle.close()
+            saveAtAuthorityHandle.close()
+        }
+        assertCurrentValid()
+    }
+
+    /** Scenario 4: clear-first rejects the stale save; save-first preserves the newer save. */
+    @Test
+    fun realClearAndSaveUseBothOrderings() = runBlocking {
+        val clearVm = initEditorForDraft(harness1, "clear-first")
+        val saveVm = initEditorForDraft(harness2, "clear-first-save")
+        val initial = launchSave(clearVm)
+        assertTrue(finishSave(clearVm, initial.first, initial.second))
+        val initialPointer = checkNotNull(currentPointer())
+        saveVm.draftPointerBaseline = initialPointer
+
         val clearReached = CompletableDeferred<Unit>()
         val clearRelease = CompletableDeferred<Unit>()
-        val clearSeam = ClearDraftTestSeam {
-            clearReached.complete(Unit)
-            clearRelease.await()
-        }
-        val handleClear = harness1.ownSeam(ClearDraftTestSeam.install(clearSeam))
-        val clearJob = CoroutineScope(Dispatchers.Default).async { vmA.clearDraft() }
-
-        vmB.draftPointerBaseline = initialPtr
-        val saveSeam = DraftSaveTestSeam()
-        val handleSave = harness2.ownSeam(DraftSaveTestSeam.install(vmB, saveSeam))
-        val saveJob = CoroutineScope(Dispatchers.Default).async { vmB.persistDraftSnapshotNow() }
-
-        // Wait for both to reach their parking points
-        awaitConditionLocal { clearReached.isCompleted }
-        awaitConditionLocal { saveSeam.reached.isCompleted }
-
-        // Release clearDraft first
-        clearRelease.complete(Unit)
-        awaitDeferredCompletion(clearJob, "clear caller must complete")
-        handleClear.close()
-
-        // Release save
-        handleSave.close()
-        val saveResult = awaitDeferredCompletion(saveJob, "save-after-clear caller must complete")
-
-        // The clear commits first, so the save captured against the old
-        // pointer must be rejected as stale rather than resurrecting Draft.
-        assertFalse("Stale save after clear must be rejected", saveResult)
-        val ptrAfter = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNull(ptrAfter)
-    }
-
-    /** Scenario 5: INVALID-GENERATION CLEANUP VS NEW VALID SAVE */
-    @Test
-    fun invalidCleanupVsNewValidSave() = runBlocking {
-        val vm = initEditorForDraft(harness1, "valid-save")
-        awaitReadiness(vm)
-
-        // Create a valid save first
-        assertTrue(awaitSave(vm, "initial save"))
-        vm.acknowledgeEditorLeave()
-        val genB = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull(genB)
-
-        // Verify the atomic compare-and-mutate works
-        val result = DraftStorageCoordinator.clearInvalidGenerationIfCurrent(context, "invalid_gen_that_does_not_exist")
-        assertFalse("Cleanup of non-current invalid must return false", result)
-
-        val stillGenB = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertEquals("Valid B must survive", genB, stillGenB)
-    }
-
-    /** Scenario 6: PHYSICAL RECONCILER DELETE VS NEW CURRENT POINTER */
-    @Test
-    fun reconcilerPhysicalDeleteVsNewCurrentPointer() = runBlocking {
-        val vm = initEditorForDraft(harness1, "reconciler-test")
-        awaitReadiness(vm)
-
-        // Create two generations A and B
-        assertTrue(awaitSave(vm, "save A"))
-        vm.acknowledgeEditorLeave()
-        val genA = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull(genA)
-
-        // Second save to create B
-        assertTrue(awaitSave(vm, "save B"))
-        vm.acknowledgeEditorLeave()
-        val genB = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull(genB)
-        assertNotEquals(genA, genB)
-
-        // Run reconciliation - A should be deleted, B preserved
-        val result = reconcileStartupArtifacts(context, vm.uiState.value.sourcePath)
-
-        // B (current pointer) must be preserved
-        val finalPtr = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertEquals("Current pointer B must survive reconciliation", genB, finalPtr)
-    }
-
-    /** MANDATORY: Pointer-publication cancellation boundary regression. */
-    @Test
-    fun pointerPublicationCancellationRegression() = runBlocking {
-        // Create previous valid generation A and candidate B.
-        val vmB = initEditorForDraft(harness2, "cancel-reg-B")
-        awaitReadiness(vmB)
-        val vmA = initEditorForDraft(harness1, "cancel-reg-A")
-        awaitReadiness(vmA)
-        assertTrue(awaitSave(vmA, "save A"))
-        vmA.acknowledgeEditorLeave()
-        val genA = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull("A must exist", genA)
-        val stableGenA = checkNotNull(genA)
-        val sourceA = checkNotNull(findCurrentDraftGenerationDirectory(context)).sourceFile.absolutePath
-
-        // Create candidate B (simulated publication stage).
-        vmB.updateUiState { it.copy(
-            draftGenerationId = stableGenA,
-            draftSavedAtMillis = System.currentTimeMillis(),
-            draftSourcePath = sourceA,
-        ) }
-        vmB.draftPointerBaseline = stableGenA
-        val saveBResult = awaitSave(vmB, "save B")
-        assertTrue(
-            "save B must succeed: failure=${vmB.lastDraftSaveFailureReasonForTest} " +
-                "stage=${DraftSaveTestSeam.Registry.lastFailureReasonForTest} " +
-                "leave=${vmB.editorLeaveState.value} baseline=${vmB.draftPointerBaseline} " +
-                "pointer=${DraftStorageCoordinator.readCurrentPointerUnsafe(context)}",
-            saveBResult,
+        val clearHandle = harness1.ownSeam(
+            ClearDraftTestSeam.install(
+                clearVm,
+                ClearDraftTestSeam(
+                    atStorageTransaction = {
+                        clearReached.complete(Unit)
+                        clearRelease.await()
+                    },
+                ),
+            ),
         )
-        vmB.acknowledgeEditorLeave()
-        val genB = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        assertNotNull("B must exist", genB)
-        assertNotEquals("B must be different from A", genA, genB)
-        val stableGenB = checkNotNull(genB)
-
-        // Physical publication of B completes (pointer committed).
-        val publishedBDir = draftGenerationsRoot(context).resolve(stableGenB)
-        assertTrue("B directory must exist after publication", publishedBDir.isDirectory)
-
-        // Force cancellation at publication return boundary: rollback to A.
-        // The coordinator must maintain exactly one coherent alternative.
-        val rollbackResult = DraftStorageCoordinator.rollbackCommittedDraftUnsafe(context, DraftSaveResult(
-            pointerPublished = true,
-            generationId = stableGenB,
-            generationDirectory = publishedBDir,
-            sourcePath = publishedBDir.resolve("source.img").absolutePath,
-            thumbnailPath = publishedBDir.resolve("thumbnail.jpg").absolutePath,
-            savedAtMillis = System.currentTimeMillis(),
-            baseContentToken = "cancel-reg-B",
-            capturedRevision = 0,
-            expectedPointerGenerationId = stableGenA,
-            previousGenerationDirectory = draftGenerationsRoot(context).resolve(stableGenA),
-        ))
-
-        // Verify final persistent state: either A or B must be coherent, never invalid/missing.
-        val finalPtr = DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
-        val finalGenDir = finalPtr?.let { draftGenerationsRoot(context).resolve(it) }
-
-        assertTrue(
-            "Pointer must reference either A or B after cancellation boundary",
-            finalPtr == stableGenA || finalPtr == stableGenB
-        )
-
-        if (finalPtr == stableGenB) {
-            assertTrue("If pointer == B, B must exist and validate", publishedBDir.isDirectory)
-        } else if (finalPtr == stableGenA) {
-            val dirA = draftGenerationsRoot(context).resolve(stableGenA)
-            assertTrue("If pointer == A, A must exist", dirA.isDirectory)
-        }
-
-        // Forbidden states: pointer references missing/invalid generation.
-        assertNotNull("Pointer must never be null after boundary", finalPtr)
-        assertTrue("Pointer must never reference missing directory", finalGenDir?.isDirectory == true)
-
-        // Verify no orphaned pointer references exist outside A/B.
-        val allFiles = draftGenerationsRoot(context).listFiles() ?: emptyArray()
-        for (f in allFiles) {
-            if (f.isDirectory) {
-                assertTrue(
-                    "Every directory must match final pointer or be a staging prefix",
-                    f.name == finalPtr || f.name.startsWith(DRAFT_GENERATION_STAGING_PREFIX)
-                )
+        val saveSeam = DraftSaveTestSeam(parkAt = DraftSaveStage.StorageTransactionAcquired)
+        val saveHandle = harness2.ownSeam(DraftSaveTestSeam.install(saveVm, saveSeam))
+        try {
+            clearVm.clearDraft()
+            awaitSignal(clearReached, "clear-first must own the global clear transaction")
+            val saveAfterClear = launchSave(saveVm)
+            awaitSignal(saveSeam.beforeStorageReached, "save must start while clear owns storage")
+            assertFalse("save must not acquire storage before clear releases", saveSeam.reached.isCompleted)
+            val clearDone = CoroutineScope(Dispatchers.Default).async {
+                clearVm.uiState.first { !it.maintenanceBusy }
             }
+            clearRelease.complete(Unit)
+            awaitDeferred(clearDone, "clear-first maintenance must settle")
+            awaitSignal(saveSeam.reached, "stale save must reach its actual global boundary")
+            saveSeam.releaseGate.complete(Unit)
+            assertFalse(finishSave(saveVm, saveAfterClear.first, saveAfterClear.second))
+            assertNull(currentPointer())
+        } finally {
+            clearRelease.complete(Unit)
+            saveSeam.releaseGate.complete(Unit)
+            clearHandle.close()
+            saveHandle.close()
+        }
+
+        val saveFirstVm = initEditorForDraft(harness1, "save-first-clear")
+        val clearAfterSaveVm = initEditorForDraft(harness2, "save-first-clear-vm")
+        val saveA = launchSave(saveFirstVm)
+        assertTrue(finishSave(saveFirstVm, saveA.first, saveA.second))
+        val baseline = checkNotNull(currentPointer())
+        clearAfterSaveVm.draftPointerBaseline = baseline
+        val saveFirstSeam = DraftSaveTestSeam(parkAt = DraftSaveStage.StorageTransactionAcquired)
+        val saveFirstHandle = harness1.ownSeam(DraftSaveTestSeam.install(saveFirstVm, saveFirstSeam))
+        val clearAttempted = CompletableDeferred<Unit>()
+        val clearStartRelease = CompletableDeferred<Unit>()
+        val clearAtStorage = CompletableDeferred<Unit>()
+        val clearAtStorageRelease = CompletableDeferred<Unit>()
+        val clearAfterSaveHandle = harness2.ownSeam(
+            ClearDraftTestSeam.install(
+                clearAfterSaveVm,
+                ClearDraftTestSeam(
+                    beforeStorageClear = {
+                        clearAttempted.complete(Unit)
+                        clearStartRelease.await()
+                    },
+                    atStorageTransaction = {
+                        clearAtStorage.complete(Unit)
+                        clearAtStorageRelease.await()
+                    },
+                ),
+            ),
+        )
+        try {
+            val saveB = launchSave(saveFirstVm)
+            awaitSignal(saveFirstSeam.reached, "save-first must own storage")
+            clearAfterSaveVm.clearDraft()
+            awaitSignal(clearAttempted, "clear must start while save owns storage")
+            assertFalse("clear must not own storage before save releases", clearAtStorage.isCompleted)
+            saveFirstSeam.releaseGate.complete(Unit)
+            assertTrue(finishSave(saveFirstVm, saveB.first, saveB.second))
+            clearStartRelease.complete(Unit)
+            awaitSignal(clearAtStorage, "clear must reach its real transaction after save")
+            val clearDone = CoroutineScope(Dispatchers.Default).async {
+                clearAfterSaveVm.uiState.first { !it.maintenanceBusy }
+            }
+            clearAtStorageRelease.complete(Unit)
+            awaitDeferred(clearDone, "save-first clear maintenance must settle")
+            assertCurrentValid()
+        } finally {
+            saveFirstSeam.releaseGate.complete(Unit)
+            clearStartRelease.complete(Unit)
+            saveFirstHandle.close()
+            clearAfterSaveHandle.close()
         }
     }
 
-    private fun draftGenerationsRoot(context: android.content.Context): java.io.File {
-        return java.io.File(context.filesDir, "drafts/generations")
+    /** Scenario 5: CurrentStartup invalid A is parked before cleanup; real B save becomes current. */
+    @Test
+    fun currentStartupInvalidCleanupCannotDeleteNewValidSave() = runBlocking {
+        val saver = initEditorForDraft(harness1, "invalid-cleanup-saver")
+        val invalidId = "gen_invalid_current_a"
+        val invalidDir = draftGenerationsRoot(context).resolve(invalidId).apply { mkdirs() }
+        File(invalidDir, "complete").writeText("invalid")
+        context.getSharedPreferences(PREF_NAME_DRAFT, 0).edit()
+            .putString(KEY_DRAFT_GENERATION_ID, invalidId)
+            .commit()
+        saver.draftPointerBaseline = invalidId
+
+        val restoreReached = CompletableDeferred<Unit>()
+        val restoreRelease = CompletableDeferred<Unit>()
+        val restoreHandle = harness2.ownSeam(
+            DraftRestoreTestSeam.install(
+                DraftRestoreTestSeam(onStage = { stage, _ ->
+                    if (stage == DraftRestoreTestStage.CurrentStartupInvalidBeforeCleanup) {
+                        restoreReached.complete(Unit)
+                        restoreRelease.await()
+                    }
+                }),
+            ),
+        )
+        val invalidVm = harness2.createEditor()
+        try {
+            awaitSignal(restoreReached, "CurrentStartup must detect invalid A before cleanup")
+            val saveB = launchSave(saver)
+            assertTrue(finishSave(saver, saveB.first, saveB.second))
+            val generationB = checkNotNull(currentPointer())
+            assertNotEquals(invalidId, generationB)
+            restoreRelease.complete(Unit)
+            awaitEditorCompletionForTest(
+                "invalid CurrentStartup cleanup must settle",
+                invalidVm.startupInitCompletion,
+                timeoutMillis = 30_000L,
+            )
+            assertCurrentValid(generationB)
+            assertTrue("new valid generation must survive stale cleanup", draftGenerationsRoot(context).resolve(generationB).isDirectory)
+        } finally {
+            restoreRelease.complete(Unit)
+            restoreHandle.close()
+        }
     }
 
-    private fun persistentDraftDirectory(context: android.content.Context): java.io.File {
-        return java.io.File(context.filesDir, "drafts/current")
+    /** Scenario 6: queued physical deletion revalidates the actual pointer at delete time. */
+    @Test
+    fun queuedReconcilerDeletePreservesGenerationPublishedAfterSnapshot() = runBlocking {
+        val vm = initEditorForDraft(harness1, "physical-delete-race")
+        val saveA = launchSave(vm)
+        assertTrue(finishSave(vm, saveA.first, saveA.second))
+        val generationA = checkNotNull(currentPointer())
+        val saveB = launchSave(vm)
+        assertTrue(finishSave(vm, saveB.first, saveB.second))
+        val generationB = checkNotNull(currentPointer())
+        assertNotEquals(generationA, generationB)
+        DraftStorageCoordinator.withWriteLock {
+            check(DraftStorageCoordinator.publishGenerationUnsafe(context, generationA))
+        }
+
+        val queuedReached = CompletableDeferred<Unit>()
+        val queuedRelease = CompletableDeferred<Unit>()
+        val reconcileSeam = StartupReconcileTestSeam().also {
+            it.generationDeletionCandidateId = generationB
+            it.generationDeletionQueuedReached = queuedReached
+            it.generationDeletionQueuedRelease = queuedRelease
+        }
+        val reconcileHandle = harness1.ownSeam(StartupReconcileTestSeam.install(reconcileSeam))
+        val reconciliation = CoroutineScope(Dispatchers.Default).async {
+            reconcileStartupArtifacts(context, vm.uiState.value.sourcePath)
+        }
+        try {
+            awaitSignal(queuedReached, "B must be queued before its delete-time check")
+            DraftStorageCoordinator.withWriteLock {
+                check(DraftStorageCoordinator.publishGenerationUnsafe(context, generationB))
+            }
+            queuedRelease.complete(Unit)
+            awaitDeferred(reconciliation, "physical reconciliation must settle")
+            assertCurrentValid(generationB)
+            assertTrue("delete-time revalidation must preserve B", draftGenerationsRoot(context).resolve(generationB).isDirectory)
+        } finally {
+            queuedRelease.complete(Unit)
+            reconcileHandle.close()
+        }
+    }
+
+    /** Real B save cancellation at PointerPersistedBeforeSettlement. */
+    @Test
+    fun pointerPublicationCancellationKeepsEitherCoherentGeneration() = runBlocking {
+        val vm = initEditorForDraft(harness1, "cancel-regression")
+        val saveA = launchSave(vm)
+        assertTrue(finishSave(vm, saveA.first, saveA.second))
+        val generationA = checkNotNull(currentPointer())
+        val seam = DraftSaveTestSeam(
+            parkAt = DraftSaveStage.PointerPersistedBeforeSettlement,
+            pointerPersistedGenerationId = CompletableDeferred(),
+            failure = IllegalStateException("fail real B owner at publication settlement"),
+        )
+        val handle = harness1.ownSeam(DraftSaveTestSeam.install(vm, seam))
+        val saveB = launchSave(vm)
+        try {
+            awaitSignal(seam.reached, "real B must persist its pointer before settlement")
+            val publishedB = checkNotNull(seam.pointerPersistedGenerationId?.await())
+            assertNotEquals(generationA, publishedB)
+            assertEquals(publishedB, currentDraftGenerationId(context))
+            assertNotNull(
+                validateDraftGeneration(
+                    DraftGenerationDirectory(draftGenerationsRoot(context).resolve(publishedB)),
+                    publishedB.removePrefix(DRAFT_GENERATION_DIR_PREFIX),
+                ),
+            )
+            seam.releaseGate.complete(Unit)
+            assertFalse(finishSave(vm, saveB.first, saveB.second))
+            val finalPointer = currentPointer()
+            assertTrue(finalPointer == generationA || finalPointer == publishedB)
+            assertCurrentValid(finalPointer)
+        } finally {
+            seam.releaseGate.complete(Unit)
+            handle.close()
+        }
+    }
+
+    private fun draftGenerationsRoot(context: Application): File =
+        File(context.filesDir, "drafts/generations")
+
+    private fun persistentDraftDirectory(context: Application): File =
+        File(context.filesDir, "drafts/current")
+
+    private fun deleteDirectoryIfPresent(directory: File) {
+        runCatching { if (directory.isDirectory) directory.deleteRecursively() }
     }
 }

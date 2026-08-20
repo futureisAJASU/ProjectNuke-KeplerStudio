@@ -18,6 +18,8 @@ internal class DraftSaveTestSeam(
     internal val parkAt: DraftSaveStage? = null,
     internal val releaseGate: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val reached: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val beforeStorageReached: CompletableDeferred<Unit> = CompletableDeferred(),
+    internal val pointerPersistedGenerationId: CompletableDeferred<String>? = null,
     internal val failure: Throwable? = null,
 ) {
     internal suspend fun awaitRelease() {

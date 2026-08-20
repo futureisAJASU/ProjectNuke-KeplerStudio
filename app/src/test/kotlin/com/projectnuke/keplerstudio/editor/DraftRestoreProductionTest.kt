@@ -659,7 +659,7 @@ class DraftRestoreProductionTest {
             val vm2 = harness.createEditor()
             clearSeam =
                 harness.ownSeam(
-                    ClearDraftTestSeam.install(
+                    ClearDraftTestSeam.install(vm2,
                         ClearDraftTestSeam {
                             clearMaintenanceReached.complete(Unit)
                             clearMaintenanceRelease.await()

@@ -167,9 +167,8 @@ class StartupStorageReconcilerProductionTest {
         assertEquals(0, outcome.failedCount)
     }
 
-    // Legacy current-dir temps and unreferenced owned sources are reclaimed;
-    // legacy source.img and unrelated files are ignored because ownership
-    // cannot be proven from the reconciler's referenced set alone.
+    // Legacy current-dir temps are reclaimed; all legacy source files and
+    // unrelated files are ignored until the later pressure phase.
     @Test
     fun legacyCurrentTempsDeletedSourcesPreserved() = runBlocking {
         val legacy = context.filesDir.resolve("drafts/current").apply { mkdirs() }
@@ -181,12 +180,12 @@ class StartupStorageReconcilerProductionTest {
         val outcome = reconcileStartupArtifacts(context, null)
 
         assertFalse("temp must be deleted", tmp.exists())
-        assertFalse("unreferenced owned source must be deleted", orphanSource.exists())
+        assertTrue("legacy source must be preserved", orphanSource.exists())
         assertTrue("legacy live source must be untouched", liveSource.exists())
         assertTrue("legacy thumbnail must be untouched", liveThumb.exists())
         assertEquals(1, outcome.entries.count { it.disposition == StartupReconcileDisposition.DELETED_TEMP })
-        assertEquals(1, outcome.entries.count { it.disposition == StartupReconcileDisposition.DELETED_UNREFERENCED })
-        assertEquals(2, outcome.entries.count { it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN })
+        assertEquals(0, outcome.entries.count { it.disposition == StartupReconcileDisposition.DELETED_UNREFERENCED })
+        assertEquals(3, outcome.entries.count { it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN })
     }
 
     // Stale uuid-suffixed temps inside the pointer generation are reclaimed while

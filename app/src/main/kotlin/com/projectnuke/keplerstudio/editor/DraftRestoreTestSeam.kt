@@ -10,6 +10,7 @@ package com.projectnuke.keplerstudio.editor
  */
 internal enum class DraftRestoreTestStage {
     ValidationComplete,
+    CurrentStartupInvalidBeforeCleanup,
     SourceDecoded,
     RenderCreated,
     NativeSessionCreated,

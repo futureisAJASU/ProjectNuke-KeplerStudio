@@ -54,6 +54,15 @@ internal class StartupReconcileTestSeam {
     /** Test-only split point after the working-source snapshot and before deletion. */
     @Volatile internal var workingSnapshotReached: CompletableDeferred<Unit>? = null
     @Volatile internal var workingSnapshotRelease: CompletableDeferred<Unit>? = null
+    /** Test-only boundary immediately before the reconciler's pointer read. */
+    @Volatile internal var pointerReadAttempted: CompletableDeferred<Unit>? = null
+    /** Test-only boundary after a generation is queued and before its delete-time check. */
+    @Volatile internal var generationDeletionCandidateId: String? = null
+    @Volatile internal var generationDeletionQueuedReached: CompletableDeferred<Unit>? = null
+    @Volatile internal var generationDeletionQueuedRelease: CompletableDeferred<Unit>? = null
+    /** Test-only boundary while the reconciler owns the generation mutation lock. */
+    @Volatile internal var generationDeletionAuthorityReached: CompletableDeferred<Unit>? = null
+    @Volatile internal var generationDeletionAuthorityRelease: CompletableDeferred<Unit>? = null
 
     internal companion object Registry {
         private val lock = Any()
@@ -105,6 +114,7 @@ internal suspend fun reconcileStartupArtifacts(
             .mapNotNull { runCatching { it.canonicalFile }.getOrNull() }
             .toSet()
 
+    seam?.pointerReadAttempted?.complete(Unit)
     val pointer = withContext(Dispatchers.IO) {
         DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
     }
@@ -204,13 +214,8 @@ internal suspend fun reconcileStartupArtifacts(
                     when {
                         canonical.name.endsWith(DRAFT_TEMP_SUFFIX) ->
                             entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_TEMP)
-                        canonical.name.startsWith("source_") && canonical.extension == "img" -> {
-                            if (referenced.any { it.name == canonical.name }) {
-                                entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_REFERENCED)
-                            } else {
-                                entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_UNREFERENCED)
-                            }
-                        }
+                        canonical.name.startsWith("source_") && canonical.extension == "img" ->
+                            entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
                         else ->
                             entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
                     }
@@ -235,9 +240,18 @@ private suspend fun recordDirectoryDeletion(
     if (canonical == null || canonical.parentFile != ownerRoot) {
         return StartupReconcileEntry(dir.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
     }
+    val seam = StartupReconcileTestSeam.capture()
+    if (seam?.generationDeletionCandidateId == canonical.name) {
+        seam.generationDeletionQueuedReached?.complete(Unit)
+        seam.generationDeletionQueuedRelease?.await()
+    }
     return try {
         withContext(Dispatchers.IO) {
             DraftStorageCoordinator.withWriteLock {
+        if (seam?.generationDeletionCandidateId == canonical.name) {
+            seam.generationDeletionAuthorityReached?.complete(Unit)
+            seam.generationDeletionAuthorityRelease?.await()
+        }
 val dirName = canonical.name
         if (!canonical.isDirectory) {
             return@withWriteLock StartupReconcileEntry(

@@ -2,30 +2,31 @@ package com.projectnuke.keplerstudio.editor
 
 /** Narrow, owner-bound gate for deterministic clearDraft publication tests. */
 internal class ClearDraftTestSeam(
-    val beforeStorageClear: suspend () -> Unit,
+    val beforeStorageClear: suspend () -> Unit = {},
+    val atStorageTransaction: suspend () -> Unit = {},
 ) : AutoCloseable {
     private var closed = false
 
     override fun close() {
         if (closed) return
         closed = true
-        synchronized(lock) {
-            if (installed === this) installed = null
-        }
+        synchronized(lock) { installed.entries.removeIf { it.value === this } }
     }
 
     companion object {
         private val lock = Any()
-        private var installed: ClearDraftTestSeam? = null
+        private val installed = mutableMapOf<EditorViewModel, ClearDraftTestSeam>()
 
-        fun install(seam: ClearDraftTestSeam): ClearDraftTestSeam = synchronized(lock) {
-            check(installed == null) { "ClearDraftTestSeam already installed" }
-            installed = seam
+        fun install(vm: EditorViewModel, seam: ClearDraftTestSeam): ClearDraftTestSeam = synchronized(lock) {
+            check(!installed.containsKey(vm)) { "ClearDraftTestSeam already installed for VM" }
+            installed[vm] = seam
             seam
         }
 
-        fun capture(): ClearDraftTestSeam? = synchronized(lock) { installed }
+        fun capture(vm: EditorViewModel): ClearDraftTestSeam? = synchronized(lock) { installed[vm] }
 
-        fun installedForTest(): Int = synchronized(lock) { if (installed == null) 0 else 1 }
+        fun installedForTest(): Int = synchronized(lock) { installed.size }
+
     }
+
 }

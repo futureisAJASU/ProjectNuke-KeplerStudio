@@ -95,12 +95,12 @@ internal fun awaitEditorReadyForTest(
     // OPTION 2: observers are wake-up only; authoritative admission evaluation
     // must occur on the Robolectric Main/test thread.
     val startupHandle = vm.startupInitCompletion.invokeOnCompletion {
-        try { wake.put(Unit) } catch (_: InterruptedException) { }
+        wake.offer(Unit)
     }
     val stateObserver = observerScope.launch {
         vm.uiState.collect {
             // Wake-up only: never evaluate admission from Default.
-            try { wake.put(Unit) } catch (_: InterruptedException) { }
+            wake.offer(Unit)
         }
     }
     try {
@@ -149,7 +149,7 @@ internal fun awaitEditorActionAdmissionForTest(
     val observer = scope.launch {
         vm.uiState.collect {
             // Wake-up only: never evaluate admission from Default.
-            try { wake.put(Unit) } catch (_: InterruptedException) { }
+            wake.offer(Unit)
         }
     }
     try {
