@@ -12182,6 +12182,7 @@ private suspend fun persistDraftGenerationInternal(
         pointerCommitted = true
         return completedDir
     } catch (ce: CancellationException) {
+        testSeam?.cancellationCaught?.complete(Unit)
         if (durablePublication) {
             val saved = pendingResult ?: result?.copy(pointerPublished = true)
             if (saved != null) {

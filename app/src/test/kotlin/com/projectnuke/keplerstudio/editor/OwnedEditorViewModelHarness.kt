@@ -15,9 +15,8 @@ import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.collect
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.ArrayBlockingQueue
 import org.robolectric.Shadows.shadowOf
 
 /**
@@ -46,25 +45,21 @@ internal fun awaitEditorCompletionForTest(
     timeoutMillis: Long = 15_000L,
     pumpMain: () -> Unit = { shadowOf(android.os.Looper.getMainLooper()).idle() },
     diagnostic: () -> String = { "" },
+    wakeup: Semaphore = Semaphore(0),
 ) {
     require(timeoutMillis > 0L) { "timeoutMillis must be positive" }
-    val wakeup = CountDownLatch(1)
-    val completionHandle = completion.invokeOnCompletion { wakeup.countDown() }
+    val completionHandle = completion.invokeOnCompletion { wakeup.release() }
     val deadlineNanos = System.nanoTime() + timeoutMillis * 1_000_000L
     try {
-        // Give an already-queued Default/IO continuation one turn before the
-        // first signal wait. This is one bridge per completion wait, never one
-        // bridge per unsuccessful poll.
-        runBlocking { withContext(Dispatchers.Default) { yield() } }
+        pumpMain()
         while (!completion.isCompleted) {
-            pumpMain()
-            if (completion.isCompleted) break
             val remainingNanos = deadlineNanos - System.nanoTime()
             if (remainingNanos <= 0L) break
-            wakeup.await(
+            wakeup.tryAcquire(
                 minOf(remainingNanos, TimeUnit.MILLISECONDS.toNanos(25L)),
                 TimeUnit.NANOSECONDS,
             )
+            if (!completion.isCompleted) pumpMain()
         }
         pumpMain()
         check(completion.isCompleted) {
@@ -85,22 +80,22 @@ internal fun awaitEditorReadyForTest(
     vm: EditorViewModel,
     timeoutMillis: Long = 15_000L,
     diagnostic: () -> String = {
-        "busy=${vm.uiState.value.isBusy} historyBusy=${vm.uiState.value.historyBusy} " +
+        "startup=${vm.startupInitCompletion.isCompleted} busy=${vm.uiState.value.isBusy} historyBusy=${vm.uiState.value.historyBusy} " +
             "admission=${vm.editorActionAdmissionForTest()}"
     },
 ) {
     val ready = CompletableDeferred<Unit>()
-    val wake = ArrayBlockingQueue<Unit>(1)
+    val wake = Semaphore(0)
     val observerScope = CoroutineScope(Dispatchers.Default)
     // OPTION 2: observers are wake-up only; authoritative admission evaluation
     // must occur on the Robolectric Main/test thread.
     val startupHandle = vm.startupInitCompletion.invokeOnCompletion {
-        wake.offer(Unit)
+        wake.release()
     }
     val stateObserver = observerScope.launch {
         vm.uiState.collect {
             // Wake-up only: never evaluate admission from Default.
-            wake.offer(Unit)
+            wake.release()
         }
     }
     try {
@@ -108,15 +103,12 @@ internal fun awaitEditorReadyForTest(
             description = "editor must become action-ready",
             completion = ready,
             timeoutMillis = timeoutMillis,
+            wakeup = wake,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idle()
                 val admission = runCatching { vm.canEnterEditorActionPure() }.getOrDefault(false)
                 val initDone = vm.startupInitCompletion.isCompleted
                 // Pump any queued wake-up signals so the loop continues.
-                while (true) {
-                    val signal = wake.poll()
-                    if (signal == null) break
-                }
                 if (initDone && admission && !ready.isCompleted) {
                     ready.complete(Unit)
                 }
@@ -144,12 +136,12 @@ internal fun awaitEditorActionAdmissionForTest(
     },
 ) {
     val ready = CompletableDeferred<Unit>()
-    val wake = ArrayBlockingQueue<Unit>(1)
+    val wake = Semaphore(0)
     val scope = CoroutineScope(Dispatchers.Default)
     val observer = scope.launch {
         vm.uiState.collect {
             // Wake-up only: never evaluate admission from Default.
-            wake.offer(Unit)
+            wake.release()
         }
     }
     try {
@@ -157,14 +149,10 @@ internal fun awaitEditorActionAdmissionForTest(
             description = "editor action admission must become ready",
             completion = ready,
             timeoutMillis = timeoutMillis,
+            wakeup = wake,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idle()
                 val admission = runCatching { vm.canEnterEditorActionPure() }.getOrDefault(false)
-                // Drain queued wake-up signals.
-                while (true) {
-                    val signal = wake.poll()
-                    if (signal == null) break
-                }
                 if (admission && !ready.isCompleted) {
                     ready.complete(Unit)
                 }

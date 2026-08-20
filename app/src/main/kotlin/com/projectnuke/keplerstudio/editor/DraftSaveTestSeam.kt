@@ -1,6 +1,9 @@
 package com.projectnuke.keplerstudio.editor
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 
 /** Exact owner-bound parking stages for deterministic Draft-save tests. */
 internal enum class DraftSaveStage {
@@ -20,8 +23,19 @@ internal class DraftSaveTestSeam(
     internal val reached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val beforeStorageReached: CompletableDeferred<Unit> = CompletableDeferred(),
     internal val pointerPersistedGenerationId: CompletableDeferred<String>? = null,
+    internal val cancellationCaught: CompletableDeferred<Unit>? = null,
     internal val failure: Throwable? = null,
 ) {
+    @Volatile private var parkedOwner: Job? = null
+
+    internal fun cancelParkedOwner(cause: CancellationException): Boolean =
+        parkedOwner?.let { owner ->
+            if (!owner.isActive) false else {
+                owner.cancel(cause)
+                true
+            }
+        } == true
+
     internal suspend fun awaitRelease() {
         reached.complete(Unit)
         releaseGate.await()
@@ -30,9 +44,14 @@ internal class DraftSaveTestSeam(
 
     internal suspend fun parkIfRequested(stage: DraftSaveStage) {
         if (stage == parkAt) {
-            reached.complete(Unit)
-            releaseGate.await()
-            failure?.let { throw it }
+            parkedOwner = currentCoroutineContext()[Job]
+            try {
+                reached.complete(Unit)
+                releaseGate.await()
+                failure?.let { throw it }
+            } finally {
+                parkedOwner = null
+            }
         }
     }
 

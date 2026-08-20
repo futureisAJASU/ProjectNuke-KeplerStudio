@@ -4,6 +4,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -118,6 +119,11 @@ class DraftPersistentStorageArbitrationProductionTest {
             it.isDirectory && it.name.startsWith(DRAFT_GENERATION_DIR_PREFIX)
         }.orEmpty()
 
+    private fun ownedDraftSourceFiles(): Set<String> =
+        persistentDraftDirectory(context).listFiles()?.filter {
+            it.isFile && it.name.startsWith("source_") && it.extension == "img"
+        }?.mapNotNull { runCatching { it.canonicalPath }.getOrNull() }?.toSet().orEmpty()
+
     private fun assertNoDraftStagingOrTempFiles() {
         assertTrue(
             "draft generation staging must be empty",
@@ -152,6 +158,7 @@ class DraftPersistentStorageArbitrationProductionTest {
         assertTrue(finishSave(vm1, initial.first, initial.second))
         val baseline = checkNotNull(currentPointer())
         vm2.draftPointerBaseline = baseline
+        val baselineOwnedSources = ownedDraftSourceFiles()
 
         val seam1 = DraftSaveTestSeam()
         val seam2 = DraftSaveTestSeam()
@@ -179,6 +186,15 @@ class DraftPersistentStorageArbitrationProductionTest {
                 "compatibility state must belong to the winner",
                 current.manifest.baseContentToken,
                 context.getSharedPreferences(PREF_NAME_DRAFT, 0).getString("draft_base_token", null),
+            )
+            val winnerCompatibilitySource =
+                context.getSharedPreferences(PREF_NAME_DRAFT, 0)
+                    .getString(KEY_DRAFT_SOURCE, null)
+                    ?.let { runCatching { File(it).canonicalPath }.getOrNull() }
+            val newlyCreatedSources = ownedDraftSourceFiles() - baselineOwnedSources
+            assertTrue(
+                "loser-only owned source artifacts must not survive",
+                newlyCreatedSources.all { it == winnerCompatibilitySource },
             )
         } finally {
             seam1.releaseGate.complete(Unit)
@@ -378,7 +394,10 @@ class DraftPersistentStorageArbitrationProductionTest {
         assertTrue(finishSave(saveFirstVm, saveA.first, saveA.second))
         val baseline = checkNotNull(currentPointer())
         clearAfterSaveVm.draftPointerBaseline = baseline
-        val saveFirstSeam = DraftSaveTestSeam(parkAt = DraftSaveStage.StorageTransactionAcquired)
+        val saveFirstSeam = DraftSaveTestSeam(
+            parkAt = DraftSaveStage.PointerPersistedBeforeSettlement,
+            pointerPersistedGenerationId = CompletableDeferred(),
+        )
         val saveFirstHandle = harness1.ownSeam(DraftSaveTestSeam.install(saveFirstVm, saveFirstSeam))
         val clearAttempted = CompletableDeferred<Unit>()
         val clearStartRelease = CompletableDeferred<Unit>()
@@ -401,7 +420,10 @@ class DraftPersistentStorageArbitrationProductionTest {
         )
         try {
             val saveB = launchSave(saveFirstVm)
-            awaitSignal(saveFirstSeam.reached, "save-first must own storage")
+            awaitSignal(saveFirstSeam.reached, "save-first must persist its pointer")
+            val generationB = checkNotNull(saveFirstSeam.pointerPersistedGenerationId?.await())
+            assertNotEquals(baseline, generationB)
+            assertEquals(generationB, currentDraftGenerationId(context))
             clearAfterSaveVm.clearDraft()
             awaitSignal(clearAttempted, "clear must start while save owns storage")
             assertFalse("clear must not own storage before save releases", clearAtStorage.isCompleted)
@@ -414,7 +436,8 @@ class DraftPersistentStorageArbitrationProductionTest {
             }
             clearAtStorageRelease.complete(Unit)
             awaitDeferred(clearDone, "save-first clear maintenance must settle")
-            assertCurrentValid()
+            assertCurrentValid(generationB)
+            assertTrue(draftGenerationsRoot(context).resolve(generationB).isDirectory)
         } finally {
             saveFirstSeam.releaseGate.complete(Unit)
             clearStartRelease.complete(Unit)
@@ -519,7 +542,7 @@ class DraftPersistentStorageArbitrationProductionTest {
         val seam = DraftSaveTestSeam(
             parkAt = DraftSaveStage.PointerPersistedBeforeSettlement,
             pointerPersistedGenerationId = CompletableDeferred(),
-            failure = IllegalStateException("fail real B owner at publication settlement"),
+            cancellationCaught = CompletableDeferred(),
         )
         val handle = harness1.ownSeam(DraftSaveTestSeam.install(vm, seam))
         val saveB = launchSave(vm)
@@ -534,8 +557,13 @@ class DraftPersistentStorageArbitrationProductionTest {
                     publishedB.removePrefix(DRAFT_GENERATION_DIR_PREFIX),
                 ),
             )
+            assertTrue(
+                "parked real B owner must accept cancellation",
+                seam.cancelParkedOwner(CancellationException("cancel real B owner at publication settlement")),
+            )
             seam.releaseGate.complete(Unit)
-            assertFalse(finishSave(vm, saveB.first, saveB.second))
+            awaitSignal(checkNotNull(seam.cancellationCaught), "real B owner must enter cancellation catch")
+            assertFalse("cancelled real B owner must report an unsuccessful save", awaitDeferred(saveB.second, "cancelled real B owner must settle"))
             val finalPointer = currentPointer()
             assertTrue(finalPointer == generationA || finalPointer == publishedB)
             assertCurrentValid(finalPointer)
