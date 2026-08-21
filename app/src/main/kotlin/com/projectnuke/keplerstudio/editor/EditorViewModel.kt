@@ -5077,7 +5077,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-        } catch (_: CancellationException) {
+        } catch (ce: CancellationException) {
             committed?.let { saved ->
                 withContext(NonCancellable) {
                     try {
@@ -5100,10 +5100,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             throw CancellationException("Draft save cancelled during publication settlement")
         } catch (t: Throwable) {
             logDraftSaveFailure(t)
-        }
-        if (committed == null) {
+        } finally {
             payload.recycleOwnedBitmaps()
             draftTracker?.end()
+        }
+        if (committed == null) {
             lastDraftSaveFailureReasonForTest = "saveDraftSnapshot-returned-null"
             updateUiStateAndRecycleReplaced {
                 if (owningJob?.isActive != false && isDraftPayloadDocumentCurrent(payload)) {
@@ -5115,8 +5116,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             return false
         }
-        payload.recycleOwnedBitmaps()
-        draftTracker?.end()
         if (!settled) lastDraftSaveFailureReasonForTest = "settleCommittedDraft-rolled-back"
         return settled
     }
@@ -11932,8 +11931,9 @@ private suspend fun saveDraftSnapshot(
                 ?: run { DraftSaveTestSeam.Registry.lastFailureReasonForTest = "no-draft-source-result:${payload.sourcePath}/dirty=${payload.baseBitmapDirty}"; return@withWriteLock null }
         testSeam?.parkIfRequested(DraftSaveStage.CompatibilitySourceVisible)
         val savedAt = System.currentTimeMillis()
-        val generationResult =
-            persistDraftGenerationInternal(
+        val generationResult: DraftSaveResult?
+        try {
+            generationResult = persistDraftGenerationInternal(
                 context = context,
                 payload = payload,
                 draftSourceFile = draftSource.file,
@@ -11942,6 +11942,17 @@ private suspend fun saveDraftSnapshot(
                 isCurrent = isCurrent,
                 testSeam = testSeam,
             )
+        } catch (ce: CancellationException) {
+            if (draftSource.changed && isOwnedDraftSource(context, draftSource.file)) {
+                runCatching { draftSource.file.delete() }
+            }
+            throw ce
+        } catch (t: Throwable) {
+            if (draftSource.changed && isOwnedDraftSource(context, draftSource.file)) {
+                runCatching { draftSource.file.delete() }
+            }
+            throw t
+        }
         if (generationResult == null) {
             if (draftSource.changed && isOwnedDraftSource(context, draftSource.file))
                 draftSource.file.delete()

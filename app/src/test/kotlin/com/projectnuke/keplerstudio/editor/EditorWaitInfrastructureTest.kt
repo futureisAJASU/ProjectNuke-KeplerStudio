@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -76,6 +77,33 @@ class EditorWaitInfrastructureTest {
         assertTrue(failure?.message.orEmpty().contains("completion must settle"))
         assertTrue(failure?.message.orEmpty().contains("100ms"))
         assertTrue(failure?.message.orEmpty().contains("phase=Rendering"))
+    }
+
+    /**
+     * Focused regression: the startup coordinator launches work on Default/IO
+     * that must begin before Main is pumped. Without the pre-pump yield,
+     * the waiter never sees the startup-completion signal.
+     */
+    @Test
+    fun startupCoordinatorRequiresDefaultYieldBeforeMainPump() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val ready = CompletableDeferred<Unit>()
+        try {
+            scope.launch(Dispatchers.Default) {
+                // Simulate startup coordinator: begin on Default, then signal.
+                yield()
+                Handler(Looper.getMainLooper()).post { ready.complete(Unit) }
+            }
+            awaitEditorCompletionForTest(
+                description = "startup coordinator default work must reach main",
+                completion = ready,
+                timeoutMillis = 2_000L,
+                pumpMain = ::drainReadyMain,
+            )
+            assertTrue(ready.isCompleted)
+        } finally {
+            scope.cancel()
+        }
     }
 
     private fun drainReadyMain() {

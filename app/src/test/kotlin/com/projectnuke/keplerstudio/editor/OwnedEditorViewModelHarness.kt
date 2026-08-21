@@ -51,6 +51,9 @@ internal fun awaitEditorCompletionForTest(
     val completionHandle = completion.invokeOnCompletion { wakeup.release() }
     val deadlineNanos = System.nanoTime() + timeoutMillis * 1_000_000L
     try {
+        // Focused startup-transition contract: the startup coordinator owns
+        // background work (Default/IO) that must begin before Main is pumped.
+        // A single yield to Default proves the concrete producer transition.
         runBlocking { withContext(Dispatchers.Default) { yield() } }
         pumpMain()
         while (!completion.isCompleted) {

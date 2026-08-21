@@ -46,12 +46,38 @@ class DraftPersistentStorageArbitrationProductionTest {
 
     @After
     fun tearDown() {
-        harness1.close()
-        harness2.close()
-        context.getSharedPreferences(PREF_NAME_DRAFT, 0).edit().clear().commit()
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
-        deleteDirectoryIfPresent(persistentDraftDirectory(context))
+        var primaryFailure: Throwable? = null
+        fun attempt(step: String, action: () -> Unit) {
+            runCatching(action).onFailure {
+                if (primaryFailure == null) {
+                    primaryFailure = it
+                } else {
+                    primaryFailure?.addSuppressed(it)
+                }
+            }
+        }
+        attempt("harness1 close") { harness1.close() }
+        attempt("harness2 close") { harness2.close() }
+        attempt("clear draft preferences") {
+            context.getSharedPreferences(PREF_NAME_DRAFT, 0).edit().clear().commit()
+        }
+        attempt("clear current draft pointer") { clearCurrentDraftGenerationPointer(context) }
+        attempt("delete generation test directories") {
+            deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        }
+        attempt("delete persistent draft test directories") {
+            deleteDirectoryIfPresent(persistentDraftDirectory(context))
+        }
+        attempt("cleanup restored working sources") {
+            deleteDirectoryIfPresent(File(context.filesDir, "editor_sources"))
+        }
+        attempt("cleanup temporary/staging artifacts") {
+            deleteDirectoryIfPresent(draftGenerationsRoot(context))
+            persistentDraftDirectory(context).listFiles()?.forEach { file ->
+                if (file.name.endsWith(".tmp")) file.delete()
+            }
+        }
+        primaryFailure?.let { throw it }
     }
 
     private fun createTestBitmap(): Bitmap =
@@ -567,6 +593,22 @@ class DraftPersistentStorageArbitrationProductionTest {
             val finalPointer = currentPointer()
             assertTrue(finalPointer == generationA || finalPointer == publishedB)
             assertCurrentValid(finalPointer)
+            assertNoDraftStagingOrTempFiles()
+            val ownedSources = ownedDraftSourceFiles()
+            val currentSourcePath = context.getSharedPreferences(PREF_NAME_DRAFT, 0).getString(KEY_DRAFT_SOURCE, null)
+            val generationDirs = generationDirectories()
+            assertTrue(
+                "only coherent generations must remain after cancellation settlement",
+                generationDirs.size <= 2,
+            )
+            if (finalPointer == generationA) {
+                assertTrue(
+                    "no unexpected owned draft sources after cancellation settlement",
+                    ownedSources.size <= 1,
+                )
+            } else if (finalPointer == publishedB) {
+                assertNotNull("current compatibility source must exist for winner B", currentSourcePath)
+            }
         } finally {
             seam.releaseGate.complete(Unit)
             handle.close()
