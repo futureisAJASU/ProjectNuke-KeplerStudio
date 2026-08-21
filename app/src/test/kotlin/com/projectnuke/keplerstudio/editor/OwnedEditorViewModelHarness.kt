@@ -51,6 +51,7 @@ internal fun awaitEditorCompletionForTest(
     val completionHandle = completion.invokeOnCompletion { wakeup.release() }
     val deadlineNanos = System.nanoTime() + timeoutMillis * 1_000_000L
     try {
+        runBlocking { withContext(Dispatchers.Default) { yield() } }
         pumpMain()
         while (!completion.isCompleted) {
             val remainingNanos = deadlineNanos - System.nanoTime()
@@ -108,7 +109,6 @@ internal fun awaitEditorReadyForTest(
                 shadowOf(android.os.Looper.getMainLooper()).idle()
                 val admission = runCatching { vm.canEnterEditorActionPure() }.getOrDefault(false)
                 val initDone = vm.startupInitCompletion.isCompleted
-                // Pump any queued wake-up signals so the loop continues.
                 if (initDone && admission && !ready.isCompleted) {
                     ready.complete(Unit)
                 }
