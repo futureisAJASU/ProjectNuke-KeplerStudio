@@ -56,6 +56,16 @@ internal class StartupReconcileTestSeam {
     @Volatile internal var workingSnapshotRelease: CompletableDeferred<Unit>? = null
     /** Test-only boundary immediately before the reconciler's pointer read. */
     @Volatile internal var pointerReadAttempted: CompletableDeferred<Unit>? = null
+    @Volatile internal var pointerReadStartedNanos: Long = 0L
+    @Volatile internal var pointerReadFinishedNanos: Long = 0L
+    @Volatile internal var generationsScanStartedNanos: Long = 0L
+    @Volatile internal var generationsScanFinishedNanos: Long = 0L
+    @Volatile internal var cacheScanStartedNanos: Long = 0L
+    @Volatile internal var cacheScanFinishedNanos: Long = 0L
+    @Volatile internal var workingScanStartedNanos: Long = 0L
+    @Volatile internal var workingScanFinishedNanos: Long = 0L
+    @Volatile internal var legacyScanStartedNanos: Long = 0L
+    @Volatile internal var legacyScanFinishedNanos: Long = 0L
     /** Test-only boundary after a generation is queued and before its delete-time check. */
     @Volatile internal var generationDeletionCandidateId: String? = null
     @Volatile internal var generationDeletionQueuedReached: CompletableDeferred<Unit>? = null
@@ -115,10 +125,13 @@ internal suspend fun reconcileStartupArtifacts(
             .toSet()
 
     seam?.pointerReadAttempted?.complete(Unit)
+    seam?.pointerReadStartedNanos = System.nanoTime()
     val pointer = withContext(Dispatchers.IO) {
         DraftStorageCoordinator.withReadLock { currentDraftGenerationId(context) }
     }
+    seam?.pointerReadFinishedNanos = System.nanoTime()
 
+    seam?.generationsScanStartedNanos = System.nanoTime()
     val generationsRoot = runCatching { draftGenerationsRoot(context).canonicalFile }.getOrNull()
     if (generationsRoot != null) {
         val listedDirs = runCatching { generationsRoot.listFiles()?.toList() }.getOrNull().orEmpty()
@@ -165,7 +178,9 @@ internal suspend fun reconcileStartupArtifacts(
             entries += recordDirectoryDeletion(context, dir, generationsRoot, disp, pointer)
         }
     }
+    seam?.generationsScanFinishedNanos = System.nanoTime()
 
+    seam?.cacheScanStartedNanos = System.nanoTime()
     val cacheRoot = runCatching { context.cacheDir.canonicalFile }.getOrNull()
     if (cacheRoot != null) {
         val cacheFiles = cacheRoot.listFiles()?.toList().orEmpty()
@@ -185,7 +200,9 @@ internal suspend fun reconcileStartupArtifacts(
             }
         }
     }
+    seam?.cacheScanFinishedNanos = System.nanoTime()
 
+    seam?.workingScanStartedNanos = System.nanoTime()
     val workingRoot = runCatching { File(context.filesDir, WORKING_SOURCES_DIR).canonicalFile }.getOrNull()
     if (workingRoot != null) {
         val workingFiles = workingRoot.listFiles()?.toList().orEmpty()
@@ -203,7 +220,9 @@ internal suspend fun reconcileStartupArtifacts(
             }
         }
     }
+    seam?.workingScanFinishedNanos = System.nanoTime()
 
+    seam?.legacyScanStartedNanos = System.nanoTime()
     val legacyRoot = runCatching { File(context.filesDir, LEGACY_DRAFT_DIR).canonicalFile }.getOrNull()
     if (legacyRoot != null) {
         withContext(Dispatchers.IO) {
@@ -223,6 +242,7 @@ internal suspend fun reconcileStartupArtifacts(
             }
         }
     }
+    seam?.legacyScanFinishedNanos = System.nanoTime()
 
     val outcome = StartupReconcileOutcome(entries)
     seam?.outcome = outcome

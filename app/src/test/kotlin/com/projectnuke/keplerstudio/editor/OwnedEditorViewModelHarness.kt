@@ -73,6 +73,32 @@ internal fun deletePathForTest(path: File) {
     }
 }
 
+internal fun awaitRemasterModelJobsSettledForTest(label: String, jobs: List<Job>) {
+    if (jobs.isEmpty()) return
+    val settled = runBlocking {
+        withTimeoutOrNull(5_000L) {
+            jobs.joinAll()
+            true
+        } ?: false
+    }
+    check(settled) {
+        "$label did not settle: " +
+            "${RemasterModelSession.activeModelScopeJobDiagnosticsForTest()}"
+    }
+}
+
+internal fun unloadRemasterIdleNowBoundedForTest(label: String) {
+    val completed = runBlocking {
+        withTimeoutOrNull(5_000L) {
+            RemasterModelSession.unloadIdleNow()
+            true
+        } ?: false
+    }
+    check(completed) {
+        "$label did not complete: ${RemasterModelSession.activeModelScopeJobDiagnosticsForTest()}"
+    }
+}
+
 /** Ownership-aware emergency cleanup for the restore-source sandbox only. */
 internal fun resetRestoredWorkingSourceSandboxForTest(context: android.content.Context) {
     val failures = CleanupFailureAggregator()
@@ -461,6 +487,7 @@ internal class OwnedEditorViewModelHarness(
             (1L..count).mapNotNull { index -> store.get("editor-$index") as? EditorViewModel }
         }
         val jobs = editors.flatMap { it.viewModelJobsForTest() }
+        val remasterJobsAtBoundary = RemasterModelSession.modelScopeJobsForTest()
         val failures = CleanupFailureAggregator()
         preClearActions.forEach { action -> failures.attempt(action) }
         preClearActions.clear()
@@ -470,7 +497,20 @@ internal class OwnedEditorViewModelHarness(
         // session to unload asynchronously.  Drain that ownership boundary
         // before this harness is considered closed so a later Robolectric
         // class cannot observe a stale Closing command from this test.
-        failures.attempt { runBlocking { RemasterModelSession.unloadIdleNow() } }
+        failures.attempt { unloadRemasterIdleNowBoundedForTest("Remaster idle unload") }
+        val remasterJobsAfterUnload = RemasterModelSession.modelScopeJobsForTest()
+        failures.attempt {
+            awaitRemasterModelJobsSettledForTest(
+                "Remaster modelScope",
+                (remasterJobsAtBoundary + remasterJobsAfterUnload).distinct(),
+            )
+        }
+        failures.attempt {
+            check(RemasterModelSession.activeModelScopeJobCountForTest() == 0) {
+                "Remaster modelScope jobs remained active after harness clear: " +
+                    RemasterModelSession.activeModelScopeJobDiagnosticsForTest()
+            }
+        }
         failures.attempt {
             val joined = awaitViewModelJobsSettledForTest(jobs)
             check(joined) {

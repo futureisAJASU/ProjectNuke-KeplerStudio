@@ -1372,6 +1372,23 @@ object RemasterModelSession : ModelRunnerContract {
     internal fun installedCommandStartTestSeamCount(): Int =
         installedCommandStartTestSeamCount.get().toInt()
 
+    /** Test-only view of the process-global command ownership boundary. */
+    internal fun modelScopeJobsForTest(): List<Job> =
+        modelScope.coroutineContext[Job]?.children?.toList().orEmpty()
+
+    internal fun activeModelScopeJobCountForTest(): Int =
+        modelScopeJobsForTest().count { !it.isCompleted }
+
+    internal fun activeModelScopeJobDiagnosticsForTest(): String =
+        synchronized(sessionStateLock) {
+            val current = currentCommand
+            val jobs = modelScopeJobsForTest()
+            "currentCommand=${current?.kind}:${current?.generation} " +
+                "jobs=${jobs.joinToString(prefix = "[", postfix = "]") { job ->
+                    "${job::class.simpleName ?: "Job"}(active=${!job.isCompleted}, cancelled=${job.isCancelled})"
+                }}"
+        }
+
     internal fun validationIdentityForTest(): ModelSessionValidationIdentity? = sessionValidationIdentity
     internal fun sessionGenerationForTest(): Long = registrySessionGeneration
     internal fun installedRunnerForTest(): AutoCloseable? = closeableModel

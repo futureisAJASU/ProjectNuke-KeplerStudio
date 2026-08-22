@@ -179,7 +179,26 @@ class IncomingSourceTransactionTest {
             val staging = context.cacheDir.listFiles().orEmpty().singleOrNull {
                 IncomingSourceArtifactNames.isStagingName(it.name)
             } ?: error("no live staging found after provider reached")
-            reconcileStartupArtifacts(context, null)
+            val timingSeam = StartupReconcileTestSeam()
+            val timingHandle = StartupReconcileTestSeam.install(timingSeam)
+            try {
+                val reconcileStartedNanos = System.nanoTime()
+                reconcileStartupArtifacts(context, null)
+                val reconcileFinishedNanos = System.nanoTime()
+                fun millis(start: Long, finish: Long): String =
+                    if (start == 0L || finish == 0L) "unavailable"
+                    else "%.3f".format((finish - start) / 1_000_000.0)
+                println(
+                    "IncomingSource reconcile timing ms: total=${millis(reconcileStartedNanos, reconcileFinishedNanos)} " +
+                        "pointer=${millis(timingSeam.pointerReadStartedNanos, timingSeam.pointerReadFinishedNanos)} " +
+                        "generations=${millis(timingSeam.generationsScanStartedNanos, timingSeam.generationsScanFinishedNanos)} " +
+                        "cache=${millis(timingSeam.cacheScanStartedNanos, timingSeam.cacheScanFinishedNanos)} " +
+                        "editorSources=${millis(timingSeam.workingScanStartedNanos, timingSeam.workingScanFinishedNanos)} " +
+                        "legacy=${millis(timingSeam.legacyScanStartedNanos, timingSeam.legacyScanFinishedNanos)}",
+                )
+            } finally {
+                timingHandle.close()
+            }
             assertTrue("live staging must survive reconciliation", staging.exists())
             assertTrue(IncomingSourceLiveOwnership.isLiveForTest(staging))
 
@@ -190,7 +209,10 @@ class IncomingSourceTransactionTest {
             runCatching { acquisition.await() }
             assertFalse("rollback removes staging", staging.exists())
             assertFalse("rollback releases ownership", IncomingSourceLiveOwnership.isLiveForTest(staging))
-            reconcileStartupArtifacts(context, null)
+            assertTrue(
+                "rollback leaves no incoming source artifact",
+                ownedSourceNames().isEmpty(),
+            )
         }
     }
 

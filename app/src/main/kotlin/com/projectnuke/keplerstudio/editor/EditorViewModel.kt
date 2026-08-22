@@ -489,6 +489,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Pure read-only inspection for tests: the currently pending render revision. */
     internal fun pendingParamRenderRevision(): Int? = activeParamRenderRevision
 
+    /** Read-only test boundary for the active parameter render completion. */
+    internal fun parameterRenderJobForTest(): Job? = parameterGesture?.renderJob
+
     /** Pure read-only inspection for tests: latest adopted params in the open transaction. */
     internal fun adoptedParamsForTest(): EditParams? = parameterGesture?.adoptedParams
 

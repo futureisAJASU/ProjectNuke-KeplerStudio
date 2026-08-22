@@ -391,6 +391,7 @@ class SelectionPreviewProductionTest {
         try {
             settle { vm.startupInitCompletion.isCompleted && vm.canEnterEditorAction() }
             vm.updateParams { it.copy(exposure = 0.2f) }
+            awaitParameterRender(vm)
             settle {
                 vm.hasOpenParameterGesture() &&
                     vm.adoptedParamsForTest()?.exposure == 0.2f &&
@@ -444,6 +445,7 @@ class SelectionPreviewProductionTest {
         try {
             settle { vm.canEnterEditorAction() }
             vm.updateParams { it.copy(exposure = 0.2f) }
+            awaitParameterRender(vm)
             settle {
                 vm.hasOpenParameterGesture() &&
                     vm.adoptedParamsForTest()?.exposure == 0.2f &&
@@ -479,6 +481,7 @@ class SelectionPreviewProductionTest {
         try {
             settle { vm.canEnterEditorAction() }
             vm.updateParams { it.copy(exposure = 0.2f) }
+            awaitParameterRender(vm)
             settle {
                 vm.hasOpenParameterGesture() &&
                     vm.adoptedParamsForTest()?.exposure == 0.2f &&
@@ -500,6 +503,7 @@ class SelectionPreviewProductionTest {
             gate.releaseSuccess()
             gateHandle.close()
             vm.updateParams { it.copy(exposure = 0.3f) }
+            awaitParameterRender(vm)
             settle {
                 vm.hasOpenParameterGesture() &&
                     vm.adoptedParamsForTest()?.exposure == 0.3f &&
@@ -525,6 +529,23 @@ class SelectionPreviewProductionTest {
         } finally {
             renderer.close()
         }
+    }
+
+    private fun awaitParameterRender(vm: EditorViewModel) {
+        val completion = checkNotNull(vm.parameterRenderJobForTest()) {
+            "parameter render job was not created: ${startupDiagnosticForTest(vm)}"
+        }
+        awaitEditorCompletionForTest(
+            description = "selection parameter render",
+            completion = completion,
+            pumpMain = {
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
+            },
+            diagnostic = {
+                "parameterPhase=${vm.paramRenderPhaseForTest()} " +
+                    startupDiagnosticForTest(vm)
+            },
+        )
     }
 
     private fun installDeterministicRenderer(color: Int): AutoCloseable =
