@@ -5,12 +5,13 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.junit.After
 import org.junit.Before
 
 /**
  * Regression tests for Experimental Lab model-assisted option enablement.
  *
- * Verifies that the Compose panel derives option enablement from the authoritative
+ * Verifies the Compose panel derives option enablement from the authoritative
  * canAttemptModelUse semantic, not the deprecated executable semantic.
  *
  * Uses the production helper [isModelAssistedOptionEnabled] consumed by
@@ -20,6 +21,14 @@ class ExperimentalLabEnablementRegressionTest {
 
     @Before
     fun resetRegistry() {
+        ModelAvailabilityRegistry.resetForTest()
+    }
+
+    @After
+    fun resetRegistryAfter() {
+        // These tests mutate the process-global registry without starting a
+        // model session. Reset at the boundary so the next Robolectric class in
+        // the same worker observes a clean registry (clean test contract).
         ModelAvailabilityRegistry.resetForTest()
     }
 

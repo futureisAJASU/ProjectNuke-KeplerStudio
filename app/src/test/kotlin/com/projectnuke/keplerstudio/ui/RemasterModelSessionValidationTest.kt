@@ -4,10 +4,12 @@ import android.graphics.Bitmap
 import androidx.lifecycle.ViewModelStore
 import com.projectnuke.keplerstudio.editor.EditorViewModel
 import com.projectnuke.keplerstudio.editor.GlobalModelDiagnostics
+import com.projectnuke.keplerstudio.editor.GlobalModelContributor
 import com.projectnuke.keplerstudio.editor.CleanupFailureAggregator
 import com.projectnuke.keplerstudio.editor.ModelRuntimeType
 import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.ModelCapabilityPhase
+import com.projectnuke.keplerstudio.editor.ModelCapabilityState
 import com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelLoadResult
@@ -26,10 +28,12 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Before
@@ -53,9 +57,16 @@ class RemasterModelSessionValidationTest {
 
     @Before
     fun resetSession() = runBlocking {
+        // Immutable pre-cleanup snapshot: captured BEFORE any unload/reset so a
+        // previous test cannot erase its own contamination evidence first.
+        val boundary = remasterBoundarySnapshotForTest()
         val failures = CleanupFailureAggregator()
-        println("Remaster pre-test boundary: $sessionBoundaryDiagnosticForTest")
-        val jobsAtBoundary = RemasterModelSession.modelScopeJobsForTest()
+        failures.attempt {
+            check(boundary.isCleanBoundary) {
+                "PRE-EXISTING TEST CONTAMINATION at Remaster boundary: $boundary"
+            }
+        }
+        val jobsAtBoundary = boundary.modelScopeJobs
         failures.attempt { unloadRemasterIdleNowBoundedForTest("pre-test Remaster idle unload") }
         val jobsAfterUnload = RemasterModelSession.modelScopeJobsForTest()
         failures.attempt {
@@ -70,7 +81,7 @@ class RemasterModelSessionValidationTest {
                     RemasterModelSession.installedInferenceTestSeamCount() == 0 &&
                     RemasterModelSession.installedEnsureReusableTestSeamCount() == 0 &&
                     RemasterModelSession.installedCommandStartTestSeamCount() == 0,
-            ) { "PRE-EXISTING TEST CONTAMINATION: $sessionBoundaryDiagnosticForTest" }
+            ) { "Remaster seams survived pre-test emergency cleanup: $boundary" }
         }
         failures.attempt {
             check(
@@ -81,7 +92,13 @@ class RemasterModelSessionValidationTest {
                     RemasterModelSession.installedRunnerForTest() == null &&
                     RemasterModelSession.validationIdentityForTest() == null &&
                     RemasterModelSession.sessionGenerationForTest() == 0L,
-            ) { "PRE-EXISTING TEST CONTAMINATION: $sessionBoundaryDiagnosticForTest" }
+            ) { "Remaster session survived pre-test emergency cleanup: $boundary" }
+        }
+        failures.attempt {
+            check(RemasterModelSession.activeModelScopeJobCountForTest() == 0) {
+                "Remaster modelScope jobs survived pre-test emergency cleanup: " +
+                    RemasterModelSession.activeModelScopeJobDiagnosticsForTest()
+            }
         }
         failures.attempt { ModelAvailabilityRegistry.resetForTest() }
         failures.attempt { GlobalModelDiagnostics.resetForTest(true) }
@@ -91,6 +108,7 @@ class RemasterModelSessionValidationTest {
     @After
     fun closeSession() = runBlocking {
         val failures = CleanupFailureAggregator()
+        val jobsAtTeardown = RemasterModelSession.modelScopeJobsForTest()
         failures.attempt { testSeam?.close(); testSeam = null }
         failures.attempt { inferenceTestSeam?.close(); inferenceTestSeam = null }
         failures.attempt { ensureReusableTestSeam?.close(); ensureReusableTestSeam = null }
@@ -98,29 +116,36 @@ class RemasterModelSessionValidationTest {
         failures.attempt { unloadRemasterIdleNowBoundedForTest("post-test Remaster idle unload") }
         val jobsAfterUnload = RemasterModelSession.modelScopeJobsForTest()
         failures.attempt {
-            awaitRemasterModelJobsSettledForTest("post-test Remaster modelScope", jobsAfterUnload)
+            awaitRemasterModelJobsSettledForTest(
+                "post-test Remaster modelScope",
+                (jobsAtTeardown + jobsAfterUnload).distinct(),
+            )
         }
         failures.attempt {
+            val boundary = remasterBoundarySnapshotForTest()
             check(
-                RemasterModelSession.installedTestSeamCount() == 0 &&
-                    RemasterModelSession.installedInferenceTestSeamCount() == 0 &&
-                    RemasterModelSession.installedEnsureReusableTestSeamCount() == 0 &&
-                    RemasterModelSession.installedCommandStartTestSeamCount() == 0,
-            ) { "Remaster test seams remained at teardown: $sessionBoundaryDiagnosticForTest" }
+                boundary.activeModelScopeJobCount == 0 &&
+                    RemasterModelSession.activeModelScopeJobCountForTest() == 0 &&
+                    boundary.lifecycle == ModelRunnerLifecycle.Unloaded &&
+                    !boundary.isModelLoading &&
+                    !boundary.isModelLoaded &&
+                    boundary.activeModelId == null &&
+                    !boundary.installedRunnerPresent &&
+                    boundary.validationIdentity == null &&
+                    boundary.registrySessionGeneration == 0L &&
+                    boundary.modelSeamCount == 0 &&
+                    boundary.inferenceSeamCount == 0 &&
+                    boundary.ensureSeamCount == 0 &&
+                    boundary.commandStartSeamCount == 0,
+            ) { "Remaster global boundary remained active at teardown: $boundary" }
         }
-        failures.attempt {
-            check(
-                RemasterModelSession.lifecycle == ModelRunnerLifecycle.Unloaded &&
-                    !RemasterModelSession.isModelLoading &&
-                    !RemasterModelSession.isModelLoaded &&
-                    RemasterModelSession.activeModel == null &&
-                    RemasterModelSession.installedRunnerForTest() == null,
-            ) { "Remaster session remained active at teardown: $sessionBoundaryDiagnosticForTest" }
-        }
-        println("Remaster post-test boundary: $sessionBoundaryDiagnosticForTest")
         failures.attempt { ModelAvailabilityRegistry.resetForTest() }
         failures.attempt { GlobalModelDiagnostics.resetForTest() }
-        failures.throwIfAny()
+        val failure = runCatching { failures.throwIfAny() }.exceptionOrNull()
+        if (failure != null) {
+            println("Remaster post-test boundary: $sessionBoundaryDiagnosticForTest")
+            throw failure
+        }
     }
 
     private val sessionBoundaryDiagnosticForTest: String
@@ -141,6 +166,98 @@ class RemasterModelSessionValidationTest {
                 "modelScope=${RemasterModelSession.activeModelScopeJobDiagnosticsForTest()}, " +
                 "registry=${ModelAvailabilityRegistry.state.value}, " +
                 "diagnostics=${GlobalModelDiagnostics.snapshot()}"
+
+    /**
+     * Immutable pre-cleanup boundary snapshot. A clean test boundary has no
+     * active model scope, no installed session fields, no seams, and no
+     * registry/diagnostics residue. The registry is compared to its exact
+     * default state because every mutating test class resets it at its own
+     * boundary; any residue therefore identifies a real pre-existing leak.
+     */
+    private class RemasterBoundarySnapshot(
+        val lifecycle: ModelRunnerLifecycle,
+        val isModelLoading: Boolean,
+        val isModelLoaded: Boolean,
+        val activeModelId: String?,
+        val statusText: String,
+        val installedRunnerPresent: Boolean,
+        val validationIdentity: ModelSessionValidationIdentity?,
+        val registrySessionGeneration: Long,
+        val currentCommandDiagnostic: String,
+        val modelScopeJobs: List<Job>,
+        val activeModelScopeJobCount: Int,
+        val modelSeamCount: Int,
+        val inferenceSeamCount: Int,
+        val ensureSeamCount: Int,
+        val commandStartSeamCount: Int,
+        val registry: Map<ModelFeature, ModelCapabilityState>,
+        val diagnostics: List<GlobalModelContributor>,
+    ) {
+        val isCleanBoundary: Boolean
+            get() =
+                lifecycle == ModelRunnerLifecycle.Unloaded &&
+                    !isModelLoading &&
+                    !isModelLoaded &&
+                    activeModelId == null &&
+                    !installedRunnerPresent &&
+                    validationIdentity == null &&
+                    registrySessionGeneration == 0L &&
+                    activeModelScopeJobCount == 0 &&
+                    modelSeamCount == 0 &&
+                    inferenceSeamCount == 0 &&
+                    ensureSeamCount == 0 &&
+                    commandStartSeamCount == 0 &&
+                    registry.values.all { it == ModelCapabilityState() } &&
+                    diagnostics.isEmpty()
+
+        override fun toString(): String =
+            "lifecycle=$lifecycle, " +
+                "isModelLoading=$isModelLoading, " +
+                "isModelLoaded=$isModelLoaded, " +
+                "activeModel=$activeModelId, " +
+                "statusText=$statusText, " +
+                "installedRunner=$installedRunnerPresent, " +
+                "validation=$validationIdentity, " +
+                "sessionGeneration=$registrySessionGeneration, " +
+                "command=$currentCommandDiagnostic, " +
+                "modelScopeJobCount=$activeModelScopeJobCount, " +
+                "seams={model=$modelSeamCount, inference=$inferenceSeamCount, " +
+                "ensure=$ensureSeamCount, commandStart=$commandStartSeamCount}, " +
+                "registry=$registry, " +
+                "diagnostics=$diagnostics"
+    }
+
+    private fun remasterBoundarySnapshotForTest() =
+        RemasterBoundarySnapshot(
+            lifecycle = RemasterModelSession.lifecycle,
+            isModelLoading = RemasterModelSession.isModelLoading,
+            isModelLoaded = RemasterModelSession.isModelLoaded,
+            activeModelId = RemasterModelSession.activeModel?.id,
+            statusText = RemasterModelSession.statusText,
+            installedRunnerPresent = RemasterModelSession.installedRunnerForTest() != null,
+            validationIdentity = RemasterModelSession.validationIdentityForTest(),
+            registrySessionGeneration = RemasterModelSession.sessionGenerationForTest(),
+            currentCommandDiagnostic = RemasterModelSession.activeModelScopeJobDiagnosticsForTest(),
+            modelScopeJobs = RemasterModelSession.modelScopeJobsForTest(),
+            activeModelScopeJobCount = RemasterModelSession.activeModelScopeJobCountForTest(),
+            modelSeamCount = RemasterModelSession.installedTestSeamCount(),
+            inferenceSeamCount = RemasterModelSession.installedInferenceTestSeamCount(),
+            ensureSeamCount = RemasterModelSession.installedEnsureReusableTestSeamCount(),
+            commandStartSeamCount = RemasterModelSession.installedCommandStartTestSeamCount(),
+            registry = ModelAvailabilityRegistry.state.value,
+            diagnostics = GlobalModelDiagnostics.snapshot(),
+        )
+
+    /**
+     * Bounded, diagnostic admission wait for process-global command gates.
+     * A timeout fails the test with boundary diagnostics instead of hanging;
+     * the gate is still released by the test finally/teardown owned cleanup.
+     */
+    private suspend fun awaitSignalWithinBound(signal: CompletableDeferred<Unit>, label: String): Unit {
+        check(withTimeoutOrNull(5_000L) { signal.await() } != null) {
+            "$label did not signal within bound: $sessionBoundaryDiagnosticForTest"
+        }
+    }
 
     private fun token(epoch: Long) =
         ValidatedModelCapabilityToken(
@@ -316,6 +433,10 @@ class RemasterModelSessionValidationTest {
                     releaseSecondRunner.await()
                 }
             },
+            // Teardown-owned release: even a failed assertion below must let the
+            // process-global load Job terminate instead of parking forever on
+            // the model mutex.
+            onClose = { releaseSecondRunner.complete(Unit) },
         )
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         val context = RuntimeEnvironment.getApplication()
@@ -334,19 +455,21 @@ class RemasterModelSessionValidationTest {
         )
 
         RemasterModelSession.load(context, candidate)
-        reachedSecondRunner.await()
+        awaitSignalWithinBound(reachedSecondRunner, "second load RunnerCreated gate")
         val secondLoadJobs = RemasterModelSession.modelScopeJobsForTest()
-        check(secondLoadJobs.any { !it.isCompleted }) {
-            "second load reached RunnerCreated without an active command job: " +
-                sessionBoundaryDiagnosticForTest
+        try {
+            check(secondLoadJobs.any { !it.isCompleted }) {
+                "second load reached RunnerCreated without an active command job: " +
+                    sessionBoundaryDiagnosticForTest
+            }
+            assertTrue(RemasterModelSession.isModelLoading)
+            assertFalse(RemasterModelSession.isModelLoaded)
+            assertEquals(ModelRunnerLifecycle.Loading, RemasterModelSession.lifecycle)
+            assertEquals("모델을 불러오는 중입니다.", RemasterModelSession.statusText)
+            assertEquals(null, RemasterModelSession.activeModel)
+        } finally {
+            releaseSecondRunner.complete(Unit)
         }
-        assertTrue(RemasterModelSession.isModelLoading)
-        assertFalse(RemasterModelSession.isModelLoaded)
-        assertEquals(ModelRunnerLifecycle.Loading, RemasterModelSession.lifecycle)
-        assertEquals("모델을 불러오는 중입니다.", RemasterModelSession.statusText)
-        assertEquals(null, RemasterModelSession.activeModel)
-
-        releaseSecondRunner.complete(Unit)
         awaitRemasterModelJobsSettledForTest("second model load", secondLoadJobs)
         assertTrue(RemasterModelSession.isModelLoaded, sessionBoundaryDiagnosticForTest)
         assertEquals(1, first.closeCount)
@@ -441,13 +564,17 @@ class RemasterModelSessionValidationTest {
                     release.await()
                 }
             },
+            onClose = { release.complete(Unit) },
         )
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         RemasterModelSession.load(RuntimeEnvironment.getApplication(), edgeCandidate())
-        reached.await()
+        awaitSignalWithinBound(reached, "stale command RunnerCreated gate")
 
-        RemasterModelSession.unload()
-        release.complete(Unit)
+        try {
+            RemasterModelSession.unload()
+        } finally {
+            release.complete(Unit)
+        }
         awaitCondition { RemasterModelSession.lifecycle == com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle.Unloaded }
 
         assertEquals(1, runner.closeCount)
@@ -467,12 +594,16 @@ class RemasterModelSessionValidationTest {
                     release.await()
                 }
             },
+            onClose = { release.complete(Unit) },
         )
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         RemasterModelSession.load(RuntimeEnvironment.getApplication(), edgeCandidate())
-        reached.await()
-        RemasterModelSession.unload()
-        release.complete(Unit)
+        awaitSignalWithinBound(reached, "suspended load RunnerCreated gate")
+        try {
+            RemasterModelSession.unload()
+        } finally {
+            release.complete(Unit)
+        }
         awaitCondition { RemasterModelSession.lifecycle == com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle.Unloaded }
 
         assertEquals(1, runner.closeCount)
@@ -495,13 +626,17 @@ class RemasterModelSessionValidationTest {
                     release.await()
                 }
             },
+            onClose = { release.complete(Unit) },
         )
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         val context = RuntimeEnvironment.getApplication()
         RemasterModelSession.load(context, edgeCandidate())
-        reached.await()
-        RemasterModelSession.load(context, edgeCandidate())
-        release.complete(Unit)
+        awaitSignalWithinBound(reached, "load A RunnerCreated gate")
+        try {
+            RemasterModelSession.load(context, edgeCandidate())
+        } finally {
+            release.complete(Unit)
+        }
         awaitCondition {
             RemasterModelSession.installedRunnerForTest() === runnerB &&
                 RemasterModelSession.isModelLoaded
@@ -553,9 +688,13 @@ class RemasterModelSessionValidationTest {
         testSeam = handle
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         val command = async { RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) }
-        reached.await()
+        awaitSignalWithinBound(reached, "closed seam beforeCreate gate")
 
-        handle.close()
+        try {
+            handle.close()
+        } finally {
+            release.complete(Unit)
+        }
         val result = command.await()
 
         assertTrue(result is ModelLoadResult.LoadFailed)
@@ -584,9 +723,13 @@ class RemasterModelSessionValidationTest {
         testSeam = handleA
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         val commandA = async { RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) }
-        reached.await()
-        handleA.close()
-        testSeam = null
+        awaitSignalWithinBound(reached, "late A beforeCreate gate")
+        try {
+            handleA.close()
+            testSeam = null
+        } finally {
+            release.complete(Unit)
+        }
         val resultA = commandA.await()
         assertTrue(resultA is ModelLoadResult.LoadFailed)
         assertEquals(0, factoryACalls.get())
@@ -621,9 +764,13 @@ class RemasterModelSessionValidationTest {
         testSeam = handle
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         val command = async { RemasterModelSession.ensureEdgeLoaded(RuntimeEnvironment.getApplication()) }
-        reached.await()
-        handle.close()
-        RemasterModelSession.unload()
+        awaitSignalWithinBound(reached, "closing seam beforeCreate gate")
+        try {
+            handle.close()
+            RemasterModelSession.unload()
+        } finally {
+            release.complete(Unit)
+        }
         command.await()
         awaitCondition { RemasterModelSession.lifecycle == com.projectnuke.keplerstudio.editor.ModelRunnerLifecycle.Unloaded }
 
@@ -664,7 +811,7 @@ class RemasterModelSessionValidationTest {
 
             // Step 1-2: start load A; wait until A is suspended in beforeCreate.
             RemasterModelSession.load(context, edgeCandidate())
-            reached.await()
+            awaitSignalWithinBound(reached, "seam owner A beforeCreate gate")
 
             // Step 3: close A's seam without releasing A's command.
             handleA.close()
@@ -846,7 +993,7 @@ class RemasterModelSessionValidationTest {
             RemasterModelSession.createForegroundMaskResult(bitmap, operation = operation)
         }
 
-        accepted.await()
+        awaitSignalWithinBound(accepted, "inference BeforeNativeInference gate")
         assertEquals(ModelRunnerLifecycle.Inferencing, RemasterModelSession.lifecycle)
         RemasterModelSession.unload()
         assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
@@ -907,7 +1054,7 @@ class RemasterModelSessionValidationTest {
                 operation = ModelOperationContext(2L, "document"),
             )
         }
-        accepted.await()
+        awaitSignalWithinBound(accepted, "inference BeforeNativeInference gate")
 
         ModelAvailabilityRegistry.beginProbe()
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
@@ -953,7 +1100,7 @@ class RemasterModelSessionValidationTest {
             )
         }
 
-        published.await()
+        awaitSignalWithinBound(published, "inference AfterInferenceStatePublication gate")
         assertEquals(ModelRunnerLifecycle.Inferencing, RemasterModelSession.lifecycle)
         assertTrue(RemasterModelSession.isInferring)
 
@@ -1006,6 +1153,7 @@ class RemasterModelSessionValidationTest {
                     fullConfidence(),
                 ).also { produced = it }
             },
+            onClose = { release.complete(Unit) },
         )
         val input = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
         val inference = async(Dispatchers.Default) {
@@ -1015,7 +1163,7 @@ class RemasterModelSessionValidationTest {
             )
         }
 
-        nativeOutput.await()
+        awaitSignalWithinBound(nativeOutput, "inference AfterNativeInference gate")
         assertTrue(produced != null)
         RemasterModelSession.unload()
         assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
@@ -1062,6 +1210,7 @@ class RemasterModelSessionValidationTest {
                     fullConfidence(),
                 ).also { produced = it }
             },
+            onClose = { release.complete(Unit) },
         )
         val input = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
         val inference = async(Dispatchers.Default) {
@@ -1071,7 +1220,7 @@ class RemasterModelSessionValidationTest {
             )
         }
 
-        nativeOutput.await()
+        awaitSignalWithinBound(nativeOutput, "inference AfterNativeInference gate")
         ModelAvailabilityRegistry.beginProbe()
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         release.complete(Unit)
@@ -1112,7 +1261,7 @@ class RemasterModelSessionValidationTest {
                 operation = ModelOperationContext(3L, "document"),
             )
         }
-        accepted.await()
+        awaitSignalWithinBound(accepted, "inference BeforeNativeInference gate")
 
         val reclaim = async(Dispatchers.Default) { RemasterModelSession.unloadIdleNow() }
         awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Closing }
@@ -1159,7 +1308,7 @@ class RemasterModelSessionValidationTest {
                 operation = ModelOperationContext(4L, "document"),
             )
         }
-        accepted.await()
+        awaitSignalWithinBound(accepted, "inference BeforeNativeInference gate")
         RemasterModelSession.unload()
         assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
 
@@ -1199,7 +1348,7 @@ class RemasterModelSessionValidationTest {
             bInvoked.complete(Unit)
             RemasterModelSession.load(context, edgeCandidate())
         }
-        bInvoked.await()
+        awaitSignalWithinBound(bInvoked, "command start B invoked gate")
         assertEquals(1, gate.claimCount.get(), "B cannot claim while A owns the transition lock")
         assertEquals(0, gate.transitionCount.get())
 
@@ -1233,7 +1382,7 @@ class RemasterModelSessionValidationTest {
             bInvoked.complete(Unit)
             RemasterModelSession.load(context, edgeCandidate())
         }
-        bInvoked.await()
+        awaitSignalWithinBound(bInvoked, "command start B invoked gate")
         assertEquals(1, gate.claimCount.get())
         assertEquals(0, gate.transitionCount.get())
 
@@ -1268,7 +1417,7 @@ class RemasterModelSessionValidationTest {
             bInvoked.complete(Unit)
             RemasterModelSession.load(context, edgeCandidate())
         }
-        bInvoked.await()
+        awaitSignalWithinBound(bInvoked, "command start B invoked gate")
         assertEquals(1, gate.claimCount.get())
         assertEquals(0, gate.transitionCount.get())
 
@@ -1303,7 +1452,7 @@ class RemasterModelSessionValidationTest {
             bInvoked.complete(Unit)
             RemasterModelSession.load(context, edgeCandidate())
         }
-        bInvoked.await()
+        awaitSignalWithinBound(bInvoked, "command start B invoked gate")
         assertEquals(1, gate.claimCount.get())
         assertEquals(0, gate.transitionCount.get())
 
@@ -1345,7 +1494,7 @@ class RemasterModelSessionValidationTest {
                 operation = ModelOperationContext(5L, "document"),
             )
         }
-        accepted.await()
+        awaitSignalWithinBound(accepted, "inference BeforeNativeInference gate")
 
         editorStore.clear()
         assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
@@ -1505,7 +1654,7 @@ class RemasterModelSessionValidationTest {
         )
         val ensure = async(Dispatchers.Default) { RemasterModelSession.ensureEdgeLoaded(context) }
 
-        outerCheckPassed.await()
+        awaitSignalWithinBound(outerCheckPassed, "ensure reusable beforeValidationRecheck gate")
         ModelAvailabilityRegistry.beginProbe()
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         release.complete(Unit)
@@ -1548,32 +1697,36 @@ class RemasterModelSessionValidationTest {
                 operation = ModelOperationContext(31L, "document"),
             )
         }
-        accepted.await()
+        awaitSignalWithinBound(accepted, "inference BeforeNativeInference gate")
 
-        ModelAvailabilityRegistry.beginProbe()
-        ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
-        releaseInference.complete(Unit)
-        assertTrue(runner.closeStarted.await(5, TimeUnit.SECONDS))
+        try {
+            ModelAvailabilityRegistry.beginProbe()
+            ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
+            releaseInference.complete(Unit)
+            assertTrue(runner.closeStarted.await(5, TimeUnit.SECONDS))
 
-        assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
-        assertFalse(RemasterModelSession.isModelLoaded)
-        assertFalse(RemasterModelSession.isModelLoading)
-        assertFalse(RemasterModelSession.isInferring)
-        assertEquals(null, RemasterModelSession.activeModel)
-        assertEquals(null, RemasterModelSession.installedRunnerForTest())
-        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionActive)
-        assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
-        assertTrue(RemasterModelSession.statusText.contains("\uC885\uB8CC"))
-        assertEquals("closing", GlobalModelDiagnostics.snapshot().single().state)
+            assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
+            assertFalse(RemasterModelSession.isModelLoaded)
+            assertFalse(RemasterModelSession.isModelLoading)
+            assertFalse(RemasterModelSession.isInferring)
+            assertEquals(null, RemasterModelSession.activeModel)
+            assertEquals(null, RemasterModelSession.installedRunnerForTest())
+            assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.Remaster).sessionActive)
+            assertFalse(ModelAvailabilityRegistry.state.value.getValue(ModelFeature.SubjectSelection).sessionActive)
+            assertTrue(RemasterModelSession.statusText.contains("\uC885\uB8CC"))
+            assertEquals("closing", GlobalModelDiagnostics.snapshot().single().state)
 
-        val rejected = RemasterModelSession.createForegroundMaskResult(
-            input,
-            operation = ModelOperationContext(32L, "document"),
-        )
-        assertTrue(rejected is ModelRunResult.Failure)
-        assertEquals(ModelFailureReason.Closed, (rejected as ModelRunResult.Failure).failure.reason)
-
-        runner.releaseClose.countDown()
+            val rejected = RemasterModelSession.createForegroundMaskResult(
+                input,
+                operation = ModelOperationContext(32L, "document"),
+            )
+            assertTrue(rejected is ModelRunResult.Failure)
+            assertEquals(ModelFailureReason.Closed, (rejected as ModelRunResult.Failure).failure.reason)
+        } finally {
+            // Never leave the physical close blocked past this test, even on
+            // an assertion failure, so teardown can settle the global session.
+            runner.releaseClose.countDown()
+        }
         val result = inference.await()
         awaitCondition { RemasterModelSession.lifecycle == ModelRunnerLifecycle.Unloaded }
         assertTrue(result is ModelRunResult.Failure)
@@ -1632,9 +1785,13 @@ class RemasterModelSessionValidationTest {
         }
         assertTrue(awaitLatch(runnerA.closeStarted))
 
-        RemasterModelSession.load(context, edgeCandidate())
-        assertEquals(ModelRunnerLifecycle.Loading, RemasterModelSession.lifecycle)
-        runnerA.releaseClose.countDown()
+        try {
+            RemasterModelSession.load(context, edgeCandidate())
+            assertEquals(ModelRunnerLifecycle.Loading, RemasterModelSession.lifecycle)
+        } finally {
+            // Never leave the physical close blocked past this test.
+            runnerA.releaseClose.countDown()
+        }
         val staleResult = inference.await()
         assertTrue(staleResult is ModelRunResult.Failure)
         assertEquals(ModelFailureReason.StaleGeneration, (staleResult as ModelRunResult.Failure).failure.reason)
@@ -1673,18 +1830,21 @@ class RemasterModelSessionValidationTest {
                 operation = ModelOperationContext(35L, "document"),
             )
         }
-        published.await()
+        awaitSignalWithinBound(published, "post-publication AfterInferenceStatePublication gate")
         ModelAvailabilityRegistry.beginProbe()
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
         release.complete(Unit)
         assertTrue(runnerA.closeStarted.await(5, TimeUnit.SECONDS))
 
-        testSeam?.close()
-        testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerB })
-        RemasterModelSession.load(context, edgeCandidate())
-        assertEquals(ModelRunnerLifecycle.Loading, RemasterModelSession.lifecycle)
-
-        runnerA.releaseClose.countDown()
+        try {
+            testSeam?.close()
+            testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runnerB })
+            RemasterModelSession.load(context, edgeCandidate())
+            assertEquals(ModelRunnerLifecycle.Loading, RemasterModelSession.lifecycle)
+        } finally {
+            // Never leave the physical close blocked past this test.
+            runnerA.releaseClose.countDown()
+        }
         val staleResult = inference.await()
         assertTrue(staleResult is ModelRunResult.Failure)
         assertEquals(ModelFailureReason.StaleGeneration, (staleResult as ModelRunResult.Failure).failure.reason)

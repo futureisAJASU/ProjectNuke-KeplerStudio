@@ -533,6 +533,13 @@ internal class OwnedEditorViewModelHarness(
         closed = true
         val failures = CleanupFailureAggregator()
         failures.attempt { clearViewModels() }
+        // EditorViewModel.init starts a process-global packaged-model probe on
+        // viewModelScope; clearViewModels drained (and cancels) those jobs, so
+        // reset the model registry and diagnostics at this class boundary. Any
+        // probe observation must settle before this point; nothing must land
+        // after it, or the next Robolectric class inherits a dirty registry.
+        failures.attempt { ModelAvailabilityRegistry.resetForTest() }
+        failures.attempt { GlobalModelDiagnostics.resetForTest() }
         seamHandles.forEach { handle -> failures.attempt { handle.close() } }
         seamHandles.clear()
         failures.attempt { check(ParameterLifecycleTestHook.installedForTestCount() == 0) }

@@ -7,6 +7,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.junit.After
 import org.junit.Before
 
 /**
@@ -22,6 +23,14 @@ class SubjectSelectionRetryRegressionTest {
 
     @Before
     fun resetRegistry() {
+        ModelAvailabilityRegistry.resetForTest()
+    }
+
+    @After
+    fun resetRegistryAfter() {
+        // These tests mutate the process-global registry without starting a
+        // model session. Reset at the boundary so the next Robolectric class in
+        // the same worker observes a clean registry (clean test contract).
         ModelAvailabilityRegistry.resetForTest()
     }
 

@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.test.assertEquals
+import org.junit.After
 import org.junit.Before
 import java.util.concurrent.CountDownLatch
 import org.junit.Test
@@ -10,6 +11,14 @@ import org.junit.Test
 class ModelAvailabilityRegistryTest {
     @Before
     fun resetRegistry() {
+        ModelAvailabilityRegistry.resetForTest()
+    }
+
+    @After
+    fun resetRegistryAfter() {
+        // These tests mutate the process-global registry without starting a
+        // model session. Reset at the boundary so the next Robolectric class in
+        // the same worker observes a clean registry (clean test contract).
         ModelAvailabilityRegistry.resetForTest()
     }
 
