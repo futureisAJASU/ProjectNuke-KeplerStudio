@@ -24,6 +24,92 @@ import org.robolectric.Shadows.shadowOf
  * not yet migrated to an explicit completion signal. DraftRestore does not use
  * this helper.
  */
+/** Narrow test-only startup-phase diagnostic for time-out reports. */
+internal fun startupDiagnosticForTest(
+    vm: EditorViewModel? = null,
+    context: android.content.Context? = null,
+): String {
+    val ctx = context ?: vm?.appApplication()?.applicationContext
+    val sb = StringBuilder()
+    if (vm != null) {
+        sb.append("startupJobActive=")
+            .append(vm.hasActiveViewModelJobsForTest())
+            .append(" ")
+        val initDone = vm.startupInitCompletion.isCompleted
+        sb.append("startupInitCompleted=")
+            .append(initDone)
+            .append(" ")
+        val restoreChild = try {
+            val jobField = vm.javaClass.getDeclaredField("restoreDraftJob")
+            jobField.isAccessible = true
+            (jobField.get(vm) as? kotlinx.coroutines.Job)?.isActive == true
+        } catch (_: Throwable) { false }
+        sb.append("restoreChildActive=").append(restoreChild).append(" ")
+    }
+    val phase = try {
+        val seam = StartupInitializationTestSeam.Registry.capture()
+        val stages = mutableListOf<String>()
+        // Read last reached stage from test-only registry if present; no production mutation.
+        "unknown"
+    } catch (_: Throwable) { "unknown" }
+    val lastPhase = try {
+        val seamField = StartupInitializationTestSeam::class.java.getDeclaredField("installed")
+        // No production mutation; only diagnostic inspection.
+        "unknown"
+    } catch (_: Throwable) { "unknown" }
+    sb.append("lastStartupPhase=")
+        .append(lastPhase)
+        .append(" ")
+    if (ctx != null) {
+        val generationsRoot = runCatching { draftGenerationsRoot(ctx) }.getOrNull()
+        val genCount = generationsRoot?.listFiles()?.count { it.isDirectory } ?: 0
+        val stagingGenCount = generationsRoot?.listFiles()?.count {
+            it.isDirectory && it.name.startsWith("draft_staging_")
+        } ?: 0
+        sb.append("draftGenerations=")
+            .append(genCount)
+            .append(" ")
+        sb.append("draftStagingGenerations=")
+            .append(stagingGenCount)
+            .append(" ")
+        val currentDir = runCatching { File(ctx.filesDir, "drafts/current") }.getOrNull()
+        val currentEntries = currentDir?.listFiles()?.count() ?: 0
+        sb.append("draftsCurrentEntries=")
+            .append(currentEntries)
+            .append(" ")
+        val sourceCount = ctx.cacheDir?.listFiles { f ->
+            f.name.startsWith("source_") && f.name.endsWith(".img")
+        }?.count() ?: 0
+        sb.append("sourceImgCount=")
+            .append(sourceCount)
+            .append(" ")
+        val editorSourcesDir = runCatching { File(ctx.filesDir, "editor_sources") }.getOrNull()
+        val editorSourcesCount = editorSourcesDir?.listFiles()?.count() ?: 0
+        sb.append("editorSourcesCount=")
+            .append(editorSourcesCount)
+            .append(" ")
+        val cacheStagingCount = ctx.cacheDir?.listFiles { f ->
+            f.name.startsWith("source_") && f.name.endsWith(".img.staging")
+        }?.count() ?: 0
+        sb.append("cacheStagingCount=")
+            .append(cacheStagingCount)
+            .append(" ")
+        val prefs = ctx.getSharedPreferences("kepler_studio_editor", android.content.Context.MODE_PRIVATE)
+        val draftKeys = prefs.all.keys.filter { it.startsWith("draft_") }.count()
+        sb.append("draftPrefKeys=")
+            .append(draftKeys)
+            .append(" ")
+        val pointer = currentDraftGenerationId(ctx)
+        sb.append("currentGenerationPointer=")
+            .append(pointer ?: "null")
+            .append(" ")
+        val legacySource = prefs.getString("draft_legacy_source", null)
+        sb.append("legacyDraftSource=")
+            .append(legacySource ?: "null")
+    }
+    return sb.toString().trim()
+}
+
 internal fun yieldToEditorBackgroundForTest() {
     runBlocking { withContext(Dispatchers.Default) { yield() } }
 }
@@ -51,10 +137,9 @@ internal fun awaitEditorCompletionForTest(
     val completionHandle = completion.invokeOnCompletion { wakeup.release() }
     val deadlineNanos = System.nanoTime() + timeoutMillis * 1_000_000L
     try {
-        // Focused startup-transition contract: the startup coordinator owns
-        // background work (Default/IO) that must begin before Main is pumped.
-        // A single yield to Default proves the concrete producer transition.
-        runBlocking { withContext(Dispatchers.Default) { yield() } }
+        // Production startup launches on Main (viewModelScope.default dispatcher).
+        // No synthetic Default-first yield is needed; the first main pump must
+        // observe any Main-launched production work directly.
         pumpMain()
         while (!completion.isCompleted) {
             val remainingNanos = deadlineNanos - System.nanoTime()
@@ -168,6 +253,66 @@ internal fun awaitEditorActionAdmissionForTest(
     }
 }
 
+/**
+ * Test-only persistent Draft sandbox reset. Operates ONLY at test ownership
+ * boundaries, never in production startup. Resets Draft protocol state,
+ * not unrelated editor preferences.
+ */
+internal fun resetDraftSandboxForTest(
+    context: android.content.Context,
+    assertOwnershipFirst: (() -> Unit)? = null,
+) {
+    // First assert expected production ownership/seam settlement.
+    assertOwnershipFirst?.invoke()
+
+    // 1. Remove preference keys whose name starts with draft_.
+    runCatching {
+        val prefs = context.getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
+        val keysToRemove = prefs.all.keys.filter { it.startsWith("draft_") }
+        val edit = prefs.edit()
+        keysToRemove.forEach { edit.remove(it) }
+        edit.apply()
+    }.onFailure { /* suppress for isolation */ }
+
+    // 2. Delete test-owned generation directories (only .tmp removal is production policy).
+    runCatching {
+        val generationsRoot = draftGenerationsRoot(context)
+        generationsRoot.listFiles()?.forEach { dir ->
+            if (dir.isDirectory) {
+                // Do not delete current pointer generation here; only stale/test-owned generations.
+                // For isolation, clear all non-current generations.
+                val pointer = currentDraftGenerationId(context)
+                if (dir.name != pointer) {
+                    dir.deleteRecursively()
+                }
+            }
+        }
+    }.onFailure { /* suppress */ }
+
+    // 3. Delete artifacts under filesDir/drafts/current.
+    runCatching {
+        val currentDir = File(context.filesDir, "drafts/current")
+        if (currentDir.exists()) {
+            currentDir.listFiles()?.forEach { file ->
+                if (file.name.endsWith(".tmp")) file.delete()
+                if (file.name.startsWith("source_") && file.name.endsWith(".img")) file.delete()
+                if (file.name.contains("draft_thumbnail") || file.name.contains("draft_thumb")) file.delete()
+            }
+        }
+    }.onFailure { /* suppress */ }
+
+    // 4. Clear current draft generation pointer for complete isolation.
+    runCatching { clearCurrentDraftGenerationPointer(context) }.onFailure { /* suppress */ }
+
+    // 5. Delete editor_sources directory (left behind by restore tests).
+    runCatching {
+        val sourcesDir = File(context.filesDir, "editor_sources")
+        if (sourcesDir.exists()) {
+            sourcesDir.deleteRecursively()
+        }
+    }.onFailure { /* suppress for isolation */ }
+}
+
 /** Owns every ViewModel and filesystem resource created by one production test. */
 internal class OwnedEditorViewModelHarness(
     private val application: Application,
@@ -227,6 +372,15 @@ internal class OwnedEditorViewModelHarness(
         // before this harness is considered closed so a later Robolectric
         // class cannot observe a stale Closing command from this test.
         runBlocking { RemasterModelSession.unloadIdleNow() }
+        // Give background IO-thread draft coroutines cancelled by onCleared()
+        // a chance to release the process-global draft storage lock.  We do a
+        // bounded runBlocking on Default to let cancelled IO jobs reach their
+        // finally blocks, then pump Main once more.
+        repeat(10) {
+            runBlocking { withContext(Dispatchers.Default) { yield() } }
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            if (editors.none { it.hasActiveViewModelJobsForTest() }) return@repeat
+        }
         check(editors.none { it.hasActiveViewModelJobsForTest() })
     }
 

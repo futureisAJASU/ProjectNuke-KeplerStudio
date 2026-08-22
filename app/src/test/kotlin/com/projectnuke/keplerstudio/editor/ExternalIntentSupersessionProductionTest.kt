@@ -48,17 +48,17 @@ class ExternalIntentSupersessionProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
+        RestoredWorkingSourceOwnership.clearForTest()
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
+        RestoredWorkingSourceOwnership.clearForTest()
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
         ExperimentalLabController.resetForTest()
     }
 
@@ -679,6 +679,7 @@ class ExternalIntentSupersessionProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
+            timeoutMillis = 30_000L,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
                 shadowOf(android.os.Looper.getMainLooper()).idle()

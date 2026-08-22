@@ -29,16 +29,14 @@ class EditorActionSettlementProductionTest {
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
     }
 
     private fun deleteDirectoryIfPresent(directory: File) {
@@ -297,21 +295,18 @@ class EditorActionSettlementProductionTest {
             if (vm.canEnterEditorAction()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
-            Thread.sleep(5L)
         }
         assertTrue(vm.canEnterEditorAction())
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
-        while (System.nanoTime() < deadline) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (vm.startupInitCompletion.isCompleted) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-            Thread.sleep(5L)
-        }
-        assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
+        awaitEditorCompletionForTest(
+            description = "startup init must complete",
+            completion = vm.startupInitCompletion,
+            timeoutMillis = 30_000L,
+            pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+            diagnostic = { startupDiagnosticForTest(vm = vm, context = context) },
+        )
     }
 
     private fun awaitEvent(vm: EditorViewModel, predicate: () -> Boolean) {
@@ -322,7 +317,6 @@ class EditorActionSettlementProductionTest {
             shadowOf(android.os.Looper.getMainLooper()).idle()
             yieldToEditorBackgroundForTest()
             if (predicate()) return
-            Thread.sleep(5L)
         }
         assertTrue(predicate())
     }

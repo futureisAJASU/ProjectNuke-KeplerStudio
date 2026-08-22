@@ -80,27 +80,26 @@ class EditorWaitInfrastructureTest {
     }
 
     /**
-     * Focused regression: the startup coordinator launches work on Default/IO
-     * that must begin before Main is pumped. Without the pre-pump yield,
-     * the waiter never sees the startup-completion signal.
+     * Production-faithful regression: the startup coordinator launches work
+     * on Main through viewModelScope; the waiter must observe it without
+     * a synthetic Default-first yield.
      */
     @Test
-    fun startupCoordinatorRequiresDefaultYieldBeforeMainPump() {
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val ready = CompletableDeferred<Unit>()
+    fun mainFirstStartupCompletesWithoutSyntheticDefaultYield() {
+        val completion = CompletableDeferred<Unit>()
+        val scope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Main)
         try {
-            scope.launch(Dispatchers.Default) {
-                // Simulate startup coordinator: begin on Default, then signal.
-                yield()
-                Handler(Looper.getMainLooper()).post { ready.complete(Unit) }
+            scope.launch {
+                // Simulate production startup: launched on Main, completes directly.
+                Handler(Looper.getMainLooper()).post { completion.complete(Unit) }
             }
             awaitEditorCompletionForTest(
-                description = "startup coordinator default work must reach main",
-                completion = ready,
+                description = "main-first startup completes without default yield",
+                completion = completion,
                 timeoutMillis = 2_000L,
                 pumpMain = ::drainReadyMain,
             )
-            assertTrue(ready.isCompleted)
+            assertTrue(completion.isCompleted)
         } finally {
             scope.cancel()
         }

@@ -43,11 +43,9 @@ class DraftRestoreProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_sources"))
         RestoredWorkingSourceOwnership.clearForTest()
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
+        resetDraftSandboxForTest(context)
     }
 
     @After
@@ -64,15 +62,8 @@ class DraftRestoreProductionTest {
         // before the emergency registry reset can hide a leak.
         RestoredWorkingSourceOwnership.clearForTest()
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_sources"))
-        context
-            .getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
-            .edit()
-            .remove(KEY_DRAFT_SOURCE)
-            .remove("draft_exposure")
-            .commit()
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
         failure?.let { throw it }
     }
 
@@ -2920,6 +2911,7 @@ class DraftRestoreProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
+            timeoutMillis = 30_000L,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
                 shadowOf(android.os.Looper.getMainLooper()).idle()

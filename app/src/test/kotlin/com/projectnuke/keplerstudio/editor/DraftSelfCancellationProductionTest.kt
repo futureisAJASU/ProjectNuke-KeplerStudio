@@ -35,16 +35,14 @@ class DraftSelfCancellationProductionTest {
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
         deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
         deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
     }
 
     // Test 1: active adopted transaction — save-and-leave before inactivity fires.
@@ -350,13 +348,13 @@ class DraftSelfCancellationProductionTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(2000) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (vm.startupInitCompletion.isCompleted) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
+        awaitEditorCompletionForTest(
+            description = "startup init must complete",
+            completion = vm.startupInitCompletion,
+            timeoutMillis = 30_000L,
+            pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+            diagnostic = { startupDiagnosticForTest(vm = vm, context = context) },
+        )
     }
 
     private fun persistDraftForTest(vm: EditorViewModel): Boolean {

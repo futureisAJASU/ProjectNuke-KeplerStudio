@@ -38,6 +38,7 @@ class DraftPersistentStorageArbitrationProductionTest {
     fun setUp() {
         harness1 = OwnedEditorViewModelHarness(context)
         harness2 = OwnedEditorViewModelHarness(context)
+        RestoredWorkingSourceOwnership.clearForTest()
         context.getSharedPreferences(PREF_NAME_DRAFT, 0).edit().clear().commit()
         clearCurrentDraftGenerationPointer(context)
         deleteDirectoryIfPresent(draftGenerationsRoot(context))
@@ -76,6 +77,9 @@ class DraftPersistentStorageArbitrationProductionTest {
             persistentDraftDirectory(context).listFiles()?.forEach { file ->
                 if (file.name.endsWith(".tmp")) file.delete()
             }
+        }
+        attempt("clear restored working source ownership") {
+            RestoredWorkingSourceOwnership.clearForTest()
         }
         primaryFailure?.let { throw it }
     }

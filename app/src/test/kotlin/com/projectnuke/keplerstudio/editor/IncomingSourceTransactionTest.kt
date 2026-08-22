@@ -28,11 +28,13 @@ class IncomingSourceTransactionTest {
 
     @Before
     fun clearOwnedSources() {
+        RestoredWorkingSourceOwnership.clearForTest()
         IncomingSourceLiveOwnership.clearForTest()
         context.cacheDir.listFiles { file ->
             file.name.startsWith("source_") &&
                 (file.name.endsWith(".img") || file.name.endsWith(".img.staging"))
         }.orEmpty().forEach { it.delete() }
+        resetDraftSandboxForTest(context)
     }
 
     @Test
@@ -97,17 +99,29 @@ class IncomingSourceTransactionTest {
             val before = ownedSourceNames()
             val acquisition = async { transaction { stream }.acquire(Uri.EMPTY) }
 
-            assertTrue(stream.entered.await())
-            acquisition.cancel()
-            stream.release()
-            try {
-                acquisition.await()
-                error("acquisition must be cancelled")
-            } catch (_: kotlinx.coroutines.CancellationException) {
+            // Bounded entry wait so the test does not hang indefinitely.
+            val enteredWithinBound = try {
+                kotlinx.coroutines.withTimeoutOrNull(5_000L) { stream.entered.await() } ?: false
+            } catch (_: Exception) {
+                false
             }
+            assertTrue("read boundary must be entered within bound", enteredWithinBound)
 
-            assertTrue(stream.closed)
-            assertEquals(before, ownedSourceNames())
+            try {
+                acquisition.cancel()
+                stream.release()
+                try {
+                    acquisition.await()
+                    error("acquisition must be cancelled")
+                } catch (_: kotlinx.coroutines.CancellationException) {
+                }
+
+                assertTrue("stream must be closed after cancellation", stream.closed)
+                assertEquals(before, ownedSourceNames())
+            } finally {
+                // Always release the blocking stream so no OS thread leaks.
+                stream.release()
+            }
         }
     }
 
@@ -126,19 +140,34 @@ class IncomingSourceTransactionTest {
     @Test
     fun reconcilePreservesLiveStagingDuringCopyThenRollbackReleasesOwnership() {
         runBlocking {
-            val stream = GateInputStream()
-            val acquisition = async { transaction { stream }.acquire(Uri.EMPTY) }
-            awaitEditorCompletionForTest(
-                description = "incoming copy must enter its gate",
-                completion = stream.entered,
+            val providerReached = CompletableDeferred<Unit>()
+            val providerRelease = CompletableDeferred<Unit>()
+            val customProvider: suspend (Uri) -> InputStream? = { uri ->
+                providerReached.complete(Unit)
+                providerRelease.await()
+                ByteArrayInputStream(byteArrayOf(1, 2, 3))
+            }
+            val acquisition = async { transaction(customProvider).acquire(Uri.EMPTY) }
+            // Bounded wait for provider to reach; do not block on a synthetic
+            // scheduler yield. Use direct deferred observation.
+            val reachedInTime = try {
+                kotlinx.coroutines.withTimeoutOrNull(5_000L) { providerReached.await() }
+            } catch (_: Exception) { null }
+            assertTrue(
+                "provider must reach to register live staging within 5s",
+                reachedInTime != null,
             )
-            val staging = context.cacheDir.listFiles().orEmpty().single { IncomingSourceArtifactNames.isStagingName(it.name) }
+            val staging = context.cacheDir.listFiles().orEmpty().singleOrNull {
+                IncomingSourceArtifactNames.isStagingName(it.name)
+            } ?: error("no live staging found after provider reached")
             reconcileStartupArtifacts(context, null)
             assertTrue("live staging must survive reconciliation", staging.exists())
             assertTrue(IncomingSourceLiveOwnership.isLiveForTest(staging))
 
+            // Cancel/release acquisition: cancellation interrupts suspended provider,
+            // cleanup removes staging, and ownership is released.
             acquisition.cancel()
-            stream.release()
+            providerRelease.complete(Unit)
             runCatching { acquisition.await() }
             assertFalse("rollback removes staging", staging.exists())
             assertFalse("rollback releases ownership", IncomingSourceLiveOwnership.isLiveForTest(staging))

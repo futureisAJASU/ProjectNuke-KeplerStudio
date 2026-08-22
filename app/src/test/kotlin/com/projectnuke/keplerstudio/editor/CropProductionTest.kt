@@ -33,16 +33,14 @@ class CropProductionTest {
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
     }
 
     private fun deleteDirectoryIfPresent(directory: File) {
@@ -224,13 +222,13 @@ class CropProductionTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(2000) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (vm.startupInitCompletion.isCompleted) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue("startup init must complete", vm.startupInitCompletion.isCompleted)
+        awaitEditorCompletionForTest(
+            description = "startup init must complete",
+            completion = vm.startupInitCompletion,
+            timeoutMillis = 30_000L,
+            pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+            diagnostic = { startupDiagnosticForTest(vm = vm, context = context) },
+        )
     }
 
     private fun awaitEvent(predicate: () -> Boolean) {

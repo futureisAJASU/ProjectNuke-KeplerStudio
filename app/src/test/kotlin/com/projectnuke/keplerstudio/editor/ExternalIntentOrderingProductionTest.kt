@@ -37,17 +37,18 @@ class ExternalIntentOrderingProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
+        RestoredWorkingSourceOwnership.clearForTest()
         deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
+        // Fresh Draft protocol state before each test.
+        resetDraftSandboxForTest(context)
     }
 
     @After
     fun cleanDraftAfter() {
         harness.close()
-        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
+        // Emergency sandbox reset after production ownership assertions have run.
+        RestoredWorkingSourceOwnership.clearForTest()
+        resetDraftSandboxForTest(context)
     }
 
     // Test 1: adopted 0.2 plus a suspended newer 0.4 render in ONE open
@@ -410,6 +411,7 @@ class ExternalIntentOrderingProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
+            timeoutMillis = 30_000L,
             pumpMain = ::drainMain,
             diagnostic = { editorDiagnostic(vm) },
         )
@@ -419,6 +421,7 @@ class ExternalIntentOrderingProductionTest {
         awaitEditorCompletionForTest(
             description = description,
             completion = completion,
+            timeoutMillis = 30_000L,
             pumpMain = ::drainMain,
             diagnostic = { editorDiagnostic(vm) },
         )

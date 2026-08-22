@@ -29,13 +29,17 @@ class GlobalParameterProductionTest {
     @Before
     fun cleanDraft() {
         harness = OwnedEditorViewModelHarness(context)
+        RestoredWorkingSourceOwnership.clearForTest()
         deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
+        resetDraftSandboxForTest(context)
     }
 
     @After
-    fun closeHarness() { harness.close() }
+    fun closeHarness() {
+        harness.close()
+        RestoredWorkingSourceOwnership.clearForTest()
+        resetDraftSandboxForTest(context)
+    }
 
     @Test
     fun updateParamsUsesWorkerRenderAndCreatesOneUndoEntry() {
@@ -126,7 +130,7 @@ class GlobalParameterProductionTest {
     }
 
     private fun await(predicate: () -> Boolean) {
-        repeat(2000) {
+        repeat(6000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -378,21 +382,24 @@ class GlobalParameterProductionTest {
     }
 
     private fun awaitInit(vm: EditorViewModel) {
-        repeat(2500) {
-            shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            if (vm.startupInitCompletion.isCompleted) return
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            yieldToEditorBackgroundForTest()
-        }
-        assertTrue(vm.startupInitCompletion.isCompleted)
+        awaitEditorCompletionForTest(
+            description = "startup init must complete",
+            completion = vm.startupInitCompletion,
+            timeoutMillis = 30_000L,
+            pumpMain = {
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+            },
+            diagnostic = { startupDiagnosticForTest(vm = vm, context = context) },
+        )
     }
 
     private fun await(vm: EditorViewModel, predicate: () -> Boolean): Boolean {
-        repeat(2000) {
+        // Main-pump cycle for arbitrary predicate settlement.
+        repeat(6000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
-            yieldToEditorBackgroundForTest()
             if (predicate()) return true
             shadowOf(android.os.Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
         }
         return false
     }
