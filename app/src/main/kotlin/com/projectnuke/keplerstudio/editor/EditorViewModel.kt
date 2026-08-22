@@ -289,6 +289,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun hasActiveViewModelJobsForTest(): Boolean =
         viewModelScope.coroutineContext[Job]?.children?.any { it.isActive } == true
 
+    /** Snapshot the actual owner jobs before ViewModelStore.clear() cancels them. */
+    internal fun viewModelJobsForTest(): List<Job> =
+        viewModelScope.coroutineContext[Job]?.children?.toList().orEmpty()
+
+    internal fun activeViewModelJobDiagnosticsForTest(): String =
+        viewModelScope.coroutineContext[Job]?.children
+            ?.filter { !it.isCompleted }
+            ?.joinToString(prefix = "[", postfix = "]") { it.toString() }
+            ?: "[]"
+
+    internal fun startupCoordinatorActiveForTest(): Boolean = startupCoordinatorJob?.isActive == true
+
+    internal fun restoreDraftChildActiveForTest(): Boolean = restoreDraftJob?.isActive == true
+
+    /** Test-only startup observability; production behavior never reads this field. */
+    @Volatile internal var lastStartupStageForTest: StartupInitializationStage? = null
+
     internal fun memoryRecoveryOwnerPhaseForTest(): String? =
         userMemoryRecoveryOwner?.phase?.name
 
@@ -5242,6 +5259,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     restoreChild.start()
                     restoreChild.join()
                 }
+                lastStartupStageForTest = StartupInitializationStage.HISTORY_LOAD_STARTED
                 StartupInitializationTestSeam.capture()?.onStage?.invoke(
                     StartupInitializationStage.HISTORY_LOAD_STARTED,
                 )
@@ -5260,6 +5278,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     historyResult.retention ?: it.exportHistoryRetention,
                             )
                     }
+                    lastStartupStageForTest = StartupInitializationStage.HISTORY_LOAD_FINISHED
                     StartupInitializationTestSeam.capture()?.onStage?.invoke(
                         StartupInitializationStage.HISTORY_LOAD_FINISHED,
                     )
@@ -5272,6 +5291,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         it.copy(message = "내보낸 사진 기록을 불러오지 못했습니다.")
                     }
                 }
+                lastStartupStageForTest = StartupInitializationStage.RECONCILIATION_STARTED
                 StartupInitializationTestSeam.capture()?.onStage?.invoke(
                     StartupInitializationStage.RECONCILIATION_STARTED,
                 )
@@ -5291,10 +5311,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }.onFailure { t ->
                     Log.w(FLARE_GUARD_AI_TAG, "Startup storage reconcile failed", t)
                 }
+                lastStartupStageForTest = StartupInitializationStage.RECONCILIATION_FINISHED
                 StartupInitializationTestSeam.capture()?.onStage?.invoke(
                     StartupInitializationStage.RECONCILIATION_FINISHED,
                 )
             } finally {
+                lastStartupStageForTest = StartupInitializationStage.COORDINATOR_SETTLED
                 runCatching {
                     StartupInitializationTestSeam.capture()?.onStage?.invoke(
                         StartupInitializationStage.COORDINATOR_SETTLED,

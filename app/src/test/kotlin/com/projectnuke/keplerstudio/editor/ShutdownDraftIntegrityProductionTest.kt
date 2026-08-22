@@ -722,7 +722,7 @@ class ShutdownDraftIntegrityProductionTest {
             awaitEditorCompletionForTest(
                 description = "draft save caller must complete",
                 completion = deferred,
-                timeoutMillis = 30_000L,
+                timeoutMillis = 15_000L,
                 pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
                 diagnostic = { "leave=${vm.editorLeaveState.value}" },
             )

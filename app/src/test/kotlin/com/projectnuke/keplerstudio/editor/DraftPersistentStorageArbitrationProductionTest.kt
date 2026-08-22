@@ -36,52 +36,21 @@ class DraftPersistentStorageArbitrationProductionTest {
 
     @Before
     fun setUp() {
+        resetRestoredWorkingSourceSandboxForTest(context)
+        resetDraftSandboxForTest(context)
         harness1 = OwnedEditorViewModelHarness(context)
         harness2 = OwnedEditorViewModelHarness(context)
-        RestoredWorkingSourceOwnership.clearForTest()
-        context.getSharedPreferences(PREF_NAME_DRAFT, 0).edit().clear().commit()
-        clearCurrentDraftGenerationPointer(context)
-        deleteDirectoryIfPresent(draftGenerationsRoot(context))
-        deleteDirectoryIfPresent(persistentDraftDirectory(context))
     }
 
     @After
     fun tearDown() {
-        var primaryFailure: Throwable? = null
-        fun attempt(step: String, action: () -> Unit) {
-            runCatching(action).onFailure {
-                if (primaryFailure == null) {
-                    primaryFailure = it
-                } else {
-                    primaryFailure?.addSuppressed(it)
-                }
-            }
-        }
-        attempt("harness1 close") { harness1.close() }
-        attempt("harness2 close") { harness2.close() }
-        attempt("clear draft preferences") {
-            context.getSharedPreferences(PREF_NAME_DRAFT, 0).edit().clear().commit()
-        }
-        attempt("clear current draft pointer") { clearCurrentDraftGenerationPointer(context) }
-        attempt("delete generation test directories") {
-            deleteDirectoryIfPresent(draftGenerationsRoot(context))
-        }
-        attempt("delete persistent draft test directories") {
-            deleteDirectoryIfPresent(persistentDraftDirectory(context))
-        }
-        attempt("cleanup restored working sources") {
-            deleteDirectoryIfPresent(File(context.filesDir, "editor_sources"))
-        }
-        attempt("cleanup temporary/staging artifacts") {
-            deleteDirectoryIfPresent(draftGenerationsRoot(context))
-            persistentDraftDirectory(context).listFiles()?.forEach { file ->
-                if (file.name.endsWith(".tmp")) file.delete()
-            }
-        }
-        attempt("clear restored working source ownership") {
-            RestoredWorkingSourceOwnership.clearForTest()
-        }
-        primaryFailure?.let { throw it }
+        val failures = CleanupFailureAggregator()
+        failures.attempt { harness1.close() }
+        failures.attempt { harness2.close() }
+        failures.attempt { deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3")) }
+        failures.attempt { resetRestoredWorkingSourceSandboxForTest(context) }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        failures.throwIfAny()
     }
 
     private fun createTestBitmap(): Bitmap =
@@ -120,12 +89,12 @@ class DraftPersistentStorageArbitrationProductionTest {
     }
 
     private fun <T> awaitDeferred(deferred: Deferred<T>, description: String): T {
-        awaitEditorCompletionForTest(description, deferred, timeoutMillis = 30_000L)
+        awaitEditorCompletionForTest(description, deferred, timeoutMillis = 15_000L)
         return runBlocking { deferred.await() }
     }
 
     private fun awaitSignal(signal: CompletableDeferred<Unit>, description: String) {
-        awaitEditorCompletionForTest(description, signal, timeoutMillis = 30_000L)
+        awaitEditorCompletionForTest(description, signal, timeoutMillis = 15_000L)
     }
 
     private fun finishSave(vm: EditorViewModel, scope: CoroutineScope, save: Deferred<Boolean>): Boolean {
@@ -511,7 +480,7 @@ class DraftPersistentStorageArbitrationProductionTest {
             awaitEditorCompletionForTest(
                 "invalid CurrentStartup cleanup must settle",
                 invalidVm.startupInitCompletion,
-                timeoutMillis = 30_000L,
+                timeoutMillis = 15_000L,
             )
             assertCurrentValid(generationB)
             assertTrue("new valid generation must survive stale cleanup", draftGenerationsRoot(context).resolve(generationB).isDirectory)
@@ -626,6 +595,6 @@ class DraftPersistentStorageArbitrationProductionTest {
         File(context.filesDir, "drafts/current")
 
     private fun deleteDirectoryIfPresent(directory: File) {
-        runCatching { if (directory.isDirectory) directory.deleteRecursively() }
+        deletePathForTest(directory)
     }
 }

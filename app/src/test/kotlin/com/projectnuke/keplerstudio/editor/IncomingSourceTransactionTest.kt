@@ -7,6 +7,7 @@ import java.io.InputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertArrayEquals
@@ -14,6 +15,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -25,16 +27,31 @@ import org.robolectric.annotation.Config
 @Config(sdk = [29])
 class IncomingSourceTransactionTest {
     private val context = RuntimeEnvironment.getApplication()
+    private val activeGates = mutableSetOf<GateInputStream>()
 
     @Before
     fun clearOwnedSources() {
-        RestoredWorkingSourceOwnership.clearForTest()
-        IncomingSourceLiveOwnership.clearForTest()
-        context.cacheDir.listFiles { file ->
-            file.name.startsWith("source_") &&
-                (file.name.endsWith(".img") || file.name.endsWith(".img.staging"))
-        }.orEmpty().forEach { it.delete() }
+        resetIncomingSourceSandboxForTest(context)
         resetDraftSandboxForTest(context)
+    }
+
+    @After
+    fun cleanupOwnedSources() {
+        val failures = CleanupFailureAggregator()
+        failures.attempt {
+            check(
+                IncomingSourceLiveOwnership.liveOwnedCountForTest() == 0 &&
+                    IncomingSourceLiveOwnership.documentOwnedCountForTest() == 0,
+            ) {
+                "IncomingSourceTransactionTest ownership leak: " +
+                    IncomingSourceLiveOwnership.snapshotForTest()
+            }
+        }
+        failures.attempt { activeGates.forEach { it.release() } }
+        failures.attempt { resetIncomingSourceSandboxForTest(context) }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        activeGates.clear()
+        failures.throwIfAny()
     }
 
     @Test
@@ -96,6 +113,7 @@ class IncomingSourceTransactionTest {
     fun cancellationDuringCopyDeletesPartialSourceAndClosesStream() {
         runBlocking {
             val stream = GateInputStream()
+            activeGates += stream
             val before = ownedSourceNames()
             val acquisition = async { transaction { stream }.acquire(Uri.EMPTY) }
 
@@ -121,6 +139,7 @@ class IncomingSourceTransactionTest {
             } finally {
                 // Always release the blocking stream so no OS thread leaks.
                 stream.release()
+                activeGates -= stream
             }
         }
     }
@@ -147,14 +166,14 @@ class IncomingSourceTransactionTest {
                 providerRelease.await()
                 ByteArrayInputStream(byteArrayOf(1, 2, 3))
             }
-            val acquisition = async { transaction(customProvider).acquire(Uri.EMPTY) }
+            val acquisition = async(Dispatchers.IO) { transaction(customProvider).acquire(Uri.EMPTY) }
             // Bounded wait for provider to reach; do not block on a synthetic
             // scheduler yield. Use direct deferred observation.
             val reachedInTime = try {
-                kotlinx.coroutines.withTimeoutOrNull(5_000L) { providerReached.await() }
+                kotlinx.coroutines.withTimeoutOrNull(1_000L) { providerReached.await() }
             } catch (_: Exception) { null }
             assertTrue(
-                "provider must reach to register live staging within 5s",
+                "provider must reach to register live staging within 1s",
                 reachedInTime != null,
             )
             val staging = context.cacheDir.listFiles().orEmpty().singleOrNull {

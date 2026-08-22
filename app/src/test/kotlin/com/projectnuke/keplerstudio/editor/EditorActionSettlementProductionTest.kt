@@ -27,20 +27,22 @@ class EditorActionSettlementProductionTest {
 
     @Before
     fun cleanDraft() {
+        resetDraftSandboxForTest(context)
         harness = OwnedEditorViewModelHarness(context)
         deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        resetDraftSandboxForTest(context)
     }
 
     @After
     fun cleanDraftAfter() {
-        harness.close()
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        resetDraftSandboxForTest(context)
+        val failures = CleanupFailureAggregator()
+        failures.attempt { harness.close() }
+        failures.attempt { deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3")) }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        failures.throwIfAny()
     }
 
     private fun deleteDirectoryIfPresent(directory: File) {
-        runCatching { if (directory.isDirectory) directory.deleteRecursively() }
+        deletePathForTest(directory)
     }
 
     private class PendingSetup(
@@ -303,7 +305,7 @@ class EditorActionSettlementProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
-            timeoutMillis = 30_000L,
+            timeoutMillis = 15_000L,
             pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
             diagnostic = { startupDiagnosticForTest(vm = vm, context = context) },
         )

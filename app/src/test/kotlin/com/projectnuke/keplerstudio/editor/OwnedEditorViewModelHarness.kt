@@ -9,8 +9,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import kotlinx.coroutines.flow.collect
 import java.io.File
@@ -24,7 +26,90 @@ import org.robolectric.Shadows.shadowOf
  * not yet migrated to an explicit completion signal. DraftRestore does not use
  * this helper.
  */
-/** Narrow test-only startup-phase diagnostic for time-out reports. */
+internal class CleanupFailureAggregator {
+    private var primary: Throwable? = null
+
+    fun attempt(action: () -> Unit) {
+        try {
+            action()
+        } catch (failure: Throwable) {
+            val first = primary
+            if (first == null) primary = failure else first.addSuppressed(failure)
+        }
+    }
+
+    fun throwIfAny() {
+        primary?.let { throw it }
+    }
+}
+
+internal fun assertNoPreExistingTestOwnershipForTest() {
+    val restoredSnapshot = RestoredWorkingSourceOwnership.snapshotForTest()
+    val incomingSnapshot = IncomingSourceLiveOwnership.snapshotForTest()
+    check(
+        restoredSnapshot.isEmpty() && incomingSnapshot.isEmpty(),
+    ) {
+        "PRE-EXISTING TEST CONTAMINATION: " +
+            "restoredRestoreCount=${RestoredWorkingSourceOwnership.restoreOwnedCountForTest()} " +
+            "restoredDocumentCount=${RestoredWorkingSourceOwnership.documentOwnedCountForTest()} " +
+            "incomingLiveCount=${IncomingSourceLiveOwnership.liveOwnedCountForTest()} " +
+            "incomingDocumentCount=${IncomingSourceLiveOwnership.documentOwnedCountForTest()} " +
+            "restoredSnapshot=$restoredSnapshot incomingSnapshot=$incomingSnapshot"
+    }
+}
+
+internal fun deletePathForTest(path: File) {
+    if (!path.exists()) return
+    if (path.isDirectory) {
+        val children = path.listFiles()
+        check(children != null || !path.exists()) {
+            "test cleanup could not list ${path.absolutePath}"
+        }
+        children.orEmpty().forEach(::deletePathForTest)
+    }
+    val deleted = path.delete()
+    if (!deleted && path.exists()) {
+        error("test cleanup could not delete ${path.absolutePath}")
+    }
+}
+
+/** Ownership-aware emergency cleanup for the restore-source sandbox only. */
+internal fun resetRestoredWorkingSourceSandboxForTest(context: android.content.Context) {
+    val failures = CleanupFailureAggregator()
+    failures.attempt { check(
+        RestoredWorkingSourceOwnership.restoreOwnedCountForTest() == 0 &&
+            RestoredWorkingSourceOwnership.documentOwnedCountForTest() == 0,
+    ) {
+        "PRE-EXISTING TEST CONTAMINATION: restored ownership snapshot=" +
+            RestoredWorkingSourceOwnership.snapshotForTest()
+    } }
+    failures.attempt { deletePathForTest(File(context.filesDir, "editor_sources")) }
+    failures.attempt { RestoredWorkingSourceOwnership.clearForTest() }
+    failures.throwIfAny()
+}
+
+/** Ownership-aware emergency cleanup for IncomingSourceTransactionTest. */
+internal fun resetIncomingSourceSandboxForTest(context: android.content.Context) {
+    val failures = CleanupFailureAggregator()
+    failures.attempt {
+        check(
+            IncomingSourceLiveOwnership.liveOwnedCountForTest() == 0 &&
+                IncomingSourceLiveOwnership.documentOwnedCountForTest() == 0,
+        ) {
+            "PRE-EXISTING TEST CONTAMINATION: incoming ownership snapshot=" +
+                IncomingSourceLiveOwnership.snapshotForTest()
+        }
+    }
+    failures.attempt {
+        context.cacheDir.listFiles().orEmpty()
+            .filter { IncomingSourceArtifactNames.isFinalName(it.name) || IncomingSourceArtifactNames.isStagingName(it.name) }
+            .forEach(::deletePathForTest)
+    }
+    failures.attempt { IncomingSourceLiveOwnership.clearForTest() }
+    failures.throwIfAny()
+}
+
+/** Narrow, read-only startup diagnostics for timeout reports. */
 internal fun startupDiagnosticForTest(
     vm: EditorViewModel? = null,
     context: android.content.Context? = null,
@@ -39,32 +124,26 @@ internal fun startupDiagnosticForTest(
         sb.append("startupInitCompleted=")
             .append(initDone)
             .append(" ")
-        val restoreChild = try {
-            val jobField = vm.javaClass.getDeclaredField("restoreDraftJob")
-            jobField.isAccessible = true
-            (jobField.get(vm) as? kotlinx.coroutines.Job)?.isActive == true
-        } catch (_: Throwable) { false }
-        sb.append("restoreChildActive=").append(restoreChild).append(" ")
+        sb.append("startupCoordinatorActive=")
+            .append(vm.startupCoordinatorActiveForTest())
+            .append(" ")
+        sb.append("restoreChildActive=")
+            .append(vm.restoreDraftChildActiveForTest())
+            .append(" ")
+        sb.append("activeViewModelJobs=")
+            .append(vm.activeViewModelJobDiagnosticsForTest())
+            .append(" ")
+        sb.append("lastStartupPhase=")
+            .append(vm.lastStartupStageForTest?.name ?: "NONE")
+            .append(" ")
     }
-    val phase = try {
-        val seam = StartupInitializationTestSeam.Registry.capture()
-        val stages = mutableListOf<String>()
-        // Read last reached stage from test-only registry if present; no production mutation.
-        "unknown"
-    } catch (_: Throwable) { "unknown" }
-    val lastPhase = try {
-        val seamField = StartupInitializationTestSeam::class.java.getDeclaredField("installed")
-        // No production mutation; only diagnostic inspection.
-        "unknown"
-    } catch (_: Throwable) { "unknown" }
-    sb.append("lastStartupPhase=")
-        .append(lastPhase)
-        .append(" ")
     if (ctx != null) {
         val generationsRoot = runCatching { draftGenerationsRoot(ctx) }.getOrNull()
-        val genCount = generationsRoot?.listFiles()?.count { it.isDirectory } ?: 0
+        val genCount = generationsRoot?.listFiles()?.count {
+            it.isDirectory && it.name.startsWith(DRAFT_GENERATION_DIR_PREFIX)
+        } ?: 0
         val stagingGenCount = generationsRoot?.listFiles()?.count {
-            it.isDirectory && it.name.startsWith("draft_staging_")
+            it.isDirectory && it.name.startsWith(DRAFT_GENERATION_STAGING_PREFIX)
         } ?: 0
         sb.append("draftGenerations=")
             .append(genCount)
@@ -77,11 +156,15 @@ internal fun startupDiagnosticForTest(
         sb.append("draftsCurrentEntries=")
             .append(currentEntries)
             .append(" ")
-        val sourceCount = ctx.cacheDir?.listFiles { f ->
-            f.name.startsWith("source_") && f.name.endsWith(".img")
-        }?.count() ?: 0
-        sb.append("sourceImgCount=")
+        val sourceCount = currentDir?.listFiles { f -> IncomingSourceArtifactNames.isFinalName(f.name) }?.count() ?: 0
+        sb.append("draftsCurrentSourceImgCount=")
             .append(sourceCount)
+            .append(" ")
+        sb.append("draftsCurrentSourceImgPresent=")
+            .append(currentDir?.resolve("source.img")?.isFile == true)
+            .append(" ")
+        sb.append("draftsCurrentThumbnailPresent=")
+            .append(currentDir?.resolve("thumbnail.jpg")?.isFile == true)
             .append(" ")
         val editorSourcesDir = runCatching { File(ctx.filesDir, "editor_sources") }.getOrNull()
         val editorSourcesCount = editorSourcesDir?.listFiles()?.count() ?: 0
@@ -89,8 +172,14 @@ internal fun startupDiagnosticForTest(
             .append(editorSourcesCount)
             .append(" ")
         val cacheStagingCount = ctx.cacheDir?.listFiles { f ->
-            f.name.startsWith("source_") && f.name.endsWith(".img.staging")
+            IncomingSourceArtifactNames.isStagingName(f.name)
         }?.count() ?: 0
+        val cacheFinalCount = ctx.cacheDir?.listFiles { f ->
+            IncomingSourceArtifactNames.isFinalName(f.name)
+        }?.count() ?: 0
+        sb.append("cacheIncomingFinalCount=")
+            .append(cacheFinalCount)
+            .append(" ")
         sb.append("cacheStagingCount=")
             .append(cacheStagingCount)
             .append(" ")
@@ -103,9 +192,9 @@ internal fun startupDiagnosticForTest(
         sb.append("currentGenerationPointer=")
             .append(pointer ?: "null")
             .append(" ")
-        val legacySource = prefs.getString("draft_legacy_source", null)
-        sb.append("legacyDraftSource=")
-            .append(legacySource ?: "null")
+        val draftSource = prefs.getString(KEY_DRAFT_SOURCE, null)
+        sb.append("draftSource=")
+            .append(draftSource ?: "null")
     }
     return sb.toString().trim()
 }
@@ -115,7 +204,7 @@ internal fun yieldToEditorBackgroundForTest() {
 }
 
 internal fun deleteDirectoryIfPresentForTest(path: File) {
-    runCatching { if (path.isDirectory) path.deleteRecursively() }
+    deletePathForTest(path)
 }
 
 /**
@@ -262,55 +351,38 @@ internal fun resetDraftSandboxForTest(
     context: android.content.Context,
     assertOwnershipFirst: (() -> Unit)? = null,
 ) {
-    // First assert expected production ownership/seam settlement.
-    assertOwnershipFirst?.invoke()
+    val failures = CleanupFailureAggregator()
+    // Ownership is inspected before any registry or physical cleanup. Setup
+    // callers pass an additional assertion when they need a narrower boundary.
+    failures.attempt { assertNoPreExistingTestOwnershipForTest() }
+    failures.attempt { assertOwnershipFirst?.invoke() }
 
-    // 1. Remove preference keys whose name starts with draft_.
-    runCatching {
+    // 1. Remove every draft_* preference synchronously and verify the commit.
+    failures.attempt {
         val prefs = context.getSharedPreferences(PREF_NAME_DRAFT, android.content.Context.MODE_PRIVATE)
         val keysToRemove = prefs.all.keys.filter { it.startsWith("draft_") }
         val edit = prefs.edit()
         keysToRemove.forEach { edit.remove(it) }
-        edit.apply()
-    }.onFailure { /* suppress for isolation */ }
+        check(edit.commit()) { "test Draft preference cleanup commit failed" }
+    }
 
-    // 2. Delete test-owned generation directories (only .tmp removal is production policy).
-    runCatching {
-        val generationsRoot = draftGenerationsRoot(context)
-        generationsRoot.listFiles()?.forEach { dir ->
-            if (dir.isDirectory) {
-                // Do not delete current pointer generation here; only stale/test-owned generations.
-                // For isolation, clear all non-current generations.
-                val pointer = currentDraftGenerationId(context)
-                if (dir.name != pointer) {
-                    dir.deleteRecursively()
-                }
-            }
+    // 2. Clear the generation pointer, then remove all test-owned generations
+    // and staging directories. This is a test ownership boundary, not policy.
+    failures.attempt {
+        check(clearCurrentDraftGenerationPointer(context)) {
+            "test Draft generation pointer cleanup commit failed"
         }
-    }.onFailure { /* suppress */ }
+    }
+    failures.attempt { deletePathForTest(draftGenerationsRoot(context)) }
 
-    // 3. Delete artifacts under filesDir/drafts/current.
-    runCatching {
-        val currentDir = File(context.filesDir, "drafts/current")
-        if (currentDir.exists()) {
-            currentDir.listFiles()?.forEach { file ->
-                if (file.name.endsWith(".tmp")) file.delete()
-                if (file.name.startsWith("source_") && file.name.endsWith(".img")) file.delete()
-                if (file.name.contains("draft_thumbnail") || file.name.contains("draft_thumb")) file.delete()
-            }
-        }
-    }.onFailure { /* suppress */ }
+    // 3. The complete legacy current sandbox is test-owned. Delete the
+    // directory so source.img, thumbnail.jpg, source_*.img, and temp files
+    // cannot survive under names the production policy intentionally keeps.
+    failures.attempt { deletePathForTest(File(context.filesDir, "drafts/current")) }
 
-    // 4. Clear current draft generation pointer for complete isolation.
-    runCatching { clearCurrentDraftGenerationPointer(context) }.onFailure { /* suppress */ }
-
-    // 5. Delete editor_sources directory (left behind by restore tests).
-    runCatching {
-        val sourcesDir = File(context.filesDir, "editor_sources")
-        if (sourcesDir.exists()) {
-            sourcesDir.deleteRecursively()
-        }
-    }.onFailure { /* suppress for isolation */ }
+    // editor_sources is owned by restored-working-source tests and is cleaned
+    // only by resetRestoredWorkingSourceSandboxForTest.
+    failures.throwIfAny()
 }
 
 /** Owns every ViewModel and filesystem resource created by one production test. */
@@ -336,6 +408,31 @@ internal class OwnedEditorViewModelHarness(
     private val seamHandles = ArrayDeque<AutoCloseable>()
     private val preClearActions = ArrayDeque<() -> Unit>()
     private var closed = false
+
+    private fun awaitViewModelJobsSettledForTest(jobs: List<Job>): Boolean {
+        val wakeup = Semaphore(0)
+        val handles = jobs.map { job -> job.invokeOnCompletion { wakeup.release() } }
+        val deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(5L)
+        return try {
+            while (jobs.any { !it.isCompleted }) {
+                shadowOf(android.os.Looper.getMainLooper()).idle()
+                val remainingNanos = deadlineNanos - System.nanoTime()
+                if (remainingNanos <= 0L) return false
+                wakeup.tryAcquire(
+                    minOf(remainingNanos, TimeUnit.MILLISECONDS.toNanos(25L)),
+                    TimeUnit.NANOSECONDS,
+                )
+            }
+            runBlocking {
+                withTimeoutOrNull(1_000L) {
+                    jobs.joinAll()
+                    true
+                } ?: false
+            }
+        } finally {
+            handles.forEach { it.dispose() }
+        }
+    }
 
     init {
         if (installBitmapCopySeam) seamHandles.addFirst(BitmapCopyTestSeam.install())
@@ -363,97 +460,71 @@ internal class OwnedEditorViewModelHarness(
         val editors = sequence.get().let { count ->
             (1L..count).mapNotNull { index -> store.get("editor-$index") as? EditorViewModel }
         }
-        preClearActions.forEach { runCatching { it() } }
+        val jobs = editors.flatMap { it.viewModelJobsForTest() }
+        val failures = CleanupFailureAggregator()
+        preClearActions.forEach { action -> failures.attempt(action) }
         preClearActions.clear()
-        store.clear()
-        shadowOf(android.os.Looper.getMainLooper()).idle()
+        failures.attempt { store.clear() }
+        failures.attempt { shadowOf(android.os.Looper.getMainLooper()).idle() }
         // EditorViewModel.onCleared() requests the process-global model
         // session to unload asynchronously.  Drain that ownership boundary
         // before this harness is considered closed so a later Robolectric
         // class cannot observe a stale Closing command from this test.
-        runBlocking { RemasterModelSession.unloadIdleNow() }
-        // Give background IO-thread draft coroutines cancelled by onCleared()
-        // a chance to release the process-global draft storage lock.  We do a
-        // bounded runBlocking on Default to let cancelled IO jobs reach their
-        // finally blocks, then pump Main once more.
-        repeat(10) {
-            runBlocking { withContext(Dispatchers.Default) { yield() } }
-            shadowOf(android.os.Looper.getMainLooper()).idle()
-            if (editors.none { it.hasActiveViewModelJobsForTest() }) return@repeat
+        failures.attempt { runBlocking { RemasterModelSession.unloadIdleNow() } }
+        failures.attempt {
+            val joined = awaitViewModelJobsSettledForTest(jobs)
+            check(joined) {
+                "ViewModel jobs did not settle: " +
+                    editors.joinToString { it.activeViewModelJobDiagnosticsForTest() }
+            }
         }
-        check(editors.none { it.hasActiveViewModelJobsForTest() })
+        failures.attempt { shadowOf(android.os.Looper.getMainLooper()).idle() }
+        failures.attempt {
+            check(editors.none { it.viewModelJobsForTest().any { job -> !job.isCompleted } }) {
+                "ViewModel owner job diagnostics after clear: " +
+                    editors.joinToString { it.activeViewModelJobDiagnosticsForTest() }
+            }
+        }
+        failures.throwIfAny()
     }
 
     override fun close() {
         if (closed) return
         closed = true
-        var failure: Throwable? = null
-        try {
-            clearViewModels()
-        } catch (t: Throwable) {
-            failure = t
-        } finally {
-            seamHandles.forEach { handle ->
-                runCatching { handle.close() }
-                    .onFailure { failure = failure ?: it }
-            }
-            seamHandles.clear()
-            runCatching { check(ParameterLifecycleTestHook.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(HistoryPublishTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(HistoryAdmissionTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(HistoryStorageBackendTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(BitmapCopyTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(HistoryNavigationTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(RotationTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(HistorySnapshotTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(ExportTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(OpenImageTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(ResetAdjustmentsTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(DraftSaveTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(DraftRestoreTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(ClearDraftTestSeam.installedForTest() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(StartupInitializationTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(AsyncBusyTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(RemasterModelSession.installedInferenceTestSeamCount() == 0) }
-            runCatching { check(RemasterModelSession.installedEnsureReusableTestSeamCount() == 0) }
-            runCatching { check(RemasterModelSession.installedCommandStartTestSeamCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(BrushPreparationTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(EditorLeaveTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(MemoryRecoveryTestSeam.installedForTestCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(SelectionPreviewPreparationGateway.installedHookCountForTest() == 0) }
-                .onFailure { failure = failure ?: it }
-            runCatching { check(cropTransformTestSeamCount() == 0) }
-                .onFailure { failure = failure ?: it }
-            files.forEach { path ->
-                runCatching { if (path.isDirectory) path.deleteRecursively() else path.delete() }
-                    .onFailure { failure = failure ?: it }
-            }
-            files.clear()
-            ThumbnailBitmapCache.clear()
-            // Test-only retained-memory reservations are process-global.  A
-            // failed/aborted test must not poison the next Robolectric class.
-            RetainedMemoryLedger.resetForTest()
-        }
-        failure?.let { throw it }
+        val failures = CleanupFailureAggregator()
+        failures.attempt { clearViewModels() }
+        seamHandles.forEach { handle -> failures.attempt { handle.close() } }
+        seamHandles.clear()
+        failures.attempt { check(ParameterLifecycleTestHook.installedForTestCount() == 0) }
+        failures.attempt { check(HistoryPublishTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(HistoryAdmissionTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(HistoryStorageBackendTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(BitmapCopyTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(HistoryNavigationTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(RotationTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(HistorySnapshotTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(ExportTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(OpenImageTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(ResetAdjustmentsTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(DraftSaveTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(DraftRestoreTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(ClearDraftTestSeam.installedForTest() == 0) }
+        failures.attempt { check(StartupInitializationTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(AsyncBusyTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(RemasterModelSession.installedInferenceTestSeamCount() == 0) }
+        failures.attempt { check(RemasterModelSession.installedEnsureReusableTestSeamCount() == 0) }
+        failures.attempt { check(RemasterModelSession.installedCommandStartTestSeamCount() == 0) }
+        failures.attempt { check(BrushPreparationTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(EditorLeaveTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(MemoryRecoveryTestSeam.installedForTestCount() == 0) }
+        failures.attempt { check(SelectionPreviewPreparationGateway.installedHookCountForTest() == 0) }
+        failures.attempt { check(cropTransformTestSeamCount() == 0) }
+        files.forEach { path -> failures.attempt { deletePathForTest(path) } }
+        files.clear()
+        failures.attempt { ThumbnailBitmapCache.clear() }
+        // Test-only retained-memory reservations are process-global. A
+        // failed/aborted test must not poison the next Robolectric class.
+        failures.attempt { RetainedMemoryLedger.resetForTest() }
+        failures.throwIfAny()
     }
 }

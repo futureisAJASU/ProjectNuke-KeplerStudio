@@ -228,6 +228,14 @@ internal object IncomingSourceLiveOwnership {
         documentPaths.clear()
     }
 
+    internal fun liveOwnedCountForTest(): Int = synchronized(lock) { livePaths.size }
+
+    internal fun documentOwnedCountForTest(): Int = synchronized(lock) { documentPaths.size }
+
+    internal fun snapshotForTest(): Set<String> = synchronized(lock) {
+        (livePaths + documentPaths).toSet()
+    }
+
     internal enum class DeleteResult {
         PRESERVED_LIVE_TRANSACTION,
         PRESERVED_DOCUMENT,

@@ -38,15 +38,17 @@ class ParameterNoAdoptionRollbackProductionTest {
 
     @Before
     fun cleanDraft() {
+        resetDraftSandboxForTest(context)
         harness = OwnedEditorViewModelHarness(context)
         deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
-        resetDraftSandboxForTest(context)
     }
 
     @After
     fun closeHarness() {
-        harness.close()
-        resetDraftSandboxForTest(context)
+        val failures = CleanupFailureAggregator()
+        failures.attempt { harness.close() }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        failures.throwIfAny()
     }
 
     // Test 1: a plain editor-action readiness check settles the gesture and
@@ -442,7 +444,7 @@ class ParameterNoAdoptionRollbackProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
-            timeoutMillis = 30_000L,
+            timeoutMillis = 15_000L,
             pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
             diagnostic = { startupDiagnosticForTest(vm = vm, context = context) },
         )

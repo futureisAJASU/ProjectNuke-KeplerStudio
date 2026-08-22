@@ -28,17 +28,20 @@ class GlobalParameterProductionTest {
 
     @Before
     fun cleanDraft() {
-        harness = OwnedEditorViewModelHarness(context)
-        RestoredWorkingSourceOwnership.clearForTest()
-        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
+        resetRestoredWorkingSourceSandboxForTest(context)
         resetDraftSandboxForTest(context)
+        harness = OwnedEditorViewModelHarness(context)
+        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
     }
 
     @After
     fun closeHarness() {
-        harness.close()
-        RestoredWorkingSourceOwnership.clearForTest()
-        resetDraftSandboxForTest(context)
+        val failures = CleanupFailureAggregator()
+        failures.attempt { harness.close() }
+        failures.attempt { deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3")) }
+        failures.attempt { resetRestoredWorkingSourceSandboxForTest(context) }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        failures.throwIfAny()
     }
 
     @Test
@@ -130,7 +133,7 @@ class GlobalParameterProductionTest {
     }
 
     private fun await(predicate: () -> Boolean) {
-        repeat(6000) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return
             shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -385,7 +388,7 @@ class GlobalParameterProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
-            timeoutMillis = 30_000L,
+            timeoutMillis = 15_000L,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idle()
             },
@@ -395,7 +398,7 @@ class GlobalParameterProductionTest {
 
     private fun await(vm: EditorViewModel, predicate: () -> Boolean): Boolean {
         // Main-pump cycle for arbitrary predicate settlement.
-        repeat(6000) {
+        repeat(2000) {
             shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
             if (predicate()) return true
             shadowOf(android.os.Looper.getMainLooper()).idle()

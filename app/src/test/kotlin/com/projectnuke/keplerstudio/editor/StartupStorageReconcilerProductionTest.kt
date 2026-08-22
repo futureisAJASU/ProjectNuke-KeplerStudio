@@ -37,23 +37,23 @@ class StartupStorageReconcilerProductionTest {
 
     @Before
     fun cleanStorage() {
-        IncomingSourceLiveOwnership.clearForTest()
-        RestoredWorkingSourceOwnership.clearForTest()
+        resetIncomingSourceSandboxForTest(context)
+        resetRestoredWorkingSourceSandboxForTest(context)
+        resetDraftSandboxForTest(context)
         harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
-        deleteDirectoryIfPresentForTest(draftGenerationsRoot(context))
-        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_sources"))
-        deleteDirectoryIfPresentForTest(context.filesDir.resolve("drafts/current"))
         context.cacheDir.listFiles()?.forEach { file ->
             if (file.name.startsWith("source_") || file.name.endsWith(".img.staging")) file.delete()
         }
-        prefs().edit().clear().commit()
     }
 
     @After
     fun cleanStorageAfter() {
-        harness.close()
-        IncomingSourceLiveOwnership.clearForTest()
-        RestoredWorkingSourceOwnership.clearForTest()
+        val failures = CleanupFailureAggregator()
+        failures.attempt { harness.close() }
+        failures.attempt { resetIncomingSourceSandboxForTest(context) }
+        failures.attempt { resetRestoredWorkingSourceSandboxForTest(context) }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        failures.throwIfAny()
     }
 
     // Orphan .staging_* directories (crash before finalize) are reclaimed while

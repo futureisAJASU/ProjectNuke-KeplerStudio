@@ -36,19 +36,20 @@ class ExternalIntentOrderingProductionTest {
 
     @Before
     fun cleanDraft() {
-        harness = OwnedEditorViewModelHarness(context)
-        RestoredWorkingSourceOwnership.clearForTest()
-        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
-        // Fresh Draft protocol state before each test.
+        resetRestoredWorkingSourceSandboxForTest(context)
         resetDraftSandboxForTest(context)
+        harness = OwnedEditorViewModelHarness(context)
+        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
     }
 
     @After
     fun cleanDraftAfter() {
-        harness.close()
-        // Emergency sandbox reset after production ownership assertions have run.
-        RestoredWorkingSourceOwnership.clearForTest()
-        resetDraftSandboxForTest(context)
+        val failures = CleanupFailureAggregator()
+        failures.attempt { harness.close() }
+        failures.attempt { deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3")) }
+        failures.attempt { resetRestoredWorkingSourceSandboxForTest(context) }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        failures.throwIfAny()
     }
 
     // Test 1: adopted 0.2 plus a suspended newer 0.4 render in ONE open
@@ -411,7 +412,7 @@ class ExternalIntentOrderingProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
-            timeoutMillis = 30_000L,
+            timeoutMillis = 15_000L,
             pumpMain = ::drainMain,
             diagnostic = { editorDiagnostic(vm) },
         )
@@ -421,7 +422,7 @@ class ExternalIntentOrderingProductionTest {
         awaitEditorCompletionForTest(
             description = description,
             completion = completion,
-            timeoutMillis = 30_000L,
+            timeoutMillis = 15_000L,
             pumpMain = ::drainMain,
             diagnostic = { editorDiagnostic(vm) },
         )
@@ -449,7 +450,7 @@ class ExternalIntentOrderingProductionTest {
             awaitEditorCompletionForTest(
                 description = "draft save caller must complete",
                 completion = deferred,
-                timeoutMillis = 30_000L,
+                timeoutMillis = 15_000L,
                 pumpMain = ::drainMain,
                 diagnostic = { "leave=${vm.editorLeaveState.value} ${editorDiagnostic(vm)}" },
             )

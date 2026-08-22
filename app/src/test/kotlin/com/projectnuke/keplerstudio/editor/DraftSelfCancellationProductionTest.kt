@@ -33,16 +33,18 @@ class DraftSelfCancellationProductionTest {
 
     @Before
     fun cleanDraft() {
+        resetDraftSandboxForTest(context)
         harness = OwnedEditorViewModelHarness(context)
         deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
-        resetDraftSandboxForTest(context)
     }
 
     @After
     fun cleanDraftAfter() {
-        harness.close()
-        deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3"))
-        resetDraftSandboxForTest(context)
+        val failures = CleanupFailureAggregator()
+        failures.attempt { harness.close() }
+        failures.attempt { deleteDirectoryIfPresentForTest(context.filesDir.resolve("editor_history_v3")) }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        failures.throwIfAny()
     }
 
     // Test 1: active adopted transaction — save-and-leave before inactivity fires.
@@ -351,7 +353,7 @@ class DraftSelfCancellationProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
-            timeoutMillis = 30_000L,
+            timeoutMillis = 15_000L,
             pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
             diagnostic = { startupDiagnosticForTest(vm = vm, context = context) },
         )
@@ -366,7 +368,7 @@ class DraftSelfCancellationProductionTest {
             awaitEditorCompletionForTest(
                 description = "draft save caller must complete",
                 completion = deferred,
-                timeoutMillis = 30_000L,
+                timeoutMillis = 15_000L,
                 pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
                 diagnostic = { "leave=${vm.editorLeaveState.value}" },
             )

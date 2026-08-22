@@ -47,23 +47,25 @@ class ExternalIntentSupersessionProductionTest {
 
     @Before
     fun cleanDraft() {
-        harness = OwnedEditorViewModelHarness(context)
-        RestoredWorkingSourceOwnership.clearForTest()
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
+        resetRestoredWorkingSourceSandboxForTest(context)
         resetDraftSandboxForTest(context)
+        harness = OwnedEditorViewModelHarness(context)
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
     }
 
     @After
     fun cleanDraftAfter() {
-        harness.close()
-        RestoredWorkingSourceOwnership.clearForTest()
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        resetDraftSandboxForTest(context)
-        ExperimentalLabController.resetForTest()
+        val failures = CleanupFailureAggregator()
+        failures.attempt { harness.close() }
+        failures.attempt { deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3")) }
+        failures.attempt { resetRestoredWorkingSourceSandboxForTest(context) }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        failures.attempt { ExperimentalLabController.resetForTest() }
+        failures.throwIfAny()
     }
 
     private fun deleteDirectoryIfPresent(directory: File) {
-        runCatching { if (directory.isDirectory) directory.deleteRecursively() }
+        deletePathForTest(directory)
     }
 
     // Crop: adopted A (0.3) + suspended B (0.5). The first crop invocation must
@@ -679,7 +681,7 @@ class ExternalIntentSupersessionProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
-            timeoutMillis = 30_000L,
+            timeoutMillis = 15_000L,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
                 shadowOf(android.os.Looper.getMainLooper()).idle()

@@ -42,29 +42,22 @@ class DraftRestoreProductionTest {
 
     @Before
     fun cleanDraft() {
-        harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
-        RestoredWorkingSourceOwnership.clearForTest()
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
+        resetRestoredWorkingSourceSandboxForTest(context)
         resetDraftSandboxForTest(context)
+        harness = OwnedEditorViewModelHarness(context, installBitmapCopySeam = true)
+        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
     }
 
     @After
     fun cleanDraftAfter() {
-        var failure: Throwable? = null
-        try {
-            harness.close()
-            assertEquals("restore working-source ownership must settle", 0, RestoredWorkingSourceOwnership.restoreOwnedCountForTest())
-            assertEquals("document working-source ownership must settle", 0, RestoredWorkingSourceOwnership.documentOwnedCountForTest())
-        } catch (t: Throwable) {
-            failure = t
-        }
-        // Test isolation is deliberately last: production ownership is checked
-        // before the emergency registry reset can hide a leak.
-        RestoredWorkingSourceOwnership.clearForTest()
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_sources"))
-        deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3"))
-        resetDraftSandboxForTest(context)
-        failure?.let { throw it }
+        val failures = CleanupFailureAggregator()
+        failures.attempt { harness.close() }
+        // This helper asserts both restore and document ownership before it
+        // clears the registry or removes editor_sources.
+        failures.attempt { resetRestoredWorkingSourceSandboxForTest(context) }
+        failures.attempt { deleteDirectoryIfPresent(context.filesDir.resolve("editor_history_v3")) }
+        failures.attempt { resetDraftSandboxForTest(context) }
+        failures.throwIfAny()
     }
 
     // Test 1: a saved draft generation is actually restored into a fresh
@@ -2805,9 +2798,7 @@ class DraftRestoreProductionTest {
     }
 
     private fun deleteDirectoryIfPresent(directory: File) {
-        runCatching {
-            if (directory.isDirectory) directory.deleteRecursively()
-        }
+        deletePathForTest(directory)
     }
 
     private fun editor(
@@ -2911,7 +2902,7 @@ class DraftRestoreProductionTest {
         awaitEditorCompletionForTest(
             description = "startup init must complete",
             completion = vm.startupInitCompletion,
-            timeoutMillis = 30_000L,
+            timeoutMillis = 15_000L,
             pumpMain = {
                 shadowOf(android.os.Looper.getMainLooper()).idleFor(20, TimeUnit.MILLISECONDS)
                 shadowOf(android.os.Looper.getMainLooper()).idle()
@@ -2956,7 +2947,7 @@ class DraftRestoreProductionTest {
             awaitEditorCompletionForTest(
                 description = "draft save caller must complete",
                 completion = deferred,
-                timeoutMillis = 30_000L,
+                timeoutMillis = 15_000L,
                 pumpMain = ::drainReadyMain,
                 diagnostic = { "leave=${vm.editorLeaveState.value}" },
             )
