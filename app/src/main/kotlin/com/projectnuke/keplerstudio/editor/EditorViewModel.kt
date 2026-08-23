@@ -266,6 +266,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal var cropJob: Job? = null
     private var draftSaveJob: Job? = null
     private val draftSaveMutex = Mutex()
+    /**
+     * Unique legacy-source ownership identity for this ViewModel. All visible
+     * Draft roots and document roots under drafts/current are registered under
+     * this key so another ViewModel releasing a shared path can never drop
+     * this instance's claim.
+     */
+    private val legacyDraftSourceOwner = LegacyDraftSourceOwnership.OwnerKey.create()
     private val _editorLeaveState = MutableStateFlow(EditorLeaveState())
     internal val editorLeaveState: StateFlow<EditorLeaveState> = _editorLeaveState.asStateFlow()
     private var editorLeaveCounter: Long = 0L
@@ -349,6 +356,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     internal fun openImageJobActiveForTest(): Boolean = openImageJob?.isActive == true
+
+    /** Test-only access to this ViewModel's legacy-source ownership identity. */
+    internal fun legacyDraftSourceOwnerKeyForTest(): LegacyDraftSourceOwnership.OwnerKey =
+        legacyDraftSourceOwner
 
     /** Test-only trigger of the production invalidation that cancels the live
      *  export and bumps `exportToken`, equivalent to a document replacement. */
@@ -5086,14 +5097,41 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         try {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
-                    committed =
-                        saveDraftSnapshot(context, payload, testSeam) {
-                            owningJob?.isActive != false &&
-                                !shuttingDown &&
-                                isDraftPayloadCurrent(payload)
+                    // In-flight save roots: the captured previous visible Draft
+                    // source stays claimed while this save can still consume
+                    // or roll back over it, and the freshly created
+                    // compatibility source stays claimed until settlement
+                    // finishes, fails, is cancelled, or is superseded.
+                    val saveLegacyOwner = LegacyDraftSourceOwnership.OwnerKey.create()
+                    try {
+                        legacyCompatibilitySource(context, payload.previousVisibleDraftPath)?.let {
+                            LegacyDraftSourceOwnership.acquire(
+                                saveLegacyOwner,
+                                LegacyDraftSourceOwnership.RootKind.OPERATION,
+                                it.absolutePath,
+                            )
                         }
-                    committed?.let { saved ->
-                        settled = settleCommittedDraft(context, saved, payload, owningJob, testSeam)
+                        committed =
+                            saveDraftSnapshot(context, payload, testSeam) {
+                                owningJob?.isActive != false &&
+                                    !shuttingDown &&
+                                    isDraftPayloadCurrent(payload)
+                            }
+                        committed?.let { saved ->
+                            legacyCompatibilitySource(
+                                context,
+                                saved.compatibilitySourceFile?.absolutePath,
+                            )?.let {
+                                LegacyDraftSourceOwnership.acquire(
+                                    saveLegacyOwner,
+                                    LegacyDraftSourceOwnership.RootKind.OPERATION,
+                                    it.absolutePath,
+                                )
+                            }
+                            settled = settleCommittedDraft(context, saved, payload, owningJob, testSeam)
+                        }
+                    } finally {
+                        LegacyDraftSourceOwnership.releaseOwner(saveLegacyOwner)
                     }
                 }
             }
@@ -5176,6 +5214,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 )
             adopted = commitUiState(expected, next)
         }
+        // The adopted save is authoritative: move this ViewModel's visible
+        // legacy Draft root atomically off the previous path. The new
+        // generation payload path is not a legacy family member, so this only
+        // releases the old claim.
+        replaceLegacyDraftVisibleRoot(payload.previousVisibleDraftPath, saved.sourcePath)
         saved.expectedPointerGenerationId?.let { ThumbnailBitmapCache.invalidate("draft:$it") }
         testSeam?.parkIfRequested(DraftSaveStage.BeforePostCommitCleanup)
         withContext(Dispatchers.IO) {
@@ -5504,6 +5547,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 lastSuccessfullyRenderedParams = EditParams()
                 preview = null
                 releaseNativeSessionHandle(previousSession, previousSessionRelease)
+                // The incoming document replaced any previous legacy Draft
+                // visibility/document claims; the file itself stays on disk
+                // under its persistent pointer until reclamation revalidates.
+                replaceLegacyDraftVisibleRoot(previousState.draftSourcePath, nextState.draftSourcePath)
+                releaseLegacyDraftDocumentRoot(previousState.sourcePath)
                 deleteOwnedWorkingSource(context, previousState.sourcePath)
                 forceDraftSaveAsync()
             } catch (ce: CancellationException) {
@@ -6931,6 +6979,36 @@ fun exportPreview() {
         }
     }
 
+    /**
+     * Moves this ViewModel's visible Draft root from [previousPath] to
+     * [nextPath] in one atomic registry transition. Non-legacy paths resolve
+     * to null, so a generation-payload draftSourcePath simply releases the
+     * previous legacy claim without registering anything.
+     */
+    private fun replaceLegacyDraftVisibleRoot(previousPath: String?, nextPath: String?) {
+        val context = getApplication<Application>()
+        val previous = legacyCompatibilitySource(context, previousPath)?.absolutePath
+        val next = legacyCompatibilitySource(context, nextPath)?.absolutePath
+        if (previous == null && next == null) return
+        LegacyDraftSourceOwnership.replace(
+            legacyDraftSourceOwner,
+            LegacyDraftSourceOwnership.RootKind.VISIBLE_DRAFT,
+            previous,
+            next,
+        )
+    }
+
+    /** Releases this ViewModel's document root when it was a legacy source. */
+    private fun releaseLegacyDraftDocumentRoot(previousPath: String?) {
+        val context = getApplication<Application>()
+        val previous = legacyCompatibilitySource(context, previousPath)?.absolutePath ?: return
+        LegacyDraftSourceOwnership.release(
+            legacyDraftSourceOwner,
+            LegacyDraftSourceOwnership.RootKind.DOCUMENT,
+            previous,
+        )
+    }
+
     fun clearDraft() {
         if (!beginMaintenance("임시 저장을 삭제하는 중입니다")) return
         val context = getApplication<Application>()
@@ -7162,16 +7240,19 @@ fun exportPreview() {
                                     }
                                 }
                                 .onFailure { logDraftSaveFailure(it) }
-                            runCatching {
-                                    expectedPointer?.let {
-                                        ThumbnailBitmapCache.invalidate("draft:$it")
-                                    }
-                                    legacyDraftSourcePath?.let {
-                                        ThumbnailBitmapCache.invalidate("draft:legacy:$it")
-                                    }
-                                }
-                                .onFailure { logDraftSaveFailure(it) }
-                            true
+                             runCatching {
+                                     expectedPointer?.let {
+                                         ThumbnailBitmapCache.invalidate("draft:$it")
+                                     }
+                                     legacyDraftSourcePath?.let {
+                                         ThumbnailBitmapCache.invalidate("draft:legacy:$it")
+                                     }
+                                 }
+                                 .onFailure { logDraftSaveFailure(it) }
+                             // Durable clear succeeded: this ViewModel no
+                             // longer exposes a visible Draft root.
+                             replaceLegacyDraftVisibleRoot(visibleBefore.draftSourcePath, null)
+                             true
                             }
                         }
                     }
@@ -8512,6 +8593,10 @@ fun exportPreview() {
                 error("draft generation adoption was not confirmed")
             }
             restoreStateAdopted = true
+            // Adopted generation restore: visible Draft root moved onto the
+            // generation payload; any previous legacy document claim ends.
+            replaceLegacyDraftVisibleRoot(previousState.draftSourcePath, validated.sourceFile.absolutePath)
+            releaseLegacyDraftDocumentRoot(previousState.sourcePath)
             restoreBusyPublication = null
             createdSession = 0L
             createdSessionRelease = null
@@ -8871,6 +8956,18 @@ fun exportPreview() {
         var createdSession = 0L
         var createdSessionRelease: ((Long) -> Unit)? = null
         var expectedRestoreRevision: Int? = null
+        // In-flight legacy restore root: the exact source being decoded stays
+        // claimed until adoption transfers it to this ViewModel or a terminal
+        // path releases it.
+        val legacyRestoreOpOwner = LegacyDraftSourceOwnership.OwnerKey.create()
+        var legacyRestoreAdoptedToDocument = false
+        legacyCompatibilitySource(context, sourcePath)?.let {
+            LegacyDraftSourceOwnership.acquire(
+                legacyRestoreOpOwner,
+                LegacyDraftSourceOwnership.RootKind.OPERATION,
+                it.absolutePath,
+            )
+        }
         val restoreTracker =
             beginMemoryTracking(
                 "restoreLegacyDraft",
@@ -8891,6 +8988,7 @@ fun exportPreview() {
                     decodeSampledMutableBitmapWithExif(sourcePath, maxSide = 2048, restoreTracker)
                 preview = decoded
             }
+            DraftRestoreTestSeam.capture()?.await(DraftRestoreTestStage.SourceDecoded, sourcePath)
             val nextRevision = _uiState.value.revision + 1
             expectedRestoreRevision = nextRevision
             val activeQuickEffects =
@@ -9027,6 +9125,16 @@ fun exportPreview() {
                 completeRetry(DraftRestoreRetryOutcome.Stale)
                 return
             }
+            // Adoption succeeded: the operation root ends exactly where this
+            // ViewModel's document + visible Draft roots begin.
+            legacyCompatibilitySource(context, sourcePath)?.let {
+                LegacyDraftSourceOwnership.transferOperationToViewModel(
+                    operationOwner = legacyRestoreOpOwner,
+                    viewModelOwner = legacyDraftSourceOwner,
+                    path = it.absolutePath,
+                )
+            }
+            legacyRestoreAdoptedToDocument = true
             createdSession = 0L
             createdSessionRelease = null
             restoreBusyPublication = null
@@ -9082,6 +9190,9 @@ fun exportPreview() {
                 completeRetry(DraftRestoreRetryOutcome.Stale)
             }
         } finally {
+            if (!legacyRestoreAdoptedToDocument) {
+                LegacyDraftSourceOwnership.releaseOwner(legacyRestoreOpOwner)
+            }
             restoreTracker?.end()
         }
     }
@@ -9722,6 +9833,9 @@ fun exportPreview() {
         tracker.logSnapshot("preTrackerClose")
         tracker.close()
         uiState.value.sourcePath?.let { RestoredWorkingSourceOwnership.releaseDocument(File(it)) }
+        // Teardown drops only this ViewModel's legacy-source claims; claims
+        // held by other ViewModels or in-flight operations always survive.
+        LegacyDraftSourceOwnership.releaseOwner(legacyDraftSourceOwner)
         super.onCleared()
     }
 }
@@ -10955,6 +11069,24 @@ private fun persistentDraftThumbnailFile(context: Context): File =
 
 private fun persistentDraftDirectory(context: Context): File =
     File(context.filesDir, "drafts/current").apply { mkdirs() }
+
+/**
+ * Resolves [path] to a live legacy Draft compatibility source candidate:
+ * canonical containment inside drafts/current plus the owned naming contract.
+ * Non-family paths (generation payloads, incoming cache finals, restored
+ * working sources) resolve to null so they are never registered here; those
+ * families have their own ownership registries.
+ */
+private fun legacyCompatibilitySource(context: Context, path: String?): File? {
+    if (path == null) return null
+    return runCatching {
+        val file = File(path).canonicalFile
+        file.takeIf {
+            it.parentFile == persistentDraftDirectory(context).canonicalFile &&
+                LegacyDraftSourceOwnership.isOwnedSourceName(it.name)
+        }
+    }.getOrNull()
+}
 
 private data class TrackedDecode(val bitmap: Bitmap, val edge: Long)
 
