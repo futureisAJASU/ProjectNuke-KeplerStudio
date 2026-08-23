@@ -12548,30 +12548,15 @@ private fun String?.parseQuickEffects(): List<ActiveQuickEffect> =
         }
         .orEmpty()
 
-private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: String?): Int {
-    val now = System.currentTimeMillis()
-    val maxAgeMs = 7L * 24L * 60L * 60L * 1000L
-    val activePath = activeSourcePath?.let { File(it).absolutePath }
-    val files =
-        context.cacheDir
-            .listFiles { file ->
-                file.isFile && IncomingSourceArtifactNames.isFinalName(file.name)
-            }
-            .orEmpty()
-    var removed = 0
-    files.forEach { file ->
-        val expired = now - file.lastModified() > maxAgeMs
-        val isActive = activePath != null && file.absolutePath == activePath
-        if (
-            expired &&
-                !isActive &&
-                IncomingSourceLiveOwnership.deleteIfUnowned(file) == IncomingSourceLiveOwnership.DeleteResult.DELETED
-        ) {
-            removed += 1
-        }
-    }
-    return removed
-}
+private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: String?): Int =
+    TransientSourceMaintenance
+        .cleanupIncoming(
+            context,
+            TransientMaintenanceMode.AGE_BASED,
+            protectedPaths = listOfNotNull(activeSourcePath).map { File(it).absolutePath }.toSet(),
+            olderThanMillis = 7L * 24L * 60L * 60L * 1000L,
+        )
+        .deletedCount
 
 private fun saveEngineSelection(context: Context, engines: EngineSelection) {
     context

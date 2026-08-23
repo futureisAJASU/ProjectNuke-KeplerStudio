@@ -73,6 +73,8 @@ import com.projectnuke.keplerstudio.editor.IncomingSourceLiveOwnership
 import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ThumbnailBitmapCache
+import com.projectnuke.keplerstudio.editor.TransientMaintenanceMode
+import com.projectnuke.keplerstudio.editor.TransientSourceMaintenance
 import com.projectnuke.keplerstudio.ui.EditorScreenV2
 import java.io.File
 import java.text.DecimalFormat
@@ -823,25 +825,20 @@ private fun calculateTemporaryCacheStats(context: Context): TemporaryCacheStats 
 }
 
 private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: String?, draftSourcePath: String?, olderThan7DaysOnly: Boolean): TemporaryCacheCleanupResult {
-    val now = System.currentTimeMillis()
-    val protectedPaths = listOfNotNull(activeSourcePath, draftSourcePath).map { File(it).absolutePath }.toSet()
-    var removedCount = 0
-    var removedBytes = 0L
-    val files = listTemporarySourceFiles(context)
     val seam = IncomingSourceCacheCleanupTestSeam.capture()
     seam?.snapshotReached?.complete(Unit)
     seam?.snapshotRelease?.let { release -> runBlocking { release.await() } }
-    files.forEach { file ->
-        val shouldDelete = file.absolutePath !in protectedPaths && (!olderThan7DaysOnly || now - file.lastModified() > TemporarySourceMaxAgeMs)
-        if (shouldDelete) {
-            val size = file.length()
-            if (IncomingSourceLiveOwnership.deleteIfUnowned(file) == IncomingSourceLiveOwnership.DeleteResult.DELETED) {
-                removedCount += 1
-                removedBytes += size
-            }
-        }
-    }
-    return TemporaryCacheCleanupResult(removedCount, removedBytes)
+    // Single ownership-aware backend shared with startup reconciliation and
+    // editor age-based hygiene. The captured strings are advisory pre-filter
+    // only; protection is re-established authoritatively at delete time.
+    val report =
+        TransientSourceMaintenance.cleanupIncoming(
+            context,
+            mode = if (olderThan7DaysOnly) TransientMaintenanceMode.AGE_BASED else TransientMaintenanceMode.MANUAL,
+            protectedPaths = listOfNotNull(activeSourcePath, draftSourcePath).map { File(it).absolutePath }.toSet(),
+            olderThanMillis = if (olderThan7DaysOnly) TemporarySourceMaxAgeMs else null,
+        )
+    return TemporaryCacheCleanupResult(report.deletedCount, report.reclaimedBytes)
 }
 
 /** Test-only access to the real production cache cleanup path. */

@@ -175,15 +175,21 @@ internal suspend fun reconcileStartupArtifacts(
         seam?.cacheSnapshotRelease?.let { release ->
             withContext(Dispatchers.IO) { runCatching { release.await() } }
         }
+        entries += TransientSourceMaintenance
+            .cleanupIncoming(context, TransientMaintenanceMode.STARTUP, inProcessReferenced = referenced)
+            .entries
+            .map { it.toReconcileEntry() }
+        // Reporting parity: files matching no owned pattern are recorded as
+        // ignored exactly as before the unified backend took over deletion.
+        val handledPaths = entries.map { it.path }.toSet()
         cacheFiles.forEach { file ->
-            val canonical = runCatching { file.canonicalFile }.getOrNull()
-            if (canonical == null || canonical.parentFile != cacheRoot) return@forEach
-            when {
-                IncomingSourceArtifactNames.isStagingName(canonical.name) ->
-                    entries += recordIncomingSourceDeletion(canonical, StartupReconcileDisposition.DELETED_STAGING)
-                IncomingSourceArtifactNames.isFinalName(canonical.name) ->
-                    entries += recordIncomingSourceReferencedDeletion(canonical, referenced)
-                else -> entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
+            val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return@forEach
+            if (canonical.parentFile != cacheRoot) return@forEach
+            if (!IncomingSourceArtifactNames.isStagingName(canonical.name) &&
+                !IncomingSourceArtifactNames.isFinalName(canonical.name) &&
+                canonical.absolutePath !in handledPaths
+            ) {
+                entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
             }
         }
     }
@@ -195,12 +201,17 @@ internal suspend fun reconcileStartupArtifacts(
         seam?.workingSnapshotRelease?.let { release ->
             withContext(Dispatchers.IO) { runCatching { release.await() } }
         }
+        entries += TransientSourceMaintenance
+            .cleanupRestored(context, TransientMaintenanceMode.STARTUP, inProcessReferenced = referenced)
+            .entries
+            .map { it.toReconcileEntry() }
+        val handledPaths = entries.map { it.path }.toSet()
         workingFiles.forEach { file ->
-            val canonical = runCatching { file.canonicalFile }.getOrNull()
-            if (canonical == null || canonical.parentFile != workingRoot) return@forEach
-            if (RestoredWorkingSourceOwnership.isOwnedName(canonical.name)) {
-                entries += recordRestoredWorkingSourceDeletion(canonical, referenced)
-            } else {
+            val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return@forEach
+            if (canonical.parentFile != workingRoot) return@forEach
+            if (!RestoredWorkingSourceOwnership.isOwnedName(canonical.name) &&
+                canonical.absolutePath !in handledPaths
+            ) {
                 entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
             }
         }
@@ -210,12 +221,15 @@ internal suspend fun reconcileStartupArtifacts(
     if (legacyRoot != null) {
         withContext(Dispatchers.IO) {
             DraftStorageCoordinator.withWriteLock {
+                entries += TransientSourceMaintenance
+                    .cleanupLegacyTemps(context, TransientMaintenanceMode.STARTUP)
+                    .entries
+                    .map { it.toReconcileEntry() }
                 legacyRoot.listFiles()?.forEach { file ->
                     val canonical = runCatching { file.canonicalFile }.getOrNull()
                     if (canonical == null || canonical.parentFile != legacyRoot) return@forEach
                     when {
-                        canonical.name.endsWith(DRAFT_TEMP_SUFFIX) ->
-                            entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_TEMP)
+                        canonical.name.endsWith(DRAFT_TEMP_SUFFIX) -> Unit // handled by the unified temp pass above
                         canonical.name.startsWith("source_") && canonical.extension == "img" ->
                             // Ownership-aware reclamation: the persistent pointer
                             // was just reread under this write lock and live
@@ -294,59 +308,30 @@ private fun recordDeletion(file: File, disposition: StartupReconcileDisposition)
     )
 }
 
-private fun recordReferencedDeletion(
-    file: File,
-    referenced: Set<File>,
-    deletionDisposition: StartupReconcileDisposition,
-): StartupReconcileEntry {
-    val canonical = runCatching { file.canonicalFile }.getOrNull()
-        ?: return StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
-    return if (canonical in referenced) {
-        StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_REFERENCED)
-    } else {
-        recordDeletion(canonical, deletionDisposition)
-    }
-}
-
-private fun recordIncomingSourceDeletion(file: File, disposition: StartupReconcileDisposition): StartupReconcileEntry =
-    when (IncomingSourceLiveOwnership.deleteIfUnowned(file)) {
-        IncomingSourceLiveOwnership.DeleteResult.PRESERVED_LIVE_TRANSACTION ->
-            StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION)
-        IncomingSourceLiveOwnership.DeleteResult.PRESERVED_DOCUMENT ->
-            StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.PRESERVED_DOCUMENT)
-        IncomingSourceLiveOwnership.DeleteResult.DELETED -> StartupReconcileEntry(file.absolutePath, disposition)
-        IncomingSourceLiveOwnership.DeleteResult.FAILED ->
-            StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
-    }
-
-private fun recordIncomingSourceReferencedDeletion(file: File, referenced: Set<File>): StartupReconcileEntry {
-    val canonical = runCatching { file.canonicalFile }.getOrNull()
-        ?: return StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
-    if (canonical in referenced) return StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_REFERENCED)
-    return recordIncomingSourceDeletion(canonical, StartupReconcileDisposition.DELETED_UNREFERENCED)
-}
-
-private fun recordRestoredWorkingSourceDeletion(
-    file: File,
-    referenced: Set<File>,
-): StartupReconcileEntry {
-    val canonical = runCatching { file.canonicalFile }.getOrNull()
-        ?: return StartupReconcileEntry(file.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
-    if (canonical in referenced) {
-        return StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_REFERENCED)
-    }
-    return when (RestoredWorkingSourceOwnership.deleteIfUnowned(canonical)) {
-        RestoredWorkingSourceOwnership.DeleteResult.PRESERVED_LIVE_RESTORE ->
-            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_LIVE_RESTORE)
-        RestoredWorkingSourceOwnership.DeleteResult.PRESERVED_DOCUMENT ->
-            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.PRESERVED_DOCUMENT)
-        RestoredWorkingSourceOwnership.DeleteResult.DELETED ->
-            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.DELETED_UNREFERENCED)
-        RestoredWorkingSourceOwnership.DeleteResult.ALREADY_ABSENT ->
-            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.ALREADY_ABSENT)
-        RestoredWorkingSourceOwnership.DeleteResult.FAILED ->
-            StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
-    }
+/**
+ * Maps unified backend outcomes onto startup reconcile dispositions so the
+ * reconciler's public reporting (and its tests) keep their exact semantics.
+ */
+private fun TransientMaintenanceEntry.toReconcileEntry(): StartupReconcileEntry {
+    val disposition =
+        when (disposition) {
+            TransientEntryDisposition.DELETED ->
+                when (family) {
+                    TransientSourceFamily.INCOMING_STAGING -> StartupReconcileDisposition.DELETED_STAGING
+                    TransientSourceFamily.LEGACY_TEMP -> StartupReconcileDisposition.DELETED_TEMP
+                    else -> StartupReconcileDisposition.DELETED_UNREFERENCED
+                }
+            TransientEntryDisposition.PRESERVED_LIVE_TRANSACTION -> StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION
+            TransientEntryDisposition.PRESERVED_LIVE_DOCUMENT -> StartupReconcileDisposition.PRESERVED_DOCUMENT
+            TransientEntryDisposition.PRESERVED_LIVE_RESTORE -> StartupReconcileDisposition.PRESERVED_LIVE_RESTORE
+            TransientEntryDisposition.PRESERVED_REFERENCED,
+            TransientEntryDisposition.PRESERVED_PROTECTED,
+            -> StartupReconcileDisposition.PRESERVED_REFERENCED
+            TransientEntryDisposition.ALREADY_ABSENT -> StartupReconcileDisposition.ALREADY_ABSENT
+            TransientEntryDisposition.FAILED -> StartupReconcileDisposition.FAILED_DELETION
+            TransientEntryDisposition.SKIPPED_BY_MODE -> StartupReconcileDisposition.IGNORED_UNKNOWN
+        }
+    return StartupReconcileEntry(path, disposition)
 }
 
 private fun recordLegacySourceReclamation(

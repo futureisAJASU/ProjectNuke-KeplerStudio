@@ -322,22 +322,18 @@ class LegacyDraftSourceOwnershipProductionTest {
             awaitInit(vm)
             seamHandle.close()
 
-            assertNotNull(
-                "save must publish a generation; reason=${DraftSaveTestSeam.Registry.lastFailureReasonForTest} " +
-                    "msg=${vm.uiState.value.message} src=${vm.uiState.value.sourcePath} " +
-                    "draftSrc=${vm.uiState.value.draftSourcePath} busy=${vm.uiState.value.isBusy} " +
-                    "job=${vm.hasActiveDraftSaveJobForTest()}",
-                vm.uiState.value.draftGenerationId,
-            )
-            assertTrue("legacy source must survive settlement", decodedSource.isFile)
+            // The adoption save may still be unwinding when startup completes;
+            // gate on its terminal state before judging the outcome.
             awaitMainUntil {
-                // Settlement moved the visible Draft root onto the new
-                // generation payload; the document root remains on the legacy
-                // file and the operation root must be gone.
                 !vm.hasActiveDraftSaveJobForTest() &&
                     LegacyDraftSourceOwnership.kindsForTest(decodedSource) ==
                     setOf(LegacyDraftSourceOwnership.RootKind.DOCUMENT)
             }
+            assertNotNull(
+                "save must publish a generation; reason=${DraftSaveTestSeam.Registry.lastFailureReasonForTest}",
+                vm.uiState.value.draftGenerationId,
+            )
+            assertTrue("legacy source must survive settlement", decodedSource.isFile)
         } finally {
             renderRelease.complete(Unit)
             sessionFactory?.close()
