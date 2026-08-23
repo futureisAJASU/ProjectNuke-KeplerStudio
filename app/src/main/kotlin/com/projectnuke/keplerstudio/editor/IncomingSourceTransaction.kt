@@ -55,10 +55,36 @@ internal class IncomingSourceTransaction(
         context.applicationContext.contentResolver.openInputStream(uri)
     },
     private val idProvider: () -> String = { UUID.randomUUID().toString() },
+    /**
+     * Optional declared source size used for storage-pressure admission.
+     * Null/unknown sizes skip admission entirely - no invented estimates;
+     * mid-copy failures still clean up truthfully through the existing path.
+     */
+    private val declaredSizeProvider: suspend (Uri) -> Long? = { uri ->
+        queryDeclaredSourceSize(context.applicationContext, uri)
+    },
 ) {
+    private val appContext: Context = context.applicationContext
     private val cacheDirectory = context.applicationContext.cacheDir
 
     suspend fun acquire(uri: Uri): OwnedIncomingSource = withContext(Dispatchers.IO) {
+        // Storage-pressure admission BEFORE allocation: with a declared size,
+        // insufficient headroom throws before any staging file exists, so
+        // there is no staging leak, no final leak, no live ownership entry,
+        // and the previous document is untouched.
+        declaredSizeProvider(uri)?.let { declared ->
+            val admitted = StoragePressure.controller.ensureWriteHeadroom(
+                context = appContext,
+                targetVolumeFile = cacheDirectory,
+                requiredBytes = declared,
+                onInsufficient = { false },
+            ) { true }
+            if (!admitted) {
+                throw IllegalStateException(
+                    "insufficient storage for incoming source acquisition: $uri",
+                )
+            }
+        }
         val pair = allocatePair()
         val staging = pair.staging
         val final = pair.final

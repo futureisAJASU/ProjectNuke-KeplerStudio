@@ -5114,12 +5114,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     // until settlement finishes, fails, is cancelled, or is
                     // superseded.
                     try {
-                        committed =
-                            saveDraftSnapshot(context, payload, testSeam) {
-                                owningJob?.isActive != false &&
-                                    !shuttingDown &&
-                                    isDraftPayloadCurrent(payload)
-                            }
+            committed =
+                saveDraftSnapshot(context, payload, testSeam) {
+                    owningJob?.isActive != false &&
+                        !shuttingDown &&
+                        isDraftPayloadCurrent(payload)
+                }
                         committed?.let { saved ->
                             legacyCompatibilitySource(
                                 context,
@@ -10911,7 +10911,7 @@ private fun percentileFromHistogram(histogram: IntArray, count: Int, percentile:
     return 1f
 }
 
-private fun migrateDraftSourceIfNeeded(context: Context, storedSourcePath: String): File? {
+private suspend fun migrateDraftSourceIfNeeded(context: Context, storedSourcePath: String): File? {
     val storedSource = File(storedSourcePath)
     if (!storedSource.isFile) return null
     if (isOwnedDraftSource(context, storedSource)) return storedSource
@@ -10951,7 +10951,7 @@ private data class DraftRecoveryResolution(
     val debugInfo: RecoveryDebugInfo,
 )
 
-private fun resolveDraftRecovery(
+private suspend fun resolveDraftRecovery(
     context: Context,
     storedSourcePath: String,
 ): DraftRecoveryResolution {
@@ -10991,18 +10991,34 @@ private fun resolveDraftRecovery(
     )
 }
 
-private fun persistDraftSourceFile(context: Context, sourcePath: String): File? {
+private suspend fun persistDraftSourceFile(context: Context, sourcePath: String): File? {
     val source = File(sourcePath).takeIf { it.isFile } ?: return null
     val draftDirectory = persistentDraftDirectory(context)
     if (isOwnedDraftSource(context, source)) return source
     val generation = File(draftDirectory, "source_${UUID.randomUUID()}.img")
-    copyFileAtomically(source, generation)
-    return generation
+    // Known-size admission: the copy length is exactly the source length.
+    // Insufficient storage yields null so the save falls back truthfully
+    // WITHOUT touching the previous valid Draft.
+    val copied = StoragePressure.controller.ensureWriteHeadroom(
+        context = context,
+        targetVolumeFile = draftDirectory,
+        requiredBytes = runCatching { source.length() }.getOrDefault(0L),
+        onInsufficient = { null as File? },
+    ) {
+        // Copy errors propagate exactly as before this admission existed.
+        copyFileAtomically(source, generation)
+        generation
+    }
+    return copied
 }
 
 internal fun newBaseContentToken(): String = UUID.randomUUID().toString()
 
-private fun persistDraftSourceFileIfNeeded(
+/** Test-only access to the real production compatibility-source copy path. */
+internal suspend fun persistDraftSourceFileForTest(context: Context, sourcePath: String): File? =
+    persistDraftSourceFile(context, sourcePath)
+
+private suspend fun persistDraftSourceFileIfNeeded(
     context: Context,
     sourcePath: String,
 ): DraftSourceResult? {
@@ -12031,10 +12047,25 @@ private fun createDraftSavePayload(
     }
 }
 
-private fun copyGenerationSourceToWorkingFile(context: Context, source: File): File {
+private suspend fun copyGenerationSourceToWorkingFile(context: Context, source: File): File {
     val directory = File(context.filesDir, "editor_sources").apply { mkdirs() }.canonicalFile
     val destination = File(directory, "restored_${UUID.randomUUID()}.img").canonicalFile
     check(destination.parentFile == directory)
+    // Known-size admission before ANY side effect: on insufficient storage we
+    // throw before ownership registration and before the file exists, so the
+    // generation payload stays untouched, no restored_* orphan is created and
+    // restore ownership is never taken.
+    val admitted = StoragePressure.controller.ensureWriteHeadroom(
+        context = context,
+        targetVolumeFile = directory,
+        requiredBytes = runCatching { source.length() }.getOrDefault(0L),
+        onInsufficient = { false },
+    ) { true }
+    if (!admitted) {
+        throw IllegalStateException(
+            "insufficient storage for restored draft working source: ${source.absolutePath}",
+        )
+    }
     RestoredWorkingSourceOwnership.acquire(destination)
     try {
         source.inputStream().use { input ->
@@ -12052,8 +12083,11 @@ private fun copyGenerationSourceToWorkingFile(context: Context, source: File): F
     }
 }
 
-private fun deleteOwnedWorkingSource(context: Context, sourcePath: String?) {
-    if (sourcePath == null) return
+/** Test-only access to the real production restored-working-copy path. */
+internal suspend fun copyGenerationSourceToWorkingFileForTest(context: Context, source: File): File =
+    copyGenerationSourceToWorkingFile(context, source)
+
+private fun deleteOwnedWorkingSource(context: Context, sourcePath: String?) {    if (sourcePath == null) return
     val filesDirectory =
         runCatching { File(context.filesDir, "editor_sources").canonicalFile }.getOrNull() ?: return
     val cacheDirectory = runCatching { context.cacheDir.canonicalFile }.getOrNull() ?: return

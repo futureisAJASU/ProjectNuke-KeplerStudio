@@ -46,7 +46,7 @@ internal fun finalizeDraftGeneration(context: Context, staging: DraftGenerationD
     return if (source.renameTo(target)) DraftGenerationDirectory(target) else null
 }
 
-internal fun writeDraftGeneration(
+internal suspend fun writeDraftGeneration(
     context: Context,
     genDir: DraftGenerationDirectory,
     manifest: DraftGenerationManifest,
@@ -57,6 +57,24 @@ internal fun writeDraftGeneration(
     maskEntries: List<Pair<SelectionLayer, DraftSelectionLayerEntry>>,
     isCurrent: () -> Boolean
 ): Boolean {
+    // Known-size admission BEFORE any generation byte is written. Only
+    // components with exact on-disk sizes are counted (reusable source copy,
+    // manifest bytes); bitmap encodes have unknown compressed sizes and are
+    // deliberately NOT invented - their write failures surface truthfully
+    // through the existing per-file checks and directory rollback below.
+    val knownRequiredBytes =
+        saturatingAdd(
+            reusableSourceFile?.takeIf { it.isFile }?.length() ?: 0L,
+            runCatching { manifestJsonBytes(manifest) }.getOrDefault(0L),
+        )
+    val admitted =
+        StoragePressure.controller.ensureWriteHeadroom(
+            context = context,
+            targetVolumeFile = genDir.root,
+            requiredBytes = knownRequiredBytes,
+            onInsufficient = { false },
+        ) { true }
+    if (!admitted) return false
     val sourceFile = genDir.sourceFile
     try {
         if (!isCurrent()) return false
@@ -354,3 +372,6 @@ internal fun EditParams.isValidDraftParams(): Boolean {
     val unsigned = listOf(sharpness, noiseReduction, luminanceNoiseReduction, colorNoiseReduction, noiseDetailProtection)
     return signed.all { it.isFinite() && it in -1f..1f } && unsigned.all { it.isFinite() && it in 0f..1f }
 }
+
+private fun manifestJsonBytes(manifest: DraftGenerationManifest): Long =
+    runCatching { manifest.toJson().toString().toByteArray(Charsets.UTF_8).size.toLong() }.getOrDefault(0L)
