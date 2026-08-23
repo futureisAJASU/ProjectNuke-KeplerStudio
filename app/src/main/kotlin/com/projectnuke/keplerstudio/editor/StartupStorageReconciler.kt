@@ -12,6 +12,7 @@ internal enum class StartupReconcileDisposition {
     PRESERVED_REFERENCED,
     PRESERVED_LIVE_TRANSACTION,
     PRESERVED_LIVE_RESTORE,
+    PRESERVED_LIVE_VIEWMODEL,
     PRESERVED_DOCUMENT,
     ALREADY_ABSENT,
     DELETED_STAGING,
@@ -37,6 +38,7 @@ internal data class StartupReconcileOutcome(
             it.disposition == StartupReconcileDisposition.PRESERVED_REFERENCED ||
             it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION ||
             it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_RESTORE ||
+            it.disposition == StartupReconcileDisposition.PRESERVED_LIVE_VIEWMODEL ||
             it.disposition == StartupReconcileDisposition.PRESERVED_DOCUMENT
     }
     val ignoredCount: Int get() = entries.count { it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN }
@@ -215,7 +217,11 @@ internal suspend fun reconcileStartupArtifacts(
                         canonical.name.endsWith(DRAFT_TEMP_SUFFIX) ->
                             entries += recordDeletion(canonical, StartupReconcileDisposition.DELETED_TEMP)
                         canonical.name.startsWith("source_") && canonical.extension == "img" ->
-                            entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
+                            // Ownership-aware reclamation: the persistent pointer
+                            // was just reread under this write lock and live
+                            // ViewModel/operation roots are consulted atomically
+                            // at the registry delete boundary.
+                            entries += recordLegacySourceReclamation(context, canonical)
                         else ->
                             entries += StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.IGNORED_UNKNOWN)
                     }
@@ -342,6 +348,31 @@ private fun recordRestoredWorkingSourceDeletion(
             StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
     }
 }
+
+private fun recordLegacySourceReclamation(
+    context: Context,
+    file: File,
+): StartupReconcileEntry =
+    when (val entry = LegacyDraftSourceReclamation.reclaimCandidateUnsafe(context = context, candidate = file)) {
+        is LegacySourceReclaimEntry -> when (entry.disposition) {
+            LegacySourceReclaimDisposition.PRESERVED_PERSISTENT_POINTER ->
+                StartupReconcileEntry(entry.path, StartupReconcileDisposition.PRESERVED_REFERENCED)
+            LegacySourceReclaimDisposition.PRESERVED_LIVE_VIEWMODEL ->
+                StartupReconcileEntry(entry.path, StartupReconcileDisposition.PRESERVED_LIVE_VIEWMODEL)
+            LegacySourceReclaimDisposition.PRESERVED_MIGRATION_COMPATIBILITY ->
+                StartupReconcileEntry(entry.path, StartupReconcileDisposition.IGNORED_UNKNOWN)
+            LegacySourceReclaimDisposition.PRESERVED_LIVE_DOCUMENT ->
+                StartupReconcileEntry(entry.path, StartupReconcileDisposition.PRESERVED_DOCUMENT)
+            LegacySourceReclaimDisposition.PRESERVED_OPERATION ->
+                StartupReconcileEntry(entry.path, StartupReconcileDisposition.PRESERVED_LIVE_TRANSACTION)
+            LegacySourceReclaimDisposition.DELETED ->
+                StartupReconcileEntry(entry.path, StartupReconcileDisposition.DELETED_UNREFERENCED)
+            LegacySourceReclaimDisposition.ALREADY_ABSENT ->
+                StartupReconcileEntry(entry.path, StartupReconcileDisposition.ALREADY_ABSENT)
+            LegacySourceReclaimDisposition.FAILED ->
+                StartupReconcileEntry(entry.path, StartupReconcileDisposition.FAILED_DELETION)
+        }
+    }
 
 private const val WORKING_SOURCES_DIR = "editor_sources"
 private const val DRAFT_TEMP_SUFFIX = ".tmp"

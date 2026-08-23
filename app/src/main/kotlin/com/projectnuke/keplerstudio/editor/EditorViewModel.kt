@@ -5091,6 +5091,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         payload.selectionLayers.forEach {
             draftTracker?.track(it.bitmap, "persistDraftSnapshot:selectionCopy:${it.id}")
         }
+        // Capture-time operation root: the instant this payload captured the
+        // path as previousVisibleDraftPath it must stay protected until the
+        // save settles, fails, is cancelled, or is superseded.
+        val saveLegacyOwner = LegacyDraftSourceOwnership.OwnerKey.create()
+        legacyCompatibilitySource(context, payload.previousVisibleDraftPath)?.let {
+            LegacyDraftSourceOwnership.acquire(
+                saveLegacyOwner,
+                LegacyDraftSourceOwnership.RootKind.OPERATION,
+                it.absolutePath,
+            )
+        }
         val owningJob = currentCoroutineContext()[Job]
         var committed: DraftSaveResult? = null
         var settled = false
@@ -5098,19 +5109,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             withContext(Dispatchers.IO) {
                 draftSaveMutex.withLock {
                     // In-flight save roots: the captured previous visible Draft
-                    // source stays claimed while this save can still consume
-                    // or roll back over it, and the freshly created
-                    // compatibility source stays claimed until settlement
-                    // finishes, fails, is cancelled, or is superseded.
-                    val saveLegacyOwner = LegacyDraftSourceOwnership.OwnerKey.create()
+                    // source was claimed when the payload was built (above);
+                    // the freshly created compatibility source is claimed here
+                    // until settlement finishes, fails, is cancelled, or is
+                    // superseded.
                     try {
-                        legacyCompatibilitySource(context, payload.previousVisibleDraftPath)?.let {
-                            LegacyDraftSourceOwnership.acquire(
-                                saveLegacyOwner,
-                                LegacyDraftSourceOwnership.RootKind.OPERATION,
-                                it.absolutePath,
-                            )
-                        }
                         committed =
                             saveDraftSnapshot(context, payload, testSeam) {
                                 owningJob?.isActive != false &&
@@ -5224,13 +5227,34 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.IO) {
             DraftStorageCoordinator.withWriteLock {
                 val actualPointer = DraftStorageCoordinator.readCurrentPointerUnsafe(context)
+                var compatPublished = false
                 runCatching {
                     // Only write legacy compatibility when the saved generation is still authoritative
                     val currentPointer = currentDraftGenerationId(context)
                     if (currentPointer == saved.generationId) {
                         persistLegacyDraftCompatibility(context, payload, saved)
+                        compatPublished = true
                     }
                 }.onFailure(::logDraftSaveFailure)
+                if (compatPublished) {
+                    // A newer compatibility source is durably published under
+                    // this write lock; obsolete older sources may now be
+                    // reclaimed. Every candidate is reread against the live
+                    // pointer and the multi-owner registry at delete time, so a
+                    // source another ViewModel or in-flight operation still
+                    // needs is preserved truthfully.
+                    runCatching {
+                        LegacyDraftSourceReclamation.sweepObsoleteSourcesUnsafe(context)
+                            .filter { it.disposition == LegacySourceReclaimDisposition.FAILED }
+                            .forEach { entry ->
+                                logDraftSaveFailure(
+                                    IllegalStateException(
+                                        "obsolete legacy source reclamation failed: ${entry.path}",
+                                    ),
+                                )
+                            }
+                    }.onFailure(::logDraftSaveFailure)
+                }
                 runCatching {
                     // Always preserve actual authoritative current pointer + saved directory
                     DraftStorageCoordinator.deleteAllExceptUnsafe(
@@ -7212,13 +7236,40 @@ fun exportPreview() {
                                         val isOwnedDraft =
                                             matchesLegacySource && isOwnedDraftSource(context, file)
                                         if (matchesLegacySource && isOwnedDraft) {
-                                            val deleted = file.delete()
-                                            if (!deleted)
-                                                logDraftSaveFailure(
-                                                    IllegalStateException(
-                                                        "failed to delete legacy draft source: ${file.absolutePath}"
+                                            // Multi-VM safety: the cleared pointer no
+                                            // longer protects this file, but another live
+                                            // ViewModel or in-flight operation may still
+                                            // own it. The ownership check and the physical
+                                            // delete share one registry boundary.
+                                            when (LegacyDraftSourceOwnership.deleteIfUnowned(file)) {
+                                                LegacyDraftSourceOwnership.DeleteResult.DELETED,
+                                                LegacyDraftSourceOwnership.DeleteResult.ALREADY_ABSENT,
+                                                -> Unit
+                                                LegacyDraftSourceOwnership.DeleteResult.PRESERVED_OPERATION ->
+                                                    logDraftSaveFailure(
+                                                        IllegalStateException(
+                                                            "clearDraft preserved in-flight legacy source: ${file.absolutePath}",
+                                                        ),
                                                     )
-                                                )
+                                                LegacyDraftSourceOwnership.DeleteResult.PRESERVED_LIVE_DOCUMENT ->
+                                                    logDraftSaveFailure(
+                                                        IllegalStateException(
+                                                            "clearDraft preserved live document legacy source: ${file.absolutePath}",
+                                                        ),
+                                                    )
+                                                LegacyDraftSourceOwnership.DeleteResult.PRESERVED_LIVE_VIEWMODEL ->
+                                                    logDraftSaveFailure(
+                                                        IllegalStateException(
+                                                            "clearDraft preserved ViewModel legacy source: ${file.absolutePath}",
+                                                        ),
+                                                    )
+                                                LegacyDraftSourceOwnership.DeleteResult.FAILED ->
+                                                    logDraftSaveFailure(
+                                                        IllegalStateException(
+                                                            "failed to delete legacy draft source: ${file.absolutePath}",
+                                                        ),
+                                                    )
+                                            }
                                         }
                                     }
                             }
@@ -11067,7 +11118,7 @@ private fun persistentDraftSourceFile(context: Context): File =
 private fun persistentDraftThumbnailFile(context: Context): File =
     File(persistentDraftDirectory(context), DRAFT_THUMBNAIL_FILE_NAME)
 
-private fun persistentDraftDirectory(context: Context): File =
+internal fun persistentDraftDirectory(context: Context): File =
     File(context.filesDir, "drafts/current").apply { mkdirs() }
 
 /**

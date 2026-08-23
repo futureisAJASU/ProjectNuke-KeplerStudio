@@ -299,6 +299,7 @@ class LegacyDraftSourceOwnershipProductionTest {
             )
 
             val seam = DraftSaveTestSeam(parkAt = DraftSaveStage.StorageTransactionAcquired)
+            DraftSaveTestSeam.Registry.lastFailureReasonForTest = null
             val seamHandle = harness.ownSeam(DraftSaveTestSeam.install(vm, seam))
             renderRelease.complete(Unit)
 
@@ -322,7 +323,10 @@ class LegacyDraftSourceOwnershipProductionTest {
             seamHandle.close()
 
             assertNotNull(
-                "save must publish a generation; reason=${DraftSaveTestSeam.lastFailureReasonForTest}",
+                "save must publish a generation; reason=${DraftSaveTestSeam.Registry.lastFailureReasonForTest} " +
+                    "msg=${vm.uiState.value.message} src=${vm.uiState.value.sourcePath} " +
+                    "draftSrc=${vm.uiState.value.draftSourcePath} busy=${vm.uiState.value.isBusy} " +
+                    "job=${vm.hasActiveDraftSaveJobForTest()}",
                 vm.uiState.value.draftGenerationId,
             )
             assertTrue("legacy source must survive settlement", decodedSource.isFile)

@@ -167,10 +167,11 @@ class StartupStorageReconcilerProductionTest {
         assertEquals(0, outcome.failedCount)
     }
 
-    // Legacy current-dir temps are reclaimed; all legacy source files and
-    // unrelated files are ignored until the later pressure phase.
+    // Legacy current-dir temps are reclaimed; ownership-aware reclamation now
+    // also reclaims unreferenced source_*.img candidates, while the fixed
+    // historical source.img and thumbnail.jpg stay conservatively untouched.
     @Test
-    fun legacyCurrentTempsDeletedSourcesPreserved() = runBlocking {
+    fun legacyCurrentTempsDeletedUnreferencedSourcesReclaimed() = runBlocking {
         val legacy = context.filesDir.resolve("drafts/current").apply { mkdirs() }
         val tmp = File(legacy, "source.img.tmp").apply { writeText("t") }
         val orphanSource = File(legacy, "source_orphan.img").apply { writeText("o") }
@@ -180,12 +181,29 @@ class StartupStorageReconcilerProductionTest {
         val outcome = reconcileStartupArtifacts(context, null)
 
         assertFalse("temp must be deleted", tmp.exists())
-        assertTrue("legacy source must be preserved", orphanSource.exists())
-        assertTrue("legacy live source must be untouched", liveSource.exists())
+        assertFalse("unreferenced owned source must be reclaimed", orphanSource.exists())
+        assertTrue("fixed legacy source must be preserved (migration compatibility)", liveSource.exists())
         assertTrue("legacy thumbnail must be untouched", liveThumb.exists())
         assertEquals(1, outcome.entries.count { it.disposition == StartupReconcileDisposition.DELETED_TEMP })
-        assertEquals(0, outcome.entries.count { it.disposition == StartupReconcileDisposition.DELETED_UNREFERENCED })
-        assertEquals(3, outcome.entries.count { it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN })
+        assertEquals(1, outcome.entries.count { it.disposition == StartupReconcileDisposition.DELETED_UNREFERENCED })
+        assertEquals(2, outcome.entries.count { it.disposition == StartupReconcileDisposition.IGNORED_UNKNOWN })
+    }
+
+    // A source_*.img that IS the current KEY_DRAFT_SOURCE target survives
+    // startup reclamation as PRESERVED_REFERENCED.
+    @Test
+    fun legacyPointerTargetSurvivesStartupReclamation() = runBlocking {
+        val legacy = context.filesDir.resolve("drafts/current").apply { mkdirs() }
+        val pointerTarget = File(legacy, "source_pointer.img").apply { writeText("p") }
+        prefs().edit().putString(KEY_DRAFT_SOURCE, pointerTarget.absolutePath).commit()
+
+        val outcome = reconcileStartupArtifacts(context, null)
+
+        assertTrue("current legacy pointer target must survive", pointerTarget.exists())
+        assertEquals(
+            1,
+            outcome.entries.count { it.disposition == StartupReconcileDisposition.PRESERVED_REFERENCED },
+        )
     }
 
     // Stale uuid-suffixed temps inside the pointer generation are reclaimed while
