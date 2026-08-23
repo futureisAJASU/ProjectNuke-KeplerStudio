@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.ViewModelStore
 import com.projectnuke.keplerstudio.ui.RemasterModelSession
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -226,7 +227,18 @@ internal fun startupDiagnosticForTest(
 }
 
 internal fun yieldToEditorBackgroundForTest() {
-    runBlocking { withContext(Dispatchers.Default) { yield() } }
+    runBlocking {
+        withContext(Dispatchers.Default) {
+            yield()
+            // Production phases that park on Mutex.withLock (startup
+            // reconciliation waiting behind the adoption save) or run
+            // Dispatchers.IO present NO runnable Default tasks to yield to;
+            // without a real-time quantum here, callers' deterministic
+            // iteration budgets can exhaust in sub-second wall time during
+            // legitimate cold-cache IO and report false startup stalls.
+            delay(1)
+        }
+    }
 }
 
 internal fun deleteDirectoryIfPresentForTest(path: File) {
