@@ -279,14 +279,15 @@ internal class EditorHistoryCoordinator(
      * All existence checking runs on Dispatchers.IO via storage.deleteEntries.
      * Duplicate directories are not re-tracked.
      */
-    private suspend fun settleColdEntries(discarded: Collection<EditorHistoryEntry>) {
-        if (discarded.isEmpty()) return
+    private suspend fun settleColdEntries(discarded: Collection<EditorHistoryEntry>): DeletionResult {
+        if (discarded.isEmpty()) return DeletionResult(true, emptyList())
         val result = storage.deleteEntries(discarded)
         for (payload in result.failedPayloads) {
             if (pendingDeletionDebt.none { it.directory == payload.directory }) {
                 pendingDeletionDebt.add(payload)
             }
         }
+        return result
     }
 
     /**
@@ -312,15 +313,32 @@ internal class EditorHistoryCoordinator(
      * Snapshot the debt list on Main, delete all via one IO batch, then reconcile on Main.
      * No iterator is held across a suspend boundary.
      * Debt added by a concurrent replacement/close during IO is preserved.
+     * CancellationException propagates; other storage failures yield a truthful
+     * zero with debt untouched. Returns the bytes of debt rows confirmed absent,
+     * so every row settles exactly once.
      */
-    private suspend fun retryPendingDeletions() {
-        if (pendingDeletionDebt.isEmpty()) return
+    private suspend fun retryPendingDeletions(): Long {
+        if (pendingDeletionDebt.isEmpty()) return 0L
         val snapshot = pendingDeletionDebt.toList()
-        val result = runCatching { storage.deletePayloads(snapshot) }.getOrNull() ?: return
+        val result = try {
+            storage.deletePayloads(snapshot)
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            return 0L
+        }
         val snapshotDirs = snapshot.map { it.directory }.toSet()
-        val failedDirs = result.failedPayloads.map { it.directory }.toSet()
+        val failedDirs = result.failedPayloads.map { it.directory }.toHashSet()
         // Remove only debt that was in the snapshot AND was confirmed absent.
-        pendingDeletionDebt.removeAll { it.directory in snapshotDirs && it.directory !in failedDirs }
+        var freedBytes = 0L
+        pendingDeletionDebt.removeAll { debt ->
+            val confirmedAbsent = debt.directory in snapshotDirs && debt.directory !in failedDirs
+            if (confirmedAbsent) {
+                freedBytes = BitmapMemoryBudget.saturatingAdd(freedBytes, debt.bytes)
+            }
+            confirmedAbsent
+        }
+        return freedBytes
     }
 
     fun flags(): HistoryFlags = visibleFlags
@@ -937,6 +955,86 @@ internal class EditorHistoryCoordinator(
         discarded.add(entry)
         return released
     }
+
+    /**
+     * Storage-pressure request boundary. The process-global pressure controller
+     * ASKS history to free disk space through this method; it receives neither
+     * paths nor payloads and never touches editor_history_v3 itself.
+     *
+     * Authority rules mirror [recover]:
+     *  - exclusive coordinator operation (never overlaps navigation/admission),
+     *    so entries captured by an in-flight navigation are structurally
+     *    unreachable;
+     *  - the current Undo/Redo tips stay protected; only non-tip cold payloads
+     *    and pending deletion debt are eligible;
+     *  - every mutation after a suspension revalidates operationToken and
+     *    documentGeneration; superseded work settles stale truthfully and never
+     *    mutates the replacing document's state;
+     *  - physically-failed deletes remain represented as deletion debt and
+     *    their bytes are NEVER reported as reclaimed.
+     *
+     * Returns best-effort CONFIRMED-freed disk bytes (>= 0), or null when the
+     * coordinator cannot attempt reclamation right now (busy/closed). The value
+     * is reporting only; the caller's capacity re-read stays authoritative.
+     */
+    suspend fun reclaimHistoryForStoragePressure(): Long? {
+        checkMainOwner()
+        if (closed || operationBusy) return null
+        val token = beginOperation()
+        val generation = documentGeneration
+        diagnosticOperationKind = TrackerSession.HistoryOperationKind.Recovery
+        diagnosticRecoveryMode = "storage-pressure"
+        diagnosticOperationPhase = "trimming"
+        publishState()
+        try {
+            val protectedSet = buildSet {
+                undo.lastOrNull()?.id?.let { add(it) }
+                redo.lastOrNull()?.id?.let { add(it) }
+            }
+            // First settle previously-failed deletions; confirmed successes
+            // report their actual bytes exactly once as debt rows are removed.
+            var reclaimed = retryPendingDeletions()
+            if (!isOperationCurrent(token, generation)) return reclaimed
+            // Eligible disk consumers: non-tip COLD payloads. Hot entries own no
+            // disk bytes; spilling them under disk pressure would only grow the
+            // footprint. Metadata-only snapshots intentionally stay hot.
+            val candidates = (undo + redo).filter {
+                it.payloadState == HistoryPayloadState.Cold &&
+                    it.coldPayload != null &&
+                    it.id !in protectedSet
+            }
+            if (candidates.isEmpty()) return reclaimed
+            // Deque mutation runs only while still current: there is no
+            // suspension between the revalidation above and this block.
+            val discarded = ArrayList<EditorHistoryEntry>(candidates.size)
+            candidates.forEach { entry ->
+                undo.remove(entry)
+                redo.remove(entry)
+                entry.payloadState = HistoryPayloadState.Discarded
+                discarded.add(entry)
+            }
+            publishState()
+            val result = settleColdEntries(discarded)
+            // Revalidate after the IO suspension: a replacement/close owns any
+            // further settlement; we only report what was actually confirmed.
+            val failedDirectories = HashSet<File>().also { dirs ->
+                result.failedPayloads.forEach { dirs.add(it.directory) }
+            }
+            candidates.forEach { entry ->
+                val payload = entry.coldPayload ?: return@forEach
+                if (payload.directory !in failedDirectories) {
+                    reclaimed = BitmapMemoryBudget.saturatingAdd(reclaimed, payload.bytes)
+                }
+            }
+            return reclaimed
+        } finally {
+            finishOperation(token)
+        }
+    }
+
+    /** Pure read-only inspection for tests: pending physical-deletion debt bytes. */
+    internal fun pendingDeletionDebtBytesForTest(): Long =
+        pendingDeletionDebt.fold(0L) { sum, payload -> BitmapMemoryBudget.saturatingAdd(sum, payload.bytes) }
 
     fun replaceDocument() {
         checkMainOwner()

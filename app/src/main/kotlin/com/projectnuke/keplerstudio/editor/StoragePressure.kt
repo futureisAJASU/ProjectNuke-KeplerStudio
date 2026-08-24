@@ -35,10 +35,9 @@ internal fun saturatingAdd(a: Long, b: Long): Long {
  * pressure sequence may ASK history to reclaim through its own coordinator;
  * it never touches editor_history_v3 directories itself.
  *
- * Phase 4 keeps the registry injectable and leaves production unwired:
- * without a handler the sequence simply skips the history step truthfully.
- * Phase 5 wires the real EditorHistoryCoordinator recovery here once its
- * navigation-protection interplay is hardened.
+ * The production handler is owned by the live EditorViewModel: each editor
+ * registers its own history-coordinator-bound handler with owner identity.
+ * Without a handler the sequence skips the history step truthfully.
  */
 internal object HistoryPressureRecovery {
     internal fun interface Handler {
@@ -48,16 +47,38 @@ internal object HistoryPressureRecovery {
 
     private val lock = Any()
 
-    @Volatile private var handler: Handler? = null
+    private var handler: Handler? = null
+    private var owner: Any? = null
 
-    fun install(newHandler: Handler): AutoCloseable =
+    /**
+     * Installs [newHandler] on behalf of [owner], atomically replacing any
+     * previous registration (the newest live owner wins linearly). The
+     * returned AutoCloseable unregisters ONLY while [owner] is still the
+     * current owner: a stale owner's teardown can never remove a newer
+     * owner's handler, so VM teardown cannot strip another editor's
+     * registration and replacement is linearizable. Registration is purely
+     * in-memory — process death clears it naturally and no persistent
+     * correctness depends on it surviving.
+     */
+    fun install(owner: Any, newHandler: Handler): AutoCloseable =
         synchronized(lock) {
-            check(handler == null) { "history pressure recovery handler already installed" }
-            handler = newHandler
-            AutoCloseable { synchronized(lock) { if (handler === newHandler) handler = null } }
+            this.owner = owner
+            this.handler = newHandler
+            AutoCloseable {
+                synchronized(lock) {
+                    if (this.owner === owner) {
+                        this.owner = null
+                        this.handler = null
+                    }
+                }
+            }
         }
 
     internal fun isInstalled(): Boolean = synchronized(lock) { handler != null }
+
+    /** Test-only: true when [candidate] is currently the registered owner. */
+    internal fun isOwnerInstalled(candidate: Any): Boolean =
+        synchronized(lock) { owner != null && owner === candidate }
 
     /**
      * Suspends while asking the registered history coordinator to reclaim.

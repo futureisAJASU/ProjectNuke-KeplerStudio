@@ -789,6 +789,21 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             onChanged = { updateHistoryFlags() },
         )
         .also { historyCoordinator.onFlagsChanged = { updateHistoryFlags() } }
+    /**
+     * Process-wide storage-pressure requests resolve to THIS editor's history
+     * coordinator while it lives. Registration is owner-keyed: a newer editor
+     * atomically replaces an older registration, and a stale owner's teardown
+     * can never remove the newer owner's handler — a replaced or destroyed
+     * editor can never answer pressure for another document. The registration
+     * is purely in-memory: process death clears it naturally and no persistent
+     * correctness depends on it surviving.
+     */
+    private val historyPressureRecoveryRegistration: AutoCloseable =
+        HistoryPressureRecovery.install(this) {
+            withContext(Dispatchers.Main.immediate) {
+                historyCoordinator.reclaimHistoryForStoragePressure()
+            }
+        }
     private val uiStateOwnership: UiStateOwnershipReconciler? =
         trackerSession?.let(::UiStateOwnershipReconciler)
     internal val bitmapLeaseLedger = BitmapLeaseLedger()
@@ -9876,6 +9891,10 @@ fun exportPreview() {
         RemasterModelSession.unload()
         historyActivity.cancel()
         discardPendingParamUndoSnapshot()
+        // Unregister this editor's pressure handler BEFORE closing the
+        // coordinator. Owner-keyed: if a newer editor replaced us, this is a
+        // no-op and the newer registration survives.
+        historyPressureRecoveryRegistration.close()
         historyCoordinator.close()
         uiStateOwnership?.releaseAll()
         uiState.value.sourcePath?.let { IncomingSourceLiveOwnership.releaseDocument(File(it)) }

@@ -119,7 +119,7 @@ class StoragePressureProductionTest {
         var usable = AtomicLong(0L)
         val historyCalls = AtomicInteger(0)
         val historyHandle =
-            HistoryPressureRecovery.install {
+            HistoryPressureRecovery.install("history-makes-room") {
                 historyCalls.incrementAndGet()
                 usable.set(reserve + 7L)
                 7L
@@ -144,7 +144,7 @@ class StoragePressureProductionTest {
     fun stillInsufficientAfterEverySafeStep() = runBlocking {
         val reserve = 1_000L
         val usable = AtomicLong(0L)
-        val historyHandle = HistoryPressureRecovery.install { 0L }
+        val historyHandle = HistoryPressureRecovery.install("still-insufficient") { 0L }
         try {
             val controller =
                 StoragePressureController(
@@ -169,7 +169,7 @@ class StoragePressureProductionTest {
         val readCount = AtomicInteger(0)
         val sweepCalls = AtomicInteger(0)
         val historyCalls = AtomicInteger(0)
-        val historyHandle = HistoryPressureRecovery.install { historyCalls.incrementAndGet(); 0L }
+        val historyHandle = HistoryPressureRecovery.install("shrinking-capacity") { historyCalls.incrementAndGet(); 0L }
         try {
             val controller =
                 StoragePressureController(
@@ -206,7 +206,7 @@ class StoragePressureProductionTest {
         var currentCapacity = 0L
         val historyCalls = AtomicInteger(0)
         val historyHandle =
-            HistoryPressureRecovery.install {
+            HistoryPressureRecovery.install("zero-freed-reread") {
                 historyCalls.incrementAndGet()
                 // Simulate filesystem gaining space externally during history call
                 currentCapacity = needed
@@ -274,7 +274,7 @@ class StoragePressureProductionTest {
         val insufficientInvocations = AtomicInteger(0)
         val historyCalls = AtomicInteger(0)
         val historyHandle =
-            HistoryPressureRecovery.install {
+            HistoryPressureRecovery.install("cancel-during-history") {
                 historyCalls.incrementAndGet()
                 gate.complete(Unit)
                 CompletableDeferred<Long>().await()
@@ -319,7 +319,7 @@ class StoragePressureProductionTest {
         val sweepCalls = AtomicInteger(0)
         val actionInvocations = AtomicInteger(0)
         val historyCalls = AtomicInteger(0)
-        val historyHandle = HistoryPressureRecovery.install {
+        val historyHandle = HistoryPressureRecovery.install("cancel-after-sweep") {
             historyCalls.incrementAndGet()
             // Block history so cancellation has deterministic window after sweep
             CompletableDeferred<Long>().await()

@@ -505,6 +505,16 @@ internal class OwnedEditorViewModelHarness(
         preClearActions.clear()
         failures.attempt { store.clear() }
         failures.attempt { shadowOf(android.os.Looper.getMainLooper()).idle() }
+        // Every editor owned by THIS harness must have unregistered its
+        // process-global pressure handler. Registrations owned by other live
+        // harnesses' editors are legitimately still installed.
+        failures.attempt {
+            editors.forEach { editor ->
+                check(!HistoryPressureRecovery.isOwnerInstalled(editor)) {
+                    "history pressure recovery registration leaked past ViewModelStore clear"
+                }
+            }
+        }
         // EditorViewModel.onCleared() requests the process-global model
         // session to unload asynchronously.  Drain that ownership boundary
         // before this harness is considered closed so a later Robolectric
