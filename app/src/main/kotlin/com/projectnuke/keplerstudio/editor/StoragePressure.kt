@@ -35,9 +35,21 @@ internal fun saturatingAdd(a: Long, b: Long): Long {
  * pressure sequence may ASK history to reclaim through its own coordinator;
  * it never touches editor_history_v3 directories itself.
  *
- * The production handler is owned by the live EditorViewModel: each editor
- * registers its own history-coordinator-bound handler with owner identity.
- * Without a handler the sequence skips the history step truthfully.
+ * Several editors may be live simultaneously; EVERY live editor owns its own
+ * registration, keyed by a unique registration token. Dispatch policy is
+ * deterministic and bounded:
+ *  - ONE pressure request consults exactly ONE handler: the MOST-RECENT live
+ *    registration;
+ *  - when the newest registration closes, older still-live registrations
+ *    become eligible again on the NEXT request — fallback happens across
+ *    requests, never as an unbounded loop within one;
+ *  - a destroyed editor can never answer pressure for another document: each
+ *    registration is removed by its owner's teardown BEFORE the owner's
+ *    coordinator closes, and a handler racing its own teardown observes a
+ *    closed coordinator truthfully as null.
+ *
+ * The production handler is owned by the live EditorViewModel. Without any
+ * live registration the sequence skips the history step truthfully.
  */
 internal object HistoryPressureRecovery {
     internal fun interface Handler {
@@ -45,48 +57,58 @@ internal object HistoryPressureRecovery {
         suspend fun reclaimHistoryBytes(): Long?
     }
 
+    private class Registration(val owner: Any, val handler: Handler)
+
     private val lock = Any()
 
-    private var handler: Handler? = null
-    private var owner: Any? = null
+    /** Insertion-ordered live registrations keyed by unique token; LAST = dispatch target. */
+    private val registrations = LinkedHashMap<Any, Registration>()
 
     /**
-     * Installs [newHandler] on behalf of [owner], atomically replacing any
-     * previous registration (the newest live owner wins linearly). The
-     * returned AutoCloseable unregisters ONLY while [owner] is still the
-     * current owner: a stale owner's teardown can never remove a newer
-     * owner's handler, so VM teardown cannot strip another editor's
-     * registration and replacement is linearizable. Registration is purely
+     * Installs a NEW registration for [owner], replacing ONLY that owner's
+     * previous registration (an owner holds at most one live registration;
+     * reinstalling invalidates the earlier handle). The returned
+     * AutoCloseable removes EXACTLY its own registration token: a stale close
+     * can never remove a newer registration — neither another owner's nor a
+     * same-owner reinstall — so VM teardown cannot strip another live editor's
+     * handler and replacement is linearizable. Registration is purely
      * in-memory — process death clears it naturally and no persistent
      * correctness depends on it surviving.
      */
     fun install(owner: Any, newHandler: Handler): AutoCloseable =
         synchronized(lock) {
-            this.owner = owner
-            this.handler = newHandler
+            registrations.values.removeAll { it.owner === owner }
+            val token = Any()
+            registrations[token] = Registration(owner, newHandler)
             AutoCloseable {
-                synchronized(lock) {
-                    if (this.owner === owner) {
-                        this.owner = null
-                        this.handler = null
-                    }
-                }
+                synchronized(lock) { registrations.remove(token) }
             }
         }
 
-    internal fun isInstalled(): Boolean = synchronized(lock) { handler != null }
+    internal fun isInstalled(): Boolean = synchronized(lock) { registrations.isNotEmpty() }
 
-    /** Test-only: true when [candidate] is currently the registered owner. */
+    /** Test-only: true when [candidate] currently owns a live registration. */
     internal fun isOwnerInstalled(candidate: Any): Boolean =
-        synchronized(lock) { owner != null && owner === candidate }
+        synchronized(lock) { registrations.values.any { it.owner === candidate } }
+
+    /** Test-only: number of simultaneously live registrations. */
+    internal fun liveRegistrationCountForTest(): Int = synchronized(lock) { registrations.size }
 
     /**
-     * Suspends while asking the registered history coordinator to reclaim.
+     * Snapshot of the newest live registration's handler under the lock; the
+     * suspend handler itself is ALWAYS invoked outside the lock so a running
+     * reclamation never blocks registration changes.
+     */
+    private fun dispatchHandlerOrNull(): Handler? =
+        synchronized(lock) { registrations.values.lastOrNull()?.handler }
+
+    /**
+     * Suspends while asking the newest live history coordinator to reclaim.
      * Caller cancellation propagates naturally through the suspension; a
      * failing or unavailable handler yields null (step skipped truthfully).
      */
     internal suspend fun reclaimSuspendingOrNull(): Long? {
-        val current = synchronized(lock) { handler } ?: return null
+        val current = dispatchHandlerOrNull() ?: return null
         return try {
             current.reclaimHistoryBytes()
         } catch (ce: kotlinx.coroutines.CancellationException) {
@@ -97,7 +119,7 @@ internal object HistoryPressureRecovery {
     }
 
     internal suspend fun tryReclaimAndReportAttempt(): Boolean {
-        val current = synchronized(lock) { handler } ?: return false
+        val current = dispatchHandlerOrNull() ?: return false
         try {
             current.reclaimHistoryBytes()
         } catch (ce: kotlinx.coroutines.CancellationException) {

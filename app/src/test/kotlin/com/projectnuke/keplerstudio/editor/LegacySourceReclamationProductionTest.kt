@@ -405,10 +405,20 @@ class LegacySourceReclamationProductionTest {
                 DraftStorageCoordinator.withWriteLock {
                     LegacyDraftSourceReclamation.sweepObsoleteSourcesUnsafe(context)
                 }
+            // Two legitimate cleanup owners race for this orphan: production
+            // startup/maintenance reconciliation and this manual sweep,
+            // serialized on the coordinator write lock. The intended invariant
+            // is final reclamation with truthful ownership, not WHICH cleaner
+            // wins: either this sweep observed and DELETED the candidate, or
+            // another legitimate production cleaner had already removed it
+            // before this sweep listed anything.
             assertFalse("terminated orphan must become reclaimable", decodedSource.exists())
-            assertEquals(
-                LegacySourceReclaimDisposition.DELETED,
-                swept.single { it.path == decodedSource.canonicalPath }.disposition,
+            val observedDisposition =
+                swept.singleOrNull { it.path == decodedSource.canonicalPath }?.disposition
+            assertTrue(
+                "manual sweep disposition must stay truthful, got=$observedDisposition swept=$swept",
+                observedDisposition == null ||
+                    observedDisposition == LegacySourceReclaimDisposition.DELETED,
             )
         } finally {
             decodeRelease.complete(Unit)

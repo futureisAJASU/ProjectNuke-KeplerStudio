@@ -790,13 +790,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         )
         .also { historyCoordinator.onFlagsChanged = { updateHistoryFlags() } }
     /**
-     * Process-wide storage-pressure requests resolve to THIS editor's history
-     * coordinator while it lives. Registration is owner-keyed: a newer editor
-     * atomically replaces an older registration, and a stale owner's teardown
-     * can never remove the newer owner's handler — a replaced or destroyed
-     * editor can never answer pressure for another document. The registration
-     * is purely in-memory: process death clears it naturally and no persistent
-     * correctness depends on it surviving.
+     * Process-wide storage-pressure requests resolve to a LIVE editor's history
+     * coordinator. Every live editor owns its own registration; dispatch goes
+     * to the MOST-RECENT live registration, and when the newest editor tears
+     * down, an older still-live editor becomes eligible again. Each teardown
+     * removes exactly its own token: a stale or destroyed editor can never
+     * strip another editor's registration nor answer pressure for another
+     * document. The registration is purely in-memory: process death clears it
+     * naturally and no persistent correctness depends on it surviving.
      */
     private val historyPressureRecoveryRegistration: AutoCloseable =
         HistoryPressureRecovery.install(this) {

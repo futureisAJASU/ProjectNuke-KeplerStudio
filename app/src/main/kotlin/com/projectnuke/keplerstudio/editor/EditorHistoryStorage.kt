@@ -20,6 +20,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -274,33 +276,69 @@ internal class EditorHistoryCoordinator(
         return total
     }
 
-    /**
-     * Delete cold entries on IO, then record any confirmed-failed payloads as pending debt.
-     * All existence checking runs on Dispatchers.IO via storage.deleteEntries.
-     * Duplicate directories are not re-tracked.
-     */
-    private suspend fun settleColdEntries(discarded: Collection<EditorHistoryEntry>): DeletionResult {
-        if (discarded.isEmpty()) return DeletionResult(true, emptyList())
-        val result = storage.deleteEntries(discarded)
-        for (payload in result.failedPayloads) {
+    /** Records confirmed-failed deletions as debt; duplicate directories are not re-tracked. */
+    private fun recordDeletionDebt(failedPayloads: Collection<ColdHistoryPayload>) {
+        for (payload in failedPayloads) {
             if (pendingDeletionDebt.none { it.directory == payload.directory }) {
                 pendingDeletionDebt.add(payload)
             }
         }
+    }
+
+    /**
+     * TOTAL physical settlement for entries whose logical discard is already
+     * irrevocably committed (removed from their stacks, payloadState ==
+     * Discarded). Every cold payload MUST end in exactly one of two states:
+     * confirmed physically absent, or represented by a pendingDeletionDebt
+     * row. The deletion batch therefore runs inside a narrow NonCancellable
+     * section — aborting between the irreversible discard and physical
+     * settlement would strand untracked payload directories forever — and
+     * caller cancellation still propagates as soon as that settlement
+     * completes. Every caller passes entries that have already crossed the
+     * discard boundary; a non-cancellation storage failure records every
+     * payload as debt truthfully (nothing is reported absent).
+     */
+    private suspend fun settleColdEntries(discarded: Collection<EditorHistoryEntry>): DeletionResult {
+        if (discarded.isEmpty()) return DeletionResult(true, emptyList())
+        val result = withContext(NonCancellable) {
+            try {
+                storage.deleteEntries(discarded)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                DeletionResult(false, discarded.mapNotNull { it.coldPayload })
+            }
+        }
+        recordDeletionDebt(result.failedPayloads)
+        // Settlement is now total: re-arm caller cancellation explicitly — the
+        // NonCancellable section may resume undispached on a same dispatcher
+        // without an implicit cancellation check.
+        currentCoroutineContext().ensureActive()
         return result
     }
 
     /**
-     * Delete cold payloads directly (not from stacks) on IO, then record failures as debt.
+     * TOTAL physical settlement for cold payloads no longer owned by any
+     * history structure (superseded publications, rejected admissions).
+     * Mirrors [settleColdEntries]: the NonCancellable batch guarantees each
+     * payload ends physically absent or recorded as debt, then caller
+     * cancellation propagates.
      */
     private suspend fun settleColdPayloads(payloads: Collection<ColdHistoryPayload>) {
         if (payloads.isEmpty()) return
-        val result = storage.deletePayloads(payloads)
-        for (payload in result.failedPayloads) {
-            if (pendingDeletionDebt.none { it.directory == payload.directory }) {
-                pendingDeletionDebt.add(payload)
+        val result = withContext(NonCancellable) {
+            try {
+                storage.deletePayloads(payloads)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                DeletionResult(false, payloads.toList())
             }
         }
+        recordDeletionDebt(result.failedPayloads)
+        // Mirrors [settleColdEntries]: total settlement first, then caller
+        // cancellation propagates.
+        currentCoroutineContext().ensureActive()
     }
 
     /** Remove all deletion debt whose generation matches [generation]. */
@@ -1036,6 +1074,10 @@ internal class EditorHistoryCoordinator(
     internal fun pendingDeletionDebtBytesForTest(): Long =
         pendingDeletionDebt.fold(0L) { sum, payload -> BitmapMemoryBudget.saturatingAdd(sum, payload.bytes) }
 
+    /** Pure read-only inspection for tests: directories owned by pending deletion debt. */
+    internal fun pendingDeletionDebtDirectoriesForTest(): Set<File> =
+        pendingDeletionDebt.mapTo(HashSet()) { it.directory }
+
     fun replaceDocument() {
         checkMainOwner()
         operationToken += 1L
@@ -1087,11 +1129,7 @@ internal class EditorHistoryCoordinator(
                         clearGenerationDebt(oldGeneration)
                     } else if (entryResult != null) {
                         // Session deletion failed — record individual failures as debt.
-                        for (payload in entryResult.failedPayloads) {
-                            if (pendingDeletionDebt.none { it.directory == payload.directory }) {
-                                pendingDeletionDebt.add(payload)
-                            }
-                        }
+                        recordDeletionDebt(entryResult.failedPayloads)
                     }
                 }
                 // Busy release: only when this replacement still owns the handoff.
@@ -1208,7 +1246,10 @@ internal class EditorHistoryCoordinator(
     /** Returns SpillResult.Success when entry is now Cold with confirmed publication.
      *  Returns SpillResult.CurrentFailure when the current operation's publish failed;
      *  caller may discard the entry. Returns SpillResult.Superseded when the operation
-     *  is stale/closed; caller must NOT discard or reclaim — replacement/close owns settlement. */
+     *  is stale/closed; caller must NOT discard or reclaim — replacement/close owns
+     *  settlement through its own NonCancellable finalizer, which deletes the whole
+     *  superseded session directory, so a caller cancellation at this boundary can
+     *  never strand the just-published payload as an untracked orphan. */
     private suspend fun spillEntry(entry: EditorHistoryEntry, token: Long, generation: String): SpillResult {
         val snapshot = entry.hotSnapshot ?: return if (entry.coldPayload != null) {
             SpillResult.Success

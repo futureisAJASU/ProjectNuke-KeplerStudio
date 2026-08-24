@@ -27,12 +27,16 @@ import org.robolectric.annotation.Config
  * Phase 5 registration-ownership and end-to-end pressure wiring coverage.
  *
  * The process-global [HistoryPressureRecovery] registry resolves storage
- * pressure requests to the LIVE editor's history coordinator. These tests pin
- * the owner-correct lifecycle: replacement is linearizable, stale teardown can
- * never strip a newer owner, absence stays truthful, cancellation leaves no
- * stale handler, and the full production chain
- * StoragePressureController -> registry -> EditorViewModel handler ->
- * EditorHistoryCoordinator executes against the real coordinator.
+ * pressure requests to a LIVE editor's history coordinator. Every live editor
+ * owns its own token-keyed registration and dispatch goes to the MOST-RECENT
+ * live registration, with deterministic fallback to older live owners after
+ * newer teardown. These tests pin that ownership model: replacement is
+ * linearizable, stale teardown (any owner, any handle) can never strip another
+ * live registration, out-of-order close keeps the survivor answerable,
+ * absence stays truthful, cancellation leaves the registration set untouched,
+ * and the full production chain StoragePressureController -> registry ->
+ * EditorViewModel handler -> EditorHistoryCoordinator executes against real
+ * coordinators.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -113,6 +117,179 @@ class HistoryPressureRecoveryProductionTest {
         // Second close of the SAME owner must not resurrect or corrupt state.
         handle.close()
         assertFalse(HistoryPressureRecovery.isInstalled())
+        Unit
+    }
+
+    @Test
+    fun newerOwnerClosingFirstRestoresOlderLiveOwnerEligibility() = runBlocking {
+        val ownerA = Object()
+        val ownerB = Object()
+        val callsA = AtomicInteger(0)
+        val handleA =
+            HistoryPressureRecovery.install(ownerA) { callsA.incrementAndGet(); 11L }
+                .also(registryHandles::addFirst)
+        val handleB =
+            HistoryPressureRecovery.install(ownerB) { 22L }
+                .also(registryHandles::addFirst)
+        assertEquals(2, HistoryPressureRecovery.liveRegistrationCountForTest())
+
+        // B closes FIRST: A must remain registered and answer pressure.
+        handleB.close()
+        assertTrue("older live owner survives newer teardown", HistoryPressureRecovery.isInstalled())
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(ownerA))
+        assertEquals(11L, HistoryPressureRecovery.reclaimSuspendingOrNull())
+        assertEquals(1, callsA.get())
+        Unit
+    }
+
+    @Test
+    fun olderOwnerClosingFirstKeepsNewerLiveOwnerRegistered() = runBlocking {
+        val ownerA = Object()
+        val ownerB = Object()
+        val callsB = AtomicInteger(0)
+        val handleA =
+            HistoryPressureRecovery.install(ownerA) { 11L }
+                .also(registryHandles::addFirst)
+        val handleB =
+            HistoryPressureRecovery.install(ownerB) { callsB.incrementAndGet(); 22L }
+                .also(registryHandles::addFirst)
+
+        // A closes FIRST: B must remain registered and answer pressure.
+        handleA.close()
+        assertTrue("newer live owner survives older teardown", HistoryPressureRecovery.isInstalled())
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(ownerB))
+        assertEquals(22L, HistoryPressureRecovery.reclaimSuspendingOrNull())
+        assertEquals(1, callsB.get())
+        Unit
+    }
+
+    @Test
+    fun sameOwnerReinstallMakesStaleHandleToothless() = runBlocking {
+        val owner = Object()
+        val callsH2 = AtomicInteger(0)
+        val handleH1 =
+            HistoryPressureRecovery.install(owner) { 111L }
+                .also(registryHandles::addFirst)
+        val handleH2 =
+            HistoryPressureRecovery.install(owner) { callsH2.incrementAndGet(); 222L }
+                .also(registryHandles::addFirst)
+
+        // Same-owner reinstall replaced exactly H1's registration.
+        assertEquals(1, HistoryPressureRecovery.liveRegistrationCountForTest())
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(owner))
+
+        // Stale H1 teardown must NOT remove H2.
+        handleH1.close()
+        assertTrue(
+            "stale same-owner close cannot remove the newer registration",
+            HistoryPressureRecovery.isInstalled(),
+        )
+        assertEquals(1, HistoryPressureRecovery.liveRegistrationCountForTest())
+        assertEquals(222L, HistoryPressureRecovery.reclaimSuspendingOrNull())
+        assertEquals("live H2 handler answered", 1, callsH2.get())
+
+        // Only the live handle removes the registration.
+        handleH2.close()
+        assertFalse(HistoryPressureRecovery.isInstalled())
+        Unit
+    }
+
+    @Test
+    fun multipleLiveOwnersDispatchNewestThenFallBackToOlderOnTeardown() = runBlocking {
+        val ownerA = Object()
+        val ownerB = Object()
+        val ownerC = Object()
+        val callsA = AtomicInteger(0)
+        val callsB = AtomicInteger(0)
+        val callsC = AtomicInteger(0)
+        val handleA =
+            HistoryPressureRecovery.install(ownerA) { callsA.incrementAndGet(); 11L }
+                .also(registryHandles::addFirst)
+        val handleB =
+            HistoryPressureRecovery.install(ownerB) { callsB.incrementAndGet(); 22L }
+                .also(registryHandles::addFirst)
+        val handleC =
+            HistoryPressureRecovery.install(ownerC) { callsC.incrementAndGet(); 33L }
+                .also(registryHandles::addFirst)
+
+        // Documented policy A: ONE request consults exactly the MOST-RECENT
+        // live registration.
+        assertEquals(3, HistoryPressureRecovery.liveRegistrationCountForTest())
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(ownerA))
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(ownerB))
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(ownerC))
+        assertEquals("newest live registration answers", 33L, HistoryPressureRecovery.reclaimSuspendingOrNull())
+
+        // Newest closes -> deterministic fallback to the next-oldest live
+        // registration on the NEXT request (never an intra-request loop).
+        handleC.close()
+        assertEquals(2, HistoryPressureRecovery.liveRegistrationCountForTest())
+        assertEquals("older live owner becomes eligible again", 22L, HistoryPressureRecovery.reclaimSuspendingOrNull())
+        handleB.close()
+        assertEquals(1, HistoryPressureRecovery.liveRegistrationCountForTest())
+        assertEquals("oldest live owner answers last", 11L, HistoryPressureRecovery.reclaimSuspendingOrNull())
+        assertEquals(1, callsA.get())
+        assertEquals(1, callsB.get())
+        assertEquals(1, callsC.get())
+
+        // All owners closed -> registry empty and truthfully unavailable.
+        handleA.close()
+        assertEquals(0, HistoryPressureRecovery.liveRegistrationCountForTest())
+        assertFalse(HistoryPressureRecovery.isInstalled())
+        assertFalse("empty registry must skip the history step", HistoryPressureRecovery.tryReclaimAndReportAttempt())
+        Unit
+    }
+
+    @Test
+    fun callerCancellationLeavesEveryLiveRegistrationUntouched() = runBlocking {
+        val ownerA = Object()
+        val ownerB = Object()
+        val parked = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val handleA =
+            HistoryPressureRecovery.install(ownerA) { 11L }
+                .also(registryHandles::addFirst)
+        val handleB =
+            HistoryPressureRecovery.install(ownerB) {
+                parked.complete(Unit)
+                release.await()
+                22L
+            }
+            .also(registryHandles::addFirst)
+        assertEquals(2, HistoryPressureRecovery.liveRegistrationCountForTest())
+
+        val scope = CoroutineScope(Dispatchers.Default)
+        try {
+            val job =
+                scope.async {
+                    StoragePressureController(
+                        capacity = { 0L },
+                        reserveBytes = 1_000L,
+                        pressureSweep = { TransientMaintenanceReport.EMPTY },
+                    ).ensureWriteHeadroom(
+                        context,
+                        workFile(),
+                        1L,
+                        { "insufficient" },
+                    ) { "wrote" }
+                }
+            awaitSignal(parked)
+            job.cancel()
+            val thrown = runCatching { job.await() }.exceptionOrNull()
+            assertTrue("caller cancellation must propagate", thrown is CancellationException || job.isCancelled)
+        } finally {
+            release.complete(Unit)
+            scope.cancel()
+        }
+
+        // Cancellation mutates NOTHING: only real owner teardown does.
+        assertEquals(
+            "cancellation must leave every live registration installed",
+            2,
+            HistoryPressureRecovery.liveRegistrationCountForTest(),
+        )
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(ownerA))
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(ownerB))
         Unit
     }
 
@@ -279,24 +456,99 @@ class HistoryPressureRecoveryProductionTest {
     @Test
     fun twoLiveEditorsCoexistAndSequentialTeardownLeavesNoRegistration() = runBlocking {
         val application = context.applicationContext as android.app.Application
-        // Two LIVE editors coexist: B replaces A's registration instead of
-        // crashing; the previous single-install contract made this impossible.
+        // Two LIVE editors coexist: each owns its own registration; neither
+        // replaces nor strips the other's.
         val storeA = androidx.lifecycle.ViewModelStore()
-        storeA.put("editor-a", EditorViewModel(application))
+        val editorA = EditorViewModel(application)
+        storeA.put("editor-a", editorA)
         shadowOf(android.os.Looper.getMainLooper()).idle()
 
         val storeB = androidx.lifecycle.ViewModelStore()
-        storeB.put("editor-b", EditorViewModel(application))
+        val editorB = EditorViewModel(application)
+        storeB.put("editor-b", editorB)
         shadowOf(android.os.Looper.getMainLooper()).idle()
-        assertTrue("replacement keeps exactly one handler installed", HistoryPressureRecovery.isInstalled())
+        assertTrue("both live editors are simultaneously represented", HistoryPressureRecovery.isInstalled())
+        assertEquals(2, HistoryPressureRecovery.liveRegistrationCountForTest())
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(editorA))
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(editorB))
 
-        // Stale editor A's teardown must NOT remove B's registration.
+        // Editor A's teardown removes exactly A; B stays registered.
         storeA.clear()
         shadowOf(android.os.Looper.getMainLooper()).idle()
-        assertTrue("stale teardown cannot unregister newer owner", HistoryPressureRecovery.isInstalled())
+        assertEquals(1, HistoryPressureRecovery.liveRegistrationCountForTest())
+        assertFalse(HistoryPressureRecovery.isOwnerInstalled(editorA))
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(editorB))
 
-        // Only B's teardown removes the registration.
+        // Only B's teardown empties the registry.
         storeB.clear()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertEquals(0, HistoryPressureRecovery.liveRegistrationCountForTest())
+        assertFalse(HistoryPressureRecovery.isInstalled())
+        Unit
+    }
+
+    @Test
+    fun newestEditorTeardownRestoresOlderEditorAsPressureDispatchTarget() = runBlocking {
+        val application = context.applicationContext as android.app.Application
+        val storeA = androidx.lifecycle.ViewModelStore()
+        val editorA = EditorViewModel(application)
+        storeA.put("editor-a", editorA)
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        val storeB = androidx.lifecycle.ViewModelStore()
+        val editorB = EditorViewModel(application)
+        storeB.put("editor-b", editorB)
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertEquals(2, HistoryPressureRecovery.liveRegistrationCountForTest())
+
+        // The NEWEST live editor tears down first; the older still-live editor
+        // becomes the dispatch target again.
+        storeB.clear()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertFalse(HistoryPressureRecovery.isOwnerInstalled(editorB))
+        assertTrue("older editor regains eligibility", HistoryPressureRecovery.isInstalled())
+        assertTrue(HistoryPressureRecovery.isOwnerInstalled(editorA))
+
+        // The surviving older editor answers a full production pressure request:
+        // transient sweep -> history step -> authoritative reread -> action.
+        val readIndex = AtomicInteger(0)
+        val override =
+            StoragePressure.installForTest(
+                StoragePressureController(
+                    capacity = { _ ->
+                        if (readIndex.getAndIncrement() < 2) 0L else Long.MAX_VALUE / 4
+                    },
+                    reserveBytes = StoragePressure.DEFAULT_STORAGE_RESERVE_BYTES,
+                    pressureSweep = { TransientMaintenanceReport.EMPTY },
+                ),
+            )
+        try {
+            val callerScope = CoroutineScope(Dispatchers.Default)
+            val actionRan = AtomicBoolean(false)
+            val deferred =
+                callerScope.async {
+                    StoragePressure.controller.ensureWriteHeadroom(
+                        context,
+                        workFile(),
+                        5L,
+                        onInsufficient = { false },
+                    ) { actionRan.set(true); true }
+                }
+            awaitEditorCompletionForTest(
+                description = "older live editor must answer pressure after newest teardown",
+                completion = deferred,
+                timeoutMillis = 20_000L,
+                pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+            )
+            runBlocking { deferred.await() }
+            assertTrue("write proceeded through the older editor's coordinator", actionRan.get())
+            assertEquals(3, readIndex.get())
+            callerScope.cancel()
+        } finally {
+            override.close()
+        }
+
+        storeA.clear()
         shadowOf(android.os.Looper.getMainLooper()).idle()
         assertFalse(HistoryPressureRecovery.isInstalled())
         Unit

@@ -278,6 +278,17 @@ class HistoryPressureCoordinatorProductionTest {
     fun callerCancellationAtRealHistoryBoundaryPropagatesAndLeavesHealthyCoordinator() = testScope.runTest {
         seedColdUndoStack(entryCount = 3)
         val tipId = coordinator.navigationTargetId(true)
+        val generation = coordinator.currentGeneration()
+        // Capture the EXACT non-tip candidate payload directories pressure will
+        // choose, before any settlement begins.
+        val candidates = backend.nonTipDirectoriesExcludingTip()
+        assertTrue("seed must produce non-tip candidates", candidates.size >= 2)
+        // Force ONE candidate delete failure so both total-settlement outcomes
+        // are proven: confirmed-absent AND debt-represented.
+        val debtCandidate = candidates.last()
+        val absentCandidates = candidates.dropLast(1)
+        val debtCandidateBytes = backend.directoryBytes(debtCandidate)
+        backend.failDeleteDirectories.add(debtCandidate)
 
         backend.parkNextDeleteEntries()
         val reclaimJob = launchReclaim()
@@ -290,16 +301,58 @@ class HistoryPressureCoordinatorProductionTest {
 
         assertTrue("cancellation must terminate the reclaim", reclaimJob.isCancelled)
         assertEquals("cancelled settlement must never publish a result", Long.MIN_VALUE, lastReclaimOutcome)
+        assertFalse("coordinator must not stay busy", coordinator.flags().busy)
+        assertEquals("protected undo tip survives", tipId, coordinator.navigationTargetId(true))
+        assertEquals("cancellation must not switch document generation", generation, coordinator.currentGeneration())
+
+        // TOTAL ownership settlement: every discarded candidate ends in exactly
+        // one of two states — physically absent, or represented by a truthful
+        // pendingDeletionDebt row. A file that exists WITHOUT a debt row is an
+        // untracked persistent orphan and fails this test.
+        absentCandidates.forEach { directory ->
+            assertFalse(
+                "settled candidate must be confirmed absent: ${directory.name}",
+                directory.exists(),
+            )
+        }
         assertEquals(
-            "cancelled settlement must not record fake debt",
-            0L,
+            "failed physical delete is truthfully recorded as debt",
+            debtCandidateBytes,
             coordinator.pendingDeletionDebtBytesForTest(),
         )
-        assertFalse("coordinator must not stay busy", coordinator.flags().busy)
-        assertEquals(tipId, coordinator.navigationTargetId(true))
-        // Coordinator remains healthy for later operations.
+        val debtDirectories =
+            coordinator.pendingDeletionDebtDirectoriesForTest().mapTo(HashSet()) { it.canonicalFile }
+        candidates.forEach { directory ->
+            val canonical = directory.canonicalFile
+            if (canonical in debtDirectories) {
+                assertTrue(
+                    "debt row must own a payload that still exists: ${directory.name}",
+                    directory.exists(),
+                )
+            } else {
+                assertFalse(
+                    "untracked orphan (file exists, no debt owns it): ${directory.name}",
+                    directory.exists(),
+                )
+            }
+        }
+
+        // Coordinator remains healthy: a later pressure pass retries remaining
+        // debt and settles it exactly once with true bytes.
+        backend.failDeleteDirectories.clear()
         val followup = checkNotNull(coordinator.reclaimHistoryForStoragePressure())
-        assertEquals("follow-up finds nothing eligible beyond the tip", 0L, followup)
+        assertEquals(
+            "debt retry settles exactly once with the failed payload's true bytes",
+            debtCandidateBytes,
+            followup,
+        )
+        assertEquals(0L, coordinator.pendingDeletionDebtBytesForTest())
+        assertFalse("debt-owned payload now really gone", debtCandidate.exists())
+        assertEquals(
+            "only the protected tip payload remains",
+            setOf(tipId),
+            backend.sessionSnapshot().entryIds,
+        )
     }
 
     // ------------------------------------------------------------------
