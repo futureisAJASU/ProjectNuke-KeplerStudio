@@ -8,12 +8,14 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -162,16 +164,19 @@ class StoragePressureProductionTest {
     @Test
     fun capacityShrinkingAfterCheckEndsInsufficientWithoutRetryLoops() = runBlocking {
         val reserve = 1_000L
-        // Capacity reads keep shrinking: initial -> after sweep -> after
-        // history. The sequence is single-pass and must end insufficient.
+        // Sequence is single bounded pass: initial -> after sweep -> after history.
         val readQueue = java.util.ArrayDeque(listOf(500L, 300L, 200L))
+        val readCount = AtomicInteger(0)
         val sweepCalls = AtomicInteger(0)
         val historyCalls = AtomicInteger(0)
         val historyHandle = HistoryPressureRecovery.install { historyCalls.incrementAndGet(); 0L }
         try {
             val controller =
                 StoragePressureController(
-                    capacity = { readQueue.pollFirst() ?: -1L },
+                    capacity = {
+                        readCount.incrementAndGet()
+                        readQueue.pollFirst() ?: -1L
+                    },
                     reserveBytes = reserve,
                     pressureSweep = {
                         sweepCalls.incrementAndGet()
@@ -183,6 +188,46 @@ class StoragePressureProductionTest {
             assertEquals("insufficient", outcome)
             assertEquals("single sweep pass", 1, sweepCalls.get())
             assertEquals("single history attempt", 1, historyCalls.get())
+            assertEquals("must have performed initial + after-sweep + after-history reads", 3, readCount.get())
+            assertTrue("no retry loop queued extra reads", readQueue.isEmpty())
+        } finally {
+            historyHandle.close()
+        }
+    }
+
+    @Test
+    fun historyZeroFreedStillRereadsCapacityAndAdmitsWhenSufficient() = runBlocking {
+        val reserve = 1_000L
+        val required = 5L
+        val needed = reserve + required
+        // Initial and after-sweep remain insufficient; during history call filesystem gains space
+        // even though handler reports 0 freed bytes. Capacity reread must still admit.
+        val capacityReads = AtomicInteger(0)
+        var currentCapacity = 0L
+        val historyCalls = AtomicInteger(0)
+        val historyHandle =
+            HistoryPressureRecovery.install {
+                historyCalls.incrementAndGet()
+                // Simulate filesystem gaining space externally during history call
+                currentCapacity = needed
+                0L
+            }
+        try {
+            val controller =
+                StoragePressureController(
+                    capacity = {
+                        capacityReads.incrementAndGet()
+                        currentCapacity
+                    },
+                    reserveBytes = reserve,
+                    pressureSweep = { TransientMaintenanceReport.EMPTY },
+                )
+            val outcome =
+                controller.ensureWriteHeadroom(context, workFile(), required, { "insufficient" }) { "wrote" }
+            assertEquals("handler returned 0 but real capacity sufficient must still write", "wrote", outcome)
+            assertEquals("one history attempt", 1, historyCalls.get())
+            // initial + after-sweep + after-history >=3 reads (history-zero path must still reread)
+            assertTrue("must have reread after history even though freed==0", capacityReads.get() >= 3)
         } finally {
             historyHandle.close()
         }
@@ -225,8 +270,12 @@ class StoragePressureProductionTest {
         val reserve = 1_000L
         val usable = AtomicLong(0L)
         val gate = CompletableDeferred<Unit>()
+        val actionInvocations = AtomicInteger(0)
+        val insufficientInvocations = AtomicInteger(0)
+        val historyCalls = AtomicInteger(0)
         val historyHandle =
             HistoryPressureRecovery.install {
+                historyCalls.incrementAndGet()
                 gate.complete(Unit)
                 CompletableDeferred<Long>().await()
             }
@@ -240,17 +289,105 @@ class StoragePressureProductionTest {
             val scope = CoroutineScope(Dispatchers.Default)
             val job =
                 scope.async {
-                    controller.ensureWriteHeadroom(context, workFile(), 1L, { "insufficient" }) { "wrote" }
+                    controller.ensureWriteHeadroom(
+                        context,
+                        workFile(),
+                        1L,
+                        { insufficientInvocations.incrementAndGet(); "insufficient" },
+                    ) { actionInvocations.incrementAndGet(); "wrote" }
                 }
             awaitSignal(gate, "history recovery must start")
             job.cancel()
-            runBlocking { job.join() }
+            val thrown = runCatching { job.await() }.exceptionOrNull()
+            assertTrue("outer operation must terminate cancelled", thrown is CancellationException)
             assertTrue("job must end cancelled", job.isCancelled)
-            scope.cancel()
+            assertEquals("cancelled history recovery must not invoke write action", 0, actionInvocations.get())
+            assertEquals("cancelled recovery must not return onInsufficient", 0, insufficientInvocations.get())
+            assertEquals("no second history recovery step", 1, historyCalls.get())
             assertFalse("cancelled recovery must never write", usable.get() > 0L)
+            scope.cancel()
         } finally {
             historyHandle.close()
         }
+    }
+
+    @Test
+    fun cancellationDuringTransientSweepPreventsWrite() = runBlocking {
+        val reserve = 1_000L
+        val usable = AtomicLong(0L)
+        val gate = CompletableDeferred<Unit>()
+        val sweepCalls = AtomicInteger(0)
+        val actionInvocations = AtomicInteger(0)
+        val historyCalls = AtomicInteger(0)
+        val historyHandle = HistoryPressureRecovery.install {
+            historyCalls.incrementAndGet()
+            // Block history so cancellation has deterministic window after sweep
+            CompletableDeferred<Long>().await()
+        }
+        try {
+            val controller =
+                StoragePressureController(
+                    capacity = { usable.get() },
+                    reserveBytes = reserve,
+                    pressureSweep = { _ ->
+                        sweepCalls.incrementAndGet()
+                        gate.complete(Unit)
+                        TransientMaintenanceReport.EMPTY
+                    },
+                )
+            val scope = CoroutineScope(Dispatchers.Default)
+            val job =
+                scope.async {
+                    controller.ensureWriteHeadroom(
+                        context,
+                        workFile(),
+                        1L,
+                        { "insufficient" },
+                    ) { actionInvocations.incrementAndGet(); "wrote" }
+                }
+            awaitSignal(gate, "transient pressure sweep must start")
+            // Cancel immediately after sweep completed, before history/history->action.
+            // ensureActive after sweep must observe cancellation before write.
+            job.cancel()
+            val thrown = runCatching { job.await() }.exceptionOrNull()
+            assertTrue("cancelled after sweep must terminate cancelled", thrown is CancellationException)
+            assertTrue("job must be cancelled", job.isCancelled)
+            assertEquals("cancelled sweep must not invoke write action", 0, actionInvocations.get())
+            assertEquals("sweep must have been attempted once", 1, sweepCalls.get())
+            scope.cancel()
+        } finally {
+            historyHandle.close()
+        }
+    }
+
+    @Test
+    fun cancellationAlreadyCancelledBeforeSweepPreventsWrite() = runBlocking {
+        val reserve = 1_000L
+        val sweepCalls = AtomicInteger(0)
+        val actionInvocations = AtomicInteger(0)
+        val controller =
+            StoragePressureController(
+                capacity = { 0L },
+                reserveBytes = reserve,
+                pressureSweep = { sweepCalls.incrementAndGet(); TransientMaintenanceReport.EMPTY },
+            )
+        // Already-cancelled coroutine must not enter write action
+        val parent = kotlinx.coroutines.Job()
+        parent.cancel()
+        val scope = CoroutineScope(parent + Dispatchers.Default)
+        val job = scope.async {
+            controller.ensureWriteHeadroom(
+                context,
+                workFile(),
+                1L,
+                { "insufficient" },
+            ) { actionInvocations.incrementAndGet(); "wrote" }
+        }
+        val thrown = runCatching { job.await() }.exceptionOrNull()
+        assertTrue("already-cancelled must terminate cancelled", thrown is CancellationException || job.isCancelled)
+        assertEquals("already-cancelled must not invoke write", 0, actionInvocations.get())
+        assertEquals("already-cancelled must not even sweep", 0, sweepCalls.get())
+        scope.cancel()
     }
 
     // ------------------------------------------------------------------
@@ -437,6 +574,117 @@ class StoragePressureProductionTest {
         }
     }
 
+    @Test
+    fun fullEditorViewModelLowStorageDraftBSavePreservesA() = runBlocking {
+        // Valid persistent Draft A -> boot real EditorViewModel -> settle startup
+        // -> establish A baseline -> inject insufficient storage for B via real save path
+        val sourceFileA = workDir().resolve("pressure-e2e-source-A.png").apply {
+            val bmp = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+            try {
+                bmp.eraseColor(0xff113355.toInt())
+                outputStream().use { out -> assertTrue(bmp.compress(Bitmap.CompressFormat.PNG, 100, out)) }
+            } finally { if (!bmp.isRecycled) bmp.recycle() }
+        }
+        harness.own(sourceFileA)
+        val nativeSession = harness.ownSeam(installNativeSessionFactoryForTest { 1L })
+        val renderer = EditorRenderer.installRendererOverrideForTest { successRestoreOutput() }
+        try {
+            // Seed Draft A through real VM save path (not direct writeDraftGeneration)
+            val seedVm = harness.createEditor()
+            // Adopt source via vm state so createDraftSavePayload can capture it
+            val baseBitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff223344.toInt()) }
+            val previewBitmap = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888).apply { eraseColor(0xff223344.toInt()) }
+            seedVm.updateUiState {
+                it.copy(
+                    sourcePath = sourceFileA.absolutePath,
+                    baseContentToken = newBaseContentToken(),
+                    baseBitmapDirty = true,
+                    previewBitmap = previewBitmap,
+                    originalPreviewBitmap = baseBitmap,
+                    params = EditParams(exposure = 0.1f),
+                )
+            }
+            awaitInit(seedVm)
+            awaitEditorReadyForTest(seedVm)
+            // Persist Draft A
+            val savedA = persistRealDraftForTest(seedVm)
+            assertTrue("Draft A must persist before low-storage B test", savedA)
+            val pointerA = currentDraftGenerationId(context)
+            assertNotNull("pointer A must exist", pointerA)
+            val validatedA = validateCurrentDraftGeneration(context)
+            assertNotNull("A must validate", validatedA)
+            val generationDirA = File(draftGenerationsRoot(context), pointerA!!)
+            assertTrue("A generation dir exists", generationDirA.isDirectory)
+            assertTrue("A complete marker exists", File(generationDirA, "complete").isFile)
+            val generationsBeforeB = draftGenerationsRoot(context).listFiles()?.map { it.name }?.toSet() ?: emptySet()
+            val stagingBeforeB = generationsBeforeB.filter { it.startsWith(DRAFT_GENERATION_STAGING_PREFIX) }
+            assertTrue("no staging leak before B", stagingBeforeB.isEmpty())
+            // Reboot VM to establish A as authoritative baseline via startup restoration
+            val vm = harness.createEditor()
+            awaitInit(vm)
+            awaitEditorReadyForTest(vm)
+            assertEquals("restored VM must have adopted A pointer", pointerA, vm.uiState.value.draftGenerationId)
+            val restoredSource = vm.uiState.value.sourcePath
+            assertNotNull("restored VM must have source after A restore", restoredSource)
+            assertTrue("restored working source must exist", File(restoredSource!!).isFile)
+            // Restored working source is a copy of generation source; generation remains authority
+            assertEquals("A still validates as authority", pointerA, currentDraftGenerationId(context))
+            // Record pre-B filesystem truth
+            val compatDir = persistentDraftDirectory(context)
+            val compatSourcesBefore = compatDir.listFiles()?.filter { LegacyDraftSourceOwnership.isOwnedSourceName(it.name) }?.map { it.name }?.toSet() ?: emptySet()
+            // Mutate to create B candidate (different exposure so payload would differ)
+            vm.updateParams { it.copy(exposure = 0.55f) }
+            // Wait for render adoption so B payload is distinct
+            repeat(200) {
+                shadowOf(android.os.Looper.getMainLooper()).idleFor(10, java.util.concurrent.TimeUnit.MILLISECONDS)
+                yieldToEditorBackgroundForTest()
+                if (vm.uiState.value.params.exposure == 0.55f) return@repeat
+            }
+            // Inject insufficient storage for B (real pressure admission)
+            val zeroOverride = installZeroCapacity()
+            try {
+                val savedB = persistRealDraftForTest(vm)
+                assertFalse("low-storage B must NOT publish", savedB)
+                // Wait for save operation ownership to settle
+                awaitMainUntilWithDiagnostic({ !vm.hasActiveDraftSaveJobForTest() }) {
+                    "B save job must settle: job=${vm.hasActiveDraftSaveJobForTest()} leave=${vm.editorLeaveState.value}"
+                }
+                // B is not published as current
+                assertEquals("pointer must remain A after B failure", pointerA, currentDraftGenerationId(context))
+                assertEquals("UI must not claim B as current generation", pointerA, vm.uiState.value.draftGenerationId)
+                // A generation directory still exists and validates
+                assertTrue("A generation dir still exists after B failure", generationDirA.isDirectory)
+                assertTrue("A complete still exists", File(generationDirA, "complete").isFile)
+                val revalidatedA = validateCurrentDraftGeneration(context)
+                assertNotNull("A must still validate after B failure", revalidatedA)
+                assertEquals("A source identity stable", validatedA!!.sourceFile.absolutePath, revalidatedA!!.sourceFile.absolutePath)
+                // Previous compatibility source/persistent truth remains coherent
+                val currentDraftSource = draftPrefs().getString(KEY_DRAFT_SOURCE, null)
+                assertNotNull("draft_source must remain", currentDraftSource)
+                assertTrue("previous compatibility source still exists", File(currentDraftSource!!).isFile)
+                // No B staging generation survives
+                val generationsAfter = draftGenerationsRoot(context).listFiles()?.map { it.name }?.toSet() ?: emptySet()
+                val stagingAfter = generationsAfter.filter { it.startsWith(DRAFT_GENERATION_STAGING_PREFIX) }
+                assertTrue("no B staging generation must survive: $stagingAfter", stagingAfter.isEmpty())
+                // Only A generation should remain (no B gen_*)
+                val genAfter = generationsAfter.filter { it.startsWith(DRAFT_GENERATION_DIR_PREFIX) }
+                assertEquals("only A generation must remain after B failure", 1, genAfter.size)
+                assertEquals("remaining generation is A", pointerA, genAfter.single())
+                // No B compatibility source leak
+                val compatSourcesAfter = compatDir.listFiles()?.filter { LegacyDraftSourceOwnership.isOwnedSourceName(it.name) }?.map { it.name }?.toSet() ?: emptySet()
+                assertEquals("no new compatibility source leak", compatSourcesBefore, compatSourcesAfter)
+                // Save operation ownership/tracking settles
+                assertFalse("save job must have settled", vm.hasActiveDraftSaveJobForTest())
+                // UI does not falsely claim B was persisted (generation id unchanged, not B)
+                assertFalse("UI busy must be false after failed save", vm.uiState.value.isBusy)
+            } finally {
+                zeroOverride.close()
+            }
+        } finally {
+            renderer.close()
+        }
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
@@ -555,5 +803,23 @@ class StoragePressureProductionTest {
 
     private fun pumpMain() {
         shadowOf(android.os.Looper.getMainLooper()).idleFor(20, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    private suspend fun persistRealDraftForTest(vm: EditorViewModel): Boolean {
+        val callerScope = CoroutineScope(Dispatchers.Default)
+        val deferred = callerScope.async { vm.persistDraftSnapshotNow() }
+        try {
+            awaitEditorCompletionForTest(
+                description = "draft save caller must complete",
+                completion = deferred,
+                timeoutMillis = 15_000L,
+                pumpMain = { shadowOf(android.os.Looper.getMainLooper()).idle() },
+                diagnostic = { "leave=${vm.editorLeaveState.value} saveReason=${vm.lastDraftSaveFailureReasonForTest} seam=${DraftSaveTestSeam.Registry.lastFailureReasonForTest}" },
+            )
+            return runBlocking { deferred.await() }
+        } finally {
+            deferred.cancel()
+            callerScope.cancel()
+        }
     }
 }

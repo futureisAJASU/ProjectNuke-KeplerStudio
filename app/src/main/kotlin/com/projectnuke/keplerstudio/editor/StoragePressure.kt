@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import java.io.File
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 
 
 /**
@@ -55,15 +57,35 @@ internal object HistoryPressureRecovery {
             AutoCloseable { synchronized(lock) { if (handler === newHandler) handler = null } }
         }
 
+    internal fun isInstalled(): Boolean = synchronized(lock) { handler != null }
+
     /**
      * Suspends while asking the registered history coordinator to reclaim.
      * Caller cancellation propagates naturally through the suspension; a
      * failing or unavailable handler yields null (step skipped truthfully).
      */
-    internal suspend fun reclaimSuspendingOrNull(): Long? =
-        synchronized(lock) { handler }?.let { current ->
-            runCatching { current.reclaimHistoryBytes() }.getOrNull()
+    internal suspend fun reclaimSuspendingOrNull(): Long? {
+        val current = synchronized(lock) { handler } ?: return null
+        return try {
+            current.reclaimHistoryBytes()
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            null
         }
+    }
+
+    internal suspend fun tryReclaimAndReportAttempt(): Boolean {
+        val current = synchronized(lock) { handler } ?: return false
+        try {
+            current.reclaimHistoryBytes()
+        } catch (ce: kotlinx.coroutines.CancellationException) {
+            throw ce
+        } catch (_: Throwable) {
+            // unavailable -> still an attempt, capacity reread is authoritative
+        }
+        return true
+    }
 }
 
 /** The question the policy answers: REQUIRED_WRITE_BYTES + RESERVE_BYTES satisfiable? */
@@ -99,20 +121,25 @@ internal class StoragePressureController(
         onInsufficient: () -> T,
         action: () -> T,
     ): T {
+        currentCoroutineContext().ensureActive()
         val request = StorageHeadroomRequest(requiredBytes, reserveBytes)
         var usable = capacity.usableBytes(targetVolumeFile)
         if (usable == null || usable >= request.neededBytes) return action()
 
         val sweepReport = pressureSweep(context)
+        currentCoroutineContext().ensureActive()
         usable = capacity.usableBytes(targetVolumeFile)
         if (usable != null && usable >= request.neededBytes) return action()
 
-        HistoryPressureRecovery.reclaimSuspendingOrNull()?.let { freed ->
-            if (freed > 0L) {
-                usable = capacity.usableBytes(targetVolumeFile)
-                if (usable != null && usable >= request.neededBytes) return action()
-            }
+        // History attempt itself propagates CancellationException; other failures
+        // are treated as unavailable but still use authoritative capacity reread.
+        val historyAttempted = HistoryPressureRecovery.tryReclaimAndReportAttempt()
+        if (historyAttempted) {
+            currentCoroutineContext().ensureActive()
+            usable = capacity.usableBytes(targetVolumeFile)
+            if (usable != null && usable >= request.neededBytes) return action()
         }
+        currentCoroutineContext().ensureActive()
         return onInsufficient()
     }
 }
