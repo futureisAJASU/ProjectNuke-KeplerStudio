@@ -52,6 +52,14 @@ class ProcessRecreationConvergenceTest {
         LegacyDraftSourceOwnership.clearForTest()
         IncomingSourceLiveOwnership.clearForTest()
         RestoredWorkingSourceOwnership.clearForTest()
+        // Process death clears the in-memory session registry; every scenario
+        // below must boot from the same empty state, not from registrations
+        // leaked by earlier tests in this JVM.
+        EditorHistoryStorage.clearActiveSessionsForTest()
+        // Start each scenario from ONLY the persistent state it intentionally
+        // constructs: clear the test-owned Draft pointer keys so a prior test's
+        // SharedPreferences cannot silently contribute a stale pointer.
+        clearDraftPointerPrefsForTest()
     }
 
     @After
@@ -59,6 +67,8 @@ class ProcessRecreationConvergenceTest {
         LegacyDraftSourceOwnership.clearForTest()
         IncomingSourceLiveOwnership.clearForTest()
         RestoredWorkingSourceOwnership.clearForTest()
+        EditorHistoryStorage.clearActiveSessionsForTest()
+        clearDraftPointerPrefsForTest()
         File(context.filesDir, "drafts").deleteRecursively()
         File(context.filesDir, "editor_sources").deleteRecursively()
         File(context.filesDir, "editor_history_v3").deleteRecursively()
@@ -68,6 +78,14 @@ class ProcessRecreationConvergenceTest {
             }
         }
         Dispatchers.resetMain()
+    }
+
+    private fun clearDraftPointerPrefsForTest() {
+        context.getSharedPreferences(PREF_NAME_DRAFT, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_DRAFT_GENERATION_ID)
+            .remove(KEY_DRAFT_SOURCE)
+            .commit()
     }
 
     // ------------------------------------------------------------------

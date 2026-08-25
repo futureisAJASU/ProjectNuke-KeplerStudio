@@ -352,36 +352,65 @@ internal class EditorHistoryCoordinator(
     }
 
     /**
-     * Retry all pending deletion debt.
-     * Snapshot the debt list on Main, delete all via one IO batch, then reconcile on Main.
-     * No iterator is held across a suspend boundary.
-     * Debt added by a concurrent replacement/close during IO is preserved.
-     * CancellationException propagates; other storage failures yield a truthful
-     * zero with debt untouched. Returns the bytes of debt rows confirmed absent,
-     * so every row settles exactly once.
+     * Removes exactly the [snapshot] debt rows whose directory is NOT in
+     * [notConfirmedAbsentDirectories] and returns their bytes. Directory
+     * identity matches the normal DeletionResult reconciliation path; debt
+     * added after the snapshot is structurally unreachable (snapshot-dir
+     * membership is required for removal), so a concurrent supersession's or
+     * close's newly recorded debt always survives. Each removed row leaves
+     * pendingDeletionDebt exactly once, so its bytes can never be reported
+     * as reclaimed again on a later attempt.
      */
-    private suspend fun retryPendingDeletions(): Long {
-        if (pendingDeletionDebt.isEmpty()) return 0L
-        val snapshot = pendingDeletionDebt.toList()
-        val result = try {
-            storage.deletePayloads(snapshot)
-        } catch (ce: CancellationException) {
-            throw ce
-        } catch (_: Throwable) {
-            return 0L
-        }
-        val snapshotDirs = snapshot.map { it.directory }.toSet()
-        val failedDirs = result.failedPayloads.map { it.directory }.toHashSet()
-        // Remove only debt that was in the snapshot AND was confirmed absent.
+    private fun removeConfirmedAbsentSnapshotDebt(
+        snapshot: List<ColdHistoryPayload>,
+        notConfirmedAbsentDirectories: Set<File>,
+    ): Long {
+        val snapshotDirs = HashSet<File>().also { dirs -> snapshot.forEach { dirs.add(it.directory) } }
         var freedBytes = 0L
         pendingDeletionDebt.removeAll { debt ->
-            val confirmedAbsent = debt.directory in snapshotDirs && debt.directory !in failedDirs
+            val confirmedAbsent = debt.directory in snapshotDirs && debt.directory !in notConfirmedAbsentDirectories
             if (confirmedAbsent) {
                 freedBytes = BitmapMemoryBudget.saturatingAdd(freedBytes, debt.bytes)
             }
             confirmedAbsent
         }
         return freedBytes
+    }
+
+    /**
+     * Retry all pending deletion debt.
+     * Snapshot the debt list on Main, delete all via one IO batch, then reconcile on Main.
+     * No iterator is held across a suspend boundary.
+     * Debt added by a concurrent replacement/close during IO is preserved.
+     *
+     * Return semantics: bytes of SNAPSHOT debt rows newly CONFIRMED absent
+     * during this attempt — nothing else. On an exceptional batch exit the
+     * exact snapshot directories are re-inspected FIRST: confirmed-absent
+     * rows settle immediately (removed from debt, bytes returned); rows still
+     * physically present remain debt-owned so no survivor can ever become
+     * file-exists AND debtless. CancellationException preserves that debt
+     * truth first, then rethrows WITHOUT publishing any reclaimed-byte
+     * result to the cancelled caller. Ordinary failures return the
+     * partially-confirmed bytes truthfully; the next retry can only report
+     * the remaining survivors' bytes.
+     */
+    private suspend fun retryPendingDeletions(): Long {
+        if (pendingDeletionDebt.isEmpty()) return 0L
+        val snapshot = pendingDeletionDebt.toList()
+        val result = try {
+            storage.deletePayloads(snapshot)
+        } catch (t: Throwable) {
+            // Exceptional batch exit: reconcile physical truth against the
+            // exact snapshot rows before anything else — including before a
+            // CancellationException may propagate.
+            val stillPresent =
+                snapshot.filter { it.directory.exists() }.mapTo(HashSet()) { it.directory }
+            val freedBytes = removeConfirmedAbsentSnapshotDebt(snapshot, stillPresent)
+            if (t is CancellationException) throw t
+            return freedBytes
+        }
+        val failedDirs = result.failedPayloads.mapTo(HashSet()) { it.directory }
+        return removeConfirmedAbsentSnapshotDebt(snapshot, failedDirs)
     }
 
     fun flags(): HistoryFlags = visibleFlags
@@ -2095,15 +2124,26 @@ internal class EditorHistoryStorage(
 
     private inline fun <reified T : Enum<T>> enumValueStrict(value: String): T = enumValueOf(value)
 
-private companion object {
-        const val VERSION = 3
-        const val SESSION_PREFIX = "session-"
-        const val ENTRY_PREFIX = "entry-"
-        const val STAGING_PREFIX = ".staging-"
-        const val MANIFEST = "manifest.json"
-        const val COMPLETE = "complete"
-        val SAFE_ID = Regex("[A-Za-z0-9_-]{1,80}")
-        val SAFE_PAYLOAD = Regex("bitmap-[0-9]+\\.png")
-        val activeSessions: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
+internal companion object {
+        private const val VERSION = 3
+        private const val SESSION_PREFIX = "session-"
+        private const val ENTRY_PREFIX = "entry-"
+        private const val STAGING_PREFIX = ".staging-"
+        private const val MANIFEST = "manifest.json"
+        private const val COMPLETE = "complete"
+        private val SAFE_ID = Regex("[A-Za-z0-9_-]{1,80}")
+        private val SAFE_PAYLOAD = Regex("bitmap-[0-9]+\\.png")
+        private val activeSessions: MutableSet<String> = Collections.newSetFromMap(ConcurrentHashMap())
+
+        /**
+         * TEST-ONLY: emulates true process death by clearing the process-global
+         * in-memory session registry, so a freshly constructed storage starts
+         * with an empty [activeSessions] set exactly like a new process.
+         * Production startup semantics are untouched — this is never called
+         * from production code paths.
+         */
+        internal fun clearActiveSessionsForTest() {
+            activeSessions.clear()
+        }
     }
 }

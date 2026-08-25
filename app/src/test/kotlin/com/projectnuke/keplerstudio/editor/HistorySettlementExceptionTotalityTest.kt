@@ -17,6 +17,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -220,6 +221,121 @@ class HistorySettlementExceptionTotalityTest {
     }
 
     // ------------------------------------------------------------------
+    // PENDING-DEBT RETRY — ordinary partial batch throw inside
+    // deletePayloads itself (not deleteEntries): the physically deleted row
+    // must settle during the exceptional attempt; only true survivors stay
+    // debt-owned for the next retry.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun debtRetryOrdinaryPartialDeletePayloadsThrowSettlesOnlyConfirmedAbsentRows() = testScope.runTest {
+        val debtDirs = seedDebtOfTwoRealPayloads()
+        assertEquals(2, debtDirs.size)
+        val tipId = checkNotNull(coordinator.navigationTargetId(true))
+        val bytesByDir = debtDirs.associateWith { backend.directoryBytes(it) }
+
+        // Debt retry batch: physically delete the FIRST snapshot row, then
+        // throw an ordinary RuntimeException before returning DeletionResult.
+        backend.deletePayloadsMode = DeleteEntriesMode.DELETE_FIRST_THEN_THROW_RUNTIME
+
+        var reclaimedDuringFailedAttempt: Long = Long.MIN_VALUE
+        var thrown: Throwable? = null
+        try {
+            reclaimedDuringFailedAttempt = checkNotNull(coordinator.reclaimHistoryForStoragePressure())
+        } catch (t: Throwable) {
+            thrown = t
+        }
+        assertNull("ordinary batch failure must not propagate to the caller", thrown)
+
+        // Exactly one snapshot row was physically removed before the throw;
+        // identity comes from observed truth, not directory listing order.
+        val deletedDir = debtDirs.filter { !it.exists() }.single()
+        val survivingDir = debtDirs.filter { it.exists() }.single()
+        val deletedBytes = checkNotNull(bytesByDir[deletedDir])
+        val survivingBytes = checkNotNull(bytesByDir[survivingDir])
+        assertEquals(
+            "confirmed-absent debt row settles during the failed attempt",
+            deletedBytes,
+            reclaimedDuringFailedAttempt,
+        )
+        val debtDirectories =
+            coordinator.pendingDeletionDebtDirectoriesForTest().mapTo(HashSet()) { it.canonicalFile }
+        assertFalse("absent row must NOT survive as debt", deletedDir in debtDirectories)
+        assertTrue("survivor must remain debt-owned", survivingDir in debtDirectories)
+        assertEquals(survivingBytes, coordinator.pendingDeletionDebtBytesForTest())
+        assertAbsentOrInDebt(listOf(deletedDir, survivingDir))
+        assertFalse("coordinator must not stay busy", coordinator.flags().busy)
+        assertEquals(tipId, coordinator.navigationTargetId(true))
+
+        // Normal retry settles ONLY the survivor's bytes, exactly once.
+        backend.resetInjection()
+        val survivorSettled = checkNotNull(coordinator.reclaimHistoryForStoragePressure())
+        assertEquals(survivingBytes, survivorSettled)
+        assertEquals(0L, coordinator.pendingDeletionDebtBytesForTest())
+        assertTrue(coordinator.pendingDeletionDebtDirectoriesForTest().isEmpty())
+        assertFalse(survivingDir.exists())
+
+        // Third retry reports zero — nothing can be settled twice.
+        assertEquals(0L, checkNotNull(coordinator.reclaimHistoryForStoragePressure()))
+        Unit
+    }
+
+    // ------------------------------------------------------------------
+    // PENDING-DEBT RETRY — CancellationException partial batch throw inside
+    // deletePayloads: debt truth reconciles BEFORE cancellation propagates;
+    // no reclaimed-byte result reaches the cancelled caller.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun debtRetryCancellationPartialDeletePayloadsThrowReconcilesDebtBeforePropagating() = testScope.runTest {
+        val debtDirs = seedDebtOfTwoRealPayloads()
+        assertEquals(2, debtDirs.size)
+        val tipId = checkNotNull(coordinator.navigationTargetId(true))
+        val generation = coordinator.currentGeneration()
+        val bytesByDir = debtDirs.associateWith { backend.directoryBytes(it) }
+
+        backend.deletePayloadsMode = DeleteEntriesMode.DELETE_FIRST_THEN_THROW_CE
+
+        var thrown: Throwable? = null
+        var outcome: Long = Long.MIN_VALUE
+        val job: Job =
+            testScope.launch {
+                try {
+                    outcome = coordinator.reclaimHistoryForStoragePressure() ?: Long.MIN_VALUE
+                } catch (t: Throwable) {
+                    thrown = t
+                }
+            }
+        testScope.advanceUntilIdle()
+
+        assertTrue("backend CancellationException must propagate", thrown is CancellationException)
+        assertEquals("cancelled settlement must never publish a result", Long.MIN_VALUE, outcome)
+
+        // Debt truth was already reconciled when cancellation surfaced:
+        // exactly one snapshot row was physically removed before the throw.
+        val deletedDir = debtDirs.filter { !it.exists() }.single()
+        val survivingDir = debtDirs.filter { it.exists() }.single()
+        val survivingBytes = checkNotNull(bytesByDir[survivingDir])
+        val debtDirectories =
+            coordinator.pendingDeletionDebtDirectoriesForTest().mapTo(HashSet()) { it.canonicalFile }
+        assertFalse("absent row must NOT survive as debt across cancellation", deletedDir in debtDirectories)
+        assertTrue("survivor must remain debt-owned", survivingDir in debtDirectories)
+        assertEquals(survivingBytes, coordinator.pendingDeletionDebtBytesForTest())
+        assertAbsentOrInDebt(listOf(deletedDir, survivingDir))
+        assertFalse("coordinator must not stay busy", coordinator.flags().busy)
+        assertEquals(tipId, coordinator.navigationTargetId(true))
+        assertEquals("cancellation must not switch generations", generation, coordinator.currentGeneration())
+
+        // Later normal retry settles the survivor exactly once.
+        backend.resetInjection()
+        val survivorSettled = checkNotNull(coordinator.reclaimHistoryForStoragePressure())
+        assertEquals(survivingBytes, survivorSettled)
+        assertEquals(0L, coordinator.pendingDeletionDebtBytesForTest())
+        assertFalse(survivingDir.exists())
+        Unit
+    }
+
+    // ------------------------------------------------------------------
     // Supersession (replaceDocument) with a batch-level backend exception AND
     // a failing session delete: old-generation survivors become debt; the new
     // generation's history stays untouched.
@@ -314,6 +430,35 @@ class HistorySettlementExceptionTotalityTest {
         repeat(entryCount) { index -> admitOversizedSnapshot(clearRedo = index == 0) }
     }
 
+    /**
+     * Creates pendingDeletionDebt owning exactly TWO real published payloads:
+     * seeds a 4-entry cold undo stack, then fails the first reclaim's ENTRY
+     * batch after one partial physical success. Returns the two debt-owned
+     * directories (canonical) in NO guaranteed order — a later debt-retry
+     * batch (deletePayloads) deletes exactly its first snapshot row, so tests
+     * resolve deleted vs. survivor from observed physical truth.
+     */
+    private suspend fun seedDebtOfTwoRealPayloads(): Set<File> {
+        seedColdUndoStack(entryCount = 4)
+        val candidates = backend.nonTipDirectoriesExcludingTip()
+        assertEquals(3, candidates.size)
+        backend.deleteEntriesMode = DeleteEntriesMode.DELETE_FIRST_THEN_THROW_RUNTIME
+        val reclaimed = checkNotNull(coordinator.reclaimHistoryForStoragePressure())
+        backend.deleteEntriesMode = DeleteEntriesMode.PASS
+        val survivors = candidates.filter { it.exists() }
+        assertEquals("seeding deletes exactly the first candidate", 1, candidates.count { !it.exists() })
+        assertEquals("seeding strands exactly two survivors as debt", 2, survivors.size)
+        assertTrue("seeding partial success must reclaim real bytes", reclaimed > 0L)
+        val debtDirectories =
+            coordinator.pendingDeletionDebtDirectoriesForTest().mapTo(HashSet()) { it.canonicalFile }
+        assertEquals(
+            "debt owns exactly the two survivors",
+            survivors.map { it.canonicalFile }.toSet(),
+            debtDirectories,
+        )
+        return debtDirectories
+    }
+
     private suspend fun admitOversizedSnapshot(clearRedo: Boolean) {
         val bitmap = bitmap()
         val outcome = coordinator.admitAdoptedSnapshot(snapshot(bitmap), clearRedo, 0L)
@@ -375,10 +520,12 @@ class HistorySettlementExceptionTotalityTest {
         private val root = File(context.filesDir, "editor_history_v3")
 
         var deleteEntriesMode = DeleteEntriesMode.PASS
+        var deletePayloadsMode = DeleteEntriesMode.PASS
         var failDeleteSession = false
 
         fun resetInjection() {
             deleteEntriesMode = DeleteEntriesMode.PASS
+            deletePayloadsMode = DeleteEntriesMode.PASS
             failDeleteSession = false
         }
 
@@ -420,7 +567,18 @@ class HistorySettlementExceptionTotalityTest {
         override suspend fun delete(payload: ColdHistoryPayload): Boolean = delegate.delete(payload)
 
         override suspend fun deletePayloads(payloads: Collection<ColdHistoryPayload>): DeletionResult =
-            delegate.deletePayloads(payloads)
+            when (deletePayloadsMode) {
+                DeleteEntriesMode.PASS -> delegate.deletePayloads(payloads)
+                DeleteEntriesMode.THROW_RUNTIME_BEFORE -> throw IllegalStateException("injected batch failure")
+                DeleteEntriesMode.DELETE_FIRST_THEN_THROW_RUNTIME -> {
+                    delegate.deletePayloads(payloads.take(1))
+                    throw IllegalStateException("injected mid-batch failure")
+                }
+                DeleteEntriesMode.DELETE_FIRST_THEN_THROW_CE -> {
+                    delegate.deletePayloads(payloads.take(1))
+                    throw CancellationException("injected backend cancellation")
+                }
+            }
 
         override suspend fun deleteSession(sessionId: String): Boolean =
             if (failDeleteSession) false else delegate.deleteSession(sessionId)
