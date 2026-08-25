@@ -88,18 +88,19 @@ internal data class TransientMaintenanceReport(
 }
 
 /**
- * Read-only snapshot of what a MANUAL "temporary original cache" action can
- * reclaim right now. Classification shares the EXACT same rules as
- * [cleanup] under [TransientMaintenanceMode.MANUAL] — family gates, name
- * gates, advisory string protection — then consults the ownership registries
- * WITHOUT deleting anything. Live/protected files are never counted as
- * reclaimable. Registry state is sampled at inspection time; a later action
- * always defers to delete-time authority over this estimate.
+ * Read-only snapshot of what a MANUAL or AGE_BASED cleanup can reclaim right
+ * now. Classification shares the EXACT same rules as [cleanup] under the same
+ * mode — family gates, name gates, prescreen rules, age contract — then
+ * consults the ownership registries WITHOUT deleting anything. Live/protected
+ * files are never counted as reclaimable. Registry state is sampled at
+ * inspection time; a later action always defers to delete-time authority over
+ * this estimate. Reclaimability is an eligibility estimate: physical delete
+ * success cannot be known non-destructively.
  */
-internal data class ManualTransientCleanupStats(
-    /** Physically present MANUAL-family candidates, including protected/live ones. */
+internal data class TransientCleanupStats(
+    /** Physically present mode-family candidates, including protected/live ones. */
     val candidateCount: Int,
-    /** Currently unowned + unprotected candidates: what MANUAL would delete today. */
+    /** Currently eligible + unowned + unprotected candidates. */
     val reclaimableCount: Int,
     /** Bytes of the reclaimable candidates only; never includes live/protected files. */
     val reclaimableBytes: Long,
@@ -146,21 +147,12 @@ internal object TransientSourceMaintenance {
         inProcessReferenced: Set<File> = emptySet(),
     ): TransientMaintenanceReport {
         val now = System.currentTimeMillis()
-        val cacheRoot = runCatching { context.cacheDir.canonicalFile }.getOrNull()
-            ?: return TransientMaintenanceReport.EMPTY
-        val listed = runCatching { cacheRoot.listFiles()?.toList() }.getOrNull().orEmpty()
         val entries = mutableListOf<TransientMaintenanceEntry>()
-        listed.forEach { file ->
-            val canonical = runCatching { file.canonicalFile }.getOrNull()
-            if (canonical == null || canonical.parentFile != cacheRoot || !canonical.isFile) {
-                return@forEach
-            }
-            when {
-                IncomingSourceArtifactNames.isStagingName(canonical.name) ->
-                    entries += processStaging(canonical, mode)
-                IncomingSourceArtifactNames.isFinalName(canonical.name) ->
-                    entries += processFinal(canonical, mode, protectedPaths, olderThanMillis, inProcessReferenced, now)
-            }
+        incomingStagingCandidates(context).forEach { canonical ->
+            entries += processStaging(canonical, mode)
+        }
+        incomingFinalCandidates(context).forEach { canonical ->
+            entries += processFinal(canonical, mode, protectedPaths, olderThanMillis, inProcessReferenced, now)
         }
         return TransientMaintenanceReport(entries)
     }
@@ -176,16 +168,8 @@ internal object TransientSourceMaintenance {
         if (!familyApplies(TransientSourceFamily.RESTORED_WORKING, mode)) {
             return TransientMaintenanceReport.EMPTY
         }
-        val workingRoot = runCatching { File(context.filesDir, WORKING_SOURCES_DIR).canonicalFile }.getOrNull()
-            ?: return TransientMaintenanceReport.EMPTY
-        val listed = runCatching { workingRoot.listFiles()?.toList() }.getOrNull().orEmpty()
         val entries = mutableListOf<TransientMaintenanceEntry>()
-        listed.forEach { file ->
-            val canonical = runCatching { file.canonicalFile }.getOrNull()
-            if (canonical == null || canonical.parentFile != workingRoot || !canonical.isFile) {
-                return@forEach
-            }
-            if (!RestoredWorkingSourceOwnership.isOwnedName(canonical.name)) return@forEach
+        restoredWorkingCandidates(context).forEach { canonical ->
             val prescreen = prescreen(canonical, mode, protectedPaths, olderThanMillis, inProcessReferenced)
             entries +=
                 when {
@@ -245,33 +229,50 @@ internal object TransientSourceMaintenance {
     }
 
     /**
-     * Non-destructive MANUAL statistics for the "temporary original cache"
-     * card. Mirrors [cleanup] under [TransientMaintenanceMode.MANUAL] exactly:
-     * incoming finals plus restored working sources (staging and legacy temps
-     * stay outside MANUAL), same advisory string prescreen, then a read-only
-     * ownership probe through each registry's own monitor. Never deletes and
-     * never mutates registry state.
+     * Non-destructive statistics for a user-facing cleanup estimate. Mirrors
+     * [cleanup] under [mode] exactly — same enumerators, family gates, name
+     * gates, prescreen rules, age contract — then probes ownership read-only
+     * through each registry's own monitor. Supported modes: MANUAL (incoming
+     * finals + restored working sources) and AGE_BASED (incoming finals older
+     * than [olderThanMillis] only). Never deletes and never mutates registry
+     * state.
      */
-    fun inspectManualTransientSources(
+    fun inspectTransientSources(
         context: Context,
+        mode: TransientMaintenanceMode,
         protectedPaths: Set<String> = emptySet(),
-    ): ManualTransientCleanupStats {
+        olderThanMillis: Long? = null,
+    ): TransientCleanupStats {
+        require(
+            mode == TransientMaintenanceMode.MANUAL || mode == TransientMaintenanceMode.AGE_BASED,
+        ) { "read-only statistics support MANUAL and AGE_BASED only: $mode" }
+        val now = System.currentTimeMillis()
         var candidateCount = 0
         var reclaimableCount = 0
         var reclaimableBytes = 0L
 
-        // Incoming finals: identical listing/name/classification rules to cleanupIncoming.
-        val cacheRoot = runCatching { context.cacheDir.canonicalFile }.getOrNull()
-        if (cacheRoot != null) {
-            val listed = runCatching { cacheRoot.listFiles()?.toList() }.getOrNull().orEmpty()
-            listed.forEach { file ->
-                val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return@forEach
-                if (canonical.parentFile != cacheRoot || !canonical.isFile) return@forEach
-                if (!IncomingSourceArtifactNames.isFinalName(canonical.name)) return@forEach
+        // Incoming finals: identical enumeration/classification to cleanupIncoming.
+        incomingFinalCandidates(context).forEach { canonical ->
+            candidateCount++
+            if (
+                prescreenFinal(canonical, mode, protectedPaths, olderThanMillis, emptySet(), now) == null &&
+                !IncomingSourceLiveOwnership.isOwned(canonical)
+            ) {
+                reclaimableCount++
+                reclaimableBytes = BitmapMemoryBudget.saturatingAdd(reclaimableBytes, fileSizeOf(canonical))
+            }
+        }
+
+        // Restored working sources: identical rules to cleanupRestored (MANUAL only;
+        // AGE_BASED never expands to this family).
+        if (mode == TransientMaintenanceMode.MANUAL &&
+            familyApplies(TransientSourceFamily.RESTORED_WORKING, mode)
+        ) {
+            restoredWorkingCandidates(context).forEach { canonical ->
                 candidateCount++
                 if (
-                    prescreen(canonical, TransientMaintenanceMode.MANUAL, protectedPaths, null, emptySet()) == null &&
-                    !IncomingSourceLiveOwnership.isOwned(canonical)
+                    prescreen(canonical, mode, protectedPaths, null, emptySet()) == null &&
+                    !RestoredWorkingSourceOwnership.isOwned(canonical)
                 ) {
                     reclaimableCount++
                     reclaimableBytes = BitmapMemoryBudget.saturatingAdd(reclaimableBytes, fileSizeOf(canonical))
@@ -279,33 +280,59 @@ internal object TransientSourceMaintenance {
             }
         }
 
-        // Restored working sources: identical rules to cleanupRestored under MANUAL.
-        if (familyApplies(TransientSourceFamily.RESTORED_WORKING, TransientMaintenanceMode.MANUAL)) {
-            val workingRoot = runCatching { File(context.filesDir, WORKING_SOURCES_DIR).canonicalFile }.getOrNull()
-            if (workingRoot != null) {
-                val listed = runCatching { workingRoot.listFiles()?.toList() }.getOrNull().orEmpty()
-                listed.forEach { file ->
-                    val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return@forEach
-                    if (canonical.parentFile != workingRoot || !canonical.isFile) return@forEach
-                    if (!RestoredWorkingSourceOwnership.isOwnedName(canonical.name)) return@forEach
-                    candidateCount++
-                    if (
-                        prescreen(canonical, TransientMaintenanceMode.MANUAL, protectedPaths, null, emptySet()) == null &&
-                        !RestoredWorkingSourceOwnership.isOwned(canonical)
-                    ) {
-                        reclaimableCount++
-                        reclaimableBytes = BitmapMemoryBudget.saturatingAdd(reclaimableBytes, fileSizeOf(canonical))
-                    }
-                }
-            }
-        }
-
-        return ManualTransientCleanupStats(candidateCount, reclaimableCount, reclaimableBytes)
+        return TransientCleanupStats(candidateCount, reclaimableCount, reclaimableBytes)
     }
 
     // ------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------
+
+    /**
+     * Single source of truth for candidate enumeration. Every destructive
+     * cleanup and every read-only inspection classifies over these exact
+     * gates (canonical root containment, regular file, family name), so the
+     * two can never silently drift apart.
+     */
+
+    private fun incomingStagingCandidates(context: Context): List<File> {
+        val cacheRoot = runCatching { context.cacheDir.canonicalFile }.getOrNull() ?: return emptyList()
+        val listed = runCatching { cacheRoot.listFiles()?.toList() }.getOrNull().orEmpty()
+        return listed.mapNotNull { file ->
+            val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return@mapNotNull null
+            when {
+                canonical.parentFile != cacheRoot || !canonical.isFile -> null
+                IncomingSourceArtifactNames.isStagingName(canonical.name) -> canonical
+                else -> null
+            }
+        }
+    }
+
+    private fun incomingFinalCandidates(context: Context): List<File> {
+        val cacheRoot = runCatching { context.cacheDir.canonicalFile }.getOrNull() ?: return emptyList()
+        val listed = runCatching { cacheRoot.listFiles()?.toList() }.getOrNull().orEmpty()
+        return listed.mapNotNull { file ->
+            val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return@mapNotNull null
+            when {
+                canonical.parentFile != cacheRoot || !canonical.isFile -> null
+                IncomingSourceArtifactNames.isFinalName(canonical.name) -> canonical
+                else -> null
+            }
+        }
+    }
+
+    private fun restoredWorkingCandidates(context: Context): List<File> {
+        val workingRoot = runCatching { File(context.filesDir, WORKING_SOURCES_DIR).canonicalFile }.getOrNull()
+            ?: return emptyList()
+        val listed = runCatching { workingRoot.listFiles()?.toList() }.getOrNull().orEmpty()
+        return listed.mapNotNull { file ->
+            val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return@mapNotNull null
+            when {
+                canonical.parentFile != workingRoot || !canonical.isFile -> null
+                RestoredWorkingSourceOwnership.isOwnedName(canonical.name) -> canonical
+                else -> null
+            }
+        }
+    }
 
     private fun processStaging(canonical: File, mode: TransientMaintenanceMode): TransientMaintenanceEntry =
         when {

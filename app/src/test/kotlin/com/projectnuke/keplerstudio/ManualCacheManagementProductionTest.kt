@@ -289,7 +289,10 @@ class ManualCacheManagementProductionTest {
         assertEquals(600L, snapshot.reclaimableBytes)
         // Backend statistics expose the physically-eligible candidate count too.
         val backendSnapshot =
-            com.projectnuke.keplerstudio.editor.TransientSourceMaintenance.inspectManualTransientSources(context)
+            com.projectnuke.keplerstudio.editor.TransientSourceMaintenance.inspectTransientSources(
+                context,
+                com.projectnuke.keplerstudio.editor.TransientMaintenanceMode.MANUAL,
+            )
         assertEquals(3, backendSnapshot.candidateCount)
         assertEquals(snapshot.reclaimableCount, backendSnapshot.reclaimableCount)
 

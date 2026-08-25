@@ -68,8 +68,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.projectnuke.keplerstudio.editor.EditorViewModel
-import com.projectnuke.keplerstudio.editor.IncomingSourceArtifactNames
-import com.projectnuke.keplerstudio.editor.IncomingSourceLiveOwnership
 import com.projectnuke.keplerstudio.editor.RecoveryDebugInfo
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.ThumbnailBitmapCache
@@ -587,7 +585,15 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?, draftSourcePat
     val scope = rememberCoroutineScope()
     var refreshKey by remember { mutableStateOf(0) }
     var actionMessage by remember { mutableStateOf<String?>(null) }
-    val cacheStats by produceState(initialValue = TemporaryCacheStats(), key1 = refreshKey) {
+    // Keyed on the protection roots as well as the manual refresh key: a
+    // document/Draft transition MUST restart the estimate, otherwise a stale
+    // reclaimable number survives a recomposition.
+    val cacheStats by produceState(
+        initialValue = TemporaryCacheStats(),
+        key1 = refreshKey,
+        key2 = activeSourcePath,
+        key3 = draftSourcePath,
+    ) {
         value = withContext(Dispatchers.IO) { calculateTemporaryCacheStats(context, activeSourcePath, draftSourcePath) }
     }
     Column(modifier = Modifier.fillMaxWidth().background(Color(0xFF242424)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -597,12 +603,12 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?, draftSourcePat
             color = Color(0xFFC8C8C8),
             style = MaterialTheme.typography.bodySmall,
         )
-        Text("7\uC77C \uC9C0\uB09C \uCE90\uC2DC: ${formatCacheBytes(cacheStats.oldBytes)} \u00B7 ${cacheStats.oldFileCount}\uAC1C", color = Color(0xFF8E8E8E), style = MaterialTheme.typography.bodySmall)
+        Text("7\uC77C \uC9C0\uB09C \uCE90\uC2DC: ${formatCacheBytes(cacheStats.ageReclaimableBytes)} \u00B7 ${cacheStats.ageReclaimableCount}\uAC1C", color = Color(0xFF8E8E8E), style = MaterialTheme.typography.bodySmall)
         actionMessage?.let { Text(it, color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall) }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             LongPressCacheAction(
                 label = "\uC624\uB798\uB41C \uD56D\uBAA9 \uC815\uB9AC",
-                enabled = cacheStats.oldFileCount > 0,
+                enabled = cacheStats.ageReclaimableCount > 0,
                 onTapHint = { actionMessage = "\uC0AD\uC81C\uD558\uB824\uBA74 \uC624\uB798\uB41C \uD56D\uBAA9 \uC815\uB9AC\uB97C \uAE38\uAC8C \uB20C\uB7EC\uC8FC\uC138\uC694." },
                 onLongPress = {
                     scope.launch {
@@ -796,8 +802,8 @@ private fun calculateThumbnailSampleSize(width: Int, height: Int, maxSide: Int):
 internal data class TemporaryCacheStats(
     val reclaimableCount: Int = 0,
     val reclaimableBytes: Long = 0L,
-    val oldFileCount: Int = 0,
-    val oldBytes: Long = 0L,
+    val ageReclaimableCount: Int = 0,
+    val ageReclaimableBytes: Long = 0L,
 )
 internal data class TemporaryCacheCleanupResult(val removedCount: Int, val removedBytes: Long)
 
@@ -837,21 +843,32 @@ private fun calculateTemporaryCacheStats(
     activeSourcePath: String?,
     draftSourcePath: String?,
 ): TemporaryCacheStats {
-    val now = System.currentTimeMillis()
-    // Truthful manual-family statistics: read-only inspection sharing the
-    // EXACT classification rules of the manual action. Live documents and
-    // string-protected files are never displayed as reclaimable capacity.
+    // Truthful statistics for BOTH card actions: read-only inspection sharing
+    // the EXACT classification rules of each real action. Live documents,
+    // live transactions/restores, and string-protected files are never
+    // displayed as reclaimable capacity. Values are a moment-in-time
+    // eligibility estimate, not a guaranteed delete result.
+    val protectedRoots = listOfNotNull(activeSourcePath, draftSourcePath).map { File(it).absolutePath }.toSet()
     val manual =
-        TransientSourceMaintenance.inspectManualTransientSources(
+        TransientSourceMaintenance.inspectTransientSources(
             context,
-            protectedPaths = listOfNotNull(activeSourcePath, draftSourcePath).map { File(it).absolutePath }.toSet(),
+            mode = TransientMaintenanceMode.MANUAL,
+            protectedPaths = protectedRoots,
         )
-    val oldFiles = listTemporarySourceFiles(context).filter { now - it.lastModified() > TemporarySourceMaxAgeMs }
+    // The 7-day line mirrors the REAL age-based action: incoming finals only,
+    // older than the threshold, unprotected, currently ownership-unowned.
+    val ageBased =
+        TransientSourceMaintenance.inspectTransientSources(
+            context,
+            mode = TransientMaintenanceMode.AGE_BASED,
+            protectedPaths = protectedRoots,
+            olderThanMillis = TemporarySourceMaxAgeMs,
+        )
     return TemporaryCacheStats(
         reclaimableCount = manual.reclaimableCount,
         reclaimableBytes = manual.reclaimableBytes,
-        oldFileCount = oldFiles.size,
-        oldBytes = oldFiles.sumOf { it.length() },
+        ageReclaimableCount = ageBased.reclaimableCount,
+        ageReclaimableBytes = ageBased.reclaimableBytes,
     )
 }
 
@@ -900,9 +917,6 @@ internal fun cleanupTemporarySourceFilesForTest(
     olderThan7DaysOnly: Boolean,
 ): TemporaryCacheCleanupResult =
     cleanupTemporarySourceFiles(context, activeSourcePath, draftSourcePath, olderThan7DaysOnly)
-
-private fun listTemporarySourceFiles(context: Context): List<File> =
-    context.cacheDir.listFiles { file -> file.isFile && IncomingSourceArtifactNames.isFinalName(file.name) }.orEmpty().toList()
 
 private fun formatCacheBytes(bytes: Long): String {
     val formatter = DecimalFormat("0.#")
