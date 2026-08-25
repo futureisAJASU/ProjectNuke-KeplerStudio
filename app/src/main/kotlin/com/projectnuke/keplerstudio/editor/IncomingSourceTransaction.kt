@@ -280,6 +280,15 @@ internal object IncomingSourceLiveOwnership {
         }
     }
 
+    /**
+     * Read-only ownership probe for truthful statistics; same monitor as the
+     * delete boundary, never deletes and never mutates state.
+     */
+    fun isOwned(file: File): Boolean = synchronized(lock) {
+        val path = canonical(file)
+        path in livePaths || path in documentPaths
+    }
+
     /** Compatibility bridge for existing callers; null means any live owner. */
     fun deleteIfNotLive(file: File): Boolean? = when (deleteIfUnowned(file)) {
         DeleteResult.PRESERVED_LIVE_TRANSACTION,

@@ -588,11 +588,15 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?, draftSourcePat
     var refreshKey by remember { mutableStateOf(0) }
     var actionMessage by remember { mutableStateOf<String?>(null) }
     val cacheStats by produceState(initialValue = TemporaryCacheStats(), key1 = refreshKey) {
-        value = withContext(Dispatchers.IO) { calculateTemporaryCacheStats(context) }
+        value = withContext(Dispatchers.IO) { calculateTemporaryCacheStats(context, activeSourcePath, draftSourcePath) }
     }
     Column(modifier = Modifier.fillMaxWidth().background(Color(0xFF242424)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text("\uCE90\uC2DC \uAD00\uB9AC", color = Color(0xFFF2F2F2), fontWeight = FontWeight.SemiBold)
-        Text("\uC784\uC2DC \uC6D0\uBCF8 \uCE90\uC2DC: ${formatCacheBytes(cacheStats.totalBytes)} \u00B7 ${cacheStats.fileCount}\uAC1C", color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall)
+        Text(
+            "\uC784\uC2DC \uC6D0\uBCF8 \uD30C\uC77C: ${formatCacheBytes(cacheStats.reclaimableBytes)} \u00B7 ${cacheStats.reclaimableCount}\uAC1C",
+            color = Color(0xFFC8C8C8),
+            style = MaterialTheme.typography.bodySmall,
+        )
         Text("7\uC77C \uC9C0\uB09C \uCE90\uC2DC: ${formatCacheBytes(cacheStats.oldBytes)} \u00B7 ${cacheStats.oldFileCount}\uAC1C", color = Color(0xFF8E8E8E), style = MaterialTheme.typography.bodySmall)
         actionMessage?.let { Text(it, color = Color(0xFFC8C8C8), style = MaterialTheme.typography.bodySmall) }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -610,7 +614,7 @@ private fun GalleryCacheManagementCard(activeSourcePath: String?, draftSourcePat
             )
             LongPressCacheAction(
                 label = "\uD604\uC7AC \uD3B8\uC9D1 \uC81C\uC678 \uBAA8\uB450 \uC815\uB9AC",
-                enabled = cacheStats.fileCount > listOfNotNull(activeSourcePath, draftSourcePath).distinct().size,
+                enabled = cacheStats.reclaimableCount > 0,
                 onTapHint = { actionMessage = "\uC0AD\uC81C\uD558\uB824\uBA74 \uD604\uC7AC \uD3B8\uC9D1 \uC81C\uC678 \uBAA8\uB450 \uC815\uB9AC\uB97C \uAE38\uAC8C \uB20C\uB7EC\uC8FC\uC138\uC694." },
                 onLongPress = {
                     scope.launch {
@@ -789,19 +793,30 @@ private fun calculateThumbnailSampleSize(width: Int, height: Int, maxSide: Int):
     return sample.coerceAtLeast(1)
 }
 
-private data class TemporaryCacheStats(val fileCount: Int = 0, val totalBytes: Long = 0L, val oldFileCount: Int = 0, val oldBytes: Long = 0L)
+internal data class TemporaryCacheStats(
+    val reclaimableCount: Int = 0,
+    val reclaimableBytes: Long = 0L,
+    val oldFileCount: Int = 0,
+    val oldBytes: Long = 0L,
+)
 internal data class TemporaryCacheCleanupResult(val removedCount: Int, val removedBytes: Long)
 
-/** Deterministic split point for production manual-cache-cleanup ownership tests. */
-internal class IncomingSourceCacheCleanupTestSeam {
+/**
+ * Deterministic split point between the UI-captured snapshot (stats strings /
+ * protected paths) and physical deletion in the production manual-cache
+ * cleanup path. The manual action spans the whole transient family (incoming
+ * finals + restored working sources); protection is always re-established
+ * authoritatively at delete time, after this gate releases.
+ */
+internal class ManualCacheCleanupTestSeam {
     @Volatile internal var snapshotReached: CompletableDeferred<Unit>? = null
     @Volatile internal var snapshotRelease: CompletableDeferred<Unit>? = null
 
     internal companion object Registry {
         private val lock = Any()
-        private var installed: IncomingSourceCacheCleanupTestSeam? = null
+        private var installed: ManualCacheCleanupTestSeam? = null
 
-        internal fun install(seam: IncomingSourceCacheCleanupTestSeam): AutoCloseable {
+        internal fun install(seam: ManualCacheCleanupTestSeam): AutoCloseable {
             synchronized(lock) {
                 check(installed == null) { "cache cleanup test seam already installed" }
                 installed = seam
@@ -813,31 +828,67 @@ internal class IncomingSourceCacheCleanupTestSeam {
             }
         }
 
-        internal fun capture(): IncomingSourceCacheCleanupTestSeam? = synchronized(lock) { installed }
+        internal fun capture(): ManualCacheCleanupTestSeam? = synchronized(lock) { installed }
     }
 }
 
-private fun calculateTemporaryCacheStats(context: Context): TemporaryCacheStats {
+private fun calculateTemporaryCacheStats(
+    context: Context,
+    activeSourcePath: String?,
+    draftSourcePath: String?,
+): TemporaryCacheStats {
     val now = System.currentTimeMillis()
-    val files = listTemporarySourceFiles(context)
-    val oldFiles = files.filter { now - it.lastModified() > TemporarySourceMaxAgeMs }
-    return TemporaryCacheStats(files.size, files.sumOf { it.length() }, oldFiles.size, oldFiles.sumOf { it.length() })
+    // Truthful manual-family statistics: read-only inspection sharing the
+    // EXACT classification rules of the manual action. Live documents and
+    // string-protected files are never displayed as reclaimable capacity.
+    val manual =
+        TransientSourceMaintenance.inspectManualTransientSources(
+            context,
+            protectedPaths = listOfNotNull(activeSourcePath, draftSourcePath).map { File(it).absolutePath }.toSet(),
+        )
+    val oldFiles = listTemporarySourceFiles(context).filter { now - it.lastModified() > TemporarySourceMaxAgeMs }
+    return TemporaryCacheStats(
+        reclaimableCount = manual.reclaimableCount,
+        reclaimableBytes = manual.reclaimableBytes,
+        oldFileCount = oldFiles.size,
+        oldBytes = oldFiles.sumOf { it.length() },
+    )
 }
 
+/** Test-only access to the real production cache statistics path. */
+internal fun calculateTemporaryCacheStatsForTest(
+    context: Context,
+    activeSourcePath: String?,
+    draftSourcePath: String?,
+): TemporaryCacheStats =
+    calculateTemporaryCacheStats(context, activeSourcePath, draftSourcePath)
+
 private fun cleanupTemporarySourceFiles(context: Context, activeSourcePath: String?, draftSourcePath: String?, olderThan7DaysOnly: Boolean): TemporaryCacheCleanupResult {
-    val seam = IncomingSourceCacheCleanupTestSeam.capture()
+    val seam = ManualCacheCleanupTestSeam.capture()
     seam?.snapshotReached?.complete(Unit)
+    // Test-only gate: unreachable in production (no seam installed), and the
+    // cleanup itself always runs on Dispatchers.IO from every call site.
     seam?.snapshotRelease?.let { release -> runBlocking { release.await() } }
     // Single ownership-aware backend shared with startup reconciliation and
     // editor age-based hygiene. The captured strings are advisory pre-filter
     // only; protection is re-established authoritatively at delete time.
     val report =
-        TransientSourceMaintenance.cleanupIncoming(
-            context,
-            mode = if (olderThan7DaysOnly) TransientMaintenanceMode.AGE_BASED else TransientMaintenanceMode.MANUAL,
-            protectedPaths = listOfNotNull(activeSourcePath, draftSourcePath).map { File(it).absolutePath }.toSet(),
-            olderThanMillis = if (olderThan7DaysOnly) TemporarySourceMaxAgeMs else null,
-        )
+        if (olderThan7DaysOnly) {
+            TransientSourceMaintenance.cleanupIncoming(
+                context,
+                mode = TransientMaintenanceMode.AGE_BASED,
+                protectedPaths = listOfNotNull(activeSourcePath, draftSourcePath).map { File(it).absolutePath }.toSet(),
+                olderThanMillis = TemporarySourceMaxAgeMs,
+            )
+        } else {
+            // Unified backend: unowned incoming finals AND unowned restored
+            // working sources. Staging and legacy temps stay outside MANUAL.
+            TransientSourceMaintenance.cleanup(
+                context,
+                mode = TransientMaintenanceMode.MANUAL,
+                protectedPaths = listOfNotNull(activeSourcePath, draftSourcePath).map { File(it).absolutePath }.toSet(),
+            )
+        }
     return TemporaryCacheCleanupResult(report.deletedCount, report.reclaimedBytes)
 }
 

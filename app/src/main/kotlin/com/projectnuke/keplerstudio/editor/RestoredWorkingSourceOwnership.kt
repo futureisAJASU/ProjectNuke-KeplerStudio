@@ -76,6 +76,15 @@ internal object RestoredWorkingSourceOwnership {
         }
     }
 
+    /**
+     * Read-only ownership probe for truthful statistics; same monitor as the
+     * delete boundary, never deletes and never mutates state.
+     */
+    fun isOwned(path: File): Boolean = synchronized(lock) {
+        val canonicalPath = canonical(path)
+        canonicalPath in restorePaths || canonicalPath in documentPaths
+    }
+
     internal fun isRestoreOwnedForTest(path: File): Boolean = synchronized(lock) {
         canonical(path) in restorePaths
     }

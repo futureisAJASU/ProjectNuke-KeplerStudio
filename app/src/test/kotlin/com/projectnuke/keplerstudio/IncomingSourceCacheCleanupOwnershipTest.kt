@@ -1,4 +1,4 @@
-package com.projectnuke.keplerstudio
+﻿package com.projectnuke.keplerstudio
 
 import android.net.Uri
 import com.projectnuke.keplerstudio.editor.IncomingSourceArtifactNames
@@ -46,8 +46,8 @@ class IncomingSourceCacheCleanupOwnershipTest {
         val path = File(context.cacheDir, IncomingSourceArtifactNames.finalName(id)).apply { writeText("old") }
         val reached = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        seamHandle = IncomingSourceCacheCleanupTestSeam.install(
-            IncomingSourceCacheCleanupTestSeam().also {
+        seamHandle = ManualCacheCleanupTestSeam.install(
+            ManualCacheCleanupTestSeam().also {
                 it.snapshotReached = reached
                 it.snapshotRelease = release
             },

@@ -88,6 +88,24 @@ internal data class TransientMaintenanceReport(
 }
 
 /**
+ * Read-only snapshot of what a MANUAL "temporary original cache" action can
+ * reclaim right now. Classification shares the EXACT same rules as
+ * [cleanup] under [TransientMaintenanceMode.MANUAL] — family gates, name
+ * gates, advisory string protection — then consults the ownership registries
+ * WITHOUT deleting anything. Live/protected files are never counted as
+ * reclaimable. Registry state is sampled at inspection time; a later action
+ * always defers to delete-time authority over this estimate.
+ */
+internal data class ManualTransientCleanupStats(
+    /** Physically present MANUAL-family candidates, including protected/live ones. */
+    val candidateCount: Int,
+    /** Currently unowned + unprotected candidates: what MANUAL would delete today. */
+    val reclaimableCount: Int,
+    /** Bytes of the reclaimable candidates only; never includes live/protected files. */
+    val reclaimableBytes: Long,
+)
+
+/**
  * Single ownership-aware backend for transient source maintenance.
  *
  * Every physical deletion goes through the owning registry's linearized
@@ -226,6 +244,65 @@ internal object TransientSourceMaintenance {
         return TransientMaintenanceReport(entries)
     }
 
+    /**
+     * Non-destructive MANUAL statistics for the "temporary original cache"
+     * card. Mirrors [cleanup] under [TransientMaintenanceMode.MANUAL] exactly:
+     * incoming finals plus restored working sources (staging and legacy temps
+     * stay outside MANUAL), same advisory string prescreen, then a read-only
+     * ownership probe through each registry's own monitor. Never deletes and
+     * never mutates registry state.
+     */
+    fun inspectManualTransientSources(
+        context: Context,
+        protectedPaths: Set<String> = emptySet(),
+    ): ManualTransientCleanupStats {
+        var candidateCount = 0
+        var reclaimableCount = 0
+        var reclaimableBytes = 0L
+
+        // Incoming finals: identical listing/name/classification rules to cleanupIncoming.
+        val cacheRoot = runCatching { context.cacheDir.canonicalFile }.getOrNull()
+        if (cacheRoot != null) {
+            val listed = runCatching { cacheRoot.listFiles()?.toList() }.getOrNull().orEmpty()
+            listed.forEach { file ->
+                val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return@forEach
+                if (canonical.parentFile != cacheRoot || !canonical.isFile) return@forEach
+                if (!IncomingSourceArtifactNames.isFinalName(canonical.name)) return@forEach
+                candidateCount++
+                if (
+                    prescreen(canonical, TransientMaintenanceMode.MANUAL, protectedPaths, null, emptySet()) == null &&
+                    !IncomingSourceLiveOwnership.isOwned(canonical)
+                ) {
+                    reclaimableCount++
+                    reclaimableBytes = BitmapMemoryBudget.saturatingAdd(reclaimableBytes, fileSizeOf(canonical))
+                }
+            }
+        }
+
+        // Restored working sources: identical rules to cleanupRestored under MANUAL.
+        if (familyApplies(TransientSourceFamily.RESTORED_WORKING, TransientMaintenanceMode.MANUAL)) {
+            val workingRoot = runCatching { File(context.filesDir, WORKING_SOURCES_DIR).canonicalFile }.getOrNull()
+            if (workingRoot != null) {
+                val listed = runCatching { workingRoot.listFiles()?.toList() }.getOrNull().orEmpty()
+                listed.forEach { file ->
+                    val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return@forEach
+                    if (canonical.parentFile != workingRoot || !canonical.isFile) return@forEach
+                    if (!RestoredWorkingSourceOwnership.isOwnedName(canonical.name)) return@forEach
+                    candidateCount++
+                    if (
+                        prescreen(canonical, TransientMaintenanceMode.MANUAL, protectedPaths, null, emptySet()) == null &&
+                        !RestoredWorkingSourceOwnership.isOwned(canonical)
+                    ) {
+                        reclaimableCount++
+                        reclaimableBytes = BitmapMemoryBudget.saturatingAdd(reclaimableBytes, fileSizeOf(canonical))
+                    }
+                }
+            }
+        }
+
+        return ManualTransientCleanupStats(candidateCount, reclaimableCount, reclaimableBytes)
+    }
+
     // ------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------
@@ -319,9 +396,12 @@ internal object TransientSourceMaintenance {
             TransientSourceFamily.INCOMING_STAGING -> mode == TransientMaintenanceMode.STARTUP || mode == TransientMaintenanceMode.PRESSURE
             TransientSourceFamily.INCOMING_FINAL -> true
             // Restored working sources stay out of the age-based editor
-            // hygiene pass and out of the manual "temporary original cache"
-            // card until the UI copy becomes truthful about them (Phase 6).
-            TransientSourceFamily.RESTORED_WORKING -> mode == TransientMaintenanceMode.STARTUP || mode == TransientMaintenanceMode.PRESSURE
+            // hygiene pass; the manual "temporary original cache" card owns
+            // them alongside incoming finals (Phase 6 made its copy truthful).
+            TransientSourceFamily.RESTORED_WORKING ->
+                mode == TransientMaintenanceMode.STARTUP ||
+                    mode == TransientMaintenanceMode.PRESSURE ||
+                    mode == TransientMaintenanceMode.MANUAL
             TransientSourceFamily.LEGACY_TEMP -> mode == TransientMaintenanceMode.STARTUP
         }
 
