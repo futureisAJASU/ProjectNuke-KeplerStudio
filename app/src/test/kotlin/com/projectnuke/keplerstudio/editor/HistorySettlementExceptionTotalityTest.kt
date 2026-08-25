@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import android.content.Context
 import android.graphics.Bitmap
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -412,6 +413,116 @@ class HistorySettlementExceptionTotalityTest {
     }
 
     // ------------------------------------------------------------------
+    // SUPERSEDED SPILL — a spill publication that lands after its operation
+    // was superseded must still settle its just-published payload totally:
+    // a failed single-payload delete becomes pendingDeletionDebt, never an
+    // untracked orphan escaping the cold-disk budget accounting.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun supersededSpillPublicationFailureIsDebtOwnedNotOrphaned() = testScope.runTest {
+        // Dedicated coordinator whose RAM budget starts unbounded (first entry
+        // stays HOT) and shrinks before the second admission, forcing the
+        // second operation to SPILL the hot entry — exactly the spillEntry
+        // path whose superseded branch must settle its just-published payload.
+        val hotBackend = ExceptionalHistoryBackend(context)
+        var ramBudget = Long.MAX_VALUE
+        val hotCoordinator = EditorHistoryCoordinator(
+            context,
+            testScope,
+            tracker = null,
+            settlementDispatcher = dispatcher,
+            storage = hotBackend,
+            historyRamBudgetBytes = { ramBudget },
+            historyDiskBudgetBytes = { Long.MAX_VALUE },
+        )
+        try {
+            testScope.advanceUntilIdle()
+            val firstBitmap = bitmap()
+            val firstOutcome =
+                hotCoordinator.admitAdoptedSnapshot(snapshotFor(hotCoordinator, firstBitmap), clearRedo = true, 0L)
+            firstBitmap.recycle()
+            assertTrue(firstOutcome is HistoryAdmissionOutcome.Retained)
+            assertEquals(0, hotBackend.sessionSnapshot().entryDirectories.size)
+            testScope.advanceUntilIdle()
+
+            ramBudget = 8L
+            val generationA = hotCoordinator.currentGeneration()
+            hotBackend.failDeleteSinglePayload = true
+            // The superseding generation's settlement must NOT swallow the old
+            // session directory, otherwise the orphan under test disappears
+            // regardless of spill-side behavior.
+            hotBackend.failDeleteSession = true
+            hotBackend.publishStarted = CompletableDeferred()
+            hotBackend.publishGate = CompletableDeferred()
+            val admissionJob = launch {
+                val secondBitmap = bitmap()
+                val outcome =
+                    hotCoordinator.admitAdoptedSnapshot(snapshotFor(hotCoordinator, secondBitmap), clearRedo = false, 0L)
+                secondBitmap.recycle()
+                assertTrue(
+                    "superseded admission must be reported truthfully",
+                    outcome is HistoryAdmissionOutcome.NotRetained,
+                )
+            }
+            hotBackend.publishStarted?.await()
+
+            hotCoordinator.replaceDocument()
+            hotBackend.publishGate?.complete(Unit)
+            testScope.advanceUntilIdle()
+            admissionJob.join()
+
+            // Every entry directory physically present under the superseded
+            // generation must be absent or debt-owned — never orphaned.
+            val supersededDirectories = hotBackend.sessionSnapshot().entryDirectories.filter {
+                it.parentFile?.name == "session-$generationA"
+            }
+            val debtDirectories =
+                hotCoordinator.pendingDeletionDebtDirectoriesForTest().mapTo(HashSet()) { it.canonicalFile }
+            supersededDirectories.forEach { directory ->
+                if (directory.exists()) {
+                    assertTrue(
+                        "superseded spill survivor must be debt-owned, not orphaned: ${directory.name}",
+                        directory.canonicalFile in debtDirectories,
+                    )
+                }
+            }
+            assertFalse("coordinator must not stay busy", hotCoordinator.flags().busy)
+        } finally {
+            hotBackend.publishGate?.complete(Unit)
+            hotBackend.resetInjection()
+            hotCoordinator.close()
+            testScope.advanceUntilIdle()
+            hotBackend.deleteHistoryRootForTest()
+        }
+        Unit
+    }
+
+    private fun snapshotFor(target: EditorHistoryCoordinator, bitmap: Bitmap?): EditorHistorySnapshot =
+        EditorHistorySnapshot(
+            params = EditParams(),
+            correctionEngine = CorrectionEngine.Engine1,
+            noiseEngine = NoiseEngine.FastEdgeAware,
+            detailEngine = DetailEngine.MaskedUnsharp,
+            toneEngine = ToneEngine.HistogramAuto,
+            hazeEngine = DehazeEngine.FastContrast,
+            baseBitmapDirty = false,
+            baseContentToken = "base",
+            previewBitmap = bitmap,
+            originalPreviewBitmap = null,
+            presetLook = null,
+            cropState = CropState(),
+            selectionLayers = emptyList(),
+            activeSelectionLayerId = null,
+            selectionPaintSettings = SelectionPaintSettings(),
+            showSelectionOverlay = false,
+            activeQuickEffects = emptyList(),
+            flareGuardRuntimeStatus = null,
+            storage = if (bitmap == null) HistorySnapshotStorage.MetadataOnly else HistorySnapshotStorage.Exact,
+            coordinatorGeneration = target.currentGeneration(),
+        ).also { it.claimCoordinatorOwnership() }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
 
@@ -522,11 +633,17 @@ class HistorySettlementExceptionTotalityTest {
         var deleteEntriesMode = DeleteEntriesMode.PASS
         var deletePayloadsMode = DeleteEntriesMode.PASS
         var failDeleteSession = false
+        var failDeleteSinglePayload = false
+        var publishStarted: CompletableDeferred<Unit>? = null
+        var publishGate: CompletableDeferred<Unit>? = null
 
         fun resetInjection() {
             deleteEntriesMode = DeleteEntriesMode.PASS
             deletePayloadsMode = DeleteEntriesMode.PASS
             failDeleteSession = false
+            failDeleteSinglePayload = false
+            publishStarted = null
+            publishGate = null
         }
 
         override fun registerSession(sessionId: String) = delegate.registerSession(sessionId)
@@ -536,7 +653,14 @@ class HistorySettlementExceptionTotalityTest {
         override suspend fun publish(
             entry: EditorHistoryEntry,
             snapshot: EditorHistorySnapshot,
-        ): HistoryPublishResult = delegate.publish(entry, snapshot)
+        ): HistoryPublishResult {
+            val result = delegate.publish(entry, snapshot)
+            // Park AFTER the physical publication so the supersession below
+            // races an already-written payload, not an unwritten one.
+            publishStarted?.complete(Unit)
+            publishGate?.await()
+            return result
+        }
 
         override suspend fun load(
             entry: EditorHistoryEntry,
@@ -564,7 +688,8 @@ class HistorySettlementExceptionTotalityTest {
             }
 
         override suspend fun delete(entry: EditorHistoryEntry): Boolean = delegate.delete(entry)
-        override suspend fun delete(payload: ColdHistoryPayload): Boolean = delegate.delete(payload)
+        override suspend fun delete(payload: ColdHistoryPayload): Boolean =
+            if (failDeleteSinglePayload) false else delegate.delete(payload)
 
         override suspend fun deletePayloads(payloads: Collection<ColdHistoryPayload>): DeletionResult =
             when (deletePayloadsMode) {

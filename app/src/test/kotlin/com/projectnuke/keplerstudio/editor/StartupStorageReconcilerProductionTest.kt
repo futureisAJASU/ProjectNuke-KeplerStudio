@@ -483,6 +483,67 @@ class StartupStorageReconcilerProductionTest {
         }
     }
 
+    /**
+     * Cancellation must stay cancellation: a reconcile job cancelled while it
+     * owns the generation-deletion authority propagates CancellationException
+     * instead of misreporting the interrupted item as FAILED_DELETION.
+     */
+    @Test
+    fun cancellationAtGenerationDeletionAuthorityPropagates() = runBlocking {
+        val generations = draftGenerationsRoot(context)
+        File(generations, "gen_current").apply { mkdirs() }.resolve("complete").writeText("ok")
+        val staleId = "gen_stale_cancel"
+        val staleDir = File(generations, staleId).apply { mkdirs() }
+        File(staleDir, "source.img").writeText("stale")
+        prefs().edit().putString(KEY_DRAFT_GENERATION_ID, "gen_current").commit()
+
+        val queuedReached = CompletableDeferred<Unit>()
+        val queuedRelease = CompletableDeferred<Unit>()
+        val authorityReached = CompletableDeferred<Unit>()
+        val authorityRelease = CompletableDeferred<Unit>()
+        val seam = StartupReconcileTestSeam().also {
+            it.generationDeletionCandidateId = staleId
+            it.generationDeletionQueuedReached = queuedReached
+            it.generationDeletionQueuedRelease = queuedRelease
+            it.generationDeletionAuthorityReached = authorityReached
+            it.generationDeletionAuthorityRelease = authorityRelease
+        }
+        val installed = StartupReconcileTestSeam.install(seam)
+        var observedFailure: Throwable? = null
+        var outcome: StartupReconcileOutcome? = null
+        try {
+            val reconciliation = async(Dispatchers.Default) {
+                try {
+                    reconcileStartupArtifacts(context, null)
+                } catch (t: Throwable) {
+                    observedFailure = t
+                    null
+                }
+            }
+            awaitEditorCompletionForTest("reconcile must queue the stale generation", queuedReached)
+            queuedRelease.complete(Unit)
+            awaitEditorCompletionForTest("reconcile must own deletion authority", authorityReached)
+            // Fail ONLY the authority-boundary await with cancellation; the
+            // surrounding job stays alive so any swallowed/misreported
+            // cancellation is directly observable.
+            authorityRelease.cancel(kotlinx.coroutines.CancellationException("injected"))
+            awaitEditorCompletionForTest("reconcile must settle", reconciliation)
+            outcome = reconciliation.getCompleted()
+
+            assertTrue(
+                "cancellation must propagate out of reconcileStartupArtifacts, " +
+                    "not be misreported as FAILED_DELETION (observed=$observedFailure outcome=$outcome)",
+                observedFailure is kotlinx.coroutines.CancellationException,
+            )
+            assertEquals(null, outcome)
+        } finally {
+            queuedRelease.complete(Unit)
+            authorityRelease.complete(Unit)
+            installed.close()
+            if (staleDir.exists()) staleDir.deleteRecursively()
+        }
+    }
+
     private fun awaitInit(vm: EditorViewModel) {
         awaitEditorCompletionForTest(
             description = "startup init must complete",

@@ -1114,6 +1114,9 @@ internal class EditorHistoryCoordinator(
 
     fun replaceDocument() {
         checkMainOwner()
+        // A closed coordinator owns no session: registering a replacement here
+        // would create a session directory no finalizer will ever delete.
+        if (closed) return
         operationToken += 1L
         activeColdLoadDecodedBytes = 0L
         diagnosticOperationKind = TrackerSession.HistoryOperationKind.Maintenance
@@ -1333,7 +1336,10 @@ internal class EditorHistoryCoordinator(
         }
         if (!isOperationCurrent(token, generation) || entry.payloadState == HistoryPayloadState.Discarded) {
             // Stale or closed during publication — replacement/close owns settlement.
-            if (published is HistoryPublishResult.Success) storage.delete(published.payload)
+            // Totality contract: the just-published payload must end physically
+            // absent OR debt-recorded; a failed delete here can never become an
+            // untracked orphan escaping the cold-disk budget accounting.
+            if (published is HistoryPublishResult.Success) settleColdPayloads(listOf(published.payload))
             if (!snapshot.resourcesReleased) snapshot.recycleBitmaps()
             entry.hotSnapshot = null
             return SpillResult.Superseded

@@ -13,6 +13,7 @@ internal enum class DraftSaveStage {
     GenerationFinalizedBeforePublish,
     PointerPublished,
     PointerPersistedBeforeSettlement,
+    BeforeSettlementAdoption,
     BeforePostCommitCleanup,
 }
 

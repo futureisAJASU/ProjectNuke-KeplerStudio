@@ -2,6 +2,7 @@ package com.projectnuke.keplerstudio.editor
 
 import android.content.Context
 import java.io.File
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -295,6 +296,9 @@ val dirName = canonical.name
         StartupReconcileEntry(canonical.absolutePath, if (shouldSkip) StartupReconcileDisposition.PRESERVED_POINTER else disposition)
             }
         }
+    } catch (ce: CancellationException) {
+        // Cancellation stays cancellation: never misreported as a deletion failure.
+        throw ce
     } catch (t: Throwable) {
         StartupReconcileEntry(canonical.absolutePath, StartupReconcileDisposition.FAILED_DELETION)
     }

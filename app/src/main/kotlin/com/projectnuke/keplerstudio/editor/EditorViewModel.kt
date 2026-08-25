@@ -5161,13 +5161,32 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         DraftStorageCoordinator.withWriteLock {
                             val actualPointer = currentDraftGenerationId(context)
                             if (actualPointer == saved.generationId) {
-                                persistLegacyDraftCompatibility(context, payload, saved)
+                                if (draftPointerBaseline != saved.generationId) {
+                                    // Cancellation landed before the published
+                                    // pointer was adopted into this ViewModel's
+                                    // baseline, so the logical commit never
+                                    // happened: restore the previous authoritative
+                                    // pointer (or clear it) instead of keeping
+                                    // unadopted disk truth that would wedge every
+                                    // later save behind a pointer/baseline mismatch.
+                                    DraftStorageCoordinator.rollbackCommittedDraftUnsafe(context, saved)
+                                } else {
+                                    persistLegacyDraftCompatibility(context, payload, saved)
+                                    DraftStorageCoordinator.deleteAllExceptUnsafe(
+                                        context,
+                                        saved.generationDirectory,
+                                        saved.expectedPointerGenerationId,
+                                    )
+                                }
+                            } else {
+                                // A newer authoritative pointer won; only clean up
+                                // this generation's leftovers without touching it.
+                                DraftStorageCoordinator.deleteAllExceptUnsafe(
+                                    context,
+                                    saved.generationDirectory,
+                                    saved.expectedPointerGenerationId,
+                                )
                             }
-                            DraftStorageCoordinator.deleteAllExceptUnsafe(
-                                context,
-                                saved.generationDirectory,
-                                saved.expectedPointerGenerationId,
-                            )
                         }
                     } catch (t: Throwable) {
                         logDraftSaveFailure(t)
@@ -5204,6 +5223,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         owningJob: Job?,
         testSeam: DraftSaveTestSeam?,
     ): Boolean {
+        testSeam?.parkIfRequested(DraftSaveStage.BeforeSettlementAdoption)
         val current =
             owningJob?.isActive != false &&
                 draftSaveJob === owningJob &&
@@ -5395,6 +5415,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                 }.onFailure { t ->
+                    if (t is CancellationException) throw t
                     Log.w(FLARE_GUARD_AI_TAG, "Startup storage reconcile failed", t)
                 }
                 lastStartupStageForTest = StartupInitializationStage.RECONCILIATION_FINISHED
