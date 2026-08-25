@@ -295,18 +295,23 @@ internal class EditorHistoryCoordinator(
      * settlement would strand untracked payload directories forever — and
      * caller cancellation still propagates as soon as that settlement
      * completes. Every caller passes entries that have already crossed the
-     * discard boundary; a non-cancellation storage failure records every
-     * payload as debt truthfully (nothing is reported absent).
+     * discard boundary. A backend-level exceptional exit (any Throwable,
+     * CancellationException included) records every payload STILL PRESENT as
+     * debt before propagating: confirmed-absent payloads stay truthfully
+     * absent, so a partial batch failure can never leave a debtless file nor
+     * invent reclaim bytes for work already done.
      */
     private suspend fun settleColdEntries(discarded: Collection<EditorHistoryEntry>): DeletionResult {
         if (discarded.isEmpty()) return DeletionResult(true, emptyList())
         val result = withContext(NonCancellable) {
             try {
                 storage.deleteEntries(discarded)
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (_: Throwable) {
-                DeletionResult(false, discarded.mapNotNull { it.coldPayload })
+            } catch (t: Throwable) {
+                val stillPresent =
+                    discarded.mapNotNull { entry -> entry.coldPayload?.takeIf { it.directory.exists() } }
+                recordDeletionDebt(stillPresent)
+                if (t is CancellationException) throw t
+                DeletionResult(false, stillPresent)
             }
         }
         recordDeletionDebt(result.failedPayloads)
@@ -320,19 +325,19 @@ internal class EditorHistoryCoordinator(
     /**
      * TOTAL physical settlement for cold payloads no longer owned by any
      * history structure (superseded publications, rejected admissions).
-     * Mirrors [settleColdEntries]: the NonCancellable batch guarantees each
-     * payload ends physically absent or recorded as debt, then caller
-     * cancellation propagates.
+     * Mirrors [settleColdEntries]: exceptional exits record every still-present
+     * payload as debt first, then caller cancellation/exception propagates.
      */
     private suspend fun settleColdPayloads(payloads: Collection<ColdHistoryPayload>) {
         if (payloads.isEmpty()) return
         val result = withContext(NonCancellable) {
             try {
                 storage.deletePayloads(payloads)
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (_: Throwable) {
-                DeletionResult(false, payloads.toList())
+            } catch (t: Throwable) {
+                val stillPresent = payloads.filter { it.directory.exists() }
+                recordDeletionDebt(stillPresent)
+                if (t is CancellationException) throw t
+                DeletionResult(false, stillPresent)
             }
         }
         recordDeletionDebt(result.failedPayloads)
@@ -1124,12 +1129,22 @@ internal class EditorHistoryCoordinator(
                     // Continue holding for session-level check in finally.
                     runCatching { storage.unregisterSession(oldGeneration) }
                     val sessionOk = runCatching { storage.deleteSession(oldGeneration) }.getOrDefault(false)
-                    if (sessionOk) {
-                        // Whole session confirmed absent — clear all debt for this generation.
-                        clearGenerationDebt(oldGeneration)
-                    } else if (entryResult != null) {
-                        // Session deletion failed — record individual failures as debt.
-                        recordDeletionDebt(entryResult.failedPayloads)
+                    when {
+                        sessionOk ->
+                            // Whole session confirmed absent — clear all debt for this generation.
+                            clearGenerationDebt(oldGeneration)
+                        entryResult != null ->
+                            // Session deletion failed — record individual failures as debt.
+                            recordDeletionDebt(entryResult.failedPayloads)
+                        else -> {
+                            // Backend-level batch exception: every old payload still
+                            // on disk becomes debt, so supersession can never leave
+                            // a debtless orphan of the superseded generation.
+                            val stillPresent = oldEntries.mapNotNull { entry ->
+                                entry.coldPayload?.takeIf { it.directory.exists() }
+                            }
+                            recordDeletionDebt(stillPresent)
+                        }
                     }
                 }
                 // Busy release: only when this replacement still owns the handoff.
