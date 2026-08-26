@@ -80,7 +80,21 @@ object ModelAssetManifest {
                 minimumBytes = 0L,
                 maximumBytes = 0L,
             ),
+            entry(
+                id = "exynos_real_esrgan_x4v3",
+                path = "models/exynos/Real-ESRGAN-General-x4v3.nnc",
+                runtime = ModelRuntimeType.ExynosEnn,
+                semantic = ModelOutputSemantic.RestorationImage,
+                runnerImplemented = true,
+                productionReady = false,
+                // Exact Samsung-distributed NNC (exynos-eco/enn-sdk-samples); pinned byte-exact.
+                minimumBytes = EXYNOS_REAL_ESRGAN_X4V3_BYTES,
+                maximumBytes = EXYNOS_REAL_ESRGAN_X4V3_BYTES,
+                sha256 = "1a36e24c91b33358a437d432cfc5e57a5ccde1a683ce80dd00a13fd00dbb0c37",
+            ),
         )
+
+    private const val EXYNOS_REAL_ESRGAN_X4V3_BYTES: Long = 2_867_200L
 
     fun byId(id: String): ModelAssetManifestEntry? = entries.firstOrNull { it.id == id }
 

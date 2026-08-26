@@ -81,6 +81,9 @@ enum class ModelRuntimeType {
     LiteRT,
     MediaPipeTask,
     RuleStatistics,
+
+    /** Samsung Exynos ENN framework (public NDK v1 API), executing on the Exynos NPU. */
+    ExynosEnn,
 }
 
 enum class ModelDelegatePolicy {

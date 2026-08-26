@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
-enum class ModelFeature { FlareGuard, Remaster, SubjectSelection }
+enum class ModelFeature { FlareGuard, Remaster, SubjectSelection, ExynosUpscale }
 
 enum class ModelCapabilityPhase {
     Unknown,
@@ -299,6 +299,7 @@ object ModelAvailabilityRegistry {
                 ModelFeature.FlareGuard -> "flare_masker"
                 ModelFeature.Remaster,
                 ModelFeature.SubjectSelection -> "edge_masker"
+                ModelFeature.ExynosUpscale -> "exynos_real_esrgan_x4v3"
             }
         val manifest =
             ModelAssetManifest.byId(modelId)
@@ -363,6 +364,10 @@ fun probePackagedCapabilities(context: Context, generation: Long = beginProbe())
                 "com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter",
             )
         applyToFeatures(listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection), edge)
+        apply(
+            ModelFeature.ExynosUpscale,
+            probeExynosUpscale(context, generation),
+        )
     }
 
     /**
@@ -393,6 +398,10 @@ fun probePackagedCapabilities(context: Context, generation: Long = beginProbe())
                 ),
             )
         applyToFeatures(listOf(ModelFeature.Remaster, ModelFeature.SubjectSelection), edge)
+        apply(
+            ModelFeature.ExynosUpscale,
+            sanitizeForRelease(probeExynosUpscale(context, generation)),
+        )
     }
 
     private fun sanitizeForRelease(observation: ModelCapabilityObservation): ModelCapabilityObservation =
@@ -664,6 +673,80 @@ fun probePackagedCapabilities(context: Context, generation: Long = beginProbe())
                 generation,
                 ModelCapabilityPhase.RuntimeUnavailable,
                 "required runtime is unavailable",
+                true,
+                true,
+                contractSupported = true,
+                runnerImplemented = true,
+            )
+        }
+        return ModelCapabilityObservation(
+            ModelCapabilityPublisher.Probe,
+            generation,
+            ModelCapabilityPhase.Loadable,
+            true,
+            true,
+            true,
+            true,
+            true,
+        )
+    }
+
+    /**
+     * Exynos ENN probe: same asset/contract mechanics, but the runtime check loads the
+     * vendored client stub — which only resolves when the device firmware exposes the
+     * vendor public library `libenn_user.samsung_slsi.so`.
+     */
+    private fun probeExynosUpscale(
+        context: Context,
+        generation: Long,
+    ): ModelCapabilityObservation {
+        val manifest =
+            ModelAssetManifest.byId("exynos_real_esrgan_x4v3")
+                ?: return probeFailure(
+                    generation,
+                    ModelCapabilityPhase.AssetMissing,
+                    "manifest entry missing",
+                    assetPresent = false,
+                    runnerImplemented = false,
+                )
+        if (manifest.asset.requiredContractSchemaVersion !=
+            ModelAssetManifest.CONTRACT_SCHEMA_VERSION
+        ) {
+            return probeFailure(
+                generation,
+                ModelCapabilityPhase.ContractUnsupported,
+                "contract schema is unsupported",
+                contractSupported = false,
+            )
+        }
+        when (
+            val validation =
+                ModelAssetValidator.validate(manifest) { path ->
+                    runCatching { context.assets.open(path) }.getOrNull()
+                }
+        ) {
+            ModelAssetValidation.Missing ->
+                return probeFailure(
+                    generation,
+                    ModelCapabilityPhase.AssetMissing,
+                    "packaged asset missing",
+                    assetPresent = false,
+                )
+            is ModelAssetValidation.Invalid ->
+                return probeFailure(
+                    generation,
+                    ModelCapabilityPhase.AssetInvalid,
+                    validation.detail,
+                    assetPresent = true,
+                    assetValid = false,
+                )
+            is ModelAssetValidation.Valid -> Unit
+        }
+        if (!ExynosEnnNative.probeRuntime()) {
+            return probeFailure(
+                generation,
+                ModelCapabilityPhase.RuntimeUnavailable,
+                "Exynos ENN runtime is unavailable on this device",
                 true,
                 true,
                 contractSupported = true,
