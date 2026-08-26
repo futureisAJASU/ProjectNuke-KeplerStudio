@@ -12,11 +12,13 @@ import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 
 /**
  * One authoritative Samsung ENN inference session for Real_ESRGAN_General_x4v3.
@@ -68,6 +70,10 @@ internal class ExynosUpscaleSession(
                         return@withLock ModelLoadResult.LoadFailed(
                             "another authoritative load already owns this session",
                         )
+                    ModelRunnerLifecycle.Failed ->
+                        return@withLock ModelLoadResult.LoadFailed(
+                            "session is in terminal Failed state",
+                        )
                     else -> Unit
                 }
                 if (!ModelAvailabilityRegistry.isCurrent(token)) {
@@ -75,8 +81,10 @@ internal class ExynosUpscaleSession(
                 }
                 val generation =
                     ModelAvailabilityRegistry.reportLoading(ModelFeature.ExynosUpscale)
+                lifecycle = ModelRunnerLifecycle.Loading
                 try {
                     if (!native.probeRuntime()) {
+                        lifecycle = ModelRunnerLifecycle.Failed
                         return@withLock settled(
                             ModelLoadResult.RuntimeUnavailable(ENN_RUNTIME_UNAVAILABLE_DETAIL),
                             generation,
@@ -85,6 +93,7 @@ internal class ExynosUpscaleSession(
                     loadLocked(token, generation)
                 } catch (cancelled: CancellationException) {
                     teardownNativeLocked()
+                    lifecycle = ModelRunnerLifecycle.Failed
                     ModelAvailabilityRegistry.reportLoad(
                         ModelFeature.ExynosUpscale,
                         ModelLoadResult.LoadFailed("load cancelled"),
@@ -94,6 +103,7 @@ internal class ExynosUpscaleSession(
                 } catch (t: Throwable) {
                     Log.e(TAG, "ENN load failed unexpectedly", t)
                     teardownNativeLocked()
+                    lifecycle = ModelRunnerLifecycle.Failed
                     settled(
                         ModelLoadResult.LoadFailed(t.message ?: "ENN load failed"),
                         generation,
@@ -155,9 +165,9 @@ internal class ExynosUpscaleSession(
 
     /** Terminal ownership boundary; safe to call repeatedly and from any thread. */
     suspend fun close() {
-        withContext(ioDispatcher) {
+        withContext(NonCancellable + ioDispatcher) {
             lifecycleMutex.withLock {
-                if (lifecycle == ModelRunnerLifecycle.Closing) return@withLock
+                if (lifecycle == ModelRunnerLifecycle.Closing || lifecycle == ModelRunnerLifecycle.Unloaded) return@withLock
                 lifecycle = ModelRunnerLifecycle.Closing
                 try {
                     teardownNativeLocked()
@@ -183,7 +193,7 @@ internal class ExynosUpscaleSession(
         token: ValidatedModelCapabilityToken,
         generation: Long,
     ): ModelLoadResult<Unit> {
-        currentCoroutineContext().ensureActive()
+        coroutineContext.ensureActive()
         val manifest =
             ModelAssetManifest.byId(EXYNOS_MODEL_ID)
                 ?: return settled(
@@ -201,7 +211,10 @@ internal class ExynosUpscaleSession(
         }
         val preparedFile: File =
             when (val file = preparedModelFileProvider(manifest.asset)) {
-                is ModelLoadResult.Ready -> file.runner
+                is ModelLoadResult.Ready -> {
+                    preparedModelFile = file.runner
+                    file.runner
+                }
                 is ModelLoadResult.AssetMissing,
                 is ModelLoadResult.AssetInvalid,
                 is ModelLoadResult.UnsupportedContract,
@@ -210,8 +223,9 @@ internal class ExynosUpscaleSession(
                 -> return settled(file, generation)
             }
 
-        currentCoroutineContext().ensureActive()
+        coroutineContext.ensureActive()
         if (native.initialize() != EnnStatus.SUCCESS) {
+            preparedModelFile = null
             return settled(
                 ModelLoadResult.RuntimeUnavailable("EnnInitialize failed"),
                 generation,
@@ -219,7 +233,7 @@ internal class ExynosUpscaleSession(
         }
         nativeInitialized = true
         try {
-            currentCoroutineContext().ensureActive()
+            coroutineContext.ensureActive()
             modelId = native.openModel(preparedFile.absolutePath)
             if (modelId < 0L) {
                 return settleAfterDeinitOnly(
@@ -281,7 +295,6 @@ internal class ExynosUpscaleSession(
             Log.i(TAG, "ENN session ready; compiler=${native.getMetaInfo(META_MODEL_COMPILER_NNC, modelId)}")
 
             descriptor = buildDescriptor(manifest)
-            preparedModelFile = preparedFile
             lifecycle = ModelRunnerLifecycle.Loaded
             registrySessionGeneration =
                 ModelAvailabilityRegistry.reportSessionReady(listOf(ModelFeature.ExynosUpscale))
@@ -293,6 +306,7 @@ internal class ExynosUpscaleSession(
             return ModelLoadResult.Ready(Unit)
         } catch (t: Throwable) {
             teardownNativeLocked()
+            lifecycle = ModelRunnerLifecycle.Failed
             throw t
         }
     }
@@ -345,17 +359,16 @@ internal class ExynosUpscaleSession(
             )
         }
         lifecycle = ModelRunnerLifecycle.Inferencing
-        val executed: Boolean =
-            try {
-                native.execute(modelId)
-            } finally {
-                lifecycle = ModelRunnerLifecycle.Loaded
+        try {
+            checkCancellation()
+            if (!native.execute(modelId)) {
+                return ModelRunResult.Failure(
+                    ModelFailure(ModelFailureReason.InferenceFailed, "EnnExecuteModel failed"),
+                    DeterministicModelFallback.NoResult,
+                )
             }
-        if (!executed) {
-            return ModelRunResult.Failure(
-                ModelFailure(ModelFailureReason.InferenceFailed, "EnnExecuteModel failed"),
-                DeterministicModelFallback.NoResult,
-            )
+        } finally {
+            lifecycle = ModelRunnerLifecycle.Loaded
         }
         val outputBytes = ByteArray(OUTPUT_BYTES)
         if (!native.memcpyDeviceToHost(bufferSet, ENN_OUTPUT_INDEX, outputBytes)) {
@@ -417,7 +430,10 @@ internal class ExynosUpscaleSession(
 
     private fun settled(result: ModelLoadResult<Unit>, generation: Long): ModelLoadResult<Unit> {
         ModelAvailabilityRegistry.reportLoad(ModelFeature.ExynosUpscale, result, generation)
-        if (result !is ModelLoadResult.Ready) teardownNativeLocked()
+        if (result !is ModelLoadResult.Ready) {
+            teardownNativeLocked()
+            lifecycle = ModelRunnerLifecycle.Unloaded
+        }
         return result
     }
 
@@ -427,7 +443,13 @@ internal class ExynosUpscaleSession(
         runCatching { native.deinitialize() }
             .onFailure { Log.w(TAG, "EnnDeinitialize failed", it) }
         nativeInitialized = false
+        preparedModelFile?.let { file ->
+            runCatching { file.delete() }
+                .onFailure { Log.w(TAG, "Prepared model file deletion failed", it) }
+        }
+        preparedModelFile = null
         ModelAvailabilityRegistry.reportLoad(ModelFeature.ExynosUpscale, result, generation)
+        lifecycle = ModelRunnerLifecycle.Unloaded
         return result
     }
 
@@ -439,7 +461,13 @@ internal class ExynosUpscaleSession(
         runCatching { native.deinitialize() }
             .onFailure { Log.w(TAG, "EnnDeinitialize failed", it) }
         nativeInitialized = false
+        preparedModelFile?.let { file ->
+            runCatching { file.delete() }
+                .onFailure { Log.w(TAG, "Prepared model file deletion failed", it) }
+        }
+        preparedModelFile = null
         ModelAvailabilityRegistry.reportLoad(ModelFeature.ExynosUpscale, result, generation)
+        lifecycle = ModelRunnerLifecycle.Unloaded
         return result
     }
 
@@ -447,10 +475,14 @@ internal class ExynosUpscaleSession(
     private fun settleAfterFullTeardown(result: ModelLoadResult<Unit>, generation: Long): ModelLoadResult<Unit> {
         teardownNativeLocked()
         ModelAvailabilityRegistry.reportLoad(ModelFeature.ExynosUpscale, result, generation)
+        lifecycle = ModelRunnerLifecycle.Unloaded
         return result
     }
 
-    /** Total physical teardown; every step attempted exactly once, failures logged truthfully. */
+    /**
+     * Total physical teardown; every step attempted exactly once.
+     * Failures are logged truthfully but do not prevent clearing local ownership.
+     */
     private fun teardownNativeLocked() {
         if (bufferSet != 0L && bufferCount > 0) {
             runCatching { native.releaseBuffers(bufferSet, bufferCount) }
@@ -468,7 +500,10 @@ internal class ExynosUpscaleSession(
                 .onFailure { Log.w(TAG, "EnnDeinitialize failed", it) }
             nativeInitialized = false
         }
-        preparedModelFile?.let { file -> runCatching { file.delete() } }
+        preparedModelFile?.let { file ->
+            runCatching { file.delete() }
+                .onFailure { Log.w(TAG, "Prepared model file deletion failed", it) }
+        }
         preparedModelFile = null
         descriptor = null
     }
@@ -490,6 +525,12 @@ internal class ExynosUpscaleSession(
             ModelFailure(ModelFailureReason.Closed, detail),
             DeterministicModelFallback.NoResult,
         )
+
+    private fun checkCancellation() {
+        if (lifecycle == ModelRunnerLifecycle.Closing || lifecycle == ModelRunnerLifecycle.Unloaded) {
+            throw CancellationException("session closing or closed")
+        }
+    }
 
     companion object {
         private const val TAG = "KeplerExynosUpscale"

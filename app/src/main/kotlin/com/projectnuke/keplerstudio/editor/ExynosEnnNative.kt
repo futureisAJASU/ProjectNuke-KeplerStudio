@@ -46,86 +46,92 @@ internal object ExynosEnnNative : ExynosEnnNativeInterface {
     private const val TAG = "KeplerExynosEnn"
 
     @Volatile
-    private var stubLoadAttempted = false
+    private var bridgeLoadAttempted = false
+    @Volatile
+    private var bridgeLoaded = false
 
     /**
-     * Loading the client stub resolves its vendor dependency (`libenn_user.samsung_slsi.so`)
-     * inside the app's native library namespace; failure means this device does not expose
-     * the public ENN surface. Safe to call repeatedly.
+     * Loading the JNI bridge (`libenn_kepler_jni.so`) resolves its dependencies:
+     * - libenn_public_api_ndk_v1.so (vendored client stub)
+     * - libenn_user.samsung_slsi.so (vendor library, device-provided)
+     *
+     * Failure means this device does not expose the public ENN surface.
+     * Safe to call repeatedly.
      */
-    override fun probeRuntime(): Boolean =
-        try {
-            System.loadLibrary("enn_public_api_ndk_v1")
-            true
-        } catch (t: Throwable) {
-            Log.i(TAG, "ENN public API stub unavailable on this device", t)
-            false
+    override fun probeRuntime(): Boolean {
+        if (bridgeLoadAttempted) return bridgeLoaded
+        synchronized(this) {
+            if (bridgeLoadAttempted) return bridgeLoaded
+            try {
+                System.loadLibrary("enn_kepler_jni")
+                bridgeLoaded = true
+            } catch (t: Throwable) {
+                Log.i(TAG, "ENN JNI bridge unavailable on this device", t)
+                bridgeLoaded = false
+            }
+            bridgeLoadAttempted = true
+            return bridgeLoaded
         }
+    }
 
     override fun initialize(): Int {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeInitialize()
     }
 
     override fun deinitialize(): Int {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeDeinitialize()
     }
 
     override fun openModel(path: String): Long {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeOpenModel(path)
     }
 
     override fun closeModel(modelId: Long): Boolean {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeCloseModel(modelId)
     }
 
     override fun allocateAllBuffers(modelId: Long): LongArray? {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeAllocateAllBuffers(modelId)
     }
 
     override fun releaseBuffers(bufferSet: Long, bufferCount: Int): Boolean {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeReleaseBuffers(bufferSet, bufferCount)
     }
 
     override fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int): IntArray? {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeGetBufferInfoByIndex(modelId, direction, index)
     }
 
     override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray): Boolean {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeMemcpyHostToDevice(bufferSet, index, data)
     }
 
     override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Boolean {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeMemcpyDeviceToHost(bufferSet, index, out)
     }
 
     override fun execute(modelId: Long): Boolean {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeExecute(modelId)
     }
 
     override fun getMetaInfo(metaId: Int, modelId: Long): String? {
-        ensureStubLoaded()
+        checkBridgeLoaded()
         return nativeGetMetaInfo(metaId, modelId)
     }
 
-    private fun ensureStubLoaded() {
-        if (!stubLoadAttempted) {
-            synchronized(this) {
-                if (!stubLoadAttempted) {
-                    runCatching { System.loadLibrary("enn_public_api_ndk_v1") }
-                        .onFailure { Log.i(TAG, "ENN stub load failed", it) }
-                    stubLoadAttempted = true
-                }
-            }
+    private fun checkBridgeLoaded() {
+        if (!bridgeLoaded) {
+            throw IllegalStateException("ENN JNI bridge not loaded; call probeRuntime() first")
         }
     }
 

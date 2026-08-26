@@ -9,9 +9,12 @@
         android:theme="@style/AppTheme">
 
         <!-- Exynos ENN vendor public library: link-time visibility for libenn_public_api_ndk_v1.so.
-             On devices exposing this library in /vendor/etc/public.libraries.txt the stub
-             can be loaded by any third-party APK that declares this dependency. -->
-        <uses-native-library android:name="libenn_user.samsung_slsi.so" />
+              On devices exposing this library in /vendor/etc/public.libraries.txt the stub
+              can be loaded by any third-party APK that declares this dependency.
+              Marked optional so KeplerStudio remains installable on non-Exynos devices. -->
+        <uses-native-library
+            android:name="libenn_user.samsung_slsi.so"
+            android:required="false" />
 
         <activity
             android:name=".MainActivity"
