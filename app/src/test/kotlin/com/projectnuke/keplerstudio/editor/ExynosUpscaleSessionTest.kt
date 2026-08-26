@@ -501,5 +501,91 @@ class ExynosUpscaleSessionTest {
         assertEquals(0, enn.releaseBufferCalls.get())
         assertNull(session.descriptor)
     }
+
+    // ------------------------------------------------------------------
+    // Prepared file ownership: every failure path must delete the prepared file
+    // ------------------------------------------------------------------
+
+    @Test
+    fun initializeFailureDeletesPreparedFile() = runBlocking {
+        val tempFile = File(context.filesDir, "initialize_failure_test.nnc").apply { writeText("fake_nnc") }
+        val enn = FakeEnn().apply { initializeStatus = -1 }
+        val session =
+            ExynosUpscaleSession(
+                context = context,
+                native = enn,
+                ioDispatcher = Dispatchers.Default,
+                preparedModelFileProvider =
+                    preparedFileProviderReturning(ModelLoadResult.Ready(tempFile)),
+            )
+        val result = session.load(fakeToken())
+        assertTrue(result is ModelLoadResult.RuntimeUnavailable)
+        assertFalse("prepared file must be deleted on initialize failure", tempFile.exists())
+        assertEquals(0, enn.openCalls.get())
+        assertEquals(0, enn.closeModelCalls.get())
+        assertNull(session.descriptor)
+    }
+
+    @Test
+    fun openModelFailureDeletesPreparedFile() = runBlocking {
+        val tempFile = File(context.filesDir, "open_model_failure_test.nnc").apply { writeText("fake_nnc") }
+        val enn = FakeEnn().apply { openModelResult = -1L }
+        val session =
+            ExynosUpscaleSession(
+                context = context,
+                native = enn,
+                ioDispatcher = Dispatchers.Default,
+                preparedModelFileProvider =
+                    preparedFileProviderReturning(ModelLoadResult.Ready(tempFile)),
+            )
+        val result = session.load(fakeToken())
+        assertTrue(result is ModelLoadResult.RuntimeUnavailable)
+        assertFalse("prepared file must be deleted on openModel failure", tempFile.exists())
+        assertEquals(0, enn.closeModelCalls.get())
+        assertEquals(1, enn.deinitializeCalls.get())
+        assertNull(session.descriptor)
+    }
+
+    @Test
+    fun contractMismatchDeletesPreparedFile() = runBlocking {
+        val tempFile = File(context.filesDir, "contract_mismatch_test.nnc").apply { writeText("fake_nnc") }
+        val enn = FakeEnn().apply { outputInfo = intArrayOf(1, 256, 256, 3, 256 * 256 * 3 * 4) }
+        val session =
+            ExynosUpscaleSession(
+                context = context,
+                native = enn,
+                ioDispatcher = Dispatchers.Default,
+                preparedModelFileProvider =
+                    preparedFileProviderReturning(ModelLoadResult.Ready(tempFile)),
+            )
+        val result = session.load(fakeToken())
+        assertTrue(result is ModelLoadResult.UnsupportedContract)
+        assertFalse("prepared file must be deleted on contract mismatch", tempFile.exists())
+        assertEquals(1, enn.releaseBufferCalls.get())
+        assertEquals(1, enn.closeModelCalls.get())
+        assertEquals(1, enn.deinitializeCalls.get())
+        assertNull(session.descriptor)
+    }
+
+    @Test
+    fun successfulCloseDeletesPreparedFile() = runBlocking {
+        val tempFile = File(context.filesDir, "successful_close_test.nnc").apply { writeText("fake_nnc") }
+        val enn = FakeEnn()
+        val session =
+            ExynosUpscaleSession(
+                context = context,
+                native = enn,
+                ioDispatcher = Dispatchers.Default,
+                preparedModelFileProvider =
+                    preparedFileProviderReturning(ModelLoadResult.Ready(tempFile)),
+            )
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        assertTrue("prepared file must exist after successful load", tempFile.exists())
+        session.close()
+        assertFalse("prepared file must be deleted after close", tempFile.exists())
+        assertEquals(1, enn.releaseBufferCalls.get())
+        assertEquals(1, enn.closeModelCalls.get())
+        assertEquals(1, enn.deinitializeCalls.get())
+    }
 }
 

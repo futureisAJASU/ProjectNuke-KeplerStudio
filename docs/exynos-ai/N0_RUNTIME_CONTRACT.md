@@ -112,7 +112,42 @@ Kotlin: System.loadLibrary("enn_jni")
 | Provenance | Committed by Samsung in S2 at `image-enhancement/Real_ESRGAN_General_x4v3/app/src/main/assets/` |
 | Model catalog page | `soc-developer.semiconductor.samsung.com/global/solution/ai/models/detail/36ad7134-5621-48b2-8ddf-e4889417f6ef` (linked from S2 README; SPA content behind login) |
 | License/distribution | Upstream model Real-ESRGAN (xinntao) is BSD-3-Clause; the compiled NNC binary is distributed publicly by Samsung in the MIT-licensed sample repo. Redistribute inside Kepler APK only after confirming packaging/license expectations; until then treat as pinned build input. |
-| Chipset targeting | NNCs are chipset-specific (S2 popup: wrong-chipset NNC ⇒ allocation fails ⇒ `bufferSet == 0L`). Which exact SoC(s) this committed variant supports is verified empirically via `EnnOpenModel`/`EnnAllocateAllBuffers` on device (§9). |
+| **Chipset targeting** | **Embedded compiler metadata records `--soc-type Solomon --chip_version EVT1`. "Solomon" is publicly associated with Exynos 2500 / S5E9955. The current SM-S921N target is Exynos 2400 / S5E9945. The committed binary is therefore NOT an Exynos-2400-targeted variant.** |
+
+### 6a. Embedded metadata (from binary inspection of current committed file)
+
+```
+--compiler NPU --snc HW_Real_ESRGAN_general_x4v3_new_snc_7.16.17.21.snc
+--framework SNC --soc-type Solomon --input_conversion hw_cfu --output_conversion hw_icfu
+--multicore true --cfs false --chip_version EVT1 --schema_version v3
+```
+
+### 6b. Root-cause classification (updated 2026-08-27)
+
+The previous N2 hardware run on SM-S921N (Exynos 2400 / S5E9945) failed at
+`EnnOpenModel()` with return -1. Root cause: **chipset mismatch**. The committed
+Samsung GitHub sample binary targets Solomon (Exynos 2500 / S5E9955), not the
+S24's S5E9945. NNCs are chipset-specific; the ENN runtime on S24 rejects the
+Solomon variant.
+
+The file is NOT corrupt, NOT a placeholder, and NOT dimensionally incompatible
+(input/output tensors remain 3×128×128 / 3×512×512 FP32). It is simply the wrong
+chipset variant.
+
+### 6c. Required action
+
+Replace the committed NNC with an **Exynos-2400-targeted variant** of
+`Real_ESRGAN_General_x4v3`. Samsung's model-detail page at S9 lists the model
+for Exynos 2400 as a separate download selection (Chipset = Exynos 2400). The
+downloaded artifact must be:
+
+- verified real binary (not Git LFS pointer, not placeholder)
+- embedded metadata showing `--soc-type` consistent with S5E9945 / Exynos 2400
+- identical tensor contract (3×128×128 → 3×512×512 FP32) or updated accordingly
+- then re-pinned in `ModelAssetManifest` and this contract section
+
+Until the correct 2400 NNC is obtained, **N2 hardware PASS is blocked** on the
+missing artifact, not on any KeplerStudio code defect.
 
 The user-reported earlier local download was searched for narrowly (Downloads, Desktop,
 project model dirs): **not found**; the official identical artifact above supersedes it.

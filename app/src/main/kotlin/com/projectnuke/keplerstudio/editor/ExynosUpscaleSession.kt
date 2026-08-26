@@ -225,11 +225,11 @@ internal class ExynosUpscaleSession(
 
         coroutineContext.ensureActive()
         if (native.initialize() != EnnStatus.SUCCESS) {
-            preparedModelFile = null
+            nativeInitialized = false
             return settled(
                 ModelLoadResult.RuntimeUnavailable("EnnInitialize failed"),
                 generation,
-            ).also { nativeInitialized = false }
+            )
         }
         nativeInitialized = true
         try {
