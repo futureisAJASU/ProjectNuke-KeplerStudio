@@ -94,67 +94,63 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             File(context.getExternalFilesDir(null), "exynos_npu_probe").apply { mkdirs() }
         val metadata = JSONObject()
         val memorySnapshots = JSONObject()
+        metadata.put("report_absolute_path", reportDir.absolutePath)
         metadata.put("device", JSONObject(socProperties))
         metadata.put("build_manufacturer", Build.MANUFACTURER)
 
-        assumeTrue(
-            "target must be Exynos 2400 (S24 family); found: $socProperties",
-            isExynos2400Target(),
-        )
-        metadata.put("soc_gate", "passed")
-
-        // 1. Real production capability probe (NOT applyForTest).
-        ModelAvailabilityRegistry.resetForTest()
-        val probeGeneration = ModelAvailabilityRegistry.beginProbe()
-        ModelAvailabilityRegistry.probePackagedCapabilities(context, probeGeneration)
-        
-        // Wait briefly for probe to settle
-        kotlinx.coroutines.delay(100)
-
-        val capability = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]
-        metadata.put("probe_phase", capability?.phase?.name ?: "Unknown")
-        metadata.put("probe_facts", JSONObject(
-            mapOf(
-                "assetPresent" to (capability?.assetPresent ?: false),
-                "assetValid" to (capability?.assetValid ?: false),
-                "runtimeAvailable" to (capability?.runtimeAvailable ?: false),
-                "contractSupported" to (capability?.contractSupported ?: false),
-                "runnerImplemented" to (capability?.runnerImplemented ?: false),
-            )
-        ))
-
-        assumeTrue(
-            "ExynosUpscale capability not loadable: ${capability?.phase}",
-            capability?.canAttemptModelUse == true,
-        )
-
-        // 2. Validated capability token from real registry facts.
-        val tokenResult = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.ExynosUpscale)
-        assertTrue("capability token refused: $tokenResult", tokenResult is ModelLoadResult.Ready)
-        val token = (tokenResult as ModelLoadResult.Ready).runner as ValidatedModelCapabilityToken
-        metadata.put("validated_model_id", token.modelId)
-        metadata.put("validated_asset_sha256", token.approvedAssetSha256 ?: "")
-        metadata.put("validation_epoch", token.validationGeneration)
-
-        // Memory: pre-load
-        memorySnapshots.put("pre_load_kb", getProcessMemoryInfo(context))
-
-        // 3. Real session load against the real Samsung runtime.
+        var testFailure: Throwable? = null
         var session: ExynosUpscaleSession? = null
-        var loadFailed = false
-        var loadFailureStage: String? = null
-        var loadFailureDetail: String? = null
+
         try {
+            assumeTrue(
+                "target must be Exynos 2400 (S24 family); found: $socProperties",
+                isExynos2400Target(),
+            )
+            metadata.put("soc_gate", "passed")
+
+            // 1. Real production capability probe (NOT applyForTest).
+            ModelAvailabilityRegistry.resetForTest()
+            val probeGeneration = ModelAvailabilityRegistry.beginProbe()
+            ModelAvailabilityRegistry.probePackagedCapabilities(context, probeGeneration)
+
+            val capability = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]
+            metadata.put("probe_phase", capability?.phase?.name ?: "Unknown")
+            metadata.put("probe_facts", JSONObject(
+                mapOf(
+                    "assetPresent" to (capability?.assetPresent ?: false),
+                    "assetValid" to (capability?.assetValid ?: false),
+                    "runtimeAvailable" to (capability?.runtimeAvailable ?: false),
+                    "contractSupported" to (capability?.contractSupported ?: false),
+                    "runnerImplemented" to (capability?.runnerImplemented ?: false),
+                )
+            ))
+
+            assumeTrue(
+                "ExynosUpscale capability not loadable: ${capability?.phase}",
+                capability?.canAttemptModelUse == true,
+            )
+
+            // 2. Validated capability token from real registry facts.
+            val tokenResult = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.ExynosUpscale)
+            assertTrue("capability token refused: $tokenResult", tokenResult is ModelLoadResult.Ready)
+            val token = (tokenResult as ModelLoadResult.Ready).runner as ValidatedModelCapabilityToken
+            metadata.put("validated_model_id", token.modelId)
+            metadata.put("validated_asset_sha256", token.approvedAssetSha256 ?: "")
+            metadata.put("validation_epoch", token.validationGeneration)
+
+            // Memory: pre-load
+            memorySnapshots.put("pre_load_kb", getProcessMemoryInfo(context))
+
+            // 3. Real session load against the real Samsung runtime.
             session = ExynosUpscaleSession(context)
             val loadStarted = System.currentTimeMillis()
             val loadResult = session.load(token)
             memorySnapshots.put("post_load_kb", getProcessMemoryInfo(context))
             if (loadResult !is ModelLoadResult.Ready) {
-                loadFailed = true
-                loadFailureStage = "load"
-                loadFailureDetail = loadResult.toString()
+                metadata.put("load_failure_stage", "load")
+                metadata.put("load_failure_detail", loadResult.toString())
+                throw AssertionError("session load failed on this device: $loadResult")
             }
-            assertTrue("session load failed on this device: $loadResult", loadResult is ModelLoadResult.Ready)
             val loadDurationMs = System.currentTimeMillis() - loadStarted
             metadata.put("model_load_ms", loadDurationMs)
             metadata.put(
@@ -198,9 +194,8 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                 if (result is ModelRunResult.Failure) {
                     runRecord.put("failure_reason", result.failure.reason.name)
                     runRecord.put("failure_detail", result.failure.detail)
-                    loadFailed = true
-                    loadFailureStage = "inference_${index}"
-                    loadFailureDetail = result.failure.toString()
+                    metadata.put("inference_failure_stage", "inference_$index")
+                    metadata.put("inference_failure_detail", result.failure.toString())
                     throw AssertionError("inference #$index failed: ${result.failure}")
                 }
                 lastOutput = result as ModelRunResult.Success<*>
@@ -259,35 +254,38 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                     com.projectnuke.keplerstudio.editor.ModelFailureReason.Cancelled,
             )
             metadata.put("lifecycle_roundtrip", "pass")
+            metadata.put("status", "PASS")
         } catch (t: Throwable) {
-            loadFailed = true
-            loadFailureStage = loadFailureStage ?: "unexpected"
-            loadFailureDetail = (loadFailureDetail ?: "") + "; " + t.message
+            testFailure = t
+            metadata.put("status", "FAILED")
+            metadata.put("failure_class", t.javaClass.simpleName)
+            metadata.put("failure_message", t.message ?: "unknown")
             throw t
         } finally {
             session?.close()
             memorySnapshots.put("final_close_kb", getProcessMemoryInfo(context))
             metadata.put("memory_snapshots_kb", memorySnapshots)
 
-            // Failure reporting
-            if (loadFailed) {
-                metadata.put("status", "FAILED")
-                metadata.put("failure_stage", loadFailureStage)
-                metadata.put("failure_detail", loadFailureDetail ?: "unknown")
-            } else {
-                metadata.put("status", "PASS")
+            val capabilityAfter = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]
+            metadata.put("session_inactive_after_close", capabilityAfter?.sessionActive != true)
+            metadata.put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "")
+
+            // NPU proof: capture actual meta info if available
+            metadata.put("npu_proof", "EnnExecuteModel executed through vendor ENN service; see meta info and device properties")
+
+            // Total report write: always happens, even on assertion failure
+            val reportWriteFailure = runCatching {
+                File(reportDir, "metadata.json").writeText(metadata.toString(2))
+            }.onFailure { e ->
+                android.util.Log.w("KeplerExynosProbe", "Failed to write probe report", e)
+                metadata.put("report_write_failure", e.message)
+            }.exceptionOrNull()
+
+            if (reportWriteFailure != null) {
+                testFailure?.addSuppressed(reportWriteFailure)
             }
+            println("EXYNOS_NPU_PROBE_REPORT=${reportDir.absolutePath}")
         }
-
-        val capabilityAfter = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.ExynosUpscale)
-        metadata.put("session_inactive_after_close", !capabilityAfter.sessionActive)
-        metadata.put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "")
-
-        // NPU proof: capture actual meta info if available
-        metadata.put("npu_proof", "EnnExecuteModel executed through vendor ENN service; see meta info and device properties")
-
-        File(reportDir, "metadata.json").writeText(metadata.toString(2))
-        println("EXYNOS_NPU_PROBE_REPORT=$reportDir")
     }
 
     private fun isExynos2400Target(): Boolean {

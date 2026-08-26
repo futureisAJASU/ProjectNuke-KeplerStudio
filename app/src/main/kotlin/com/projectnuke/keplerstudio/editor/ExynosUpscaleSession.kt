@@ -57,6 +57,8 @@ internal class ExynosUpscaleSession(
     private var nativeInitialized: Boolean = false
     private var registrySessionGeneration: Long = NO_REGISTRY_GENERATION
     private var preparedModelFile: File? = null
+    @Volatile
+    internal var preExecuteCheck: (suspend () -> Unit)? = null
 
     suspend fun load(token: ValidatedModelCapabilityToken): ModelLoadResult<Unit> =
         withContext(ioDispatcher) {
@@ -348,7 +350,7 @@ internal class ExynosUpscaleSession(
             hasUnknownRuntimeMemory = true,
         )
 
-    private fun runLocked(argbPixels: IntArray): ModelRunResult<Bitmap> {
+    private suspend fun runLocked(argbPixels: IntArray): ModelRunResult<Bitmap> {
         val inputBuffer = preprocess(argbPixels)
         val inputBytes = ByteArray(INPUT_BYTES)
         inputBuffer.get(inputBytes)
@@ -361,6 +363,8 @@ internal class ExynosUpscaleSession(
         lifecycle = ModelRunnerLifecycle.Inferencing
         try {
             checkCancellation()
+            coroutineContext.ensureActive()
+            preExecuteCheck?.invoke()
             if (!native.execute(modelId)) {
                 return ModelRunResult.Failure(
                     ModelFailure(ModelFailureReason.InferenceFailed, "EnnExecuteModel failed"),
@@ -437,11 +441,30 @@ internal class ExynosUpscaleSession(
         return result
     }
 
+    private data class TeardownResult(
+        val releaseBuffers: Boolean,
+        val closeModel: Boolean,
+        val deinitialize: Int,
+        val releaseBuffersThrew: Boolean = false,
+        val closeModelThrew: Boolean = false,
+        val deinitializeThrew: Boolean = false,
+    ) {
+        val allSuccessful: Boolean
+            get() = releaseBuffers && closeModel && deinitialize == EnnStatus.SUCCESS && !releaseBuffersThrew && !closeModelThrew && !deinitializeThrew
+    }
+
+    private fun TeardownResult.logWarnings() {
+        if (!releaseBuffers || releaseBuffersThrew) Log.w(TAG, "EnnReleaseBuffers failed: returned=$releaseBuffers threw=$releaseBuffersThrew")
+        if (!closeModel || closeModelThrew) Log.w(TAG, "EnnCloseModel failed: returned=$closeModel threw=$closeModelThrew")
+        if (deinitialize != EnnStatus.SUCCESS || deinitializeThrew) Log.w(TAG, "EnnDeinitialize failed: returned=$deinitialize threw=$deinitializeThrew")
+    }
+
     /** OpenModel failed before any handle beyond the framework context existed. */
     private fun settleAfterDeinitOnly(result: ModelLoadResult<Unit>, generation: Long): ModelLoadResult<Unit> {
         modelId = NO_MODEL_ID
-        runCatching { native.deinitialize() }
-            .onFailure { Log.w(TAG, "EnnDeinitialize failed", it) }
+        val deinitResult = runCatching { native.deinitialize() }
+            .onFailure { Log.w(TAG, "EnnDeinitialize threw", it) }
+            .getOrDefault(EnnStatus.SUCCESS)
         nativeInitialized = false
         preparedModelFile?.let { file ->
             runCatching { file.delete() }
@@ -455,11 +478,13 @@ internal class ExynosUpscaleSession(
 
     /** CloseModel succeeded; buffers were never allocated or are already released. */
     private fun settleAfterCloseModel(result: ModelLoadResult<Unit>, generation: Long): ModelLoadResult<Unit> {
-        runCatching { native.closeModel(modelId) }
-            .onFailure { Log.w(TAG, "EnnCloseModel failed", it) }
+        val closeOk = runCatching { native.closeModel(modelId) }
+            .onFailure { Log.w(TAG, "EnnCloseModel threw", it) }
+            .getOrDefault(false)
         modelId = NO_MODEL_ID
-        runCatching { native.deinitialize() }
-            .onFailure { Log.w(TAG, "EnnDeinitialize failed", it) }
+        val deinitResult = runCatching { native.deinitialize() }
+            .onFailure { Log.w(TAG, "EnnDeinitialize threw", it) }
+            .getOrDefault(EnnStatus.SUCCESS)
         nativeInitialized = false
         preparedModelFile?.let { file ->
             runCatching { file.delete() }
@@ -482,22 +507,33 @@ internal class ExynosUpscaleSession(
     /**
      * Total physical teardown; every step attempted exactly once.
      * Failures are logged truthfully but do not prevent clearing local ownership.
+     * Returns the physical result of each step for diagnostics.
      */
-    private fun teardownNativeLocked() {
+    private fun teardownNativeLocked(): TeardownResult {
+        var releaseBuffersOk = true
+        var releaseBuffersThrew = false
+        var closeModelOk = true
+        var closeModelThrew = false
+        var deinitializeOk = EnnStatus.SUCCESS
+        var deinitializeThrew = false
+
         if (bufferSet != 0L && bufferCount > 0) {
-            runCatching { native.releaseBuffers(bufferSet, bufferCount) }
-                .onFailure { Log.w(TAG, "EnnReleaseBuffers failed", it) }
+            val releaseResult = runCatching { native.releaseBuffers(bufferSet, bufferCount) }
+            releaseBuffersThrew = releaseResult.isFailure
+            releaseBuffersOk = releaseResult.getOrDefault(false)
         }
         bufferSet = 0L
         bufferCount = 0
         if (modelId != NO_MODEL_ID) {
-            runCatching { native.closeModel(modelId) }
-                .onFailure { Log.w(TAG, "EnnCloseModel failed", it) }
+            val closeResult = runCatching { native.closeModel(modelId) }
+            closeModelThrew = closeResult.isFailure
+            closeModelOk = closeResult.getOrDefault(false)
         }
         modelId = NO_MODEL_ID
         if (nativeInitialized) {
-            runCatching { native.deinitialize() }
-                .onFailure { Log.w(TAG, "EnnDeinitialize failed", it) }
+            val deinitResult = runCatching { native.deinitialize() }
+            deinitializeThrew = deinitResult.isFailure
+            deinitializeOk = deinitResult.getOrDefault(EnnStatus.SUCCESS)
             nativeInitialized = false
         }
         preparedModelFile?.let { file ->
@@ -506,6 +542,19 @@ internal class ExynosUpscaleSession(
         }
         preparedModelFile = null
         descriptor = null
+
+        val teardown = TeardownResult(
+            releaseBuffers = releaseBuffersOk,
+            closeModel = closeModelOk,
+            deinitialize = deinitializeOk,
+            releaseBuffersThrew = releaseBuffersThrew,
+            closeModelThrew = closeModelThrew,
+            deinitializeThrew = deinitializeThrew,
+        )
+        if (!teardown.allSuccessful) {
+            teardown.logWarnings()
+        }
+        return teardown
     }
 
     private fun staleRunFailure(): ModelRunResult<Bitmap> =
