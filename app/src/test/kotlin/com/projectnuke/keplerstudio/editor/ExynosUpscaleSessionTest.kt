@@ -988,6 +988,7 @@ class ExynosUpscaleSessionTest {
         assertEquals(EnnStatus.IO, diag.d2hStatus)
         assertFalse("output decode must not pass when D2H failed", diag.outputDecodePassed)
         assertNull(diag.throwableStage)
+        assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
         session.close()
     }
 
@@ -1005,6 +1006,7 @@ class ExynosUpscaleSessionTest {
         assertNull("execute status must be absent when execute was not reached", diag.executeStatus)
         assertNull("d2h must not be reached after H2D failure", diag.d2hStatus)
         assertEquals(0, enn.executeCalls.get())
+        assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
         session.close()
     }
 
@@ -1028,6 +1030,7 @@ class ExynosUpscaleSessionTest {
         // D2H was never reached because execute failed first
         assertNull(diag.d2hStatus)
         assertFalse(diag.outputDecodePassed)
+        assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
         session.close()
     }
 
@@ -1045,6 +1048,59 @@ class ExynosUpscaleSessionTest {
         assertEquals("execute", diag.throwableStage)
         assertTrue(diag.throwableDetail?.contains("npu faulted") == true)
         session.close()
+    }
+
+    @Test
+    fun lifecycleRemainsInferencingAcrossH2dAndD2hBoundaries() = runBlocking {
+        val enn = FakeEnn()
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        val h2dReached = CompletableDeferred<Unit>()
+        val h2dRelease = CompletableDeferred<Unit>()
+        session.preH2dCheck = { h2dReached.complete(Unit); h2dRelease.await() }
+        val scope = CoroutineScope(Dispatchers.Default)
+        val h2dRun = scope.async { session.run(testPixels(), ModelOperationContext(1L, "g1")) }
+        h2dReached.await()
+        assertEquals(ModelRunnerLifecycle.Inferencing, session.lifecycle)
+        h2dRelease.complete(Unit)
+        assertTrue(h2dRun.await() is ModelRunResult.Success)
+
+        val d2hReached = CompletableDeferred<Unit>()
+        val d2hRelease = CompletableDeferred<Unit>()
+        session.preH2dCheck = null
+        session.preD2hCheck = { d2hReached.complete(Unit); d2hRelease.await() }
+        val d2hRun = scope.async { session.run(testPixels(), ModelOperationContext(2L, "g1")) }
+        d2hReached.await()
+        assertEquals(ModelRunnerLifecycle.Inferencing, session.lifecycle)
+        d2hRelease.complete(Unit)
+        assertTrue(d2hRun.await() is ModelRunResult.Success)
+        assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
+        session.close()
+        scope.cancel()
+    }
+
+    @Test
+    fun successfulDecodeRestoresLoadedAndRetainsLabeledRunHistory() = runBlocking {
+        val enn = FakeEnn()
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        assertTrue(session.run(testPixels(), ModelOperationContext(1L, "g1"), "cold") is ModelRunResult.Success)
+        assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
+        assertEquals("cold", session.runDiagnosticsHistory.single().attemptLabel)
+        session.close()
+    }
+
+    @Test
+    fun reportWriteFailureBecomesPrimaryOnlyWhenProbeOtherwiseSucceeded() {
+        val writeFailure = IOException("metadata unavailable")
+        val success = finalizeProbeReport({ throw writeFailure }, null, null)
+        assertFalse(success.persisted)
+        assertEquals(writeFailure, success.primaryFailure)
+
+        val original = AssertionError("inference failed")
+        val failed = finalizeProbeReport({ throw writeFailure }, original, null)
+        assertEquals(original, failed.primaryFailure)
+        assertTrue(original.suppressed.contains(writeFailure))
     }
 
     // Prepared-file deletion outcome classification (deterministic seam).

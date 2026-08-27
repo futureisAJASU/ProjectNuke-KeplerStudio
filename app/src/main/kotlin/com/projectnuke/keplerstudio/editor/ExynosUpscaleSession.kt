@@ -84,6 +84,9 @@ internal class ExynosUpscaleSession(
     internal var lastLoadDiagnostics: ExynosLoadDiagnostics = ExynosLoadDiagnostics()
         private set
 
+    internal val loadDiagnosticsHistory: List<ExynosLoadDiagnostics>
+        get() = loadDiagnosticsHistoryInternal.toList()
+
     /**
      * Smallest session-native run-stage truth: replaced when a run passes all gates and
      * native work begins; updated the moment each native call returns.
@@ -91,6 +94,9 @@ internal class ExynosUpscaleSession(
     @Volatile
     internal var lastRunDiagnostics: ExynosRunDiagnostics = ExynosRunDiagnostics()
         private set
+
+    internal val runDiagnosticsHistory: List<ExynosRunDiagnostics>
+        get() = runDiagnosticsHistoryInternal.toList()
 
     /**
      * Test-only seam for deterministic prepared-file deletion outcomes.
@@ -107,10 +113,18 @@ internal class ExynosUpscaleSession(
     private var nativeInitialized: Boolean = false
     private var registrySessionGeneration: Long = NO_REGISTRY_GENERATION
     private var preparedModelFile: File? = null
+    private val loadDiagnosticsHistoryInternal = mutableListOf<ExynosLoadDiagnostics>()
+    private val runDiagnosticsHistoryInternal = mutableListOf<ExynosRunDiagnostics>()
     private val preparedFileToken = "session-${PREPARED_FILE_SEQUENCE.getAndIncrement()}"
 
     @Volatile
     internal var preExecuteCheck: (suspend () -> Unit)? = null
+
+    @Volatile
+    internal var preH2dCheck: (suspend () -> Unit)? = null
+
+    @Volatile
+    internal var preD2hCheck: (suspend () -> Unit)? = null
 
     suspend fun load(token: ValidatedModelCapabilityToken): ModelLoadResult<Unit> =
         withContext(ioDispatcher) {
@@ -138,6 +152,7 @@ internal class ExynosUpscaleSession(
                 lifecycle = ModelRunnerLifecycle.Loading
                 val diagnostics = ExynosLoadDiagnostics()
                 lastLoadDiagnostics = diagnostics
+                loadDiagnosticsHistoryInternal += diagnostics
                 try {
                     if (!native.probeRuntime()) {
                         return@withLock settleAfterPhysicalTeardown(
@@ -175,6 +190,7 @@ internal class ExynosUpscaleSession(
     suspend fun run(
         argbPixels: IntArray,
         operationContext: ModelOperationContext,
+        attemptLabel: String? = null,
     ): ModelRunResult<Bitmap> {
         return withContext(ioDispatcher) {
             lifecycleMutex.withLock {
@@ -205,7 +221,7 @@ internal class ExynosUpscaleSession(
                     )
                 }
                 try {
-                    runLocked(argbPixels)
+                    runLocked(argbPixels, attemptLabel)
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (t: Throwable) {
@@ -477,12 +493,18 @@ internal class ExynosUpscaleSession(
             hasUnknownRuntimeMemory = true,
         )
 
-    private suspend fun runLocked(argbPixels: IntArray): ModelRunResult<Bitmap> {
+    private suspend fun runLocked(argbPixels: IntArray, attemptLabel: String? = null): ModelRunResult<Bitmap> {
         val diagnostics = ExynosRunDiagnostics()
         lastRunDiagnostics = diagnostics
+        diagnostics.attemptLabel = attemptLabel
+        runDiagnosticsHistoryInternal += diagnostics
+        lifecycle = ModelRunnerLifecycle.Inferencing
+        try {
         val inputBuffer = preprocess(argbPixels)
         val inputBytes = ByteArray(INPUT_BYTES)
         inputBuffer.get(inputBytes)
+        preH2dCheck?.invoke()
+        coroutineContext.ensureActive()
         val memcpyInStatus =
             nativeRunStage(diagnostics, "h2d") { native.memcpyHostToDevice(bufferSet, 0, inputBytes) }
         diagnostics.h2dStatus = memcpyInStatus
@@ -495,8 +517,6 @@ internal class ExynosUpscaleSession(
                 DeterministicModelFallback.NoResult,
             )
         }
-        lifecycle = ModelRunnerLifecycle.Inferencing
-        try {
             checkCancellation()
             coroutineContext.ensureActive()
             preExecuteCheck?.invoke()
@@ -517,10 +537,9 @@ internal class ExynosUpscaleSession(
                     DeterministicModelFallback.NoResult,
                 )
             }
-        } finally {
-            lifecycle = ModelRunnerLifecycle.Loaded
-        }
         val outputBytes = ByteArray(OUTPUT_BYTES)
+        preD2hCheck?.invoke()
+        coroutineContext.ensureActive()
         val memcpyOutStatus =
             nativeRunStage(diagnostics, "d2h") {
                 native.memcpyDeviceToHost(bufferSet, ENN_OUTPUT_INDEX, outputBytes)
@@ -540,6 +559,9 @@ internal class ExynosUpscaleSession(
             diagnostics.outputDecodePassed = true
         }
         return decodeResult
+        } finally {
+            lifecycle = ModelRunnerLifecycle.Loaded
+        }
     }
 
     private fun buildOutputBitmap(outputBytes: ByteArray): ModelRunResult<Bitmap> {
@@ -811,6 +833,7 @@ internal class ExynosLoadDiagnostics {
  * threw (see [throwableStage]/[throwableDetail]).
  */
 internal class ExynosRunDiagnostics {
+    @Volatile var attemptLabel: String? = null
     /** Raw EnnReturn of the H2D copy; null = not reached / threw. */
     @Volatile var h2dStatus: Int? = null
     /**
@@ -827,6 +850,24 @@ internal class ExynosRunDiagnostics {
     /** Stage whose native call threw before returning, if any. */
     @Volatile var throwableStage: String? = null
     @Volatile var throwableDetail: String? = null
+}
+
+internal data class ProbeReportFinalization(
+    val persisted: Boolean,
+    val primaryFailure: Throwable?,
+    val writeFailure: Throwable?,
+)
+
+internal fun finalizeProbeReport(
+    writeReport: () -> Unit,
+    originalFailure: Throwable?,
+    closeFailure: Throwable?,
+): ProbeReportFinalization {
+    val writeFailure = runCatching { writeReport() }.exceptionOrNull()
+    val primary = originalFailure ?: closeFailure ?: writeFailure
+    if (closeFailure != null && primary !== closeFailure) primary?.addSuppressed(closeFailure)
+    if (writeFailure != null && primary !== writeFailure) primary?.addSuppressed(writeFailure)
+    return ProbeReportFinalization(writeFailure == null, primary, writeFailure)
 }
 
 /** Physical outcome of one native teardown step. */

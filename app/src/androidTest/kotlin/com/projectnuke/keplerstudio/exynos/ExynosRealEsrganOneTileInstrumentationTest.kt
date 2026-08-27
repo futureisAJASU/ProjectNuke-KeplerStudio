@@ -11,6 +11,7 @@ import com.projectnuke.keplerstudio.editor.EnnMetaIds
 import com.projectnuke.keplerstudio.editor.EnnStatus
 import com.projectnuke.keplerstudio.editor.ExynosEnnNative
 import com.projectnuke.keplerstudio.editor.ExynosUpscaleSession
+import com.projectnuke.keplerstudio.editor.finalizeProbeReport
 import com.projectnuke.keplerstudio.editor.ModelAssetManifest
 import com.projectnuke.keplerstudio.editor.ModelAvailabilityRegistry
 import com.projectnuke.keplerstudio.editor.ModelCapabilityObservation
@@ -199,7 +200,7 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             var previousBitmap: Bitmap? = null
             repeat(3) { index ->
                 val startedNanos = SystemClock.elapsedRealtimeNanos()
-                val result = session.run(inputPixels, operationContext)
+                val result = session.run(inputPixels, operationContext, if (index == 0) "cold" else "warm_${index}")
                 val durationMs = (SystemClock.elapsedRealtimeNanos() - startedNanos) / 1_000_000L
                 val diag = session.lastRunDiagnostics
                 runDiagnostics.add(diag)
@@ -273,7 +274,8 @@ class ExynosRealEsrganOneTileInstrumentationTest {
 
             session.close()
             assertTrue(session.load(token) is ModelLoadResult.Ready)
-            val rerun = session.run(inputPixels, operationContext)
+            val rerun = session.run(inputPixels, operationContext, "lifecycle_roundtrip")
+            runDiagnostics.add(session.lastRunDiagnostics)
             assertTrue("second lifecycle inference failed: $rerun", rerun is ModelRunResult.Success)
             (rerun as ModelRunResult.Success<Bitmap>).value.recycle()
             session.close()
@@ -320,9 +322,10 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             }
             metadata.put("memory_snapshots_native_heap_kb", memorySnapshots)
 
-            val loadDiag = session?.lastLoadDiagnostics
-            val openOk = loadDiag?.openModelStatus == EnnStatus.SUCCESS
-            val allocateOk = loadDiag?.allocationStatus == EnnStatus.SUCCESS
+            val loadAttempts = session?.loadDiagnosticsHistory ?: emptyList()
+            val loadDiag = loadAttempts.lastOrNull()
+            val openOk = loadAttempts.any { it.openModelStatus == EnnStatus.SUCCESS }
+            val allocateOk = loadAttempts.any { it.allocationStatus == EnnStatus.SUCCESS }
             val executeAttempted = runDiagnostics.any { it.executeReached }
             val executeSucceeded = runDiagnostics.any { it.executeReached && it.executeStatus == EnnStatus.SUCCESS }
             val outputReadSucceeded = runDiagnostics.any { it.d2hStatus == EnnStatus.SUCCESS && it.outputDecodePassed }
@@ -332,6 +335,27 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             metadata.put("npu_execute_attempted", executeAttempted)
             metadata.put("npu_execute_succeeded", executeSucceeded)
             metadata.put("npu_output_read_succeeded", outputReadSucceeded)
+            metadata.put(
+                "load_attempts",
+                JSONArray(loadAttempts.mapIndexed { index, diag ->
+                    JSONObject(
+                        mapOf(
+                            "index" to index,
+                            "initialize_status" to (diag.initializeStatus?.let(EnnStatus::describe) ?: "not_reached"),
+                            "open_model_status" to (diag.openModelStatus?.let(EnnStatus::describe) ?: "not_reached"),
+                            "allocation_status" to (diag.allocationStatus?.let(EnnStatus::describe) ?: "not_reached"),
+                            "contract_validation_passed" to diag.contractValidationPassed,
+                            "throwable_stage" to (diag.throwableStage ?: ""),
+                        ),
+                    )
+                }),
+            )
+            metadata.put(
+                "run_attempts",
+                JSONArray(runDiagnostics.mapIndexed { index, diag ->
+                    JSONObject(mapOf("index" to index, "label" to (diag.attemptLabel ?: ""), "h2d_status" to (diag.h2dStatus?.let(EnnStatus::describe) ?: "not_reached"), "execute_reached" to diag.executeReached, "execute_status" to (diag.executeStatus?.let(EnnStatus::describe) ?: "not_reached"), "d2h_status" to (diag.d2hStatus?.let(EnnStatus::describe) ?: "not_reached"), "output_decode_passed" to diag.outputDecodePassed))
+                }),
+            )
 
             if (loadDiag != null) {
                 metadata.put(
@@ -350,38 +374,42 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                 )
             }
 
-            if (executeSucceeded) {
+            val metaInfo = metadata.optJSONObject("npu_meta_info") ?: JSONObject()
+            val compilerNpu = metaInfo.optString("compiler_npu", "unavailable")
+            val positiveNpuIdentity = compilerNpu.isNotBlank() && !compilerNpu.equals("unavailable", ignoreCase = true)
+            val ennExecuteObserved = executeSucceeded
+            metadata.put("enn_execute_observed", ennExecuteObserved)
+            metadata.put("accelerator_evidence", metaInfo)
+            if (!executeAttempted) {
+                metadata.put("npu_execution_observed", false)
+                metadata.put("npu_proof_status", "NOT_EXECUTED")
+            } else if (ennExecuteObserved && positiveNpuIdentity) {
                 metadata.put("npu_execution_observed", true)
                 metadata.put("npu_proof_status", "OBSERVED")
                 metadata.put(
                     "npu_proof",
-                    "EnnExecuteModel returned ENN_RET_SUCCESS through the vendor ENN service; see npu_meta_info",
+                    "EnnExecuteModel returned ENN_RET_SUCCESS and MODEL_COMPILER_NPU provided positive identity",
                 )
             } else {
                 metadata.put("npu_execution_observed", false)
-                metadata.put("npu_proof_status", "NOT_ESTABLISHED")
+                metadata.put("npu_proof_status", "EXECUTED_EVIDENCE_INCOMPLETE")
             }
 
             val capabilityAfter = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]
             metadata.put("session_inactive_after_close", capabilityAfter?.sessionActive != true)
             metadata.put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "")
 
-            val reportWriteFailure =
-                runCatching {
-                    File(reportDir, "metadata.json").writeText(metadata.toString(2))
-                }.exceptionOrNull()
-            if (reportWriteFailure != null) {
-                Log.w("KeplerExynosProbe", "Failed to write probe report", reportWriteFailure)
-                testFailure?.addSuppressed(reportWriteFailure)
+            val report = finalizeProbeReport(
+                writeReport = { File(reportDir, "metadata.json").writeText(metadata.toString(2)) },
+                originalFailure = testFailure,
+                closeFailure = closeFailure,
+            )
+            if (report.persisted) println("EXYNOS_NPU_PROBE_REPORT=${reportDir.absolutePath}")
+            else {
+                Log.w("KeplerExynosProbe", "Failed to write probe report", report.writeFailure)
+                println("EXYNOS_NPU_PROBE_REPORT_WRITE_FAILED=${reportDir.absolutePath}")
             }
-            println("EXYNOS_NPU_PROBE_REPORT=${reportDir.absolutePath}")
-            if (closeFailure != null) {
-                if (testFailure != null) {
-                    testFailure.addSuppressed(closeFailure)
-                } else {
-                    throw closeFailure
-                }
-            }
+            if (testFailure == null && report.primaryFailure != null) throw report.primaryFailure
         }
     }
 
