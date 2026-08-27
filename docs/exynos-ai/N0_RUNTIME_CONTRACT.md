@@ -126,6 +126,12 @@ prepared files may remain in `filesDir/exynos_models/` bounded by the number of 
 lifetimes in a single process lifetime (typical: zero; pathological: O(crash count) × ~3 MB each).
 Future cleanup policy may sweep stale `session-*` files on startup if needed.
 
+**Prepared-file deletion truth:** Teardown classifies the delete outcome truthfully —
+`Deleted`, `AlreadyAbsent`, `DeleteFailed`, or `Threw`. A `delete()` that returns `false` while
+the file still exists is `DeleteFailed`, never silently treated as clean. On `DeleteFailed`/`Threw`
+the path is retained as session-owned cleanup debt until an explicit later `close()` retry; the
+session reference is never dropped while the file may physically remain.
+
 ## 6. Exact NNC identity
 
 | Field | Value |

@@ -94,6 +94,8 @@ class ExynosUpscaleSessionTest {
         var closeModelThrows: Throwable? = null
         var deinitializeThrows: Throwable? = null
         var memcpyInThrows: Throwable? = null
+        var executeThrows: Throwable? = null
+        var memcpyOutThrows: Throwable? = null
 
         val initializeCalls = AtomicInteger()
         val deinitializeCalls = AtomicInteger()
@@ -171,6 +173,7 @@ class ExynosUpscaleSessionTest {
         }
 
         override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int {
+            memcpyOutThrows?.let { throw it }
             outputFiller?.invoke(out)
             return memcpyOutStatus
         }
@@ -178,6 +181,7 @@ class ExynosUpscaleSessionTest {
         override fun execute(modelId: Long): Int {
             stepLog += "execute:start"
             executeCalls.incrementAndGet()
+            executeThrows?.let { throw it }
             executeStarted?.complete(Unit)
             executeGate?.let { gate -> runBlocking { gate.await() } }
             stepLog += "execute:end"
@@ -499,6 +503,10 @@ class ExynosUpscaleSessionTest {
         assertTrue(result is ModelLoadResult.LoadFailed)
         assertEquals(1, enn.deinitializeCalls.get())
         assertNull(session.descriptor)
+        // Unexpected backend exception settles to Failed — total teardown does not overwrite it.
+        assertEquals(ModelRunnerLifecycle.Failed, session.lifecycle)
+        val capability = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.ExynosUpscale)
+        assertEquals(ModelCapabilityPhase.Failed, capability.phase)
     }
 
     @Test
@@ -905,5 +913,266 @@ class ExynosUpscaleSessionTest {
         assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
         session.close()
         assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
+    }
+
+    // ------------------------------------------------------------------
+    // N2 pre-NNC static corrective: lifecycle, stage-truth diagnostics,
+    // prepared-file truthfulness, and staged-cleanup truthfulness.
+    // ------------------------------------------------------------------
+
+    // Regression: unexpected backend exception during load → physical ownership fully
+    // settled, LoadFailed published, lifecycle == Failed, subsequent load on the SAME
+    // session rejected, a NEW session remains usable. No sleeps.
+    @Test
+    fun unexpectedBackendExceptionDuringLoadSettlesToFailedAndRejectsReload() = runBlocking {
+        val enn = FakeEnn().apply { openModelThrows = IllegalStateException("service exploded") }
+        val session = session(enn)
+        val result = session.load(fakeToken())
+        assertTrue(result is ModelLoadResult.LoadFailed)
+        // all physical ownership settled
+        assertEquals(1, enn.deinitializeCalls.get())
+        assertNull(session.descriptor)
+        // registry load failure published as Failed
+        val capability = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.ExynosUpscale)
+        assertEquals(ModelCapabilityPhase.Failed, capability.phase)
+        // lifecycle terminal Failed — total teardown did not overwrite it
+        assertEquals(ModelRunnerLifecycle.Failed, session.lifecycle)
+        // subsequent load on the same session rejected (terminal Failed)
+        val reload = session.load(fakeToken())
+        assertTrue("reload on Failed session must be rejected", reload is ModelLoadResult.LoadFailed)
+        // diagnostic: the throwing stage was openModel
+        val diag = session.lastLoadDiagnostics
+        assertEquals(EnnStatus.SUCCESS, diag.initializeStatus)
+        assertNull(diag.openModelStatus)
+        assertEquals("openModel", diag.throwableStage)
+        assertTrue("throwable detail must preserve the exception message", diag.throwableDetail?.contains("service exploded") == true)
+        // a new session instance remains fully usable
+        val newEnn = FakeEnn()
+        val newSession = session(newEnn)
+        assertTrue("new session must load after a sibling's unexpected failure", newSession.load(fakeToken()) is ModelLoadResult.Ready)
+        newSession.close()
+    }
+
+    // Regression A: Open SUCCESS + Allocate SUCCESS then output tensor contract
+    // mismatch → diagnostics preserve open=true, allocation=true, contract=false.
+    @Test
+    fun openAllocateSuccessThenContractMismatchPreservesNativeLoadDiagnostics() = runBlocking {
+        val enn = FakeEnn().apply { outputInfo = intArrayOf(1, 256, 256, 3, 256 * 256 * 3 * 4) }
+        val session = session(enn)
+        val result = session.load(fakeToken())
+        assertTrue(result is ModelLoadResult.UnsupportedContract)
+        val diag = session.lastLoadDiagnostics
+        assertEquals(EnnStatus.SUCCESS, diag.initializeStatus)
+        assertEquals(EnnStatus.SUCCESS, diag.openModelStatus)
+        assertEquals(EnnStatus.SUCCESS, diag.allocationStatus)
+        assertEquals(1, diag.allocationNIn)
+        assertEquals(1, diag.allocationNOut)
+        assertTrue("contract gate must be reached after allocation success", diag.contractValidationReached)
+        assertFalse("contract mismatch must be recorded as not passed", diag.contractValidationPassed)
+        assertNull("no throwable stage on a structured rejection", diag.throwableStage)
+    }
+
+    // Regression B: H2D SUCCESS + Execute SUCCESS then D2H returns failure →
+    // executeAttempted=true, executeSucceeded=true, outputRead=false.
+    @Test
+    fun executeSuccessThenD2hFailurePreservesExecuteDiagnostics() = runBlocking {
+        val enn = FakeEnn().apply { memcpyOutStatus = EnnStatus.IO }
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        val result = session.run(testPixels(), ModelOperationContext(1L, "g1"))
+        assertTrue(result is ModelRunResult.Failure)
+        val diag = session.lastRunDiagnostics
+        assertEquals(EnnStatus.SUCCESS, diag.h2dStatus)
+        assertTrue("execute must be recorded as reached", diag.executeReached)
+        assertEquals(EnnStatus.SUCCESS, diag.executeStatus)
+        assertEquals(EnnStatus.IO, diag.d2hStatus)
+        assertFalse("output decode must not pass when D2H failed", diag.outputDecodePassed)
+        assertNull(diag.throwableStage)
+        session.close()
+    }
+
+    // Regression C: H2D failure → execute not attempted, executeStatus absent.
+    @Test
+    fun h2dFailureLeavesExecuteNotAttempted() = runBlocking {
+        val enn = FakeEnn().apply { memcpyInStatus = EnnStatus.IO }
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        val result = session.run(testPixels(), ModelOperationContext(1L, "g1"))
+        assertTrue(result is ModelRunResult.Failure)
+        val diag = session.lastRunDiagnostics
+        assertEquals(EnnStatus.IO, diag.h2dStatus)
+        assertFalse("execute must not be marked reached before H2D success", diag.executeReached)
+        assertNull("execute status must be absent when execute was not reached", diag.executeStatus)
+        assertNull("d2h must not be reached after H2D failure", diag.d2hStatus)
+        assertEquals(0, enn.executeCalls.get())
+        session.close()
+    }
+
+    // Regression D: execute returns an ENN error → executeAttempted=true AND the exact
+    // raw executeStatus is preserved verbatim.
+    @Test
+    fun executeFailurePreservesExactRawStatusInDiagnostics() = runBlocking {
+        val enn = FakeEnn().apply { executeStatus = EnnStatus.FAILED_TIMEOUT_HW_RECOVERED }
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        val result = session.run(testPixels(), ModelOperationContext(1L, "g1"))
+        assertTrue(result is ModelRunResult.Failure)
+        val diag = session.lastRunDiagnostics
+        assertTrue(diag.executeReached)
+        assertEquals(
+            "exact raw EnnReturn must be preserved, not collapsed",
+            EnnStatus.FAILED_TIMEOUT_HW_RECOVERED,
+            diag.executeStatus,
+        )
+        assertEquals(EnnStatus.SUCCESS, diag.h2dStatus)
+        // D2H was never reached because execute failed first
+        assertNull(diag.d2hStatus)
+        assertFalse(diag.outputDecodePassed)
+        session.close()
+    }
+
+    // Regression: a thrown execute call preserves reached=true + throwable stage/detail.
+    @Test
+    fun thrownExecuteCallRecordsReachedWithThrowableStage() = runBlocking {
+        val enn = FakeEnn().apply { executeThrows = IllegalStateException("npu faulted") }
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        val result = session.run(testPixels(), ModelOperationContext(1L, "g1"))
+        assertTrue(result is ModelRunResult.Failure)
+        val diag = session.lastRunDiagnostics
+        assertTrue(diag.executeReached)
+        assertNull("executeStatus must be absent when the call threw", diag.executeStatus)
+        assertEquals("execute", diag.throwableStage)
+        assertTrue(diag.throwableDetail?.contains("npu faulted") == true)
+        session.close()
+    }
+
+    // Prepared-file deletion outcome classification (deterministic seam).
+    @Test
+    fun preparedFileDeletionOutcomeClassificationIsTruthful() {
+        // delete() returned true → Deleted
+        assertEquals(
+            PreparedFileOutcome.Deleted,
+            classifyPreparedFileDeletion(Result.success(true), fileStillExists = false),
+        )
+        // delete() returned true, file coincidentally also absent → still Deleted
+        assertEquals(
+            PreparedFileOutcome.Deleted,
+            classifyPreparedFileDeletion(Result.success(true), fileStillExists = true),
+        )
+        // delete() returned false AND file still exists → DeleteFailed
+        assertEquals(
+            PreparedFileOutcome.DeleteFailed,
+            classifyPreparedFileDeletion(Result.success(false), fileStillExists = true),
+        )
+        // delete() returned false AND no file remains → AlreadyAbsent (NOT a failure)
+        assertEquals(
+            PreparedFileOutcome.AlreadyAbsent,
+            classifyPreparedFileDeletion(Result.success(false), fileStillExists = false),
+        )
+        // delete() threw AND file still exists → Threw
+        assertEquals(
+            PreparedFileOutcome.Threw,
+            classifyPreparedFileDeletion(
+                Result.failure(IOException("permission denied")),
+                fileStillExists = true,
+            ),
+        )
+        // delete() threw AND file absent → still Threw
+        assertEquals(
+            PreparedFileOutcome.Threw,
+            classifyPreparedFileDeletion(
+                Result.failure(IOException("permission denied")),
+                fileStillExists = false,
+            ),
+        )
+    }
+
+    // Prepared-file delete failure retains cleanup debt until an explicit later close().
+    @Test
+    fun preparedFileDeleteFailureRetainsCleanupDebtUntilExplicitRetry() = runBlocking {
+        val tempFile = File(context.filesDir, "delete_debt_test.nnc").apply { writeText("fake_nnc") }
+        val enn = FakeEnn()
+        val session =
+            ExynosUpscaleSession(
+                context = context,
+                native = enn,
+                ioDispatcher = Dispatchers.Default,
+                preparedModelFileProvider =
+                    preparedFileProviderReturning(ModelLoadResult.Ready(tempFile)),
+            )
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        // Force delete to lie-fail while the physical file still exists.
+        session.preparedFileDeleter = { false }
+        session.close()
+        val firstTeardown = session.lastTeardownResult
+        assertNotNull(firstTeardown)
+        firstTeardown!!
+        assertEquals(PreparedFileOutcome.DeleteFailed, firstTeardown.preparedFileOutcome)
+        assertEquals(tempFile.absolutePath, firstTeardown.preparedFilePath)
+        assertFalse("allAttemptedSucceeded must be false while debt remains", firstTeardown.allAttemptedSucceeded)
+        assertTrue("file must still exist (debt)", tempFile.exists())
+        // Explicit later cleanup attempt: restore a working deleter and close again.
+        session.preparedFileDeleter = { it.delete() }
+        session.close()
+        val retryTeardown = session.lastTeardownResult
+        assertNotNull(retryTeardown)
+        retryTeardown!!
+        assertEquals(PreparedFileOutcome.Deleted, retryTeardown.preparedFileOutcome)
+        assertFalse("debt file must be gone after retry", tempFile.exists())
+        assertTrue(retryTeardown.allAttemptedSucceeded)
+    }
+
+    // An already-absent prepared file must NOT be recorded as a deletion failure.
+    @Test
+    fun alreadyAbsentPreparedFileIsNotRecordedAsDeleteFailure() = runBlocking {
+        val tempFile = File(context.filesDir, "already_absent_test.nnc").apply { writeText("fake_nnc") }
+        val enn = FakeEnn()
+        val session =
+            ExynosUpscaleSession(
+                context = context,
+                native = enn,
+                ioDispatcher = Dispatchers.Default,
+                preparedModelFileProvider =
+                    preparedFileProviderReturning(ModelLoadResult.Ready(tempFile)),
+            )
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        // Simulate the file being gone before teardown (e.g. external cleanup).
+        assertTrue(tempFile.delete())
+        session.close()
+        val teardown = session.lastTeardownResult
+        assertNotNull(teardown)
+        teardown!!
+        assertEquals(PreparedFileOutcome.AlreadyAbsent, teardown.preparedFileOutcome)
+        assertTrue("already-absent is not a failure", teardown.allAttemptedSucceeded)
+    }
+
+    // Staged-file cleanup failure (copyVerifying verification failure + delete false while
+    // the file still exists) must surface as a suppressed exception, never silent.
+    @Test
+    fun stagingCleanupFailureIsSurfacedNotSilent() {
+        val targetDir = File(context.filesDir, "exynos_models_test").apply { mkdirs() }
+        val target = File(targetDir, "staging_cleanup_test.tmp")
+        val input = ByteArrayInputStream(byteArrayOf(1, 2, 3, 4))
+        var thrown: Throwable? = null
+        try {
+            // stagingDeleter deterministically reports false; the partial file still exists.
+            copyVerifying(
+                input = input,
+                target = target,
+                expectedSha256 = "irrelevant",
+                expectedBytes = 100L,
+                stagingDeleter = { false },
+            )
+        } catch (t: Throwable) {
+            thrown = t
+        }
+        assertNotNull(thrown)
+        assertTrue("verification must still throw", thrown is IllegalStateException)
+        val suppressed = thrown!!.suppressed
+        assertTrue(
+            "staging cleanup failure must be surfaced as suppressed, not silent",
+            suppressed.any { it is IOException && (it.message ?: "").contains("staging cleanup incomplete") },
+        )
     }
 }

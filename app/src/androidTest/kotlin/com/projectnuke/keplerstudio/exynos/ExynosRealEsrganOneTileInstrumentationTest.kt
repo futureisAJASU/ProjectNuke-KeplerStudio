@@ -26,6 +26,7 @@ import java.io.FileOutputStream
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.AssumptionViolatedException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -36,11 +37,11 @@ import org.junit.runner.RunWith
 /**
  * Phase N2 — retail Galaxy S24 / Exynos 2400 one-tile NPU probe.
  *
- * NEVER runs by default: requires the explicit instrumentation argument
- * `kepler.exynosNpuProbe=true` AND a device whose SoC properties identify an
- * Exynos target AND the vendored ENN client stub resolving against the vendor
- * public library. On anything else it fails truthfully with the exact missing
- * prerequisite (never a fake PASS, never a silent CPU fallback claim).
+ * Opt-in semantics:
+ *  - no explicit `kepler.exynosNpuProbe=true` -> JUnit assumption SKIP (no report);
+ *  - non-S24 target -> JUnit assumption SKIP (persists metadata with status=SKIPPED);
+ *  - once BOTH are true (explicit probe requested + S24 / Exynos-2400 target gate passed),
+ *    all later prerequisite or capability failures are REAL N2 failures (never skipped).
  *
  * Run:
  * adb shell am instrument -w -e kepler.exynosNpuProbe true \
@@ -87,7 +88,8 @@ class ExynosRealEsrganOneTileInstrumentationTest {
 
     @Test
     fun exynosRealEsrganOneTileNpuProbe() = runBlocking {
-        assertTrue(
+        // OPT-IN GATE: default test runs skip here immediately without creating report artifacts.
+        assumeTrue(
             "probe is opt-in only; rerun with -e kepler.exynosNpuProbe true",
             isProbeRequested(),
         )
@@ -106,13 +108,10 @@ class ExynosRealEsrganOneTileInstrumentationTest {
 
         var testFailure: Throwable? = null
         var session: ExynosUpscaleSession? = null
-        var openSucceeded = false
-        var allocateSucceeded = false
-        var executeAttempted = false
-        var executeSucceeded = false
-        var outputReadSucceeded = false
+        val runDiagnostics = mutableListOf<com.projectnuke.keplerstudio.editor.ExynosRunDiagnostics>()
 
         try {
+            // APPLICABILITY GATE: non-S24 target skips with a persisted report marked SKIPPED.
             assumeTrue(
                 "target must be Exynos 2400 (S24 family); found: $socProperties",
                 isExynos2400Target(),
@@ -138,8 +137,9 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                 ),
             )
 
-            assumeTrue(
-                "ExynosUpscale capability not loadable: ${capability?.phase}",
+            // Once both opt-in and target gate pass, capability failure MUST assert/fail, never skip.
+            assertTrue(
+                "ExynosUpscale capability not loadable on requested+applicable target: phase=${capability?.phase} facts=${capability?.let { JSONObject(mapOf("present" to it.assetPresent, "valid" to it.assetValid, "runtime" to it.runtimeAvailable, "contract" to it.contractSupported)) }}",
                 capability?.canAttemptModelUse == true,
             )
 
@@ -151,20 +151,18 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             metadata.put("validated_asset_sha256", token.approvedAssetSha256 ?: "")
             metadata.put("validation_epoch", token.validationGeneration)
 
-            memorySnapshots.put("pre_load_kb", getNativeHeapAllocatedKb(context))
+            memorySnapshots.put("pre_load_kb", getNativeHeapAllocatedKb())
 
             session = ExynosUpscaleSession(context)
             val loadStartedNanos = SystemClock.elapsedRealtimeNanos()
             val loadResult = session.load(token)
             val loadDurationMs = (SystemClock.elapsedRealtimeNanos() - loadStartedNanos) / 1_000_000L
-            memorySnapshots.put("post_load_kb", getNativeHeapAllocatedKb(context))
+            memorySnapshots.put("post_load_kb", getNativeHeapAllocatedKb())
             if (loadResult !is ModelLoadResult.Ready) {
                 metadata.put("load_failure_stage", "load")
                 metadata.put("load_failure_detail", loadResult.toString())
                 throw AssertionError("session load failed on this device: $loadResult")
             }
-            openSucceeded = true
-            allocateSucceeded = true
             metadata.put("model_load_ms", loadDurationMs)
             metadata.put(
                 "descriptor_input",
@@ -182,10 +180,15 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             captureNpuMetaInfo(session, metadata)
 
             val inputPixels = deterministicTile()
-            savePng(
-                renderTileBitmap(inputPixels),
-                File(reportDir, "input_tile_128.png"),
-            )
+            val inputBitmap = renderTileBitmap(inputPixels)
+            val inputPngFailure =
+                runCatching { savePng(inputBitmap, File(reportDir, "input_tile_128.png")) }
+                    .exceptionOrNull()
+            inputBitmap.recycle()
+            metadata.put("input_png_write_succeeded", inputPngFailure == null)
+            if (inputPngFailure != null) {
+                throw AssertionError("input PNG write failed", inputPngFailure)
+            }
             metadata.put("input_tile_sha_source", "deterministicTile(): documented generator")
             metadata.put("input_pixels", inputPixels.size)
 
@@ -195,13 +198,29 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             val timings = JSONArray()
             var previousBitmap: Bitmap? = null
             repeat(3) { index ->
-                executeAttempted = true
                 val startedNanos = SystemClock.elapsedRealtimeNanos()
                 val result = session.run(inputPixels, operationContext)
                 val durationMs = (SystemClock.elapsedRealtimeNanos() - startedNanos) / 1_000_000L
+                val diag = session.lastRunDiagnostics
+                runDiagnostics.add(diag)
+
                 val runRecord = JSONObject()
                 runRecord.put("run_index", index)
                 runRecord.put("ms", durationMs)
+                runRecord.put("h2d_status", diag.h2dStatus?.let(EnnStatus::describe) ?: "not_reached")
+                runRecord.put("execute_reached", diag.executeReached)
+                runRecord.put(
+                    "execute_status",
+                    diag.executeStatus?.let(EnnStatus::describe) ?: "not_reached",
+                )
+                runRecord.put("d2h_status", diag.d2hStatus?.let(EnnStatus::describe) ?: "not_reached")
+                runRecord.put("output_decode_passed", diag.outputDecodePassed)
+                if (diag.throwableStage != null) {
+                    runRecord.put("throwable_stage", diag.throwableStage)
+                    runRecord.put("throwable_detail", diag.throwableDetail ?: "")
+                }
+                timings.put(runRecord)
+
                 if (result is ModelRunResult.Failure) {
                     runRecord.put("failure_reason", result.failure.reason.name)
                     runRecord.put("failure_detail", result.failure.detail)
@@ -209,15 +228,13 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                     metadata.put("inference_failure_detail", result.failure.toString())
                     throw AssertionError("inference #$index failed: ${result.failure}")
                 }
-                executeSucceeded = true
                 previousBitmap?.recycle()
                 previousBitmap = (result as ModelRunResult.Success<Bitmap>).value
                 if (index == 0) {
-                    memorySnapshots.put("post_cold_inference_kb", getNativeHeapAllocatedKb(context))
+                    memorySnapshots.put("post_cold_inference_kb", getNativeHeapAllocatedKb())
                 }
-                timings.put(runRecord)
             }
-            memorySnapshots.put("post_warm_inferences_kb", getNativeHeapAllocatedKb(context))
+            memorySnapshots.put("post_warm_inferences_kb", getNativeHeapAllocatedKb())
             metadata.put("runs", timings)
 
             val bitmap = previousBitmap!!
@@ -241,9 +258,18 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                 ),
             )
             assertTrue("output must not be trivially empty", !stats.isTriviallyEmpty)
-            val saved = savePng(bitmap, File(reportDir, "output_tile_x4_512.png"))
-            metadata.put("output_png_bytes", saved.length())
-            outputReadSucceeded = true
+            val outputPngFailure =
+                runCatching { savePng(bitmap, File(reportDir, "output_tile_x4_512.png")) }
+                    .exceptionOrNull()
+            metadata.put("output_png_write_succeeded", outputPngFailure == null)
+            if (outputPngFailure != null) {
+                metadata.put("output_png_bytes", 0L)
+                throw AssertionError("output PNG write failed", outputPngFailure)
+            }
+            metadata.put(
+                "output_png_bytes",
+                File(reportDir, "output_tile_x4_512.png").length(),
+            )
 
             session.close()
             assertTrue(session.load(token) is ModelLoadResult.Ready)
@@ -251,10 +277,7 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             assertTrue("second lifecycle inference failed: $rerun", rerun is ModelRunResult.Success)
             (rerun as ModelRunResult.Success<Bitmap>).value.recycle()
             session.close()
-            if (!memorySnapshots.has("post_close_kb")) {
-                memorySnapshots.put("post_close_kb", getNativeHeapAllocatedKb(context))
-            }
-            memorySnapshots.put("post_close_kb", getNativeHeapAllocatedKb(context))
+            memorySnapshots.put("post_close_kb", getNativeHeapAllocatedKb())
 
             val cancelledContext =
                 ModelOperationContext(
@@ -273,9 +296,14 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             metadata.put("status", "PASS")
         } catch (t: Throwable) {
             testFailure = t
-            metadata.put("status", "FAILED")
-            metadata.put("failure_class", t.javaClass.simpleName)
-            metadata.put("failure_message", t.message ?: "unknown")
+            if (t is AssumptionViolatedException) {
+                metadata.put("status", "SKIPPED")
+                metadata.put("skip_reason", t.message ?: "assumption not satisfied")
+            } else {
+                metadata.put("status", "FAILED")
+                metadata.put("failure_class", t.javaClass.simpleName)
+                metadata.put("failure_message", t.message ?: "unknown")
+            }
             throw t
         } finally {
             val closeFailure = runCatching { session?.close() }.exceptionOrNull()
@@ -288,15 +316,40 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                 }
             }
             if (!memorySnapshots.has("post_close_kb")) {
-                memorySnapshots.put("post_close_kb", getNativeHeapAllocatedKb(context))
+                memorySnapshots.put("post_close_kb", getNativeHeapAllocatedKb())
             }
             metadata.put("memory_snapshots_native_heap_kb", memorySnapshots)
 
-            metadata.put("npu_open_succeeded", openSucceeded)
-            metadata.put("npu_buffer_allocation_succeeded", allocateSucceeded)
+            val loadDiag = session?.lastLoadDiagnostics
+            val openOk = loadDiag?.openModelStatus == EnnStatus.SUCCESS
+            val allocateOk = loadDiag?.allocationStatus == EnnStatus.SUCCESS
+            val executeAttempted = runDiagnostics.any { it.executeReached }
+            val executeSucceeded = runDiagnostics.any { it.executeReached && it.executeStatus == EnnStatus.SUCCESS }
+            val outputReadSucceeded = runDiagnostics.any { it.d2hStatus == EnnStatus.SUCCESS && it.outputDecodePassed }
+
+            metadata.put("npu_open_succeeded", openOk)
+            metadata.put("npu_buffer_allocation_succeeded", allocateOk)
             metadata.put("npu_execute_attempted", executeAttempted)
             metadata.put("npu_execute_succeeded", executeSucceeded)
             metadata.put("npu_output_read_succeeded", outputReadSucceeded)
+
+            if (loadDiag != null) {
+                metadata.put(
+                    "exynos_load_diagnostics",
+                    JSONObject(
+                        mapOf(
+                            "initialize_status" to (loadDiag.initializeStatus?.let(EnnStatus::describe) ?: "not_reached"),
+                            "open_model_status" to (loadDiag.openModelStatus?.let(EnnStatus::describe) ?: "not_reached"),
+                            "allocation_status" to (loadDiag.allocationStatus?.let(EnnStatus::describe) ?: "not_reached"),
+                            "allocation_in_out" to "${loadDiag.allocationNIn}/${loadDiag.allocationNOut}",
+                            "contract_validation_reached" to loadDiag.contractValidationReached,
+                            "contract_validation_passed" to loadDiag.contractValidationPassed,
+                            "throwable_stage" to (loadDiag.throwableStage ?: ""),
+                        ),
+                    ),
+                )
+            }
+
             if (executeSucceeded) {
                 metadata.put("npu_execution_observed", true)
                 metadata.put("npu_proof_status", "OBSERVED")
@@ -388,7 +441,7 @@ class ExynosRealEsrganOneTileInstrumentationTest {
         metadata.put("npu_meta_info", metaJson)
     }
 
-    private fun getNativeHeapAllocatedKb(context: Context): Long {
+    private fun getNativeHeapAllocatedKb(): Long {
         return try {
             val debugClass = Class.forName("android.os.Debug")
             val method = debugClass.getMethod("getNativeHeapAllocatedSize")

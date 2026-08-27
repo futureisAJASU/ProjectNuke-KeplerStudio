@@ -39,6 +39,19 @@ import kotlin.coroutines.coroutineContext
  *  - a stale [ModelOperationContext] never reaches native code;
  *  - unsupported devices/NNC variants surface as structured failures with exact raw
  *    EnnReturn statuses — the adapter has no CPU fallback path to misreport.
+ *
+ * Load terminal-state policy:
+ *  - expected structured rejection ([ModelLoadResult.RuntimeUnavailable],
+ *    [ModelLoadResult.UnsupportedContract], asset rejection) settles to
+ *    [ModelRunnerLifecycle.Unloaded];
+ *  - caller cancellation settles to [ModelRunnerLifecycle.Failed];
+ *  - an unexpected backend [Throwable] settles to [ModelRunnerLifecycle.Failed];
+ *  - physical teardown is always total and never overwrites the Failed terminal state.
+ *
+ * Bring-up diagnostics: [lastLoadDiagnostics]/[lastRunDiagnostics] snapshot the ACTUAL
+ * per-stage native boundary results (raw EnnReturn values, reached flags, throwable
+ * stage/detail) — they are updated the moment each native call returns and are never
+ * inferred from the overall [ModelLoadResult]/[ModelRunResult].
  */
 internal class ExynosUpscaleSession(
     private val context: Context,
@@ -62,6 +75,29 @@ internal class ExynosUpscaleSession(
     @Volatile
     internal var lastTeardownResult: TeardownResult? = null
         private set
+
+    /**
+     * Smallest session-native load-stage truth: replaced when a load attempt passes the
+     * lifecycle/token gates and updated the moment each native call returns.
+     */
+    @Volatile
+    internal var lastLoadDiagnostics: ExynosLoadDiagnostics = ExynosLoadDiagnostics()
+        private set
+
+    /**
+     * Smallest session-native run-stage truth: replaced when a run passes all gates and
+     * native work begins; updated the moment each native call returns.
+     */
+    @Volatile
+    internal var lastRunDiagnostics: ExynosRunDiagnostics = ExynosRunDiagnostics()
+        private set
+
+    /**
+     * Test-only seam for deterministic prepared-file deletion outcomes.
+     * Production value is exactly `File.delete`.
+     */
+    @Volatile
+    internal var preparedFileDeleter: (File) -> Boolean = { it.delete() }
 
     private val lifecycleMutex = Mutex()
 
@@ -100,15 +136,16 @@ internal class ExynosUpscaleSession(
                 val generation =
                     ModelAvailabilityRegistry.reportLoading(ModelFeature.ExynosUpscale)
                 lifecycle = ModelRunnerLifecycle.Loading
+                val diagnostics = ExynosLoadDiagnostics()
+                lastLoadDiagnostics = diagnostics
                 try {
                     if (!native.probeRuntime()) {
-                        lifecycle = ModelRunnerLifecycle.Failed
                         return@withLock settleAfterPhysicalTeardown(
                             ModelLoadResult.RuntimeUnavailable(ENN_RUNTIME_UNAVAILABLE_DETAIL),
                             generation,
                         )
                     }
-                    loadLocked(token, generation)
+                    loadLocked(token, generation, diagnostics)
                 } catch (cancelled: CancellationException) {
                     teardownNativeLocked()
                     lifecycle = ModelRunnerLifecycle.Failed
@@ -120,11 +157,12 @@ internal class ExynosUpscaleSession(
                     throw cancelled
                 } catch (t: Throwable) {
                     Log.e(TAG, "ENN load failed unexpectedly", t)
-                    teardownNativeLocked()
-                    lifecycle = ModelRunnerLifecycle.Failed
+                    // Unexpected backend failure policy: physical teardown must be total,
+                    // but the terminal lifecycle stays Failed — teardown never overwrites it.
                     settleAfterPhysicalTeardown(
                         ModelLoadResult.LoadFailed(t.message ?: "ENN load failed"),
                         generation,
+                        terminalLifecycle = ModelRunnerLifecycle.Failed,
                     )
                 }
             }
@@ -181,11 +219,23 @@ internal class ExynosUpscaleSession(
         }
     }
 
-    /** Terminal ownership boundary; safe to call repeatedly and from any thread. */
+    /**
+     * Terminal ownership boundary; safe to call repeatedly and from any thread.
+     * When a previous teardown could not delete the prepared model file, calling close()
+     * again is the explicit later cleanup attempt that retries the deletion of that
+     * session-owned cleanup debt.
+     */
     suspend fun close() {
         withContext(NonCancellable + ioDispatcher) {
             lifecycleMutex.withLock {
-                if (lifecycle == ModelRunnerLifecycle.Closing || lifecycle == ModelRunnerLifecycle.Unloaded) return@withLock
+                if (lifecycle == ModelRunnerLifecycle.Closing) return@withLock
+                if (lifecycle == ModelRunnerLifecycle.Unloaded) {
+                    if (preparedModelFile == null) return@withLock
+                    // Explicit later cleanup attempt for retained prepared-file debt only;
+                    // every native handle is already cleared so this is a no-op for them.
+                    teardownNativeLocked()
+                    return@withLock
+                }
                 lifecycle = ModelRunnerLifecycle.Closing
                 try {
                     teardownNativeLocked()
@@ -214,6 +264,7 @@ internal class ExynosUpscaleSession(
     private suspend fun loadLocked(
         token: ValidatedModelCapabilityToken,
         generation: Long,
+        diagnostics: ExynosLoadDiagnostics,
     ): ModelLoadResult<Unit> {
         coroutineContext.ensureActive()
         val manifest =
@@ -246,7 +297,8 @@ internal class ExynosUpscaleSession(
             }
 
         coroutineContext.ensureActive()
-        val initStatus = native.initialize()
+        val initStatus = nativeLoadStage(diagnostics, "initialize") { native.initialize() }
+        diagnostics.initializeStatus = initStatus
         if (initStatus != EnnStatus.SUCCESS) {
             nativeInitialized = false
             return settleAfterPhysicalTeardown(
@@ -257,93 +309,136 @@ internal class ExynosUpscaleSession(
             )
         }
         nativeInitialized = true
-        try {
-            coroutineContext.ensureActive()
-            val openResult = native.openModel(preparedFile.absolutePath)
-            if (!openResult.isSuccess) {
-                return settleAfterPhysicalTeardown(
-                    ModelLoadResult.RuntimeUnavailable(
-                        "EnnOpenModel failed: EnnReturn=${EnnStatus.describe(openResult.status)}",
-                    ),
-                    generation,
-                )
-            }
-            modelId = openResult.modelId
-
-            val allocation = native.allocateAllBuffers(modelId)
-            if (!allocation.isSuccess) {
-                return settleAfterPhysicalTeardown(
-                    ModelLoadResult.RuntimeUnavailable(
-                        "EnnAllocateAllBuffers failed: EnnReturn=${EnnStatus.describe(allocation.status)}",
-                    ),
-                    generation,
-                )
-            }
-            bufferSet = allocation.bufferSet
-            val nIn = allocation.nInBuffers
-            val nOut = allocation.nOutBuffers
-            bufferCount = nIn + nOut
-            if (nIn != EXPECTED_TENSOR_COUNT || nOut != EXPECTED_TENSOR_COUNT) {
-                return settleAfterPhysicalTeardown(
-                    ModelLoadResult.UnsupportedContract(
-                        "expected one input and one output tensor, got $nIn/$nOut",
-                    ),
-                    generation,
-                )
-            }
-            val inputInfo =
-                native.getBufferInfoByIndex(modelId, ENN_DIR_IN, 0)
-                    ?: return settleAfterPhysicalTeardown(
-                        ModelLoadResult.UnsupportedContract("input tensor info unavailable"),
-                        generation,
-                    )
-            val outputInfo =
-                native.getBufferInfoByIndex(modelId, ENN_DIR_OUT, 0)
-                    ?: return settleAfterPhysicalTeardown(
-                        ModelLoadResult.UnsupportedContract("output tensor info unavailable"),
-                        generation,
-                    )
-            val expectedInput =
-                intArrayOf(1, INPUT_WIDTH, INPUT_HEIGHT, INPUT_CHANNELS, INPUT_BYTES)
-            val expectedOutput =
-                intArrayOf(1, OUTPUT_WIDTH, OUTPUT_HEIGHT, OUTPUT_CHANNELS, OUTPUT_BYTES)
-            if (!inputInfo.contentEquals(expectedInput)) {
-                return settleAfterPhysicalTeardown(
-                    ModelLoadResult.UnsupportedContract(
-                        "input tensor ${inputInfo.toList()} violates the pinned CHW 3x128x128 FP32 contract",
-                    ),
-                    generation,
-                )
-            }
-            if (!outputInfo.contentEquals(expectedOutput)) {
-                return settleAfterPhysicalTeardown(
-                    ModelLoadResult.UnsupportedContract(
-                        "output tensor ${outputInfo.toList()} violates the pinned CHW 3x512x512 FP32 contract",
-                    ),
-                    generation,
-                )
-            }
-            Log.i(
-                TAG,
-                "ENN session ready; compiler=${native.getMetaInfo(EnnMetaIds.MODEL_COMPILER_NNC, modelId)}",
-            )
-
-            descriptor = buildDescriptor(manifest)
-            lifecycle = ModelRunnerLifecycle.Loaded
-            registrySessionGeneration =
-                ModelAvailabilityRegistry.reportSessionReady(listOf(ModelFeature.ExynosUpscale))
-            ModelAvailabilityRegistry.reportLoad(
-                ModelFeature.ExynosUpscale,
-                ModelLoadResult.Ready(Unit),
+        coroutineContext.ensureActive()
+        val openResult =
+            nativeLoadStage(diagnostics, "openModel") { native.openModel(preparedFile.absolutePath) }
+        diagnostics.openModelStatus = openResult.status
+        if (!openResult.isSuccess) {
+            return settleAfterPhysicalTeardown(
+                ModelLoadResult.RuntimeUnavailable(
+                    "EnnOpenModel failed: EnnReturn=${EnnStatus.describe(openResult.status)}",
+                ),
                 generation,
             )
-            return ModelLoadResult.Ready(Unit)
+        }
+        modelId = openResult.modelId
+
+        val allocation =
+            nativeLoadStage(diagnostics, "allocateAllBuffers") { native.allocateAllBuffers(modelId) }
+        diagnostics.allocationStatus = allocation.status
+        diagnostics.allocationNIn = allocation.nInBuffers
+        diagnostics.allocationNOut = allocation.nOutBuffers
+        if (!allocation.isSuccess) {
+            return settleAfterPhysicalTeardown(
+                ModelLoadResult.RuntimeUnavailable(
+                    "EnnAllocateAllBuffers failed: EnnReturn=${EnnStatus.describe(allocation.status)}",
+                ),
+                generation,
+            )
+        }
+        bufferSet = allocation.bufferSet
+        val nIn = allocation.nInBuffers
+        val nOut = allocation.nOutBuffers
+        bufferCount = nIn + nOut
+        // From here on every rejection is a tensor/contract verdict, not a native call failure.
+        diagnostics.contractValidationReached = true
+        if (nIn != EXPECTED_TENSOR_COUNT || nOut != EXPECTED_TENSOR_COUNT) {
+            return settleAfterPhysicalTeardown(
+                ModelLoadResult.UnsupportedContract(
+                    "expected one input and one output tensor, got $nIn/$nOut",
+                ),
+                generation,
+            )
+        }
+        val inputInfo =
+            nativeLoadStage(diagnostics, "inputBufferInfo") {
+                native.getBufferInfoByIndex(modelId, ENN_DIR_IN, 0)
+            }
+        diagnostics.inputBufferInfoQueried = true
+        diagnostics.inputBufferInfo = inputInfo
+        if (inputInfo == null) {
+            return settleAfterPhysicalTeardown(
+                ModelLoadResult.UnsupportedContract("input tensor info unavailable"),
+                generation,
+            )
+        }
+        val outputInfo =
+            nativeLoadStage(diagnostics, "outputBufferInfo") {
+                native.getBufferInfoByIndex(modelId, ENN_DIR_OUT, 0)
+            }
+        diagnostics.outputBufferInfoQueried = true
+        diagnostics.outputBufferInfo = outputInfo
+        if (outputInfo == null) {
+            return settleAfterPhysicalTeardown(
+                ModelLoadResult.UnsupportedContract("output tensor info unavailable"),
+                generation,
+            )
+        }
+        val expectedInput =
+            intArrayOf(1, INPUT_WIDTH, INPUT_HEIGHT, INPUT_CHANNELS, INPUT_BYTES)
+        val expectedOutput =
+            intArrayOf(1, OUTPUT_WIDTH, OUTPUT_HEIGHT, OUTPUT_CHANNELS, OUTPUT_BYTES)
+        if (!inputInfo.contentEquals(expectedInput)) {
+            return settleAfterPhysicalTeardown(
+                ModelLoadResult.UnsupportedContract(
+                    "input tensor ${inputInfo.toList()} violates the pinned CHW 3x128x128 FP32 contract",
+                ),
+                generation,
+            )
+        }
+        if (!outputInfo.contentEquals(expectedOutput)) {
+            return settleAfterPhysicalTeardown(
+                ModelLoadResult.UnsupportedContract(
+                    "output tensor ${outputInfo.toList()} violates the pinned CHW 3x512x512 FP32 contract",
+                ),
+                generation,
+            )
+        }
+        diagnostics.contractValidationPassed = true
+        Log.i(
+            TAG,
+            "ENN session ready; compiler=${native.getMetaInfo(EnnMetaIds.MODEL_COMPILER_NNC, modelId)}",
+        )
+
+        descriptor = buildDescriptor(manifest)
+        lifecycle = ModelRunnerLifecycle.Loaded
+        registrySessionGeneration =
+            ModelAvailabilityRegistry.reportSessionReady(listOf(ModelFeature.ExynosUpscale))
+        ModelAvailabilityRegistry.reportLoad(
+            ModelFeature.ExynosUpscale,
+            ModelLoadResult.Ready(Unit),
+            generation,
+        )
+        return ModelLoadResult.Ready(Unit)
+    }
+
+    /** Runs [block], recording the throwing stage/detail on [diagnostics] before rethrowing. */
+    private fun <T> nativeLoadStage(
+        diagnostics: ExynosLoadDiagnostics,
+        stage: String,
+        block: () -> T,
+    ): T =
+        try {
+            block()
         } catch (t: Throwable) {
-            teardownNativeLocked()
-            lifecycle = ModelRunnerLifecycle.Failed
+            diagnostics.throwableStage = stage
+            diagnostics.throwableDetail = t.message ?: t.javaClass.simpleName
             throw t
         }
-    }
+
+    /** Runs [block], recording the throwing stage/detail on [diagnostics] before rethrowing. */
+    private fun <T> nativeRunStage(
+        diagnostics: ExynosRunDiagnostics,
+        stage: String,
+        block: () -> T,
+    ): T =
+        try {
+            block()
+        } catch (t: Throwable) {
+            diagnostics.throwableStage = stage
+            diagnostics.throwableDetail = t.message ?: t.javaClass.simpleName
+            throw t
+        }
 
     private fun buildDescriptor(manifest: ModelAssetManifestEntry): ModelRunnerDescriptor =
         ModelRunnerDescriptor(
@@ -383,10 +478,14 @@ internal class ExynosUpscaleSession(
         )
 
     private suspend fun runLocked(argbPixels: IntArray): ModelRunResult<Bitmap> {
+        val diagnostics = ExynosRunDiagnostics()
+        lastRunDiagnostics = diagnostics
         val inputBuffer = preprocess(argbPixels)
         val inputBytes = ByteArray(INPUT_BYTES)
         inputBuffer.get(inputBytes)
-        val memcpyInStatus = native.memcpyHostToDevice(bufferSet, 0, inputBytes)
+        val memcpyInStatus =
+            nativeRunStage(diagnostics, "h2d") { native.memcpyHostToDevice(bufferSet, 0, inputBytes) }
+        diagnostics.h2dStatus = memcpyInStatus
         if (memcpyInStatus != EnnStatus.SUCCESS) {
             return ModelRunResult.Failure(
                 ModelFailure(
@@ -404,7 +503,11 @@ internal class ExynosUpscaleSession(
             // Authoritative coroutine cancellation boundary AFTER the test-only park
             // seam, immediately before native EnnExecuteModel execution.
             coroutineContext.ensureActive()
-            val executeStatus = native.execute(modelId)
+            // Reached the native execute boundary — recorded BEFORE the call so a throw
+            // still proves EnnExecuteModel was entered (status stays null, throwable set).
+            diagnostics.executeReached = true
+            val executeStatus = nativeRunStage(diagnostics, "execute") { native.execute(modelId) }
+            diagnostics.executeStatus = executeStatus
             if (executeStatus != EnnStatus.SUCCESS) {
                 return ModelRunResult.Failure(
                     ModelFailure(
@@ -418,7 +521,11 @@ internal class ExynosUpscaleSession(
             lifecycle = ModelRunnerLifecycle.Loaded
         }
         val outputBytes = ByteArray(OUTPUT_BYTES)
-        val memcpyOutStatus = native.memcpyDeviceToHost(bufferSet, ENN_OUTPUT_INDEX, outputBytes)
+        val memcpyOutStatus =
+            nativeRunStage(diagnostics, "d2h") {
+                native.memcpyDeviceToHost(bufferSet, ENN_OUTPUT_INDEX, outputBytes)
+            }
+        diagnostics.d2hStatus = memcpyOutStatus
         if (memcpyOutStatus != EnnStatus.SUCCESS) {
             return ModelRunResult.Failure(
                 ModelFailure(
@@ -428,7 +535,11 @@ internal class ExynosUpscaleSession(
                 DeterministicModelFallback.NoResult,
             )
         }
-        return buildOutputBitmap(outputBytes)
+        val decodeResult = buildOutputBitmap(outputBytes)
+        if (decodeResult is ModelRunResult.Success) {
+            diagnostics.outputDecodePassed = true
+        }
+        return decodeResult
     }
 
     private fun buildOutputBitmap(outputBytes: ByteArray): ModelRunResult<Bitmap> {
@@ -479,13 +590,22 @@ internal class ExynosUpscaleSession(
             .also { it.asFloatBuffer().put(floats) }
     }
 
+    /**
+     * Total physical settlement for a failed load: releases every owned native handle,
+     * publishes the load result to the registry, and applies the intended terminal
+     * lifecycle. "Physical resources fully settled" is deliberately separate from the
+     * session terminal state: expected structured rejections pass [terminalLifecycle]
+     * = [ModelRunnerLifecycle.Unloaded]; unexpected backend [Throwable]s pass
+     * [ModelRunnerLifecycle.Failed] so total teardown never overwrites Failed.
+     */
     private fun settleAfterPhysicalTeardown(
         result: ModelLoadResult<Unit>,
         generation: Long,
+        terminalLifecycle: ModelRunnerLifecycle = ModelRunnerLifecycle.Unloaded,
     ): ModelLoadResult<Unit> {
         teardownNativeLocked()
         ModelAvailabilityRegistry.reportLoad(ModelFeature.ExynosUpscale, result, generation)
-        lifecycle = ModelRunnerLifecycle.Unloaded
+        lifecycle = terminalLifecycle
         return result
     }
 
@@ -550,11 +670,30 @@ internal class ExynosUpscaleSession(
             nativeInitialized = false
         }
 
-        preparedModelFile?.let { file ->
-            runCatching { file.delete() }
-                .onFailure { Log.w(TAG, "Prepared model file deletion failed", it) }
+        val prepared = preparedModelFile
+        var preparedFileOutcome = PreparedFileOutcome.NotOwned
+        var preparedFilePath: String? = null
+        var preparedFileDetail: String? = null
+        if (prepared != null) {
+            preparedFilePath = prepared.absolutePath
+            val deleteResult = runCatching { preparedFileDeleter(prepared) }
+            preparedFileOutcome =
+                classifyPreparedFileDeletion(deleteResult, prepared.exists())
+            if (preparedFileOutcome == PreparedFileOutcome.Threw) {
+                preparedFileDetail =
+                    deleteResult.exceptionOrNull()?.let {
+                        it.message ?: it.javaClass.simpleName
+                    }
+            }
+            if (preparedFileOutcome == PreparedFileOutcome.Deleted ||
+                preparedFileOutcome == PreparedFileOutcome.AlreadyAbsent
+            ) {
+                preparedModelFile = null
+            }
+            // DeleteFailed/Threw: the physical file remains, so the path is RETAINED as
+            // session-owned cleanup debt until an explicit later cleanup attempt (close()
+            // on this session). The reference is never dropped while the file may exist.
         }
-        preparedModelFile = null
         descriptor = null
 
         val teardown =
@@ -568,6 +707,9 @@ internal class ExynosUpscaleSession(
                 deinitializeOutcome = deinitializeOutcome,
                 deinitializeStatus = deinitializeStatus,
                 deinitializeDetail = deinitializeDetail,
+                preparedFileOutcome = preparedFileOutcome,
+                preparedFilePath = preparedFilePath,
+                preparedFileDetail = preparedFileDetail,
             )
         teardown.logWarnings()
         if (teardown.attemptedAny) {
@@ -631,6 +773,62 @@ internal class ExynosUpscaleSession(
     }
 }
 
+/**
+ * Smallest session-native load diagnostic snapshot. Every field is written the moment
+ * the corresponding native boundary returns — never inferred afterwards from the
+ * overall [ModelLoadResult]. A null status means the stage was NOT reached or the call
+ * threw; in the thrown case [throwableStage]/[throwableDetail] identify it.
+ */
+internal class ExynosLoadDiagnostics {
+    /** Raw EnnReturn of EnnInitialize; null = not reached / threw. */
+    @Volatile var initializeStatus: Int? = null
+    /** Raw EnnReturn of EnnOpenModel; null = not reached / threw. */
+    @Volatile var openModelStatus: Int? = null
+    /** Raw EnnReturn of EnnAllocateAllBuffers; null = not reached / threw. */
+    @Volatile var allocationStatus: Int? = null
+    /** Buffer counts from the raw allocation result (-1 = not reached / threw). */
+    @Volatile var allocationNIn: Int = -1
+    @Volatile var allocationNOut: Int = -1
+    /** True once EnnGetBufferInfoByIndex(IN) returned (info may still be null). */
+    @Volatile var inputBufferInfoQueried: Boolean = false
+    @Volatile var inputBufferInfo: IntArray? = null
+    /** True once EnnGetBufferInfoByIndex(OUT) returned (info may still be null). */
+    @Volatile var outputBufferInfoQueried: Boolean = false
+    @Volatile var outputBufferInfo: IntArray? = null
+    /** True once allocation succeeded and the tensor contract gate was entered. */
+    @Volatile var contractValidationReached: Boolean = false
+    /** True only when every pinned contract check passed. */
+    @Volatile var contractValidationPassed: Boolean = false
+    /** Stage whose native call threw before returning, if any. */
+    @Volatile var throwableStage: String? = null
+    @Volatile var throwableDetail: String? = null
+}
+
+/**
+ * Smallest session-native run diagnostic snapshot. Same truth rule as
+ * [ExynosLoadDiagnostics]: written at each native boundary, never inferred from the
+ * overall [ModelRunResult]. A null status means the stage was NOT reached or the call
+ * threw (see [throwableStage]/[throwableDetail]).
+ */
+internal class ExynosRunDiagnostics {
+    /** Raw EnnReturn of the H2D copy; null = not reached / threw. */
+    @Volatile var h2dStatus: Int? = null
+    /**
+     * Set true on the line immediately before EnnExecuteModel is invoked — never
+     * earlier — so a throw still proves the native execute boundary was entered.
+     */
+    @Volatile var executeReached: Boolean = false
+    /** Raw EnnReturn of EnnExecuteModel; null = not reached / threw. */
+    @Volatile var executeStatus: Int? = null
+    /** Raw EnnReturn of the D2H copy; null = not reached / threw. */
+    @Volatile var d2hStatus: Int? = null
+    /** True only when the D2H payload decoded into the pinned output bitmap contract. */
+    @Volatile var outputDecodePassed: Boolean = false
+    /** Stage whose native call threw before returning, if any. */
+    @Volatile var throwableStage: String? = null
+    @Volatile var throwableDetail: String? = null
+}
+
 /** Physical outcome of one native teardown step. */
 internal enum class NativeStepOutcome {
     /** The step was skipped because this session never owned the handle. */
@@ -643,10 +841,40 @@ internal enum class NativeStepOutcome {
     Threw,
 }
 
+/** Physical outcome of deleting this session's prepared model file during teardown. */
+internal enum class PreparedFileOutcome {
+    /** This teardown owned no prepared file (never prepared, or already settled). */
+    NotOwned,
+    /** delete() returned true; no physical file remains. */
+    Deleted,
+    /** delete() returned false AND no file exists at the path — nothing was left to delete. */
+    AlreadyAbsent,
+    /** delete() returned false AND the file still exists — physical cleanup debt retained. */
+    DeleteFailed,
+    /** delete() threw; the file may still exist — physical cleanup debt retained. */
+    Threw,
+}
+
 /**
- * Truthful per-step record of one physical native teardown.
- * Exposed through [ExynosUpscaleSession.lastTeardownResult] as the smallest
- * test-visible diagnostic seam.
+ * Truthful prepared-file delete classification. [deleteResult] is the captured
+ * `File.delete()` call; [fileStillExists] is observed AFTER the attempt. A `false`
+ * return is only a failure when a physical file actually remains.
+ */
+internal fun classifyPreparedFileDeletion(
+    deleteResult: Result<Boolean>,
+    fileStillExists: Boolean,
+): PreparedFileOutcome =
+    when {
+        deleteResult.isFailure -> PreparedFileOutcome.Threw
+        deleteResult.getOrDefault(false) -> PreparedFileOutcome.Deleted
+        fileStillExists -> PreparedFileOutcome.DeleteFailed
+        else -> PreparedFileOutcome.AlreadyAbsent
+    }
+
+/**
+ * Truthful per-step record of one physical native teardown, including the prepared
+ * model file deletion. Exposed through [ExynosUpscaleSession.lastTeardownResult] as the
+ * smallest test-visible diagnostic seam.
  */
 internal data class TeardownResult(
     val releaseBuffersOutcome: NativeStepOutcome,
@@ -658,17 +886,26 @@ internal data class TeardownResult(
     val deinitializeOutcome: NativeStepOutcome,
     val deinitializeStatus: Int?,
     val deinitializeDetail: String?,
+    val preparedFileOutcome: PreparedFileOutcome,
+    val preparedFilePath: String?,
+    val preparedFileDetail: String?,
 ) {
     /** True when at least one physical teardown step was attempted. */
     val attemptedAny: Boolean
         get() = releaseBuffersOutcome != NativeStepOutcome.NotAttempted ||
             closeModelOutcome != NativeStepOutcome.NotAttempted ||
-            deinitializeOutcome != NativeStepOutcome.NotAttempted
+            deinitializeOutcome != NativeStepOutcome.NotAttempted ||
+            preparedFileOutcome != PreparedFileOutcome.NotOwned
 
     /** True when every attempted step returned ENN_RET_SUCCESS without throwing. */
     val allAttemptedSucceeded: Boolean
         get() = listOf(releaseBuffersOutcome, closeModelOutcome, deinitializeOutcome)
-            .all { it == NativeStepOutcome.NotAttempted || it == NativeStepOutcome.ReturnedSuccess }
+            .all { it == NativeStepOutcome.NotAttempted || it == NativeStepOutcome.ReturnedSuccess } &&
+            (
+                preparedFileOutcome == PreparedFileOutcome.NotOwned ||
+                    preparedFileOutcome == PreparedFileOutcome.Deleted ||
+                    preparedFileOutcome == PreparedFileOutcome.AlreadyAbsent
+            )
 
     fun logWarnings() {
         if (releaseBuffersOutcome != NativeStepOutcome.NotAttempted && releaseBuffersOutcome != NativeStepOutcome.ReturnedSuccess) {
@@ -687,6 +924,13 @@ internal data class TeardownResult(
             Log.w(
                 "KeplerExynosUpscale",
                 "EnnDeinitialize failed: outcome=$deinitializeOutcome status=${deinitializeStatus?.let { EnnStatus.describe(it) }} detail=$deinitializeDetail",
+            )
+        }
+        if (preparedFileOutcome == PreparedFileOutcome.DeleteFailed || preparedFileOutcome == PreparedFileOutcome.Threw) {
+            Log.w(
+                "KeplerExynosUpscale",
+                "Prepared model file deletion failed (cleanup debt retained by session): " +
+                    "outcome=$preparedFileOutcome path=$preparedFilePath detail=$preparedFileDetail",
             )
         }
     }
@@ -744,7 +988,7 @@ internal fun prepareModelFile(
                     }
                     ModelLoadResult.Ready(finalFile)
                 } catch (t: Throwable) {
-                    stagedFile.delete()
+                    deleteStagingFileTruthfully(stagedFile, t)
                     throw t
                 }
             }
@@ -753,11 +997,38 @@ internal fun prepareModelFile(
         ModelLoadResult.LoadFailed(failure.message ?: "model preparation failed")
     }
 
+private const val PREPARED_FILE_TAG = "KeplerExynosUpscale"
+
+/**
+ * Best-effort staging-file cleanup that never silently claims success: when the file
+ * still exists after a delete failure (or delete threw), the residual is logged as a
+ * warning and attached to [failure] as a suppressed exception.
+ */
+internal fun deleteStagingFileTruthfully(
+    file: File,
+    failure: Throwable,
+    deleter: (File) -> Boolean = { it.delete() },
+) {
+    val deleteResult = runCatching { deleter(file) }
+    val residual = file.exists()
+    if (deleteResult.isFailure || (deleteResult.getOrDefault(false) == false && residual)) {
+        Log.w(
+            PREPARED_FILE_TAG,
+            "staging cleanup incomplete: residual staging file ${file.absolutePath}",
+            deleteResult.exceptionOrNull(),
+        )
+        failure.addSuppressed(
+            IOException("staging cleanup incomplete: ${file.absolutePath} still exists")
+        )
+    }
+}
+
 internal fun copyVerifying(
     input: InputStream,
     target: File,
     expectedSha256: String,
     expectedBytes: Long,
+    stagingDeleter: (File) -> Boolean = { it.delete() },
 ) {
     val digest = MessageDigest.getInstance("SHA-256")
     try {
@@ -780,7 +1051,7 @@ internal fun copyVerifying(
     } catch (t: Throwable) {
         // Verification gate failed before publication: the partial staging file
         // must never survive as a (possibly renamed) final artifact.
-        target.delete()
+        deleteStagingFileTruthfully(target, t, stagingDeleter)
         throw t
     }
 }
