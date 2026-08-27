@@ -3,8 +3,11 @@ package com.projectnuke.keplerstudio.exynos
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Build
+import android.os.SystemClock
+import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.projectnuke.keplerstudio.editor.EnnMetaIds
 import com.projectnuke.keplerstudio.editor.EnnStatus
 import com.projectnuke.keplerstudio.editor.ExynosEnnNative
 import com.projectnuke.keplerstudio.editor.ExynosUpscaleSession
@@ -20,7 +23,6 @@ import com.projectnuke.keplerstudio.editor.ModelRunResult
 import com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken
 import java.io.File
 import java.io.FileOutputStream
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -97,9 +99,18 @@ class ExynosRealEsrganOneTileInstrumentationTest {
         metadata.put("report_absolute_path", reportDir.absolutePath)
         metadata.put("device", JSONObject(socProperties))
         metadata.put("build_manufacturer", Build.MANUFACTURER)
+        metadata.put(
+            "memory_metric",
+            "native_heap_allocated_kb (android.os.Debug.getNativeHeapAllocatedSize / 1024; NOT total process PSS/RSS)",
+        )
 
         var testFailure: Throwable? = null
         var session: ExynosUpscaleSession? = null
+        var openSucceeded = false
+        var allocateSucceeded = false
+        var executeAttempted = false
+        var executeSucceeded = false
+        var outputReadSucceeded = false
 
         try {
             assumeTrue(
@@ -108,50 +119,52 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             )
             metadata.put("soc_gate", "passed")
 
-            // 1. Real production capability probe (NOT applyForTest).
             ModelAvailabilityRegistry.resetForTest()
             val probeGeneration = ModelAvailabilityRegistry.beginProbe()
             ModelAvailabilityRegistry.probePackagedCapabilities(context, probeGeneration)
 
             val capability = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]
             metadata.put("probe_phase", capability?.phase?.name ?: "Unknown")
-            metadata.put("probe_facts", JSONObject(
-                mapOf(
-                    "assetPresent" to (capability?.assetPresent ?: false),
-                    "assetValid" to (capability?.assetValid ?: false),
-                    "runtimeAvailable" to (capability?.runtimeAvailable ?: false),
-                    "contractSupported" to (capability?.contractSupported ?: false),
-                    "runnerImplemented" to (capability?.runnerImplemented ?: false),
-                )
-            ))
+            metadata.put(
+                "probe_facts",
+                JSONObject(
+                    mapOf(
+                        "assetPresent" to (capability?.assetPresent ?: false),
+                        "assetValid" to (capability?.assetValid ?: false),
+                        "runtimeAvailable" to (capability?.runtimeAvailable ?: false),
+                        "contractSupported" to (capability?.contractSupported ?: false),
+                        "runnerImplemented" to (capability?.runnerImplemented ?: false),
+                    ),
+                ),
+            )
 
             assumeTrue(
                 "ExynosUpscale capability not loadable: ${capability?.phase}",
                 capability?.canAttemptModelUse == true,
             )
 
-            // 2. Validated capability token from real registry facts.
-            val tokenResult = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.ExynosUpscale)
+            val tokenResult =
+                ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.ExynosUpscale)
             assertTrue("capability token refused: $tokenResult", tokenResult is ModelLoadResult.Ready)
             val token = (tokenResult as ModelLoadResult.Ready).runner as ValidatedModelCapabilityToken
             metadata.put("validated_model_id", token.modelId)
             metadata.put("validated_asset_sha256", token.approvedAssetSha256 ?: "")
             metadata.put("validation_epoch", token.validationGeneration)
 
-            // Memory: pre-load
-            memorySnapshots.put("pre_load_kb", getProcessMemoryInfo(context))
+            memorySnapshots.put("pre_load_kb", getNativeHeapAllocatedKb(context))
 
-            // 3. Real session load against the real Samsung runtime.
             session = ExynosUpscaleSession(context)
-            val loadStarted = System.currentTimeMillis()
+            val loadStartedNanos = SystemClock.elapsedRealtimeNanos()
             val loadResult = session.load(token)
-            memorySnapshots.put("post_load_kb", getProcessMemoryInfo(context))
+            val loadDurationMs = (SystemClock.elapsedRealtimeNanos() - loadStartedNanos) / 1_000_000L
+            memorySnapshots.put("post_load_kb", getNativeHeapAllocatedKb(context))
             if (loadResult !is ModelLoadResult.Ready) {
                 metadata.put("load_failure_stage", "load")
                 metadata.put("load_failure_detail", loadResult.toString())
                 throw AssertionError("session load failed on this device: $loadResult")
             }
-            val loadDurationMs = System.currentTimeMillis() - loadStarted
+            openSucceeded = true
+            allocateSucceeded = true
             metadata.put("model_load_ms", loadDurationMs)
             metadata.put(
                 "descriptor_input",
@@ -166,10 +179,8 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                 } ?: "",
             )
 
-            // Capture NPU meta info
             captureNpuMetaInfo(session, metadata)
 
-            // 4. Deterministic known RGB tile.
             val inputPixels = deterministicTile()
             savePng(
                 renderTileBitmap(inputPixels),
@@ -181,16 +192,16 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             val operationContext =
                 ModelOperationContext(operationToken = 1L, documentGeneration = "n2-probe")
 
-            // 5. Cold inference + two warm inferences.
             val timings = JSONArray()
-            var lastOutput: ModelRunResult.Success<*>? = null
+            var previousBitmap: Bitmap? = null
             repeat(3) { index ->
-                val startedAt = System.currentTimeMillis()
+                executeAttempted = true
+                val startedNanos = SystemClock.elapsedRealtimeNanos()
                 val result = session.run(inputPixels, operationContext)
-                val duration = System.currentTimeMillis() - startedAt
+                val durationMs = (SystemClock.elapsedRealtimeNanos() - startedNanos) / 1_000_000L
                 val runRecord = JSONObject()
                 runRecord.put("run_index", index)
-                runRecord.put("ms", duration)
+                runRecord.put("ms", durationMs)
                 if (result is ModelRunResult.Failure) {
                     runRecord.put("failure_reason", result.failure.reason.name)
                     runRecord.put("failure_detail", result.failure.detail)
@@ -198,15 +209,18 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                     metadata.put("inference_failure_detail", result.failure.toString())
                     throw AssertionError("inference #$index failed: ${result.failure}")
                 }
-                lastOutput = result as ModelRunResult.Success<*>
+                executeSucceeded = true
+                previousBitmap?.recycle()
+                previousBitmap = (result as ModelRunResult.Success<Bitmap>).value
+                if (index == 0) {
+                    memorySnapshots.put("post_cold_inference_kb", getNativeHeapAllocatedKb(context))
+                }
                 timings.put(runRecord)
             }
-            memorySnapshots.put("post_first_inference_kb", getProcessMemoryInfo(context))
+            memorySnapshots.put("post_warm_inferences_kb", getNativeHeapAllocatedKb(context))
             metadata.put("runs", timings)
 
-            // 6. Output validation.
-            @Suppress("UNCHECKED_CAST")
-            val bitmap = (lastOutput as ModelRunResult.Success<Bitmap>).value
+            val bitmap = previousBitmap!!
             assertEquals(512, bitmap.width)
             assertEquals(512, bitmap.height)
             val stats = channelStatistics(bitmap)
@@ -229,17 +243,19 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             assertTrue("output must not be trivially empty", !stats.isTriviallyEmpty)
             val saved = savePng(bitmap, File(reportDir, "output_tile_x4_512.png"))
             metadata.put("output_png_bytes", saved.length())
+            outputReadSucceeded = true
 
-            // 7. Lifecycle sanity: second load/run/close round.
             session.close()
             assertTrue(session.load(token) is ModelLoadResult.Ready)
             val rerun = session.run(inputPixels, operationContext)
             assertTrue("second lifecycle inference failed: $rerun", rerun is ModelRunResult.Success)
             (rerun as ModelRunResult.Success<Bitmap>).value.recycle()
             session.close()
-            memorySnapshots.put("post_close_kb", getProcessMemoryInfo(context))
+            if (!memorySnapshots.has("post_close_kb")) {
+                memorySnapshots.put("post_close_kb", getNativeHeapAllocatedKb(context))
+            }
+            memorySnapshots.put("post_close_kb", getNativeHeapAllocatedKb(context))
 
-            // 8. Cancellation check.
             val cancelledContext =
                 ModelOperationContext(
                     operationToken = 2L,
@@ -262,29 +278,57 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             metadata.put("failure_message", t.message ?: "unknown")
             throw t
         } finally {
-            session?.close()
-            memorySnapshots.put("final_close_kb", getProcessMemoryInfo(context))
-            metadata.put("memory_snapshots_kb", memorySnapshots)
+            val closeFailure = runCatching { session?.close() }.exceptionOrNull()
+            if (closeFailure != null) {
+                metadata.put("session_close_failure", closeFailure.toString())
+                if (testFailure == null) {
+                    metadata.put("status", "FAILED")
+                    metadata.put("failure_class", closeFailure.javaClass.simpleName)
+                    metadata.put("failure_message", "session close failed: ${closeFailure.message}")
+                }
+            }
+            if (!memorySnapshots.has("post_close_kb")) {
+                memorySnapshots.put("post_close_kb", getNativeHeapAllocatedKb(context))
+            }
+            metadata.put("memory_snapshots_native_heap_kb", memorySnapshots)
+
+            metadata.put("npu_open_succeeded", openSucceeded)
+            metadata.put("npu_buffer_allocation_succeeded", allocateSucceeded)
+            metadata.put("npu_execute_attempted", executeAttempted)
+            metadata.put("npu_execute_succeeded", executeSucceeded)
+            metadata.put("npu_output_read_succeeded", outputReadSucceeded)
+            if (executeSucceeded) {
+                metadata.put("npu_execution_observed", true)
+                metadata.put("npu_proof_status", "OBSERVED")
+                metadata.put(
+                    "npu_proof",
+                    "EnnExecuteModel returned ENN_RET_SUCCESS through the vendor ENN service; see npu_meta_info",
+                )
+            } else {
+                metadata.put("npu_execution_observed", false)
+                metadata.put("npu_proof_status", "NOT_ESTABLISHED")
+            }
 
             val capabilityAfter = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]
             metadata.put("session_inactive_after_close", capabilityAfter?.sessionActive != true)
             metadata.put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "")
 
-            // NPU proof: capture actual meta info if available
-            metadata.put("npu_proof", "EnnExecuteModel executed through vendor ENN service; see meta info and device properties")
-
-            // Total report write: always happens, even on assertion failure
-            val reportWriteFailure = runCatching {
-                File(reportDir, "metadata.json").writeText(metadata.toString(2))
-            }.onFailure { e ->
-                android.util.Log.w("KeplerExynosProbe", "Failed to write probe report", e)
-                metadata.put("report_write_failure", e.message)
-            }.exceptionOrNull()
-
+            val reportWriteFailure =
+                runCatching {
+                    File(reportDir, "metadata.json").writeText(metadata.toString(2))
+                }.exceptionOrNull()
             if (reportWriteFailure != null) {
+                Log.w("KeplerExynosProbe", "Failed to write probe report", reportWriteFailure)
                 testFailure?.addSuppressed(reportWriteFailure)
             }
             println("EXYNOS_NPU_PROBE_REPORT=${reportDir.absolutePath}")
+            if (closeFailure != null) {
+                if (testFailure != null) {
+                    testFailure.addSuppressed(closeFailure)
+                } else {
+                    throw closeFailure
+                }
+            }
         }
     }
 
@@ -293,51 +337,58 @@ class ExynosRealEsrganOneTileInstrumentationTest {
         val boardPlatform = socProperties["ro.board.platform"]?.lowercase() ?: ""
         val hardware = socProperties["ro.hardware"]?.lowercase() ?: ""
         val product = socProperties["ro.product.device"]?.lowercase() ?: ""
-        
-        // Exynos 2400 identifiers
+
         val isSocModel2400 = socModel.contains("2400") || socModel.contains("s5e9945")
-        val isBoardExynos = boardPlatform.contains("exynos") || boardPlatform.contains("e1s") || boardPlatform.contains("e1q")
+        val isBoardExynos =
+            boardPlatform.contains("exynos") || boardPlatform.contains("e1s") || boardPlatform.contains("e1q")
         val isS24Family = product.contains("e1s") || product.contains("e1q") || product.contains("s24")
-        
+
         return (isSocModel2400 || isBoardExynos) && isS24Family
     }
 
     private fun captureNpuMetaInfo(session: ExynosUpscaleSession, metadata: JSONObject) {
-        // Meta IDs from enn_api.h: ENN_META_VERSION_MODEL_COMPILER_NNC=120, etc.
-        val metaIds = mapOf(
-            120 to "compiler_nnc",
-            121 to "compiler_npu",
-            122 to "unified_fw",
-            123 to "npu_fw"
-        )
+        val metaIds =
+            linkedMapOf(
+                EnnMetaIds.MODEL_COMPILER_NNC to "compiler_nnc",
+                EnnMetaIds.MODEL_COMPILER_NPU to "compiler_npu",
+                EnnMetaIds.MODEL_SCHEMA to "model_schema",
+                EnnMetaIds.MODEL_VERSION to "model_version",
+                EnnMetaIds.DD to "dd",
+                EnnMetaIds.UNIFIED_FW to "unified_fw",
+                EnnMetaIds.NPU_FW to "npu_fw",
+            )
         val metaJson = JSONObject()
+        var reflectionError: String? = null
         try {
             val modelIdField = session::class.java.getDeclaredField("modelId").apply { isAccessible = true }
             val modelId = modelIdField.getLong(session)
             if (modelId > 0) {
-                val nativeField = session::class.java.getDeclaredField("native").apply { isAccessible = true }
+                val nativeField =
+                    session::class.java.getDeclaredField("native").apply { isAccessible = true }
                 val nativeInstance = nativeField.get(session)
-                val getMetaInfoMethod = nativeInstance::class.java.getMethod("getMetaInfo", Int::class.java, Long::class.java)
+                val getMetaInfoMethod =
+                    nativeInstance::class.java.getMethod("getMetaInfo", Int::class.java, Long::class.java)
                 metaIds.forEach { (id, name) ->
                     try {
                         val meta = getMetaInfoMethod.invoke(nativeInstance, id, modelId) as? String
-                        if (!meta.isNullOrBlank()) {
-                            metaJson.put(name, meta)
-                        }
+                        metaJson.put(name, if (meta.isNullOrBlank()) "unavailable" else meta)
                     } catch (e: Exception) {
-                        // Ignore individual meta failures
+                        metaJson.put(name, "unavailable")
                     }
                 }
+            } else {
+                reflectionError = "modelId not set (load failed)"
             }
         } catch (e: Exception) {
-            // Ignore reflection failures
+            reflectionError = e.message ?: e.javaClass.simpleName
         }
-        if (metaJson.length() > 0) {
-            metadata.put("npu_meta_info", metaJson)
+        if (reflectionError != null) {
+            metaJson.put("capture_error", reflectionError)
         }
+        metadata.put("npu_meta_info", metaJson)
     }
 
-    private fun getProcessMemoryInfo(context: Context): Long {
+    private fun getNativeHeapAllocatedKb(context: Context): Long {
         return try {
             val debugClass = Class.forName("android.os.Debug")
             val method = debugClass.getMethod("getNativeHeapAllocatedSize")
@@ -347,7 +398,6 @@ class ExynosRealEsrganOneTileInstrumentationTest {
         }
     }
 
-    /** Deterministic 128x128 ARGB tile: gradients + bars + checker + gray quadrant. */
     private fun deterministicTile(): IntArray {
         val w = ExynosUpscaleSession.INPUT_WIDTH
         val h = ExynosUpscaleSession.INPUT_HEIGHT
@@ -358,26 +408,46 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             val g: Int
             val b: Int
             when {
-                x < w / 2 && y < h / 2 -> { // gradient quadrant
+                x < w / 2 && y < h / 2 -> {
                     r = x * 255 / (w / 2 - 1)
                     g = y * 255 / (h / 2 - 1)
                     b = ((x + y) * 255) / (w / 2 + h / 2 - 2)
                 }
-                x >= w / 2 && y < h / 2 -> { // vertical color bars R/G/B/W
+                x >= w / 2 && y < h / 2 -> {
                     when ((x / (w / 8)) % 4) {
-                        0 -> { r = 255; g = 0; b = 0 }
-                        1 -> { r = 0; g = 255; b = 0 }
-                        2 -> { r = 0; g = 0; b = 255 }
-                        else -> { r = 255; g = 255; b = 255 }
+                        0 -> {
+                            r = 255
+                            g = 0
+                            b = 0
+                        }
+                        1 -> {
+                            r = 0
+                            g = 255
+                            b = 0
+                        }
+                        2 -> {
+                            r = 0
+                            g = 0
+                            b = 255
+                        }
+                        else -> {
+                            r = 255
+                            g = 255
+                            b = 255
+                        }
                     }
                 }
-                x < w / 2 && y >= h / 2 -> { // high-frequency 4px checker
+                x < w / 2 && y >= h / 2 -> {
                     val on = ((x / 4) + (y / 4)) % 2 == 0
                     r = if (on) 240 else 16
                     g = if (on) 240 else 16
                     b = if (on) 240 else 16
                 }
-                else -> { r = 128; g = 128; b = 128 } // neutral gray quadrant
+                else -> {
+                    r = 128
+                    g = 128
+                    b = 128
+                }
             }
             (0xFF shl 24) or (r shl 16) or (g shl 8) or b
         }

@@ -102,6 +102,30 @@ Kotlin: System.loadLibrary("enn_jni")
   (`copyNNCFromAssetsToInternalStorage()` then `EnnOpenModel(filesDir/<name>)`).
 * minSdk implication: samples use 29; Kepler-compatible.
 
+### 5a. Multi-session prepared-file audit (static)
+
+**Question:** Can two concurrent `ExynosUpscaleSession` instances interfere with each other's
+prepared model file when one session closes and deletes its file while the other is still using it?
+
+**Audit outcome (Option B — per-session isolation):** The adapter implements session-exclusive
+prepared file paths. Each `ExynosUpscaleSession` instance prepares its model into a uniquely named
+file `<baseName>.session-<N>` where `<N>` is a per-process monotonic sequence. Teardown deletes
+ONLY the session's own file.
+
+**Rationale:** The vendored Samsung contract (S2, S4) does not establish whether the ENN runtime
+continues to read the model file after `EnnOpenModel()` returns. Without that guarantee, sharing a
+single prepared path across sessions would risk one session deleting a file that another live
+session's runtime handle still depends on.
+
+**Safety mechanism:** Path exclusivity — not timing assumptions. No session can delete another
+live session's model file because they never share the same path. This holds regardless of how
+long the ENN framework keeps the file open internally.
+
+**Leak bounds:** Each session's prepared file is deleted on successful close. On crash, orphaned
+prepared files may remain in `filesDir/exynos_models/` bounded by the number of crashed session
+lifetimes in a single process lifetime (typical: zero; pathological: O(crash count) × ~3 MB each).
+Future cleanup policy may sweep stale `session-*` files on startup if needed.
+
 ## 6. Exact NNC identity
 
 | Field | Value |

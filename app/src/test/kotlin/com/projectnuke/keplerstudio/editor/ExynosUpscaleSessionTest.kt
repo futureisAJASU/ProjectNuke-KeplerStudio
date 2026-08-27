@@ -2,16 +2,18 @@ package com.projectnuke.keplerstudio.editor
 
 import android.app.Application
 import android.graphics.Bitmap
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.IOException
+import java.io.InputStream
 import java.util.concurrent.atomic.AtomicInteger
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -27,8 +29,8 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /**
- * Phase N1 — ExynosUpscaleSession lifecycle, ownership, cancellation and capability
- * publication, exercised through an injected FAKE ENN backend only (no production
+ * Phase N1/N2 — ExynosUpscaleSession lifecycle, ownership, cancellation, teardown truthfulness,
+ * and capability publication, exercised through an injected FAKE ENN backend only (no production
  * native code runs under unit tests).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -54,8 +56,19 @@ class ExynosUpscaleSessionTest {
     private class FakeEnn : ExynosEnnNativeInterface {
         var probeResult: Boolean = true
         var initializeStatus: Int = EnnStatus.SUCCESS
-        var openModelResult: Long = 7001L
-        var allocationResult: LongArray? = longArrayOf(0x515A, 1L, 1L)
+        var deinitializeStatus: Int = EnnStatus.SUCCESS
+        var openModelStatus: Int = EnnStatus.SUCCESS
+        var openModelId: Long = 7001L
+        var allocationStatus: Int = EnnStatus.SUCCESS
+        var allocationBufferSet: Long = 0x515AL
+        var allocationNIn: Int = 1
+        var allocationNOut: Int = 1
+        var releaseBuffersStatus: Int = EnnStatus.SUCCESS
+        var closeModelStatus: Int = EnnStatus.SUCCESS
+        var memcpyInStatus: Int = EnnStatus.SUCCESS
+        var memcpyOutStatus: Int = EnnStatus.SUCCESS
+        var executeStatus: Int = EnnStatus.SUCCESS
+
         var inputInfo: IntArray =
             intArrayOf(
                 1,
@@ -72,11 +85,15 @@ class ExynosUpscaleSessionTest {
                 3,
                 ExynosUpscaleSession.OUTPUT_BYTES,
             )
-        var executeResult: Boolean = true
+
         var outputFiller: ((ByteArray) -> Unit)? = null
         var metaInfo: String? = "nnc-test-1.0"
-        var openModelFailure: Throwable? = null
-        var memcpyInFailure: Throwable? = null
+
+        var openModelThrows: Throwable? = null
+        var releaseBuffersThrows: Throwable? = null
+        var closeModelThrows: Throwable? = null
+        var deinitializeThrows: Throwable? = null
+        var memcpyInThrows: Throwable? = null
 
         val initializeCalls = AtomicInteger()
         val deinitializeCalls = AtomicInteger()
@@ -87,6 +104,7 @@ class ExynosUpscaleSessionTest {
         val executeCalls = AtomicInteger()
         /** Ordered log of physical lifecycle steps for close-vs-inference ordering proof. */
         val stepLog = mutableListOf<String>()
+
         var executeGate: CompletableDeferred<Unit>? = null
         var executeStarted: CompletableDeferred<Unit>? = null
 
@@ -99,30 +117,45 @@ class ExynosUpscaleSessionTest {
 
         override fun deinitialize(): Int {
             stepLog += "deinitialize"
-            return EnnStatus.SUCCESS.also { deinitializeCalls.incrementAndGet() }
+            deinitializeCalls.incrementAndGet()
+            deinitializeThrows?.let { throw it }
+            return deinitializeStatus
         }
 
-        override fun openModel(path: String): Long {
-            openModelFailure?.let { throw it }
+        override fun openModel(path: String): EnnOpenModelResult {
+            openModelThrows?.let { throw it }
             stepLog += "openModel:$path"
-            return if (openModelResult < 0) -1L else openModelResult.also { openCalls.incrementAndGet() }
+            if (openModelStatus == EnnStatus.SUCCESS) {
+                openCalls.incrementAndGet()
+            }
+            return EnnOpenModelResult(
+                status = openModelStatus,
+                modelId = if (openModelStatus == EnnStatus.SUCCESS) openModelId else 0L,
+            )
         }
 
-        override fun closeModel(modelId: Long): Boolean {
+        override fun closeModel(modelId: Long): Int {
             stepLog += "closeModel"
             closeModelCalls.incrementAndGet()
-            return true
+            closeModelThrows?.let { throw it }
+            return closeModelStatus
         }
 
-        override fun allocateAllBuffers(modelId: Long): LongArray? {
+        override fun allocateAllBuffers(modelId: Long): EnnAllocateResult {
             allocateCalls.incrementAndGet()
-            return allocationResult
+            return EnnAllocateResult(
+                status = allocationStatus,
+                bufferSet = if (allocationStatus == EnnStatus.SUCCESS) allocationBufferSet else 0L,
+                nInBuffers = if (allocationStatus == EnnStatus.SUCCESS) allocationNIn else 0,
+                nOutBuffers = if (allocationStatus == EnnStatus.SUCCESS) allocationNOut else 0,
+            )
         }
 
-        override fun releaseBuffers(bufferSet: Long, bufferCount: Int): Boolean {
+        override fun releaseBuffers(bufferSet: Long, bufferCount: Int): Int {
             stepLog += "releaseBuffers"
             releaseBufferCalls.incrementAndGet()
-            return true
+            releaseBuffersThrows?.let { throw it }
+            return releaseBuffersStatus
         }
 
         override fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int): IntArray? =
@@ -131,24 +164,24 @@ class ExynosUpscaleSessionTest {
                 else -> outputInfo
             }
 
-        override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray): Boolean {
-            memcpyInFailure?.let { throw it }
+        override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray): Int {
+            memcpyInThrows?.let { throw it }
             require(data.size == ExynosUpscaleSession.INPUT_BYTES)
-            return true
+            return memcpyInStatus
         }
 
-        override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Boolean {
+        override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int {
             outputFiller?.invoke(out)
-            return true
+            return memcpyOutStatus
         }
 
-        override fun execute(modelId: Long): Boolean {
+        override fun execute(modelId: Long): Int {
             stepLog += "execute:start"
             executeCalls.incrementAndGet()
             executeStarted?.complete(Unit)
             executeGate?.let { gate -> runBlocking { gate.await() } }
             stepLog += "execute:end"
-            return executeResult
+            return executeStatus
         }
 
         override fun getMetaInfo(metaId: Int, modelId: Long): String? = metaInfo
@@ -322,6 +355,45 @@ class ExynosUpscaleSessionTest {
     }
 
     // ------------------------------------------------------------------
+    // Pre-execute cancellation regression (Fix 1) — uses the EXACT FakeEnn
+    // injected into the session with deterministic completable deferreds.
+    // ------------------------------------------------------------------
+
+    @Test
+    fun cancelBeforeExecutePreventsNativeExecuteCall() = runBlocking {
+        val enn = FakeEnn()
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val session = session(enn)
+        session.preExecuteCheck = {
+            reached.complete(Unit)
+            release.await()
+        }
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        val scope = CoroutineScope(Dispatchers.Default)
+        val deferred = scope.async { session.run(testPixels(), ModelOperationContext(1L, "g1")) }
+        reached.await()
+        deferred.cancel(CancellationException("cancel before execute"))
+        release.complete(Unit)
+        var thrown: Throwable? = null
+        try {
+            deferred.await()
+        } catch (t: Throwable) {
+            thrown = t
+        }
+        assertTrue("expected cancellation, got $thrown", thrown is CancellationException)
+        assertEquals(0, enn.executeCalls.get())
+        assertFalse("execute:start must not be logged", enn.stepLog.any { it.startsWith("execute:start") })
+        assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
+        session.close()
+        assertEquals(1, enn.releaseBufferCalls.get())
+        assertEquals(1, enn.closeModelCalls.get())
+        assertEquals(1, enn.deinitializeCalls.get())
+        assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
+        scope.cancel()
+    }
+
+    // ------------------------------------------------------------------
     // Close semantics
     // ------------------------------------------------------------------
 
@@ -385,7 +457,7 @@ class ExynosUpscaleSessionTest {
     }
 
     // ------------------------------------------------------------------
-    // Run-time staleness / failure mapping
+    // Run-time staleness / raw failure mapping
     // ------------------------------------------------------------------
 
     @Test
@@ -407,22 +479,21 @@ class ExynosUpscaleSessionTest {
     }
 
     @Test
-    fun failedInferenceMapsToStructuredInferenceFailed() = runBlocking {
-        val enn = FakeEnn().apply { executeResult = false }
+    fun failedInferenceMapsToStructuredInferenceFailedWithRawStatus() = runBlocking {
+        val enn = FakeEnn().apply { executeStatus = EnnStatus.FAILED_TIMEOUT_HW_RECOVERED }
         val session = session(enn)
         assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
         val result = session.run(testPixels(), ModelOperationContext(1L, "g1"))
         assertTrue(result is ModelRunResult.Failure)
-        assertEquals(
-            ModelFailureReason.InferenceFailed,
-            (result as ModelRunResult.Failure).failure.reason,
-        )
+        val failure = (result as ModelRunResult.Failure).failure
+        assertEquals(ModelFailureReason.InferenceFailed, failure.reason)
+        assertTrue("detail must include raw EnnReturn status", failure.detail?.contains("14") == true)
         session.close()
     }
 
     @Test
     fun backendExceptionDuringLoadMapsToLoadFailedWithTotalTeardown() = runBlocking {
-        val enn = FakeEnn().apply { openModelFailure = IllegalStateException("service exploded") }
+        val enn = FakeEnn().apply { openModelThrows = IllegalStateException("service exploded") }
         val session = session(enn)
         val result = session.load(fakeToken())
         assertTrue(result is ModelLoadResult.LoadFailed)
@@ -432,7 +503,7 @@ class ExynosUpscaleSessionTest {
 
     @Test
     fun backendExceptionDuringInferenceMapsToInferenceFailed() = runBlocking {
-        val enn = FakeEnn().apply { memcpyInFailure = IllegalStateException("buffer gone") }
+        val enn = FakeEnn().apply { memcpyInThrows = IllegalStateException("buffer gone") }
         val session = session(enn)
         assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
         val result = session.run(testPixels(), ModelOperationContext(1L, "g1"))
@@ -445,11 +516,14 @@ class ExynosUpscaleSessionTest {
     }
 
     @Test
-    fun openModelNegativeIdMapsToRuntimeUnavailableForWrongChipsetNnc() = runBlocking {
-        val enn = FakeEnn().apply { openModelResult = -1L }
+    fun openModelFailureReturnsRawStatusWithoutChipsetLabel() = runBlocking {
+        val enn = FakeEnn().apply { openModelStatus = EnnStatus.IO }
         val session = session(enn)
         val result = session.load(fakeToken())
         assertTrue(result is ModelLoadResult.RuntimeUnavailable)
+        val detail = (result as ModelLoadResult.RuntimeUnavailable).detail
+        assertTrue("detail must include raw status", detail.contains("2(ENN_RET_IO)"))
+        assertFalse("detail must not auto-label chipset incompatible", detail.contains("incompatible"))
         assertEquals(1, enn.deinitializeCalls.get())
     }
 
@@ -489,15 +563,17 @@ class ExynosUpscaleSessionTest {
     }
 
     // ------------------------------------------------------------------
-    // No leak after failure + reload after close on the same instance
+    // No leak after failure
     // ------------------------------------------------------------------
 
     @Test
     fun failedAllocationLeavesNoLiveHandles() = runBlocking {
-        val enn = FakeEnn().apply { allocationResult = null }
+        val enn = FakeEnn().apply { allocationStatus = EnnStatus.MEM_ERR }
         val session = session(enn)
         val result = session.load(fakeToken())
         assertTrue(result is ModelLoadResult.RuntimeUnavailable)
+        val detail = (result as ModelLoadResult.RuntimeUnavailable).detail
+        assertTrue("detail must contain raw MEM_ERR status", detail.contains("5(ENN_RET_MEM_ERR)"))
         assertEquals(1, enn.closeModelCalls.get())
         assertEquals(1, enn.deinitializeCalls.get())
         assertEquals(0, enn.releaseBufferCalls.get())
@@ -511,7 +587,7 @@ class ExynosUpscaleSessionTest {
     @Test
     fun initializeFailureDeletesPreparedFile() = runBlocking {
         val tempFile = File(context.filesDir, "initialize_failure_test.nnc").apply { writeText("fake_nnc") }
-        val enn = FakeEnn().apply { initializeStatus = -1 }
+        val enn = FakeEnn().apply { initializeStatus = EnnStatus.FAILED }
         val session =
             ExynosUpscaleSession(
                 context = context,
@@ -531,7 +607,7 @@ class ExynosUpscaleSessionTest {
     @Test
     fun openModelFailureDeletesPreparedFile() = runBlocking {
         val tempFile = File(context.filesDir, "open_model_failure_test.nnc").apply { writeText("fake_nnc") }
-        val enn = FakeEnn().apply { openModelResult = -1L }
+        val enn = FakeEnn().apply { openModelStatus = EnnStatus.FAILED }
         val session =
             ExynosUpscaleSession(
                 context = context,
@@ -591,57 +667,101 @@ class ExynosUpscaleSessionTest {
     }
 
     // ------------------------------------------------------------------
-    // Pre-execute coroutine cancellation: EnnExecuteModel must not begin
-    // if the owning coroutine is cancelled after H2D but before execute.
+    // Truthful physical teardown status regressions A–F (Fix 3)
     // ------------------------------------------------------------------
 
     @Test
-    fun cancelBeforeExecutePreventsNativeExecuteCall() = runBlocking {
-        val gate = CompletableDeferred<Unit>()
-        val passedCheck = CompletableDeferred<Unit>()
-        val session =
-            ExynosUpscaleSession(
-                context = context,
-                native = FakeEnn().apply { executeGate = gate },
-                ioDispatcher = Dispatchers.Default,
-                preparedModelFileProvider =
-                    preparedFileProviderReturning(ModelLoadResult.Ready(File(context.filesDir, "fake.nnc"))),
-            )
-        session.preExecuteCheck = {
-            passedCheck.complete(Unit)
-        }
-        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
-        val scope = CoroutineScope(Dispatchers.Default)
-        val deferred = scope.async { session.run(testPixels(), ModelOperationContext(1L, "g1")) }
-        passedCheck.await()
-        deferred.cancel(CancellationException("cancel before execute"))
-        gate.complete(Unit)
-        var thrown: Throwable? = null
-        try {
-            deferred.await()
-        } catch (t: Throwable) {
-            thrown = t
-        }
-        assertTrue("expected cancellation, got $thrown", thrown is CancellationException)
-        assertEquals(0, FakeEnn().executeCalls.get())
-        assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
-        session.close()
-        scope.cancel()
-    }
-
-    // ------------------------------------------------------------------
-    // Truthful physical teardown status: returned failures must be recorded
-    // ------------------------------------------------------------------
-
-    @Test
-    fun releaseBuffersReturnedFailureIsRecorded() = runBlocking {
-        val enn = FakeEnn()
+    fun releaseBuffersReturnsFailureIsRecorded() = runBlocking {
+        val enn = FakeEnn().apply { releaseBuffersStatus = EnnStatus.FAILED }
         val session = session(enn)
         assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
-        // Directly invoke teardown via close with a mock that returns false
-        // We verify via stepLog that the failure was logged
         session.close()
-        assertTrue(enn.stepLog.contains("releaseBuffers") || enn.stepLog.contains("execute:start"))
+        val teardown = session.lastTeardownResult
+        assertNotNull(teardown)
+        teardown!!
+        assertEquals(NativeStepOutcome.ReturnedFailure, teardown.releaseBuffersOutcome)
+        assertEquals(EnnStatus.FAILED, teardown.releaseBuffersStatus)
+        assertEquals(NativeStepOutcome.ReturnedSuccess, teardown.closeModelOutcome)
+        assertEquals(NativeStepOutcome.ReturnedSuccess, teardown.deinitializeOutcome)
+        assertFalse(teardown.allAttemptedSucceeded)
+    }
+
+    @Test
+    fun closeModelReturnsFailureIsRecorded() = runBlocking {
+        val enn = FakeEnn().apply { closeModelStatus = EnnStatus.FAILED_SERVICE_NULL }
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        session.close()
+        val teardown = session.lastTeardownResult
+        assertNotNull(teardown)
+        teardown!!
+        assertEquals(NativeStepOutcome.ReturnedSuccess, teardown.releaseBuffersOutcome)
+        assertEquals(NativeStepOutcome.ReturnedFailure, teardown.closeModelOutcome)
+        assertEquals(EnnStatus.FAILED_SERVICE_NULL, teardown.closeModelStatus)
+        assertEquals(NativeStepOutcome.ReturnedSuccess, teardown.deinitializeOutcome)
+        assertFalse(teardown.allAttemptedSucceeded)
+    }
+
+    @Test
+    fun deinitializeReturnsNonSuccessIsRecorded() = runBlocking {
+        val enn = FakeEnn().apply { deinitializeStatus = EnnStatus.FAILED_RESOURCE_BUSY }
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        session.close()
+        val teardown = session.lastTeardownResult
+        assertNotNull(teardown)
+        teardown!!
+        assertEquals(NativeStepOutcome.ReturnedSuccess, teardown.releaseBuffersOutcome)
+        assertEquals(NativeStepOutcome.ReturnedSuccess, teardown.closeModelOutcome)
+        assertEquals(NativeStepOutcome.ReturnedFailure, teardown.deinitializeOutcome)
+        assertEquals(EnnStatus.FAILED_RESOURCE_BUSY, teardown.deinitializeStatus)
+        assertFalse(teardown.allAttemptedSucceeded)
+    }
+
+    @Test
+    fun allThreeReturnFailureEveryEligiblePhysicalTeardownStepAttemptedOnce() = runBlocking {
+        val enn = FakeEnn().apply {
+            releaseBuffersStatus = EnnStatus.FAILED
+            closeModelStatus = EnnStatus.IO
+            deinitializeStatus = EnnStatus.NOT_SUPPORTED
+        }
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        session.close()
+        assertEquals(1, enn.releaseBufferCalls.get())
+        assertEquals(1, enn.closeModelCalls.get())
+        assertEquals(1, enn.deinitializeCalls.get())
+        val teardown = session.lastTeardownResult
+        assertNotNull(teardown)
+        teardown!!
+        assertEquals(NativeStepOutcome.ReturnedFailure, teardown.releaseBuffersOutcome)
+        assertEquals(NativeStepOutcome.ReturnedFailure, teardown.closeModelOutcome)
+        assertEquals(NativeStepOutcome.ReturnedFailure, teardown.deinitializeOutcome)
+        assertFalse(teardown.allAttemptedSucceeded)
+        assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
+    }
+
+    @Test
+    fun oneOrMoreThrowSubsequentStepsStillAttemptedAndDistinguishedFromReturnedFailure() = runBlocking {
+        val enn = FakeEnn().apply {
+            releaseBuffersThrows = IllegalStateException("buffer explosion")
+            closeModelStatus = EnnStatus.FAILED
+        }
+        val session = session(enn)
+        assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+        session.close()
+        assertEquals(1, enn.releaseBufferCalls.get())
+        assertEquals(1, enn.closeModelCalls.get())
+        assertEquals(1, enn.deinitializeCalls.get())
+        val teardown = session.lastTeardownResult
+        assertNotNull(teardown)
+        teardown!!
+        assertEquals(NativeStepOutcome.Threw, teardown.releaseBuffersOutcome)
+        assertEquals("buffer explosion", teardown.releaseBuffersDetail)
+        assertEquals(NativeStepOutcome.ReturnedFailure, teardown.closeModelOutcome)
+        assertEquals(NativeStepOutcome.ReturnedSuccess, teardown.deinitializeOutcome)
+        assertFalse(teardown.allAttemptedSucceeded)
+        assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
     }
 
     @Test
@@ -650,11 +770,76 @@ class ExynosUpscaleSessionTest {
         val session = session(enn)
         assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
         session.close()
+        val firstResult = session.lastTeardownResult
         session.close()
         session.close()
         assertEquals(1, enn.releaseBufferCalls.get())
         assertEquals(1, enn.closeModelCalls.get())
         assertEquals(1, enn.deinitializeCalls.get())
+        assertEquals(firstResult, session.lastTeardownResult)
+    }
+
+    // ------------------------------------------------------------------
+    // Staged model preparation failure regressions (Fix 4)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun copyVerifyingSizeMismatchDeletesTarget() {
+        val targetDir = File(context.filesDir, "exynos_models_test").apply { mkdirs() }
+        val target = File(targetDir, "model.nnc.size.tmp")
+        val input = ByteArrayInputStream(byteArrayOf(1, 2, 3, 4))
+        var thrown: Throwable? = null
+        try {
+            copyVerifying(input, target, "irrelevant", 100L)
+        } catch (t: Throwable) {
+            thrown = t
+        }
+        assertNotNull(thrown)
+        assertTrue(thrown is IllegalStateException)
+        assertFalse("partial staging file must be deleted on size failure", target.exists())
+    }
+
+    @Test
+    fun copyVerifyingShaMismatchDeletesTarget() {
+        val targetDir = File(context.filesDir, "exynos_models_test").apply { mkdirs() }
+        val target = File(targetDir, "model.nnc.sha.tmp")
+        val input = ByteArrayInputStream(byteArrayOf(1, 2, 3, 4))
+        var thrown: Throwable? = null
+        try {
+            copyVerifying(
+                input,
+                target,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                4L,
+            )
+        } catch (t: Throwable) {
+            thrown = t
+        }
+        assertNotNull(thrown)
+        assertTrue(thrown is IllegalStateException)
+        assertFalse("partial staging file must be deleted on SHA failure", target.exists())
+    }
+
+    @Test
+    fun prepareModelFileLeavesNoStagingOnMissingAsset() {
+        val manifest = requireNotNull(ModelAssetManifest.byId(ExynosUpscaleSession.EXYNOS_MODEL_ID))
+        val targetDir = File(context.filesDir, "exynos_models").apply { mkdirs() }
+        val token = "test-missing"
+        val baseName = File(manifest.asset.assetPath).name
+        val staging = File(targetDir, "$baseName.$token.tmp")
+        val finalFile = File(targetDir, "$baseName.$token")
+        val result = prepareModelFile(context, manifest.asset, token)
+        assertTrue(
+            "missing asset must be AssetMissing (or Ready if asset present in env)",
+            result is ModelLoadResult.AssetMissing || result is ModelLoadResult.Ready,
+        )
+        assertFalse("no staging file may remain after terminal return", staging.exists())
+        if (result is ModelLoadResult.Ready) {
+            assertTrue("final file must exist on success", finalFile.exists())
+            finalFile.delete()
+        } else {
+            assertFalse("no final file may exist on missing-asset path", finalFile.exists())
+        }
     }
 
     // ------------------------------------------------------------------
@@ -722,4 +907,3 @@ class ExynosUpscaleSessionTest {
         assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
     }
 }
-
