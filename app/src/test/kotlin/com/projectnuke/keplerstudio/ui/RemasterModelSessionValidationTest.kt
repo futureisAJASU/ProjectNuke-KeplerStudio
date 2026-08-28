@@ -443,10 +443,9 @@ class RemasterModelSessionValidationTest {
         val candidate = edgeCandidate()
 
         RemasterModelSession.load(context, candidate)
-        awaitCondition { RemasterModelSession.isModelLoaded }
-        check(RemasterModelSession.isModelLoaded) {
-            "first load reported loaded but state changed before status assertion: " +
-                sessionBoundaryDiagnosticForTest
+        awaitCondition {
+            RemasterModelSession.isModelLoaded &&
+                RemasterModelSession.statusText == "Edge Masker 모델을 사용할 수 있습니다."
         }
         assertEquals(
             "Edge Masker 모델을 사용할 수 있습니다.",
@@ -1468,9 +1467,6 @@ class RemasterModelSessionValidationTest {
     @Test
     fun `editor teardown logically closes an in-flight model session`() = runBlocking {
         val editorStore = ViewModelStore()
-        val editor = EditorViewModel(RuntimeEnvironment.getApplication())
-        editorStore.put("editor", editor)
-
         val runner = FakeRunner()
         testSeam = RemasterModelSession.installTestSeam(factory = { _, _ -> runner })
         ModelAvailabilityRegistry.reportEdgeLoad(ModelLoadResult.Ready(Unit))
@@ -1496,6 +1492,11 @@ class RemasterModelSessionValidationTest {
         }
         awaitSignalWithinBound(accepted, "inference BeforeNativeInference gate")
 
+        // Editor construction starts asynchronous capability observation. Create it only after
+        // this test's inference is admitted and blocked at its owned gate, then exercise the
+        // real ViewModelStore teardown immediately; startup observation cannot preempt admission.
+        val editor = EditorViewModel(RuntimeEnvironment.getApplication())
+        editorStore.put("editor", editor)
         editorStore.clear()
         assertEquals(ModelRunnerLifecycle.Closing, RemasterModelSession.lifecycle)
         assertFalse(RemasterModelSession.canStartInferenceForTest())

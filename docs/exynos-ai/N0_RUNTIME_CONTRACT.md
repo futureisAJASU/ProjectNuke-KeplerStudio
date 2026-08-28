@@ -155,14 +155,17 @@ unchanged.
 | Input tensor | FLOAT32 CHW `1 x 3 x 128 x 128` |
 | Output tensor | FLOAT32 CHW `1 x 3 x 512 x 512` |
 
-### 6a. Deferred quantized comparison artifact
+### 6a. Quantized comparison artifact (N2B; not active)
 
-The Samsung portal Quantized Exynos-2400 variant is recorded but deliberately not wired
-into production before FP16 N2A passes: 1,867,776 bytes, SHA-256
+The Samsung portal Quantized Exynos-2400 variant was brought up through the same
+production capability and S24 instrumentation path in N2B, then deliberately retained as
+a comparison artifact rather than promoted: 1,867,776 bytes, SHA-256
 `81968b6a2c6963f081c27d4c843c57ebd0de493d3bb7fa706f2872fdb8840196`,
 Root / EVT1, NPUC `v2.4.11.l`, `QUANT_MODE=ASYMM`, and FLOAT32 CHW external I/O
 `1 x 3 x 128 x 128` to `1 x 3 x 512 x 512`. No internal quantization bit-width is
-assumed without runtime or official artifact evidence.
+assumed without runtime or official artifact evidence. See
+[`N2B_QUANTIZED_COMPARISON.md`](N2B_QUANTIZED_COMPARISON.md) for the immutable report
+and FP16 comparison; the manifest and bundled production candidate remain FP16.
 
 ### 6b. Artifact-selection status
 

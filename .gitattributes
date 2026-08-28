@@ -1,0 +1,2 @@
+# Preserve immutable device log bytes exactly; do not normalize captured whitespace.
+artifacts/**/enn-logcat.txt -text

@@ -87,7 +87,7 @@ object ModelAssetManifest {
                 semantic = ModelOutputSemantic.RestorationImage,
                 runnerImplemented = true,
                 productionReady = false,
-                // Exact Samsung official portal FP16 NNC for Exynos 2400; pinned byte-exact.
+                // Exact Samsung official portal FP16 NNC for Exynos 2400; retained after N2B comparison.
                 minimumBytes = EXYNOS_REAL_ESRGAN_X4V3_BYTES,
                 maximumBytes = EXYNOS_REAL_ESRGAN_X4V3_BYTES,
                 sha256 = "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",

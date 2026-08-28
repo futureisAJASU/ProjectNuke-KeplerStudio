@@ -1,0 +1,192 @@
+{
+  "report_absolute_path": "\/storage\/emulated\/0\/Android\/data\/com.projectnuke.keplerstudio\/files\/exynos_npu_probe",
+  "device": {
+    "ro.board.platform": "erd9945",
+    "ro.soc.model": "s5e9945",
+    "ro.soc.manufacturer": "Samsung",
+    "ro.hardware": "s5e9945",
+    "ro.product.model": "SM-S921N",
+    "ro.product.device": "e1s",
+    "ro.build.version.release": "16",
+    "ro.build.fingerprint": "samsung\/e1sksx\/e1s:16\/BP4A.251205.006\/S921NKSSGDZG1:user\/release-keys"
+  },
+  "build_manufacturer": "samsung",
+  "memory_metric": "native_heap_allocated_kb (android.os.Debug.getNativeHeapAllocatedSize \/ 1024; NOT total process PSS\/RSS)",
+  "soc_gate": "passed",
+  "probe_phase": "Loadable",
+  "probe_facts": {
+    "assetPresent": true,
+    "assetValid": true,
+    "runtimeAvailable": true,
+    "contractSupported": true,
+    "runnerImplemented": true
+  },
+  "validated_model_id": "exynos_real_esrgan_x4v3",
+  "validated_asset_sha256": "81968b6a2c6963f081c27d4c843c57ebd0de493d3bb7fa706f2872fdb8840196",
+  "validation_epoch": 1,
+  "model_load_ms": 251,
+  "prepared_file_path": "\/data\/user\/0\/com.projectnuke.keplerstudio\/files\/exynos_models\/Real-ESRGAN-General-x4v3.nnc.session-0",
+  "prepared_file_bytes": 1867776,
+  "prepared_file_sha256": "81968b6a2c6963f081c27d4c843c57ebd0de493d3bb7fa706f2872fdb8840196",
+  "prepared_file_expected_bytes": 1867776,
+  "prepared_file_expected_sha256": "81968b6a2c6963f081c27d4c843c57ebd0de493d3bb7fa706f2872fdb8840196",
+  "descriptor_input": "128x128x3 Float32 NCHW pixel \/ 255.0 into [0, 1]; no mean\/std offset",
+  "descriptor_output": "512x512x3 Float32 NCHW range=0.0..1.0",
+  "npu_meta_info": {
+    "compiler_nnc": "27",
+    "compiler_npu": "v2.4.11.l",
+    "model_schema": "NOT SUPPORTED",
+    "model_version": "NOT SUPPORTED",
+    "dd": "Failed",
+    "unified_fw": "Failed",
+    "npu_fw": "Failed"
+  },
+  "input_png_write_succeeded": true,
+  "input_png_sha256": "a6b95c4c51f5c874c443628284669a36e5318d4ee3d162b722f96a9e1ed74a4d",
+  "input_tile_sha_source": "deterministicTile(): documented generator",
+  "input_pixels": 16384,
+  "runs": [
+    {
+      "run_index": 0,
+      "ms": 268,
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)",
+      "output_decode_passed": true
+    },
+    {
+      "run_index": 1,
+      "ms": 100,
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)",
+      "output_decode_passed": true
+    },
+    {
+      "run_index": 2,
+      "ms": 98,
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)",
+      "output_decode_passed": true
+    }
+  ],
+  "output_stats": {
+    "r_min": 0,
+    "r_max": 240,
+    "r_mean": 125.47366333007812,
+    "g_min": 0,
+    "g_max": 240,
+    "g_mean": 122.59525680541992,
+    "b_min": 0,
+    "b_max": 240,
+    "b_mean": 123.0748062133789
+  },
+  "output_png_write_succeeded": true,
+  "output_png_bytes": 419459,
+  "output_png_sha256": "fe635f7ec3c43eeaf7475367e7dc742dac3bfd5ae7314caae6f039bcdacd91e0",
+  "lifecycle_timings_ms": {
+    "first_load": 251,
+    "first_close": 21,
+    "second_load": 55,
+    "second_run": 93,
+    "second_close": 9
+  },
+  "lifecycle_roundtrip": "pass",
+  "status": "PASS",
+  "memory_snapshots_native_heap_kb": {
+    "pre_load_kb": 6713,
+    "post_load_kb": 6763,
+    "post_cold_inference_kb": 7803,
+    "post_warm_inferences_kb": 7803,
+    "post_close_kb": 7781
+  },
+  "npu_open_succeeded": true,
+  "npu_buffer_allocation_succeeded": true,
+  "npu_execute_attempted": true,
+  "npu_execute_succeeded": true,
+  "npu_output_read_succeeded": true,
+  "load_attempts": [
+    {
+      "index": 0,
+      "initialize_status": "0(ENN_RET_SUCCESS)",
+      "open_model_status": "0(ENN_RET_SUCCESS)",
+      "allocation_status": "0(ENN_RET_SUCCESS)",
+      "contract_validation_passed": true,
+      "throwable_stage": ""
+    },
+    {
+      "index": 1,
+      "initialize_status": "0(ENN_RET_SUCCESS)",
+      "open_model_status": "0(ENN_RET_SUCCESS)",
+      "allocation_status": "0(ENN_RET_SUCCESS)",
+      "contract_validation_passed": true,
+      "throwable_stage": ""
+    }
+  ],
+  "run_attempts": [
+    {
+      "index": 0,
+      "label": "cold",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)",
+      "output_decode_passed": true
+    },
+    {
+      "index": 1,
+      "label": "warm_1",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)",
+      "output_decode_passed": true
+    },
+    {
+      "index": 2,
+      "label": "warm_2",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)",
+      "output_decode_passed": true
+    },
+    {
+      "index": 3,
+      "label": "lifecycle_roundtrip",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)",
+      "output_decode_passed": true
+    }
+  ],
+  "exynos_load_diagnostics": {
+    "initialize_status": "0(ENN_RET_SUCCESS)",
+    "open_model_status": "0(ENN_RET_SUCCESS)",
+    "allocation_status": "0(ENN_RET_SUCCESS)",
+    "allocation_in_out": "1\/1",
+    "contract_validation_reached": true,
+    "contract_validation_passed": true,
+    "throwable_stage": ""
+  },
+  "enn_execute_observed": true,
+  "accelerator_evidence": {
+    "compiler_nnc": "27",
+    "compiler_npu": "v2.4.11.l",
+    "model_schema": "NOT SUPPORTED",
+    "model_version": "NOT SUPPORTED",
+    "dd": "Failed",
+    "unified_fw": "Failed",
+    "npu_fw": "Failed"
+  },
+  "npu_execution_observed": true,
+  "npu_proof_status": "OBSERVED",
+  "npu_proof": "EnnExecuteModel returned ENN_RET_SUCCESS and MODEL_COMPILER_NPU provided positive identity",
+  "session_inactive_after_close": true,
+  "abi": "arm64-v8a"
+}

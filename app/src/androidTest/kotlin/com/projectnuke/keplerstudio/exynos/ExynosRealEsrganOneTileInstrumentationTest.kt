@@ -173,14 +173,15 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             metadata.put("model_load_ms", loadDurationMs)
             val preparedFile = checkNotNull(session.preparedModelFileForDiagnostics())
             val preparedSha256 = sha256(preparedFile)
+            val activeManifest = checkNotNull(ModelAssetManifest.byId(token.modelId))
             metadata.put("prepared_file_path", preparedFile.absolutePath)
             metadata.put("prepared_file_bytes", preparedFile.length())
             metadata.put("prepared_file_sha256", preparedSha256)
-            assertEquals(3_112_960L, preparedFile.length())
-            assertEquals(
-                "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
-                preparedSha256,
-            )
+            metadata.put("prepared_file_expected_bytes", activeManifest.asset.minimumExpectedBytes)
+            metadata.put("prepared_file_expected_sha256", activeManifest.asset.sha256 ?: "")
+            assertEquals(activeManifest.asset.minimumExpectedBytes, activeManifest.asset.maximumExpectedBytes)
+            assertEquals(activeManifest.asset.minimumExpectedBytes, preparedFile.length())
+            assertEquals(activeManifest.asset.sha256, preparedSha256)
             metadata.put(
                 "descriptor_input",
                 session.descriptor?.input?.let {
@@ -441,7 +442,12 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             }
 
             val capabilityAfter = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]
-            metadata.put("session_inactive_after_close", capabilityAfter?.sessionActive != true)
+            val sessionInactiveAfterClose = capabilityAfter?.sessionActive != true
+            metadata.put("session_inactive_after_close", sessionInactiveAfterClose)
+            assertTrue(
+                "Exynos availability registry must not retain an active session after close",
+                sessionInactiveAfterClose,
+            )
             metadata.put("abi", Build.SUPPORTED_ABIS.firstOrNull() ?: "")
 
             val report = finalizeProbeReport(
