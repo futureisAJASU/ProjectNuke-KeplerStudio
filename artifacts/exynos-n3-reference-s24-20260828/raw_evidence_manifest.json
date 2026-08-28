@@ -1,0 +1,109 @@
+{
+  "retained_gzipped": [
+    {
+      "path": "device_raw/n2_original_fp16cpu.npy.gz",
+      "gz_sha256": "41162013aba89270881ed0adb806fa593508f35ccfecf98b6979d3da77440261",
+      "orig_sha256": "33b22df409b74a4c1467fb9d5115c3904ec011c5ae7c4d32aa11a3bfce14c379"
+    },
+    {
+      "path": "device_raw/npu_raw_output_deterministic_noise_1.f32le.gz",
+      "gz_sha256": "93d8e3be737a6011afc6d2147cb01204713548e281262f6821cf7cc43ed52258",
+      "orig_sha256": "da9596d0c2473603b610cfea2ca9b56c8661eeb915a6c42369dc45b940d49bba"
+    },
+    {
+      "path": "device_raw/npu_raw_output_edges_impulses_1.f32le.gz",
+      "gz_sha256": "2efd06da3032c2dd3dfb9cb370ee13f32c7cfd352db535b3ac2556c4fa483397",
+      "orig_sha256": "8225c58bda78a3c5163b7a27a85fd843c8b9a76c7e62c775c62eb339c7ec0830"
+    },
+    {
+      "path": "device_raw/npu_raw_output_high_frequency_1.f32le.gz",
+      "gz_sha256": "998dcf123926b0c10527d855d96347e68b47d3bf0589f5a73e7e81834f295a80",
+      "orig_sha256": "9fe88c82262672c54a145aee1528cd3c4fc5d93a8a5fceb1df456aa069bcc5bf"
+    },
+    {
+      "path": "device_raw/npu_raw_output_n2_original_1.f32le.gz",
+      "gz_sha256": "5c34041d94ec1a6628a10e5d57268bf2adcdd602538a456afd48d6ea9b65ad2b",
+      "orig_sha256": "43348569b212c6af127baa0c41f24dd471ac3ed8b519872df1827c016110655c"
+    },
+    {
+      "path": "device_raw/npu_raw_output_rgb_channel_ramps_1.f32le.gz",
+      "gz_sha256": "2bf6b0b6d82d261ed348b59564bd0527b6b8db8ef931d303caf8db8747d07879",
+      "orig_sha256": "a09e2de9d4ad1eee90db4d240b327a17bc2ff30ed8c79908c09c3b5b5b432253"
+    },
+    {
+      "path": "device_raw/npu_raw_output_smooth_2d_gradient_1.f32le.gz",
+      "gz_sha256": "9a3b7b12f0298be6084a919f6d704ffc86d8adccc78a89551a81ce3d93e5baa9",
+      "orig_sha256": "453367acedcd6be26fa31c528394a68d9a65af80f06856eda29cc198c5be364c"
+    },
+    {
+      "path": "reference/GENERAL/deterministic_noise_raw.f32le.gz",
+      "gz_sha256": "6f44bf81eb4d3bfe2980e8f168ec8e4236a504518cee4158a6b4bde084b06609",
+      "orig_sha256": "0b49045f649aabfdf13e9f13f12fb99062e076a6760162e6d56ba93b5751470b"
+    },
+    {
+      "path": "reference/GENERAL/edges_impulses_raw.f32le.gz",
+      "gz_sha256": "d7b20c6da17ea5a521f9dbc7c137aa610a48f756537e49b7e34707f3e5900e2a",
+      "orig_sha256": "33250dc8db54109c33c89bd7bab2a6fd51219f015f2b9626b2615216a8e9b983"
+    },
+    {
+      "path": "reference/GENERAL/high_frequency_raw.f32le.gz",
+      "gz_sha256": "c6d1c72c204d332c38a97d3a31b8a67b8a81180c34921cd70c758fd413da67c6",
+      "orig_sha256": "0b818685751806a19b415b54b7b4fe473125305bcf8e01d9121b29bb24b96088"
+    },
+    {
+      "path": "reference/GENERAL/n2_original_raw.f32le.gz",
+      "gz_sha256": "392349b939d265a45bbcf8e5789bc19f23bb54af9df8a0114514589309c3cade",
+      "orig_sha256": "0df15363ca12cde9a67901d694a186681174060a0d4e971f6fe9cfd7c49e7477"
+    },
+    {
+      "path": "reference/GENERAL/rgb_channel_ramps_raw.f32le.gz",
+      "gz_sha256": "16b8bb290892ea2f46b3daaef63853f6cb5de126bc42b5973e51a36a597c4f7c",
+      "orig_sha256": "1a4661e8ff4deb563a432ea7b7b8df7e569b6ff22f22437a8cf900ee4581b265"
+    },
+    {
+      "path": "reference/GENERAL/smooth_2d_gradient_raw.f32le.gz",
+      "gz_sha256": "5e908bea1217b9f1ad3d03e8a091038ef380ae2ddadc9695ff06f741857e820a",
+      "orig_sha256": "6d8030943c243a8f44f136c9e57a698883ac49509d55079b9822278386a4fe60"
+    }
+  ],
+  "deleted_regenerable": [
+    "device_raw/npu_raw_output_deterministic_noise_2.f32le (bit-identical to run 1; sha in metadata.json)",
+    "device_raw/npu_raw_output_edges_impulses_2.f32le (bit-identical to run 1; sha in metadata.json)",
+    "device_raw/npu_raw_output_high_frequency_2.f32le (bit-identical to run 1; sha in metadata.json)",
+    "device_raw/npu_raw_output_n2_original_2.f32le (bit-identical to run 1; sha in metadata.json)",
+    "device_raw/npu_raw_output_rgb_channel_ramps_2.f32le (bit-identical to run 1; sha in metadata.json)",
+    "device_raw/npu_raw_output_smooth_2d_gradient_2.f32le (bit-identical to run 1; sha in metadata.json)",
+    "device_raw/npu_raw_output_warmup.f32le (equals n2_original run 1, same input)",
+    "reference/DNI-0.5/deterministic_noise_raw.npy (regenerable via reference_runner.py)",
+    "reference/DNI-0.5/edges_impulses_raw.npy (regenerable via reference_runner.py)",
+    "reference/DNI-0.5/high_frequency_raw.npy (regenerable via reference_runner.py)",
+    "reference/DNI-0.5/n2_original_raw.npy (regenerable via reference_runner.py)",
+    "reference/DNI-0.5/rgb_channel_ramps_raw.npy (regenerable via reference_runner.py)",
+    "reference/DNI-0.5/smooth_2d_gradient_raw.npy (regenerable via reference_runner.py)",
+    "reference/DNI-0.5/deterministic_noise_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/DNI-0.5/edges_impulses_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/DNI-0.5/high_frequency_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/DNI-0.5/n2_original_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/DNI-0.5/rgb_channel_ramps_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/DNI-0.5/smooth_2d_gradient_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/GENERAL/deterministic_noise_raw.npy (regenerable via reference_runner.py)",
+    "reference/GENERAL/edges_impulses_raw.npy (regenerable via reference_runner.py)",
+    "reference/GENERAL/high_frequency_raw.npy (regenerable via reference_runner.py)",
+    "reference/GENERAL/n2_original_raw.npy (regenerable via reference_runner.py)",
+    "reference/GENERAL/rgb_channel_ramps_raw.npy (regenerable via reference_runner.py)",
+    "reference/GENERAL/smooth_2d_gradient_raw.npy (regenerable via reference_runner.py)",
+    "reference/WDN/deterministic_noise_raw.npy (regenerable via reference_runner.py)",
+    "reference/WDN/edges_impulses_raw.npy (regenerable via reference_runner.py)",
+    "reference/WDN/high_frequency_raw.npy (regenerable via reference_runner.py)",
+    "reference/WDN/n2_original_raw.npy (regenerable via reference_runner.py)",
+    "reference/WDN/rgb_channel_ramps_raw.npy (regenerable via reference_runner.py)",
+    "reference/WDN/smooth_2d_gradient_raw.npy (regenerable via reference_runner.py)",
+    "reference/WDN/deterministic_noise_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/WDN/edges_impulses_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/WDN/high_frequency_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/WDN/n2_original_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/WDN/rgb_channel_ramps_raw.f32le (regenerable; hashes in reference_manifest.json)",
+    "reference/WDN/smooth_2d_gradient_raw.f32le (regenerable; hashes in reference_manifest.json)"
+  ],
+  "notes": []
+}

@@ -562,8 +562,8 @@ class ExynosUpscaleSessionTest {
             val pixel = IntArray(1)
             bitmap.getPixels(pixel, 0, bitmap.width, 0, 0, 1, 1)
             assertEquals(255, (pixel[0] shr 16) and 0xFF)
-            assertEquals(127, (pixel[0] shr 8) and 0xFF)
-            assertEquals(63, pixel[0] and 0xFF)
+            assertEquals(128, (pixel[0] shr 8) and 0xFF)
+            assertEquals(64, pixel[0] and 0xFF)
             bitmap.recycle()
         } finally {
             session.close()
@@ -1088,6 +1088,18 @@ class ExynosUpscaleSessionTest {
         assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
         assertEquals("cold", session.runDiagnosticsHistory.single().attemptLabel)
         session.close()
+    }
+
+    @Test
+    fun quantizeFp32PixelToUint8MatchesUpstreamRoundToNearest() {
+        // 1.0, 0.5, 0.25 in [0,1] scale to 255, 128, 64 under nearest rounding
+        // (truncation would yield 255, 127, 63).
+        assertEquals(255, quantizeFp32PixelToUint8(1.0f))
+        assertEquals(128, quantizeFp32PixelToUint8(0.5f))
+        assertEquals(64, quantizeFp32PixelToUint8(0.25f))
+        // clamp to [0,1] preserves the documented output range contract
+        assertEquals(0, quantizeFp32PixelToUint8(-0.3f))
+        assertEquals(255, quantizeFp32PixelToUint8(1.7f))
     }
 
     @Test

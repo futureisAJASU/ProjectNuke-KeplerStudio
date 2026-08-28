@@ -1,0 +1,177 @@
+{
+  "torch": "2.13.0+cpu",
+  "numpy": "2.3.3",
+  "upstream_commit": "a4abfb2979a7bbff3f69f58f58ae324608821e27",
+  "architecture": "SRVGGNetCompact(num_in_ch=3,num_out_ch=3,num_feat=64,num_conv=32,upscale=4,act_type=prelu)",
+  "weapons_load_key": "params (no params_ema present in official checkpoints)",
+  "candidates": {
+    "GENERAL": {
+      "deterministic_noise": {
+        "raw_sha256": "0b49045f649aabfdf13e9f13f12fb99062e076a6760162e6d56ba93b5751470b",
+        "raw_bytes": 3145728,
+        "png_bytes": 607946,
+        "out_min": 0.00718572735786438,
+        "out_max": 0.9067100286483765,
+        "out_mean": 0.5102949738502502,
+        "nonfinite": 0
+      },
+      "edges_impulses": {
+        "raw_sha256": "33250dc8db54109c33c89bd7bab2a6fd51219f015f2b9626b2615216a8e9b983",
+        "raw_bytes": 3145728,
+        "png_bytes": 22071,
+        "out_min": -0.30544745922088623,
+        "out_max": 1.2899128198623657,
+        "out_mean": 0.03032699227333069,
+        "nonfinite": 0
+      },
+      "high_frequency": {
+        "raw_sha256": "0b818685751806a19b415b54b7b4fe473125305bcf8e01d9121b29bb24b96088",
+        "raw_bytes": 3145728,
+        "png_bytes": 243845,
+        "out_min": -0.14122267067432404,
+        "out_max": 1.2103855609893799,
+        "out_mean": 0.4743211269378662,
+        "nonfinite": 0
+      },
+      "n2_original": {
+        "raw_sha256": "0df15363ca12cde9a67901d694a186681174060a0d4e971f6fe9cfd7c49e7477",
+        "raw_bytes": 3145728,
+        "png_bytes": 336067,
+        "out_min": -0.21138224005699158,
+        "out_max": 1.284443974494934,
+        "out_mean": 0.49477967619895935,
+        "nonfinite": 0
+      },
+      "rgb_channel_ramps": {
+        "raw_sha256": "1a4661e8ff4deb563a432ea7b7b8df7e569b6ff22f22437a8cf900ee4581b265",
+        "raw_bytes": 3145728,
+        "png_bytes": 342618,
+        "out_min": 0.001096712308935821,
+        "out_max": 1.0117402076721191,
+        "out_mean": 0.5018117427825928,
+        "nonfinite": 0
+      },
+      "smooth_2d_gradient": {
+        "raw_sha256": "6d8030943c243a8f44f136c9e57a698883ac49509d55079b9822278386a4fe60",
+        "raw_bytes": 3145728,
+        "png_bytes": 578417,
+        "out_min": -0.015018250793218613,
+        "out_max": 1.062840461730957,
+        "out_mean": 0.436799019575119,
+        "nonfinite": 0
+      }
+    },
+    "WDN": {
+      "deterministic_noise": {
+        "raw_sha256": "b4f0e23822e4a52d52e025ee67276b51954bc98761c6830fb7aee42d8194acfa",
+        "raw_bytes": 3145728,
+        "png_bytes": 753488,
+        "out_min": -1.0493391752243042,
+        "out_max": 1.7327488660812378,
+        "out_mean": 0.48831045627593994,
+        "nonfinite": 0
+      },
+      "edges_impulses": {
+        "raw_sha256": "bf555f44443c595a23506cbd3d9b1a63337ef9bf3c8cbda9691ae574d5cd94dd",
+        "raw_bytes": 3145728,
+        "png_bytes": 47928,
+        "out_min": -0.22456173598766327,
+        "out_max": 1.3918966054916382,
+        "out_mean": 0.031586986035108566,
+        "nonfinite": 0
+      },
+      "high_frequency": {
+        "raw_sha256": "27b18fa21469b5e180edc45994da51c1c9232913cb583affd2e9c800023b861e",
+        "raw_bytes": 3145728,
+        "png_bytes": 243143,
+        "out_min": -0.26376503705978394,
+        "out_max": 1.280288577079773,
+        "out_mean": 0.4664560854434967,
+        "nonfinite": 0
+      },
+      "n2_original": {
+        "raw_sha256": "993ad4b4583536401d41c2f17e277f45faa8892df4da567eca64b934ccfb5fe1",
+        "raw_bytes": 3145728,
+        "png_bytes": 370390,
+        "out_min": -0.31243807077407837,
+        "out_max": 1.330622911453247,
+        "out_mean": 0.49641573429107666,
+        "nonfinite": 0
+      },
+      "rgb_channel_ramps": {
+        "raw_sha256": "515a4a6fcd721137bf897b69d6e8e43dbe14f453665f3d7c67dc79b95088d5ea",
+        "raw_bytes": 3145728,
+        "png_bytes": 484167,
+        "out_min": -0.012077867984771729,
+        "out_max": 1.0102012157440186,
+        "out_mean": 0.5009140968322754,
+        "nonfinite": 0
+      },
+      "smooth_2d_gradient": {
+        "raw_sha256": "664ee86ea477ec8a4d11ce72cbb5928e25f8382b43ae993680de1224af54a326",
+        "raw_bytes": 3145728,
+        "png_bytes": 628179,
+        "out_min": -0.028379375115036964,
+        "out_max": 1.051066517829895,
+        "out_mean": 0.4360080659389496,
+        "nonfinite": 0
+      }
+    },
+    "DNI-0.5": {
+      "deterministic_noise": {
+        "raw_sha256": "315ec9abc111d80d2a241c37f78c7238f9e9e1abad9a2ea418ed3621d2046335",
+        "raw_bytes": 3145728,
+        "png_bytes": 653894,
+        "out_min": -0.22002877295017242,
+        "out_max": 1.0970947742462158,
+        "out_mean": 0.480392724275589,
+        "nonfinite": 0
+      },
+      "edges_impulses": {
+        "raw_sha256": "3f2e4c70d0e73afa3e24c65bd97c0fb3373b15a460fcdb159aae6e5dc35a59b7",
+        "raw_bytes": 3145728,
+        "png_bytes": 45089,
+        "out_min": -0.2127324342727661,
+        "out_max": 1.3384530544281006,
+        "out_mean": 0.0341976098716259,
+        "nonfinite": 0
+      },
+      "high_frequency": {
+        "raw_sha256": "5aad338f22ed0a8eeb99c014f77fb2684dc4013197a9d0b695ceb4b7acff0733",
+        "raw_bytes": 3145728,
+        "png_bytes": 205494,
+        "out_min": -0.14782103896141052,
+        "out_max": 1.2434303760528564,
+        "out_mean": 0.47643598914146423,
+        "nonfinite": 0
+      },
+      "n2_original": {
+        "raw_sha256": "7f4581c4aaf4cbac5ee2f10f2a21b557e86aa25bab870b3553c4241f6ea857ee",
+        "raw_bytes": 3145728,
+        "png_bytes": 335691,
+        "out_min": -0.24273258447647095,
+        "out_max": 1.2675056457519531,
+        "out_mean": 0.49750736355781555,
+        "nonfinite": 0
+      },
+      "rgb_channel_ramps": {
+        "raw_sha256": "1cb193faa2d2a90ccc081d858a306f289808a0336e521997bb9a660b05cd54ae",
+        "raw_bytes": 3145728,
+        "png_bytes": 559256,
+        "out_min": -0.004091806244105101,
+        "out_max": 1.00824773311615,
+        "out_mean": 0.5010069012641907,
+        "nonfinite": 0
+      },
+      "smooth_2d_gradient": {
+        "raw_sha256": "4bb5e76eb87617467ce51b2a82361f2aeb4d320632658ded1dfe9b33c9d8932c",
+        "raw_bytes": 3145728,
+        "png_bytes": 633090,
+        "out_min": -0.023978184908628464,
+        "out_max": 1.0664421319961548,
+        "out_mean": 0.43706169724464417,
+        "nonfinite": 0
+      }
+    }
+  }
+}

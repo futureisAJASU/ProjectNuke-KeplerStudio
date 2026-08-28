@@ -248,6 +248,47 @@ internal class ExynosUpscaleSession(
     }
 
     /**
+     * N3 narrow raw-output observation seam.
+     *
+     * Runs one x4 upscale over raw FP32 CHW RGB input bytes (exactly [INPUT_BYTES],
+     * the same canonical bytes fed to the PyTorch reference) and returns the raw FP32
+     * D2H output bytes BEFORE any clamp, scale-by-255, round, Bitmap, or PNG post-processing.
+     *
+     * Ownership contract is unchanged: the real [ExynosUpscaleSession] still owns the
+     * model, buffers, H2D, execute, D2H, and lifecycle. This seam only observes/copies
+     * the D2H tensor and hashes the exact H2D payload for input-parity evidence. It is
+     * never invoked by any production/N2 path and has zero effect when unused.
+     */
+    internal suspend fun runRawFp32Chw(
+        inputBytes: ByteArray,
+        operationContext: ModelOperationContext,
+        attemptLabel: String? = null,
+    ): ExynosRawRunResult =
+        withContext(ioDispatcher) {
+            lifecycleMutex.withLock {
+                if (operationContext.isCancelled()) {
+                    return@withLock ExynosRawRunResult.cancelled()
+                }
+                if (!operationContext.isCurrent(
+                        operationContext.operationToken,
+                        operationContext.documentGeneration,
+                    )
+                ) {
+                    return@withLock ExynosRawRunResult.failure("stale operation context")
+                }
+                if (lifecycle != ModelRunnerLifecycle.Loaded) {
+                    return@withLock ExynosRawRunResult.failure("session is not Loaded")
+                }
+                if (inputBytes.size != INPUT_BYTES) {
+                    return@withLock ExynosRawRunResult.failure(
+                        "raw input must be exactly $INPUT_BYTES bytes (FP32 CHW 3x${INPUT_WIDTH}x${INPUT_HEIGHT})",
+                    )
+                }
+                rawRunLocked(inputBytes, attemptLabel)
+            }
+        }
+
+    /**
      * Terminal ownership boundary; safe to call repeatedly and from any thread.
      * When a previous teardown could not delete the prepared model file, calling close()
      * again is the explicit later cleanup attempt that retries the deletion of that
@@ -576,6 +617,58 @@ internal class ExynosUpscaleSession(
         }
     }
 
+    /**
+     * Raw-run core mirroring [runLocked]'s discipline (same lifecycle flips, same native
+     * boundaries, same diagnostic recording) but feeding the exact H2D payload provided by
+     * the caller and surfacing the untouched D2H payload instead of a decoded bitmap.
+     */
+    private suspend fun rawRunLocked(inputBytes: ByteArray, attemptLabel: String?): ExynosRawRunResult {
+        val diagnostics = ExynosRunDiagnostics()
+        lastRunDiagnostics = diagnostics
+        diagnostics.attemptLabel = attemptLabel
+        runDiagnosticsHistoryInternal += diagnostics
+        lifecycle = ModelRunnerLifecycle.Inferencing
+        try {
+            val inputSha = runCatching { sha256Bytes(inputBytes) }.getOrNull()
+            preH2dCheck?.invoke()
+            val h2dStatus = nativeRunStage(diagnostics, "h2d") {
+                native.memcpyHostToDevice(bufferSet, 0, inputBytes)
+            }
+            diagnostics.h2dStatus = h2dStatus
+            if (h2dStatus != EnnStatus.SUCCESS) {
+                return ExynosRawRunResult(
+                    h2dStatus, null, null, inputSha, null,
+                ).also { it.log("H2D failed: EnnReturn=${EnnStatus.describe(h2dStatus)}") }
+            }
+            checkCancellation()
+            preExecuteCheck?.invoke()
+            coroutineContext.ensureActive()
+            diagnostics.executeReached = true
+            val executeStatus = nativeRunStage(diagnostics, "execute") { native.execute(modelId) }
+            diagnostics.executeStatus = executeStatus
+            if (executeStatus != EnnStatus.SUCCESS) {
+                return ExynosRawRunResult(
+                    h2dStatus, executeStatus, null, inputSha, null,
+                ).also { it.log("execute failed: EnnReturn=${EnnStatus.describe(executeStatus)}") }
+            }
+            val outputBytes = ByteArray(OUTPUT_BYTES)
+            preD2hCheck?.invoke()
+            coroutineContext.ensureActive()
+            val d2hStatus = nativeRunStage(diagnostics, "d2h") {
+                native.memcpyDeviceToHost(bufferSet, ENN_OUTPUT_INDEX, outputBytes)
+            }
+            diagnostics.d2hStatus = d2hStatus
+            if (d2hStatus != EnnStatus.SUCCESS) {
+                return ExynosRawRunResult(
+                    h2dStatus, executeStatus, d2hStatus, inputSha, null,
+                ).also { it.log("D2H failed: EnnReturn=${EnnStatus.describe(d2hStatus)}") }
+            }
+            return ExynosRawRunResult(h2dStatus, executeStatus, d2hStatus, inputSha, outputBytes)
+        } finally {
+            lifecycle = ModelRunnerLifecycle.Loaded
+        }
+    }
+
     private fun buildOutputBitmap(outputBytes: ByteArray): ModelRunResult<Bitmap> {
         val floats =
             ByteBuffer.wrap(outputBytes)
@@ -599,9 +692,9 @@ internal class ExynosUpscaleSession(
                     DeterministicModelFallback.NoResult,
                 )
             }
-            val red = (r.coerceIn(0f, 1f) * 255f).toInt()
-            val green = (g.coerceIn(0f, 1f) * 255f).toInt()
-            val blue = (b.coerceIn(0f, 1f) * 255f).toInt()
+            val red = quantizeFp32PixelToUint8(r)
+            val green = quantizeFp32PixelToUint8(g)
+            val blue = quantizeFp32PixelToUint8(b)
             pixels[i] = (0xFF shl 24) or (red shl 16) or (green shl 8) or blue
         }
         val bitmap = Bitmap.createBitmap(OUTPUT_WIDTH, OUTPUT_HEIGHT, Bitmap.Config.ARGB_8888)
@@ -870,6 +963,50 @@ internal enum class NpuProofStatus {
     EXECUTED_EVIDENCE_INCOMPLETE,
     OBSERVED,
 }
+
+/**
+ * Result of the N3 raw-output observation seam.
+ * [outputBytes] is the untouched FP32 D2H payload (3x512x512, little-endian) on success.
+ * [inputSha256] is the hash of the exact bytes handed to H2D (input-parity evidence).
+ */
+internal data class ExynosRawRunResult(
+    val h2dStatus: Int?,
+    val executeStatus: Int?,
+    val d2hStatus: Int?,
+    val inputSha256: String?,
+    val outputBytes: ByteArray?,
+) {
+    val reachedExecute: Boolean
+        get() = executeStatus != null
+    val succeeded: Boolean
+        get() =
+            h2dStatus == EnnStatus.SUCCESS &&
+                executeStatus == EnnStatus.SUCCESS &&
+                d2hStatus == EnnStatus.SUCCESS &&
+                outputBytes != null
+
+    fun log(reason: String) {
+        Log.w("KeplerExynosUpscale", "raw run incomplete: $reason")
+    }
+
+    companion object {
+        fun cancelled() = ExynosRawRunResult(null, null, null, null, null)
+        fun failure(reason: String): ExynosRawRunResult = cancelled().also { it.log(reason) }
+    }
+}
+
+/** SHA-256 of the exact bytes handed to the ENN input buffer (little-endian hex). */
+internal fun sha256Bytes(data: ByteArray): String =
+    MessageDigest.getInstance("SHA-256").digest(data).joinToString("") { byte -> "%02x".format(byte) }
+
+/**
+ * Quantizes one clamped FP32 pixel value in [0,1] to uint8 using nearest rounding
+ * (round half to even). This mirrors the upstream Real-ESRGAN helper, which converts
+ * with `(output * 255.0).round()` — numpy round is half-to-even — rather than a
+ * truncation toward zero.
+ */
+internal fun quantizeFp32PixelToUint8(value: Float): Int =
+    Math.rint((value.coerceIn(0f, 1f) * 255f).toDouble()).toInt()
 
 internal data class NpuProofDecision(
     val ennExecuteObserved: Boolean,

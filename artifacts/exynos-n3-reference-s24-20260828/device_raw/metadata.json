@@ -1,0 +1,311 @@
+{
+  "report_absolute_path": "\/storage\/emulated\/0\/Android\/data\/com.projectnuke.keplerstudio\/files\/exynos_n3_probe",
+  "device": {
+    "ro.board.platform": "erd9945",
+    "ro.soc.model": "s5e9945",
+    "ro.soc.manufacturer": "Samsung",
+    "ro.hardware": "s5e9945",
+    "ro.product.model": "SM-S921N",
+    "ro.product.device": "e1s",
+    "ro.build.version.release": "16",
+    "ro.build.fingerprint": "samsung\/e1sksx\/e1s:16\/BP4A.251205.006\/S921NKSSGDZG1:user\/release-keys"
+  },
+  "build_manufacturer": "samsung",
+  "soc_gate": "passed",
+  "validated_asset_sha256": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
+  "prepared_file_bytes": 3112960,
+  "prepared_file_sha256": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
+  "prepared_file_expected_sha256": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
+  "npu_meta_info": {
+    "compiler_nnc": "27",
+    "compiler_npu": "v2.4.11.l",
+    "model_schema": "NOT SUPPORTED",
+    "model_version": "NOT SUPPORTED",
+    "dd": "Failed",
+    "unified_fw": "Failed",
+    "npu_fw": "Failed"
+  },
+  "fixtures": [
+    {
+      "name": "n2_original",
+      "expected_input_sha256": "4ed73d81aef9c69ecce6e0eb36d2e443e49ae25d5c4061f549035a0c8d404ed2",
+      "repeatability_bit_identical": true,
+      "repeatability_max_abs_diff": 0,
+      "runs": [
+        {
+          "run": 1,
+          "ms": 16,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "4ed73d81aef9c69ecce6e0eb36d2e443e49ae25d5c4061f549035a0c8d404ed2",
+          "output_sha256": "43348569b212c6af127baa0c41f24dd471ac3ed8b519872df1827c016110655c",
+          "output_bytes": 3145728
+        },
+        {
+          "run": 2,
+          "ms": 16,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "4ed73d81aef9c69ecce6e0eb36d2e443e49ae25d5c4061f549035a0c8d404ed2",
+          "output_sha256": "43348569b212c6af127baa0c41f24dd471ac3ed8b519872df1827c016110655c",
+          "output_bytes": 3145728
+        }
+      ]
+    },
+    {
+      "name": "rgb_channel_ramps",
+      "expected_input_sha256": "e0f7f7b4ba0eaf9030d037048de19dc7a15380f131679a1783441caf50cdbb28",
+      "repeatability_bit_identical": true,
+      "repeatability_max_abs_diff": 0,
+      "runs": [
+        {
+          "run": 1,
+          "ms": 20,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "e0f7f7b4ba0eaf9030d037048de19dc7a15380f131679a1783441caf50cdbb28",
+          "output_sha256": "a09e2de9d4ad1eee90db4d240b327a17bc2ff30ed8c79908c09c3b5b5b432253",
+          "output_bytes": 3145728
+        },
+        {
+          "run": 2,
+          "ms": 15,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "e0f7f7b4ba0eaf9030d037048de19dc7a15380f131679a1783441caf50cdbb28",
+          "output_sha256": "a09e2de9d4ad1eee90db4d240b327a17bc2ff30ed8c79908c09c3b5b5b432253",
+          "output_bytes": 3145728
+        }
+      ]
+    },
+    {
+      "name": "smooth_2d_gradient",
+      "expected_input_sha256": "75ac8cfe41114c4b48cabc6aea6fdfabaa3a846a9e2af2fb62f5d94e0badbaaf",
+      "repeatability_bit_identical": true,
+      "repeatability_max_abs_diff": 0,
+      "runs": [
+        {
+          "run": 1,
+          "ms": 15,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "75ac8cfe41114c4b48cabc6aea6fdfabaa3a846a9e2af2fb62f5d94e0badbaaf",
+          "output_sha256": "453367acedcd6be26fa31c528394a68d9a65af80f06856eda29cc198c5be364c",
+          "output_bytes": 3145728
+        },
+        {
+          "run": 2,
+          "ms": 18,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "75ac8cfe41114c4b48cabc6aea6fdfabaa3a846a9e2af2fb62f5d94e0badbaaf",
+          "output_sha256": "453367acedcd6be26fa31c528394a68d9a65af80f06856eda29cc198c5be364c",
+          "output_bytes": 3145728
+        }
+      ]
+    },
+    {
+      "name": "edges_impulses",
+      "expected_input_sha256": "17b25fd931355ad6dfa8c305811094aadfae0446d1814a37f84a8a63ecdfa4fd",
+      "repeatability_bit_identical": true,
+      "repeatability_max_abs_diff": 0,
+      "runs": [
+        {
+          "run": 1,
+          "ms": 19,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "17b25fd931355ad6dfa8c305811094aadfae0446d1814a37f84a8a63ecdfa4fd",
+          "output_sha256": "8225c58bda78a3c5163b7a27a85fd843c8b9a76c7e62c775c62eb339c7ec0830",
+          "output_bytes": 3145728
+        },
+        {
+          "run": 2,
+          "ms": 17,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "17b25fd931355ad6dfa8c305811094aadfae0446d1814a37f84a8a63ecdfa4fd",
+          "output_sha256": "8225c58bda78a3c5163b7a27a85fd843c8b9a76c7e62c775c62eb339c7ec0830",
+          "output_bytes": 3145728
+        }
+      ]
+    },
+    {
+      "name": "high_frequency",
+      "expected_input_sha256": "1e52e92fd3fe16dce5cbc04d36b66d9fd2a2922f2ed351c2b287d295d698ec1e",
+      "repeatability_bit_identical": true,
+      "repeatability_max_abs_diff": 0,
+      "runs": [
+        {
+          "run": 1,
+          "ms": 20,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "1e52e92fd3fe16dce5cbc04d36b66d9fd2a2922f2ed351c2b287d295d698ec1e",
+          "output_sha256": "9fe88c82262672c54a145aee1528cd3c4fc5d93a8a5fceb1df456aa069bcc5bf",
+          "output_bytes": 3145728
+        },
+        {
+          "run": 2,
+          "ms": 18,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "1e52e92fd3fe16dce5cbc04d36b66d9fd2a2922f2ed351c2b287d295d698ec1e",
+          "output_sha256": "9fe88c82262672c54a145aee1528cd3c4fc5d93a8a5fceb1df456aa069bcc5bf",
+          "output_bytes": 3145728
+        }
+      ]
+    },
+    {
+      "name": "deterministic_noise",
+      "expected_input_sha256": "0144c67d9d56a7cbb0b336fc7d9697ec766ef374c6ae968664be6575821f932b",
+      "repeatability_bit_identical": true,
+      "repeatability_max_abs_diff": 0,
+      "runs": [
+        {
+          "run": 1,
+          "ms": 20,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "0144c67d9d56a7cbb0b336fc7d9697ec766ef374c6ae968664be6575821f932b",
+          "output_sha256": "da9596d0c2473603b610cfea2ca9b56c8661eeb915a6c42369dc45b940d49bba",
+          "output_bytes": 3145728
+        },
+        {
+          "run": 2,
+          "ms": 18,
+          "h2d_status": "0(ENN_RET_SUCCESS)",
+          "execute_reached": true,
+          "execute_status": "0(ENN_RET_SUCCESS)",
+          "d2h_status": "0(ENN_RET_SUCCESS)",
+          "input_sha256": "0144c67d9d56a7cbb0b336fc7d9697ec766ef374c6ae968664be6575821f932b",
+          "output_sha256": "da9596d0c2473603b610cfea2ca9b56c8661eeb915a6c42369dc45b940d49bba",
+          "output_bytes": 3145728
+        }
+      ]
+    }
+  ],
+  "repeatability_bit_identical_count": 6,
+  "repeatability_total_fixtures": 6,
+  "repeatability_max_abs_diff": 0,
+  "close": "PASS",
+  "status": "PASS",
+  "enn_execute_observed": true,
+  "npu_execution_observed": true,
+  "npu_proof_status": "OBSERVED",
+  "run_attempts": [
+    {
+      "label": "warmup",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "n2_original#1",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "n2_original#2",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "rgb_channel_ramps#1",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "rgb_channel_ramps#2",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "smooth_2d_gradient#1",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "smooth_2d_gradient#2",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "edges_impulses#1",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "edges_impulses#2",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "high_frequency#1",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "high_frequency#2",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "deterministic_noise#1",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    },
+    {
+      "label": "deterministic_noise#2",
+      "h2d_status": "0(ENN_RET_SUCCESS)",
+      "execute_reached": true,
+      "execute_status": "0(ENN_RET_SUCCESS)",
+      "d2h_status": "0(ENN_RET_SUCCESS)"
+    }
+  ]
+}
