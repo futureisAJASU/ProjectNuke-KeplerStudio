@@ -25,7 +25,9 @@ import com.projectnuke.keplerstudio.editor.NpuProofStatus
 import com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken
 import com.projectnuke.keplerstudio.editor.decideNpuProof
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import com.projectnuke.keplerstudio.editor.npuProofAcceptanceFailure
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -91,7 +93,8 @@ class ExynosRealEsrganOneTileInstrumentationTest {
     }
 
     @Test
-    fun exynosRealEsrganOneTileNpuProbe() = runBlocking {
+    fun exynosRealEsrganOneTileNpuProbe() {
+        runBlocking {
         // OPT-IN GATE: default test runs skip here immediately without creating report artifacts.
         assumeTrue(
             "probe is opt-in only; rerun with -e kepler.exynosNpuProbe true",
@@ -168,6 +171,16 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                 throw AssertionError("session load failed on this device: $loadResult")
             }
             metadata.put("model_load_ms", loadDurationMs)
+            val preparedFile = checkNotNull(session.preparedModelFileForDiagnostics())
+            val preparedSha256 = sha256(preparedFile)
+            metadata.put("prepared_file_path", preparedFile.absolutePath)
+            metadata.put("prepared_file_bytes", preparedFile.length())
+            metadata.put("prepared_file_sha256", preparedSha256)
+            assertEquals(3_112_960L, preparedFile.length())
+            assertEquals(
+                "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
+                preparedSha256,
+            )
             metadata.put(
                 "descriptor_input",
                 session.descriptor?.input?.let {
@@ -193,6 +206,7 @@ class ExynosRealEsrganOneTileInstrumentationTest {
             if (inputPngFailure != null) {
                 throw AssertionError("input PNG write failed", inputPngFailure)
             }
+            metadata.put("input_png_sha256", sha256(File(reportDir, "input_tile_128.png")))
             metadata.put("input_tile_sha_source", "deterministicTile(): documented generator")
             metadata.put("input_pixels", inputPixels.size)
 
@@ -274,14 +288,39 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                 "output_png_bytes",
                 File(reportDir, "output_tile_x4_512.png").length(),
             )
+            metadata.put("output_png_sha256", sha256(File(reportDir, "output_tile_x4_512.png")))
 
+            val firstCloseStartedNanos = SystemClock.elapsedRealtimeNanos()
             session.close()
+            val firstCloseMs = (SystemClock.elapsedRealtimeNanos() - firstCloseStartedNanos) / 1_000_000L
+            val firstTeardown = checkNotNull(session.lastTeardownResult)
+            assertTrue("first close must settle all attempted native steps", firstTeardown.allAttemptedSucceeded)
+            val secondLoadStartedNanos = SystemClock.elapsedRealtimeNanos()
             assertTrue(session.load(token) is ModelLoadResult.Ready)
+            val secondLoadMs = (SystemClock.elapsedRealtimeNanos() - secondLoadStartedNanos) / 1_000_000L
+            val secondRunStartedNanos = SystemClock.elapsedRealtimeNanos()
             val rerun = session.run(inputPixels, operationContext, "lifecycle_roundtrip")
+            val secondRunMs = (SystemClock.elapsedRealtimeNanos() - secondRunStartedNanos) / 1_000_000L
             runDiagnostics.add(session.lastRunDiagnostics)
             assertTrue("second lifecycle inference failed: $rerun", rerun is ModelRunResult.Success)
             (rerun as ModelRunResult.Success<Bitmap>).value.recycle()
+            val secondCloseStartedNanos = SystemClock.elapsedRealtimeNanos()
             session.close()
+            val secondCloseMs = (SystemClock.elapsedRealtimeNanos() - secondCloseStartedNanos) / 1_000_000L
+            val secondTeardown = checkNotNull(session.lastTeardownResult)
+            assertTrue("second close must settle all attempted native steps", secondTeardown.allAttemptedSucceeded)
+            metadata.put(
+                "lifecycle_timings_ms",
+                JSONObject(
+                    mapOf(
+                        "first_load" to loadDurationMs,
+                        "first_close" to firstCloseMs,
+                        "second_load" to secondLoadMs,
+                        "second_run" to secondRunMs,
+                        "second_close" to secondCloseMs,
+                    ),
+                ),
+            )
             memorySnapshots.put("post_close_kb", getNativeHeapAllocatedKb())
 
             val cancelledContext =
@@ -416,6 +455,7 @@ class ExynosRealEsrganOneTileInstrumentationTest {
                 println("EXYNOS_NPU_PROBE_REPORT_WRITE_FAILED=${reportDir.absolutePath}")
             }
             if (testFailure == null && report.primaryFailure != null) throw report.primaryFailure
+        }
         }
     }
 
@@ -599,4 +639,16 @@ class ExynosRealEsrganOneTileInstrumentationTest {
         }
         return target
     }
+
+    private fun sha256(file: File): String =
+        FileInputStream(file).use { input ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+            digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+        }
 }

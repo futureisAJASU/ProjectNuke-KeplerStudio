@@ -87,14 +87,14 @@ object ModelAssetManifest {
                 semantic = ModelOutputSemantic.RestorationImage,
                 runnerImplemented = true,
                 productionReady = false,
-                // Exact Samsung-distributed NNC (exynos-eco/enn-sdk-samples); pinned byte-exact.
+                // Exact Samsung official portal FP16 NNC for Exynos 2400; pinned byte-exact.
                 minimumBytes = EXYNOS_REAL_ESRGAN_X4V3_BYTES,
                 maximumBytes = EXYNOS_REAL_ESRGAN_X4V3_BYTES,
-                sha256 = "1a36e24c91b33358a437d432cfc5e57a5ccde1a683ce80dd00a13fd00dbb0c37",
+                sha256 = "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
             ),
         )
 
-    private const val EXYNOS_REAL_ESRGAN_X4V3_BYTES: Long = 2_867_200L
+    private const val EXYNOS_REAL_ESRGAN_X4V3_BYTES: Long = 3_112_960L
 
     fun byId(id: String): ModelAssetManifestEntry? = entries.firstOrNull { it.id == id }
 

@@ -1,0 +1,203 @@
+﻿08-28 14:58:15.900  2628  2628 D SubscreenNotificationListCoordinator: onAfterRenderList() isSubScreen = false, pluginLockMode = 0, doNotShowOnCover = false
+08-28 14:58:15.904  2628  2628 I LockscreenNotificationIconsOnlyController: onNotificationInfoUpdated 6
+08-28 14:58:17.379  2628  2628 D SubscreenNotificationListCoordinator: onAfterRenderList() isSubScreen = false, pluginLockMode = 0, doNotShowOnCover = false
+08-28 14:58:17.385  2628  2628 I LockscreenNotificationIconsOnlyController: onNotificationInfoUpdated 6
+08-28 14:58:19.305  2628  2628 D SubscreenNotificationListCoordinator: onAfterRenderList() isSubScreen = false, pluginLockMode = 0, doNotShowOnCover = false
+08-28 14:58:19.316  2628  2628 I LockscreenNotificationIconsOnlyController: onNotificationInfoUpdated 6
+08-28 14:58:23.284 12737 12737 D nativeloader: Configuring clns-9 for other apk /data/app/~~8JbE_W9zh3SGhmT0GilvEw==/com.projectnuke.keplerstudio.test-1xMluPNv0DKfZaLr1h9LHw==/base.apk:/data/app/~~LGnnEhBlehiwMzdjSxMH7Q==/com.projectnuke.keplerstudio-iZbCR4Lka8AgBvaWkJNeFQ==/base.apk. target_sdk_version=36, uses_libraries=libenn_user.samsung_slsi.so, library_path=/data/app/~~8JbE_W9zh3SGhmT0GilvEw==/com.projectnuke.keplerstudio.test-1xMluPNv0DKfZaLr1h9LHw==/lib/arm64:/data/app/~~LGnnEhBlehiwMzdjSxMH7Q==/com.projectnuke.keplerstudio-iZbCR4Lka8AgBvaWkJNeFQ==/lib/arm64:/data/app/~~8JbE_W9zh3SGhmT0GilvEw==/com.projectnuke.keplerstudio.test-1xMluPNv0DKfZaLr1h9LHw==/base.apk!/lib/arm64-v8a:/data/app/~~LGnnEhBlehiwMzdjSxMH7Q==/com.projectnuke.keplerstudio-iZbCR4Lka8AgBvaWkJNeFQ==/base.apk!/lib/arm64-v8a, permitted_path=/data:/mnt/expand:/data/user/0/com.projectnuke.keplerstudio
+08-28 14:58:23.571 12737 12750 D nativeloader: Load /data/app/~~LGnnEhBlehiwMzdjSxMH7Q==/com.projectnuke.keplerstudio-iZbCR4Lka8AgBvaWkJNeFQ==/base.apk!/lib/arm64-v8a/libenn_kepler_jni.so using class loader ns clns-9 (caller=/data/app/~~LGnnEhBlehiwMzdjSxMH7Q==/com.projectnuke.keplerstudio-iZbCR4Lka8AgBvaWkJNeFQ==/base.apk!classes4.dex): ok
+08-28 14:58:23.619 12737 12754 I ENN_FRAMEWORK: 2.2.29: * ENN Trace OFF
+08-28 14:58:23.723 12758 12758 I libbinder.AidlLazyServiceRegistrar: Registering service vendor.samsung_slsi.hardware.enn_aidl.IEnnInterfaceAidl/default
+08-28 14:58:23.724 12758 12758 I libbinder.AidlLazyServiceRegistrar: Process has 1 (of 1 available) client(s) in use after notification vendor.samsung_slsi.hardware.enn_aidl.IEnnInterfaceAidl/default has clients: 1
+08-28 14:58:23.725 12758 12762 I ENN_FRAMEWORK: 2.2.29: * [enn_aidl] Link monitor is set(12737)
+08-28 14:58:23.725 12758 12762 I ENN_FRAMEWORK: 2.2.29: * [enn_aidl] Wake Up Monitor thread.. 
+08-28 14:58:23.726 12758 12762 I ENN_FRAMEWORK: 2.2.29: * Set SOC name as 9945
+08-28 14:58:23.728 12758 12762 W ENN_FRAMEWORK: 2.2.29:   Adjust invalid mo_scen_id from 2 to 1
+08-28 14:58:23.730 12758 12762 I ENN_FRAMEWORK: 2.2.29: * GpuUserDriver::Initialize started
+08-28 14:58:23.730 12758 12762 I ENN_FRAMEWORK: 2.2.29: * ENN Trace OFF
+08-28 14:58:23.730 12758 12762 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::init->(0x31C1)
+08-28 14:58:23.730 12758 12762 I ENN_FRAMEWORK: 2.2.29: * A ClientProcess(ID: 0x31C100000000) is created.
+08-28 14:58:23.730 12758 12762 I ENN_FRAMEWORK: 2.2.29: * ClientProcess(ID: 0x31C100000000) is added: ClientProcess[1], Model[0], ExecutableModel[0], ExecuteRequest[0]
+08-28 14:58:23.730 12758 12762 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::init->(0x31C1)
+08-28 14:58:23.730 12758 12760 I ENN_FRAMEWORK: 2.2.29: * [ENN SERVICE] pid(12737): ref_cnt(1), status(0)
+08-28 14:58:23.730 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Context(0x70a17b9a78) ref_cnt(0x70a17b9a78)=1, Commit [2.2.28:1:gb0af9ffd], Version [2.2.29], AIDL , created context.
+08-28 14:58:23.730 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Initialized, set handler with signal 53
+08-28 14:58:23.730 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Model File: /data/user/0/com.projectnuke.keplerstudio/files/exynos_models/Real-ESRGAN-General-x4v3.nnc.session-0 load start
+08-28 14:58:23.730 12737 12754 I ENN_FRAMEWORK: 2.2.29: * FileDescriptorBufferReader fd(107) (size: 0 offset: 0)
+08-28 14:58:23.730 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Pref: (0,0,0) (1,7,0) (2,0,0) 
+08-28 14:58:23.731 12758 12762 I ENN_FRAMEWORK: 2.2.29: * [SUBMITTED] (0x890001,2592000) (0x880002,4206000) (0x880003,533000) 
+08-28 14:58:23.733 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnOpenFile() file load start : /data/user/0/com.projectnuke.keplerstudio/files/exynos_models/Real-ESRGAN-General-x4v3.nnc.session-0
+08-28 14:58:23.734 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnOpenFile() file load ended : /data/user/0/com.projectnuke.keplerstudio/files/exynos_models/Real-ESRGAN-General-x4v3.nnc.session-0
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::open_model
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: * NNC Model addr: 0x72650f5000, size: 3112960, fd: 11
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   [ 0] COMPILED_COMMAND: ./nncontainer-gen --compiler NPU --snc HW_real_esrgan_general_x4v3_new_snc_8.12.30.25.snc
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: --framework SNC --soc-type Root --input_conversion hw_cfu --output_conversion hw_icfu --chip_version EVT1 --schema_version v2 --dequant_type_hw_or_sw sw --quant_type_hw_or_sw sw --npuhw hardware_configuration.EVT1.xml
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: --npupass O2.json
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: --cast_hw_or_sw sw --multi_vc True -D enable_hw_cost_based_stratum=true -C enable_zero_skip=false --computational_workload 19809436 --enable_stm True --export_io_info 1 -o /home/user/eais-workspace/08505844-7e98-4d98-ad91-b843f84b760d/real_esrgan_general_x4v3/Compiler_result --tuning_config Config/nnc_graph_tiling.json 
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   [ 1] FRAMEWORK: SNC
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   [ 2] HW_CFU: true
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   [ 3] NAME: real_esrgan_general_x4v3_simplify_ncp.bin
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   [ 4] NCP_VERSION: 27
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   [ 5] NPUC_VERSION: v2.4.11.l
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   [10] SOC_TYPE: Root
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   Operator[ 0] (hw: 1) (code:   53) CAST
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   Operator[ 1] (hw: 4) (code: 1013) ENN_NPU
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: *   Operator[ 2] (hw: 1) (code:   53) CAST
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: * [SUBMITTED] (0x890001,2592000) (0x880002,4206000) (0x880003,533000) (0x900005,1) (0x900003,2048) 
+08-28 14:58:23.735 12758 12762 I ENN_FRAMEWORK: 2.2.29: * A Model(ID: 0x31C101000000) is created.
+08-28 14:58:23.736 12758 12776 I ENN_FRAMEWORK: 2.2.29: * (+) NpuUserDriver::OpenSubGraph(), model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.736 12758 12776 I ENN_FRAMEWORK: 2.2.29: * FD Open :: model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.736 12758 12776 I ENN_FRAMEWORK: 2.2.29: * VS4L BOOTUP :: model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.743 12758 12776 I ENN_FRAMEWORK: 2.2.29: * VS4L S_PARAM(MODE) :: model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.743 12758 12776 I ENN_FRAMEWORK: 2.2.29: * VS4L S_PARAM(SCHED_PARAM) :: model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.743 12758 12776 I ENN_FRAMEWORK: 2.2.29: * VS4L S_GRAPH :: model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.744 12758 12776 I ENN_FRAMEWORK: 2.2.29: * VS4L S_FORMAT :: model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.745 12758 12776 I ENN_FRAMEWORK: 2.2.29: * VS4L STREAM_ON :: model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.745 12758 12776 I ENN_FRAMEWORK: 2.2.29: * (-) NpuUserDriver::OpenSubGraph(), model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.748 12758 12775 I ENN_FRAMEWORK: 2.2.29: * opr->code = 53 (CAST)
+08-28 14:58:23.748 12758 12777 I ENN_FRAMEWORK: 2.2.29: * opr->code = 53 (CAST)
+08-28 14:58:23.749 12758 12762 I ENN_FRAMEWORK: 2.2.29: * Model(ID: 0x31C101000000) is added: ClientProcess[1], Model[1], ExecutableModel[0], ExecuteRequest[0]
+08-28 14:58:23.749 12758 12762 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::open_model->(0x31C101000000)
+08-28 14:58:23.749 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Set SOC name as 9945
+08-28 14:58:23.749 12737 12754 I ENN_FRAMEWORK: 2.2.29: * -------------------- Model container :   1 --------------------
+08-28 14:58:23.749 12737 12754 I ENN_FRAMEWORK: 2.2.29: * # Session[0] Model_ID: 0x31C101000000 / 0x31C101000000 (buf: 4, reg: 4), /data/user/0/com.projectnuke.keplerstudio/files/exynos_models/Real-ESRGAN-General-x4v3.nnc.session-0
+08-28 14:58:23.749 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnOpenModel Success(0x31C101000000)
+08-28 14:58:23.750 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Buffer Commit: model_id(0x31C101000000), session_id(0) (+)
+08-28 14:58:23.750 12758 12762 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::commit_execution_data->(0x31C101000000)
+08-28 14:58:23.750 12758 12762 I ENN_FRAMEWORK: 2.2.29: * An ExecutableModel(ID: 0x31C101000001) from a Model(ID : 0x31C101000000) is created.
+08-28 14:58:23.750 12758 12762 I ENN_FRAMEWORK: 2.2.29: * (+) NpuUserDriver::CommitSubGraph(), model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.750 12758 12762 I ENN_FRAMEWORK: 2.2.29: * NPU/DSP UD, validate fd(21) done, alloc_size(98304) shape_size(98304)
+08-28 14:58:23.750 12758 12762 I ENN_FRAMEWORK: 2.2.29: * NPU/DSP UD, validate fd(22) done, alloc_size(1572864) shape_size(1572864)
+08-28 14:58:23.757 12758 12762 I ENN_FRAMEWORK: 2.2.29: * (-) NpuUserDriver::CommitSubGraph(), model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:23.757 12758 12762 I ENN_FRAMEWORK: 2.2.29: * ExecutableModel(ID: 0x31C101000001) is added: ClientProcess[1], Model[1], ExecutableModel[1], ExecuteRequest[0]
+08-28 14:58:23.757 12758 12762 I ENN_FRAMEWORK: 2.2.29: * An ExecuteRequest from an ExecutableModel(ID: 0x31C101000001) is created.
+08-28 14:58:23.757 12758 12762 I ENN_FRAMEWORK: 2.2.29: * ExecuteRequest from ExecutableModel(ID: 0x31C101000001) is added: ClientProcess[1], Model[1], ExecutableModel[1], ExecuteRequest[1]
+08-28 14:58:23.757 12758 12762 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::commit_execution_data->(0x31C101000000)
+08-28 14:58:23.757 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnBufferCommit: ExecModelID: 0x31C101000001 from mID 0x31C101000000, 0(-)
+08-28 14:58:23.758 12737 12754 I KeplerExynosUpscale: ENN session ready; compiler=27
+08-28 14:58:23.764 12758 12758 W ENN_FRAMEWORK: 2.2.29:   Queried version is not supported: 123
+08-28 14:58:23.765 12758 12758 W ENN_FRAMEWORK: 2.2.29:   Queried version is not supported: 124
+08-28 14:58:23.765 12758 12758 E ENN_FRAMEWORK: 2.2.29: * Not yet supported version_info_type(130). 
+08-28 14:58:23.767 12758 12758 E ENN_FRAMEWORK: 2.2.29:   Not supported version_info type.(vendor/samsung_slsi/exynos/enn/source/src/runtime/engine.cc:625)
+08-28 14:58:23.767 12758 12758 E ENN_FRAMEWORK: 2.2.29:   get version information failed while getting model(54705015226368) from pool
+08-28 14:58:23.767 12758 12758 E ENN_FRAMEWORK: 2.2.29: * Not yet supported version_info_type(131). 
+08-28 14:58:23.767 12758 12758 E ENN_FRAMEWORK: 2.2.29:   Not supported version_info type.(vendor/samsung_slsi/exynos/enn/source/src/runtime/engine.cc:625)
+08-28 14:58:23.767 12758 12758 E ENN_FRAMEWORK: 2.2.29:   get version information failed while getting model(54705015226368) from pool
+08-28 14:58:23.767 12758 12758 E ENN_FRAMEWORK: 2.2.29: * Not yet supported version_info_type(132). 
+08-28 14:58:23.767 12758 12758 E ENN_FRAMEWORK: 2.2.29:   Not supported version_info type.(vendor/samsung_slsi/exynos/enn/source/src/runtime/engine.cc:625)
+08-28 14:58:23.767 12758 12758 E ENN_FRAMEWORK: 2.2.29:   get version information failed while getting model(54705015226368) from pool
+08-28 14:58:23.784 12737 12754 I ENN_FRAMEWORK: 2.2.29: * ExecuteModel: 0x31C101000000
+08-28 14:58:24.472 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnCloseModel : 0x31C101000000(+)
+08-28 14:58:24.472 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::close_model->(0x31C101000000)
+08-28 14:58:24.472 12758 12758 I ENN_FRAMEWORK: 2.2.29: * An ExecuteRequest from an ExecutableModel(ID: 0x31C101000001) is released.
+08-28 14:58:24.472 12758 12758 I ENN_FRAMEWORK: 2.2.29: * An ExecutableModel(ID: 0x31C101000001) from a Model(ID : 0x31C101000000) is released.
+08-28 14:58:24.473 12758 12758 I ENN_FRAMEWORK: 2.2.29: * + Unload Model(ID:0x0x31C101000000) Accelerator(1)
+08-28 14:58:24.473 12758 12758 I ENN_FRAMEWORK: 2.2.29: * - Unload Model(ID:0x0x31C101000000) Accelerator(1)
+08-28 14:58:24.473 12758 12758 I ENN_FRAMEWORK: 2.2.29: * + Unload Model(ID:0x0x31C101000000) Accelerator(4)
+08-28 14:58:24.473 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) NpuUserDriver::CloseSubGraph(), model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:24.480 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) NpuUserDriver::CloseSubGraph(), model_id(0x31C101000000), op_list_id(0x31C101000200)
+08-28 14:58:24.480 12758 12758 I ENN_FRAMEWORK: 2.2.29: * - Unload Model(ID:0x0x31C101000000) Accelerator(4)
+08-28 14:58:24.480 12758 12758 I ENN_FRAMEWORK: 2.2.29: * + Unload Model(ID:0x0x31C101000000) Accelerator(1)
+08-28 14:58:24.480 12758 12758 I ENN_FRAMEWORK: 2.2.29: * - Unload Model(ID:0x0x31C101000000) Accelerator(1)
+08-28 14:58:24.480 12758 12758 I ENN_FRAMEWORK: 2.2.29: * A Model(ID: 0x31C101000000) is released.
+08-28 14:58:24.484 12758 12758 I ENN_FRAMEWORK: 2.2.29: * Model(0x31C101000000) is released: ClientProcess[1], Model[0], ExecutableModel[0], ExecuteRequest[0]
+08-28 14:58:24.484 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::close_model->(0x31C101000000)
+08-28 14:58:24.485 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnCloseModel Success(0x31C101000000) (-)
+08-28 14:58:24.485 12737 12754 I ENN_FRAMEWORK: 2.2.29: * -------------------- Model container :   0 --------------------
+08-28 14:58:24.486 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Context(0x70a17b9a78) ref_cnt(0x70a17b9a78)=0 , will delete context.. force_deinit(0)
+08-28 14:58:24.486 12758 12758 I libbinder.BpBinder: onLastStrongRef automatically unlinking death recipients for descriptor: 'vendor.samsung_slsi.hardware.enn_aidl.IEnnCallbackAidl'
+08-28 14:58:24.486 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::deinit->(0x31C1)
+08-28 14:58:24.486 12758 12758 I ENN_FRAMEWORK: 2.2.29: * A ClientProcess(ID: 0x31C100000000) is released.
+08-28 14:58:24.486 12758 12758 I ENN_FRAMEWORK: 2.2.29: * ClientProcess(0x31C100000000) is released: ClientProcess[0], Model[0], ExecutableModel[0], ExecuteRequest[0]
+08-28 14:58:24.487 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::deinit->(0x31C1)
+08-28 14:58:24.487 12737 12754 I libbinder.BpBinder: onLastStrongRef automatically unlinking death recipients for descriptor: 'vendor.samsung_slsi.hardware.enn_aidl.IEnnInterfaceAidl'
+08-28 14:58:24.487 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnDeinitialize
+08-28 14:58:24.546 12737 12754 I ENN_FRAMEWORK: 2.2.29: * ENN Trace OFF
+08-28 14:58:24.548 12758 12758 I ENN_FRAMEWORK: 2.2.29: * [enn_aidl] Link monitor is set(12737)
+08-28 14:58:24.548 12758 12758 I ENN_FRAMEWORK: 2.2.29: * [enn_aidl] Wake Up Monitor thread.. 
+08-28 14:58:24.548 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::init->(0x31C1)
+08-28 14:58:24.548 12758 12758 I ENN_FRAMEWORK: 2.2.29: * A ClientProcess(ID: 0x31C100000000) is created.
+08-28 14:58:24.548 12758 12758 I ENN_FRAMEWORK: 2.2.29: * ClientProcess(ID: 0x31C100000000) is added: ClientProcess[1], Model[0], ExecutableModel[0], ExecuteRequest[0]
+08-28 14:58:24.548 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::init->(0x31C1)
+08-28 14:58:24.548 12758 12760 I ENN_FRAMEWORK: 2.2.29: * [ENN SERVICE] pid(12737): ref_cnt(1), status(0)
+08-28 14:58:24.548 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Context(0x70a17b9a78) ref_cnt(0x70a17b9a78)=1, Commit [2.2.28:1:gb0af9ffd], Version [2.2.29], AIDL , created context.
+08-28 14:58:24.548 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Initialized, set handler with signal 53
+08-28 14:58:24.548 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Model File: /data/user/0/com.projectnuke.keplerstudio/files/exynos_models/Real-ESRGAN-General-x4v3.nnc.session-0 load start
+08-28 14:58:24.548 12737 12754 I ENN_FRAMEWORK: 2.2.29: * FileDescriptorBufferReader fd(107) (size: 0 offset: 0)
+08-28 14:58:24.548 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Pref: (0,0,0) (1,7,0) (2,0,0) 
+08-28 14:58:24.550 12758 12758 I ENN_FRAMEWORK: 2.2.29: * [SUBMITTED] (0x890001,2592000) (0x880002,4206000) (0x880003,533000) 
+08-28 14:58:24.551 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnOpenFile() file load start : /data/user/0/com.projectnuke.keplerstudio/files/exynos_models/Real-ESRGAN-General-x4v3.nnc.session-0
+08-28 14:58:24.553 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnOpenFile() file load ended : /data/user/0/com.projectnuke.keplerstudio/files/exynos_models/Real-ESRGAN-General-x4v3.nnc.session-0
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::open_model
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: * NNC Model addr: 0x72650f5000, size: 3112960, fd: 11
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   [ 0] COMPILED_COMMAND: ./nncontainer-gen --compiler NPU --snc HW_real_esrgan_general_x4v3_new_snc_8.12.30.25.snc
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: --framework SNC --soc-type Root --input_conversion hw_cfu --output_conversion hw_icfu --chip_version EVT1 --schema_version v2 --dequant_type_hw_or_sw sw --quant_type_hw_or_sw sw --npuhw hardware_configuration.EVT1.xml
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: --npupass O2.json
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: --cast_hw_or_sw sw --multi_vc True -D enable_hw_cost_based_stratum=true -C enable_zero_skip=false --computational_workload 19809436 --enable_stm True --export_io_info 1 -o /home/user/eais-workspace/08505844-7e98-4d98-ad91-b843f84b760d/real_esrgan_general_x4v3/Compiler_result --tuning_config Config/nnc_graph_tiling.json 
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   [ 1] FRAMEWORK: SNC
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   [ 2] HW_CFU: true
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   [ 3] NAME: real_esrgan_general_x4v3_simplify_ncp.bin
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   [ 4] NCP_VERSION: 27
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   [ 5] NPUC_VERSION: v2.4.11.l
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   [10] SOC_TYPE: Root
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   Operator[ 0] (hw: 1) (code:   53) CAST
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   Operator[ 1] (hw: 4) (code: 1013) ENN_NPU
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: *   Operator[ 2] (hw: 1) (code:   53) CAST
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: * [SUBMITTED] (0x890001,2592000) (0x880002,4206000) (0x880003,533000) (0x900005,1) (0x900003,2048) 
+08-28 14:58:24.554 12758 12758 I ENN_FRAMEWORK: 2.2.29: * A Model(ID: 0x31C102000000) is created.
+08-28 14:58:24.555 12758 12792 I ENN_FRAMEWORK: 2.2.29: * (+) NpuUserDriver::OpenSubGraph(), model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.555 12758 12791 I ENN_FRAMEWORK: 2.2.29: * opr->code = 53 (CAST)
+08-28 14:58:24.555 12758 12792 I ENN_FRAMEWORK: 2.2.29: * FD Open :: model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.555 12758 12793 I ENN_FRAMEWORK: 2.2.29: * opr->code = 53 (CAST)
+08-28 14:58:24.555 12758 12792 I ENN_FRAMEWORK: 2.2.29: * VS4L BOOTUP :: model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.562 12758 12792 I ENN_FRAMEWORK: 2.2.29: * VS4L S_PARAM(MODE) :: model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.562 12758 12792 I ENN_FRAMEWORK: 2.2.29: * VS4L S_PARAM(SCHED_PARAM) :: model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.562 12758 12792 I ENN_FRAMEWORK: 2.2.29: * VS4L S_GRAPH :: model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.563 12758 12792 I ENN_FRAMEWORK: 2.2.29: * VS4L S_FORMAT :: model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.563 12758 12792 I ENN_FRAMEWORK: 2.2.29: * VS4L STREAM_ON :: model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.563 12758 12792 I ENN_FRAMEWORK: 2.2.29: * (-) NpuUserDriver::OpenSubGraph(), model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.563 12758 12758 I ENN_FRAMEWORK: 2.2.29: * Model(ID: 0x31C102000000) is added: ClientProcess[1], Model[1], ExecutableModel[0], ExecuteRequest[0]
+08-28 14:58:24.564 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::open_model->(0x31C102000000)
+08-28 14:58:24.564 12737 12754 I ENN_FRAMEWORK: 2.2.29: * -------------------- Model container :   1 --------------------
+08-28 14:58:24.564 12737 12754 I ENN_FRAMEWORK: 2.2.29: * # Session[0] Model_ID: 0x31C102000000 / 0x31C102000000 (buf: 4, reg: 4), /data/user/0/com.projectnuke.keplerstudio/files/exynos_models/Real-ESRGAN-General-x4v3.nnc.session-0
+08-28 14:58:24.564 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnOpenModel Success(0x31C102000000)
+08-28 14:58:24.564 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Buffer Commit: model_id(0x31C102000000), session_id(0) (+)
+08-28 14:58:24.564 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::commit_execution_data->(0x31C102000000)
+08-28 14:58:24.564 12758 12758 I ENN_FRAMEWORK: 2.2.29: * An ExecutableModel(ID: 0x31C102000002) from a Model(ID : 0x31C102000000) is created.
+08-28 14:58:24.564 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) NpuUserDriver::CommitSubGraph(), model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.564 12758 12758 I ENN_FRAMEWORK: 2.2.29: * NPU/DSP UD, validate fd(21) done, alloc_size(98304) shape_size(98304)
+08-28 14:58:24.564 12758 12758 I ENN_FRAMEWORK: 2.2.29: * NPU/DSP UD, validate fd(22) done, alloc_size(1572864) shape_size(1572864)
+08-28 14:58:24.576 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) NpuUserDriver::CommitSubGraph(), model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.577 12758 12758 I ENN_FRAMEWORK: 2.2.29: * ExecutableModel(ID: 0x31C102000002) is added: ClientProcess[1], Model[1], ExecutableModel[1], ExecuteRequest[0]
+08-28 14:58:24.577 12758 12758 I ENN_FRAMEWORK: 2.2.29: * An ExecuteRequest from an ExecutableModel(ID: 0x31C102000002) is created.
+08-28 14:58:24.577 12758 12758 I ENN_FRAMEWORK: 2.2.29: * ExecuteRequest from ExecutableModel(ID: 0x31C102000002) is added: ClientProcess[1], Model[1], ExecutableModel[1], ExecuteRequest[1]
+08-28 14:58:24.577 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::commit_execution_data->(0x31C102000000)
+08-28 14:58:24.577 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnBufferCommit: ExecModelID: 0x31C102000002 from mID 0x31C102000000, 0(-)
+08-28 14:58:24.577 12737 12754 I KeplerExynosUpscale: ENN session ready; compiler=27
+08-28 14:58:24.581 12737 12754 I ENN_FRAMEWORK: 2.2.29: * ExecuteModel: 0x31C102000000
+08-28 14:58:24.675 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnCloseModel : 0x31C102000000(+)
+08-28 14:58:24.676 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::close_model->(0x31C102000000)
+08-28 14:58:24.676 12758 12758 I ENN_FRAMEWORK: 2.2.29: * An ExecuteRequest from an ExecutableModel(ID: 0x31C102000002) is released.
+08-28 14:58:24.676 12758 12758 I ENN_FRAMEWORK: 2.2.29: * An ExecutableModel(ID: 0x31C102000002) from a Model(ID : 0x31C102000000) is released.
+08-28 14:58:24.676 12758 12758 I ENN_FRAMEWORK: 2.2.29: * + Unload Model(ID:0x0x31C102000000) Accelerator(1)
+08-28 14:58:24.676 12758 12758 I ENN_FRAMEWORK: 2.2.29: * - Unload Model(ID:0x0x31C102000000) Accelerator(1)
+08-28 14:58:24.676 12758 12758 I ENN_FRAMEWORK: 2.2.29: * + Unload Model(ID:0x0x31C102000000) Accelerator(4)
+08-28 14:58:24.676 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) NpuUserDriver::CloseSubGraph(), model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.688 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) NpuUserDriver::CloseSubGraph(), model_id(0x31C102000000), op_list_id(0x31C102000500)
+08-28 14:58:24.688 12758 12758 I ENN_FRAMEWORK: 2.2.29: * - Unload Model(ID:0x0x31C102000000) Accelerator(4)
+08-28 14:58:24.688 12758 12758 I ENN_FRAMEWORK: 2.2.29: * + Unload Model(ID:0x0x31C102000000) Accelerator(1)
+08-28 14:58:24.688 12758 12758 I ENN_FRAMEWORK: 2.2.29: * - Unload Model(ID:0x0x31C102000000) Accelerator(1)
+08-28 14:58:24.688 12758 12758 I ENN_FRAMEWORK: 2.2.29: * A Model(ID: 0x31C102000000) is released.
+08-28 14:58:24.692 12758 12758 I ENN_FRAMEWORK: 2.2.29: * Model(0x31C102000000) is released: ClientProcess[1], Model[0], ExecutableModel[0], ExecuteRequest[0]
+08-28 14:58:24.692 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::close_model->(0x31C102000000)
+08-28 14:58:24.692 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnCloseModel Success(0x31C102000000) (-)
+08-28 14:58:24.692 12737 12754 I ENN_FRAMEWORK: 2.2.29: * -------------------- Model container :   0 --------------------
+08-28 14:58:24.693 12737 12754 I ENN_FRAMEWORK: 2.2.29: * Context(0x70a17b9a78) ref_cnt(0x70a17b9a78)=0 , will delete context.. force_deinit(0)
+08-28 14:58:24.693 12758 12758 I libbinder.BpBinder: onLastStrongRef automatically unlinking death recipients for descriptor: 'vendor.samsung_slsi.hardware.enn_aidl.IEnnCallbackAidl'
+08-28 14:58:24.693 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (+) Engine::EngineImpl::deinit->(0x31C1)
+08-28 14:58:24.693 12758 12758 I ENN_FRAMEWORK: 2.2.29: * A ClientProcess(ID: 0x31C100000000) is released.
+08-28 14:58:24.693 12758 12758 I ENN_FRAMEWORK: 2.2.29: * ClientProcess(0x31C100000000) is released: ClientProcess[0], Model[0], ExecutableModel[0], ExecuteRequest[0]
+08-28 14:58:24.693 12758 12758 I ENN_FRAMEWORK: 2.2.29: * (-) Engine::EngineImpl::deinit->(0x31C1)
+08-28 14:58:24.694 12737 12754 I libbinder.BpBinder: onLastStrongRef automatically unlinking death recipients for descriptor: 'vendor.samsung_slsi.hardware.enn_aidl.IEnnInterfaceAidl'
+08-28 14:58:24.694 12737 12754 I ENN_FRAMEWORK: 2.2.29: * EnnDeinitialize
+08-28 14:58:28.715 12758 12758 I libbinder.AidlLazyServiceRegistrar: Process has 0 (of 1 available) client(s) in use after notification vendor.samsung_slsi.hardware.enn_aidl.IEnnInterfaceAidl/default has clients: 0

@@ -99,6 +99,12 @@ internal class ExynosUpscaleSession(
         get() = runDiagnosticsHistoryInternal.toList()
 
     /**
+     * Read-only N2 probe snapshot of the session-owned prepared model file while it is live.
+     * The caller must not retain, mutate, or delete the returned file; [close] owns cleanup.
+     */
+    internal fun preparedModelFileForDiagnostics(): File? = preparedModelFile
+
+    /**
      * Test-only seam for deterministic prepared-file deletion outcomes.
      * Production value is exactly `File.delete`.
      */

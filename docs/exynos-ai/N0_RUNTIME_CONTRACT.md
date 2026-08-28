@@ -132,7 +132,45 @@ the file still exists is `DeleteFailed`, never silently treated as clean. On `De
 the path is retained as session-owned cleanup debt until an explicit later `close()` retry; the
 session reference is never dropped while the file may physically remain.
 
-## 6. Exact NNC identity
+## 6. Active production NNC identity
+
+The active production asset is the FP16 variant supplied through the official Samsung
+model portal with `Chipset = Exynos 2400`. "FP16" identifies the compiled model variant;
+the verified external tensor interface remains FP32 and Kepler's FP32 CHW preprocessing is
+unchanged.
+
+| Field | Active FP16 production asset |
+|---|---|
+| Logical APK asset | `models/exynos/Real-ESRGAN-General-x4v3.nnc` |
+| Portal model | `Real_ESRGAN_General_x4v3` |
+| Source | Samsung official model portal |
+| Selected chipset | Exynos 2400 |
+| Variant | FP16 |
+| Byte size | 3,112,960 |
+| SHA-256 | `9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12` |
+| File header | `ENNC` |
+| Embedded compiler target | `--compiler NPU`, `--framework SNC`, `--soc-type Root`, `--chip_version EVT1`, `--schema_version v2` |
+| NPUC version | `v2.4.11.l` |
+| Embedded model name | `real_esrgan_general_x4v3_simplify` |
+| Input tensor | FLOAT32 CHW `1 x 3 x 128 x 128` |
+| Output tensor | FLOAT32 CHW `1 x 3 x 512 x 512` |
+
+### 6a. Deferred quantized comparison artifact
+
+The Samsung portal Quantized Exynos-2400 variant is recorded but deliberately not wired
+into production before FP16 N2A passes: 1,867,776 bytes, SHA-256
+`81968b6a2c6963f081c27d4c843c57ebd0de493d3bb7fa706f2872fdb8840196`,
+Root / EVT1, NPUC `v2.4.11.l`, `QUANT_MODE=ASYMM`, and FLOAT32 CHW external I/O
+`1 x 3 x 128 x 128` to `1 x 3 x 512 x 512`. No internal quantization bit-width is
+assumed without runtime or official artifact evidence.
+
+### 6b. Artifact-selection status
+
+The FP16 asset above supersedes the former GitHub sample for production and N2A. The
+historical sample is retained below solely to preserve the prior device rejection evidence;
+it is not an active model and must not be restored.
+
+## 6c. Rejected wrong-chipset sample (historical only)
 
 | Field | Value |
 |---|---|
@@ -164,7 +202,7 @@ The file is NOT corrupt, NOT a placeholder, and NOT dimensionally incompatible
 (input/output tensors remain 3×128×128 / 3×512×512 FP32). It is simply the wrong
 chipset variant.
 
-### 6c. Required action
+### Original required action (completed by the active FP16 repin)
 
 Replace the committed NNC with an **Exynos-2400-targeted variant** of
 `Real_ESRGAN_General_x4v3`. Samsung's model-detail page at S9 lists the model
@@ -176,8 +214,8 @@ downloaded artifact must be:
 - identical tensor contract (3×128×128 → 3×512×512 FP32) or updated accordingly
 - then re-pinned in `ModelAssetManifest` and this contract section
 
-Until the correct 2400 NNC is obtained, **N2 hardware PASS is blocked** on the
-missing artifact, not on any KeplerStudio code defect.
+This was the pre-repin hardware gate. The active FP16 portal artifact above now satisfies
+the missing-artifact prerequisite; N2A hardware results remain separately required.
 
 The user-reported earlier local download was searched for narrowly (Downloads, Desktop,
 project model dirs): **not found**; the official identical artifact above supersedes it.
