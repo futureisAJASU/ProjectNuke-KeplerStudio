@@ -126,6 +126,12 @@ internal class ExynosUpscaleSession(
     @Volatile
     internal var preD2hCheck: (suspend () -> Unit)? = null
 
+    /** Internal probe-only access to metadata from this session's currently loaded model. */
+    internal fun getEnnMetaInfo(metaId: Int): String? {
+        if (lifecycle != ModelRunnerLifecycle.Loaded || modelId == NO_MODEL_ID) return null
+        return native.getMetaInfo(metaId, modelId)
+    }
+
     suspend fun load(token: ValidatedModelCapabilityToken): ModelLoadResult<Unit> =
         withContext(ioDispatcher) {
             lifecycleMutex.withLock {
@@ -850,6 +856,51 @@ internal class ExynosRunDiagnostics {
     /** Stage whose native call threw before returning, if any. */
     @Volatile var throwableStage: String? = null
     @Volatile var throwableDetail: String? = null
+}
+
+internal enum class NpuProofStatus {
+    NOT_EXECUTED,
+    EXECUTION_FAILED,
+    EXECUTED_EVIDENCE_INCOMPLETE,
+    OBSERVED,
+}
+
+internal data class NpuProofDecision(
+    val ennExecuteObserved: Boolean,
+    val npuExecutionObserved: Boolean,
+    val status: NpuProofStatus,
+)
+
+internal fun decideNpuProof(
+    executeReached: Boolean,
+    executeStatus: Int?,
+    compilerNpu: String?,
+): NpuProofDecision {
+    if (!executeReached) return NpuProofDecision(false, false, NpuProofStatus.NOT_EXECUTED)
+    if (executeStatus != EnnStatus.SUCCESS) {
+        return NpuProofDecision(false, false, NpuProofStatus.EXECUTION_FAILED)
+    }
+    val positiveIdentity = !compilerNpu.isNullOrBlank() && !compilerNpu.equals("unavailable", ignoreCase = true)
+    return NpuProofDecision(
+        ennExecuteObserved = true,
+        npuExecutionObserved = positiveIdentity,
+        status = if (positiveIdentity) NpuProofStatus.OBSERVED else NpuProofStatus.EXECUTED_EVIDENCE_INCOMPLETE,
+    )
+}
+
+internal fun npuProofAcceptanceFailure(
+    decision: NpuProofDecision,
+    earlierFailure: Throwable?,
+): AssertionError? {
+    if (earlierFailure != null || decision.status == NpuProofStatus.OBSERVED) return null
+    val detail = when (decision.status) {
+        NpuProofStatus.NOT_EXECUTED -> "EnnExecuteModel was not reached"
+        NpuProofStatus.EXECUTION_FAILED -> "EnnExecuteModel did not return ENN_RET_SUCCESS"
+        NpuProofStatus.EXECUTED_EVIDENCE_INCOMPLETE ->
+            "EnnExecuteModel succeeded but MODEL_COMPILER_NPU identity was unavailable"
+        NpuProofStatus.OBSERVED -> error("unreachable")
+    }
+    return AssertionError("N2 accelerator proof incomplete: $detail")
 }
 
 internal data class ProbeReportFinalization(

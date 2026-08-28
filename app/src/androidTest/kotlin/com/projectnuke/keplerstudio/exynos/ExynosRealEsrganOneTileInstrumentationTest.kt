@@ -21,9 +21,12 @@ import com.projectnuke.keplerstudio.editor.ModelFeature
 import com.projectnuke.keplerstudio.editor.ModelLoadResult
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ModelRunResult
+import com.projectnuke.keplerstudio.editor.NpuProofStatus
 import com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken
+import com.projectnuke.keplerstudio.editor.decideNpuProof
 import java.io.File
 import java.io.FileOutputStream
+import com.projectnuke.keplerstudio.editor.npuProofAcceptanceFailure
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
@@ -376,23 +379,26 @@ class ExynosRealEsrganOneTileInstrumentationTest {
 
             val metaInfo = metadata.optJSONObject("npu_meta_info") ?: JSONObject()
             val compilerNpu = metaInfo.optString("compiler_npu", "unavailable")
-            val positiveNpuIdentity = compilerNpu.isNotBlank() && !compilerNpu.equals("unavailable", ignoreCase = true)
-            val ennExecuteObserved = executeSucceeded
-            metadata.put("enn_execute_observed", ennExecuteObserved)
+            val executeAttempt = runDiagnostics.firstOrNull { it.executeReached && it.executeStatus == EnnStatus.SUCCESS }
+                ?: runDiagnostics.firstOrNull { it.executeReached }
+            val proofDecision = decideNpuProof(
+                executeReached = executeAttempt != null,
+                executeStatus = executeAttempt?.executeStatus,
+                compilerNpu = compilerNpu,
+            )
+            metadata.put("enn_execute_observed", proofDecision.ennExecuteObserved)
             metadata.put("accelerator_evidence", metaInfo)
-            if (!executeAttempted) {
-                metadata.put("npu_execution_observed", false)
-                metadata.put("npu_proof_status", "NOT_EXECUTED")
-            } else if (ennExecuteObserved && positiveNpuIdentity) {
-                metadata.put("npu_execution_observed", true)
-                metadata.put("npu_proof_status", "OBSERVED")
-                metadata.put(
-                    "npu_proof",
-                    "EnnExecuteModel returned ENN_RET_SUCCESS and MODEL_COMPILER_NPU provided positive identity",
-                )
-            } else {
-                metadata.put("npu_execution_observed", false)
-                metadata.put("npu_proof_status", "EXECUTED_EVIDENCE_INCOMPLETE")
+            metadata.put("npu_execution_observed", proofDecision.npuExecutionObserved)
+            metadata.put("npu_proof_status", proofDecision.status.name)
+            if (proofDecision.status == NpuProofStatus.OBSERVED) {
+                metadata.put("npu_proof", "EnnExecuteModel returned ENN_RET_SUCCESS and MODEL_COMPILER_NPU provided positive identity")
+            }
+            val proofFailure = npuProofAcceptanceFailure(proofDecision, testFailure ?: closeFailure)
+            if (proofFailure != null) {
+                metadata.put("status", "FAILED")
+                metadata.put("failure_stage", "npu_proof")
+                metadata.put("failure_class", proofFailure.javaClass.simpleName)
+                metadata.put("failure_message", proofFailure.message ?: "N2 accelerator proof incomplete")
             }
 
             val capabilityAfter = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]
@@ -401,7 +407,7 @@ class ExynosRealEsrganOneTileInstrumentationTest {
 
             val report = finalizeProbeReport(
                 writeReport = { File(reportDir, "metadata.json").writeText(metadata.toString(2)) },
-                originalFailure = testFailure,
+                originalFailure = testFailure ?: proofFailure,
                 closeFailure = closeFailure,
             )
             if (report.persisted) println("EXYNOS_NPU_PROBE_REPORT=${reportDir.absolutePath}")
@@ -441,24 +447,13 @@ class ExynosRealEsrganOneTileInstrumentationTest {
         val metaJson = JSONObject()
         var reflectionError: String? = null
         try {
-            val modelIdField = session::class.java.getDeclaredField("modelId").apply { isAccessible = true }
-            val modelId = modelIdField.getLong(session)
-            if (modelId > 0) {
-                val nativeField =
-                    session::class.java.getDeclaredField("native").apply { isAccessible = true }
-                val nativeInstance = nativeField.get(session)
-                val getMetaInfoMethod =
-                    nativeInstance::class.java.getMethod("getMetaInfo", Int::class.java, Long::class.java)
-                metaIds.forEach { (id, name) ->
-                    try {
-                        val meta = getMetaInfoMethod.invoke(nativeInstance, id, modelId) as? String
-                        metaJson.put(name, if (meta.isNullOrBlank()) "unavailable" else meta)
-                    } catch (e: Exception) {
-                        metaJson.put(name, "unavailable")
-                    }
+            metaIds.forEach { (id, name) ->
+                try {
+                    val meta = session.getEnnMetaInfo(id)
+                    metaJson.put(name, if (meta.isNullOrBlank()) "unavailable" else meta)
+                } catch (e: Exception) {
+                    metaJson.put(name, "unavailable")
                 }
-            } else {
-                reflectionError = "modelId not set (load failed)"
             }
         } catch (e: Exception) {
             reflectionError = e.message ?: e.javaClass.simpleName

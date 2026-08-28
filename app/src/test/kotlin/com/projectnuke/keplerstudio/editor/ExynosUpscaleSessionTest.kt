@@ -1103,6 +1103,40 @@ class ExynosUpscaleSessionTest {
         assertTrue(original.suppressed.contains(writeFailure))
     }
 
+    @Test
+    fun npuProofDecisionRequiresExecuteSuccessAndPositiveCompilerIdentity() {
+        val notExecuted = decideNpuProof(false, null, "compiler")
+        assertEquals(NpuProofStatus.NOT_EXECUTED, notExecuted.status)
+        assertNull(npuProofAcceptanceFailure(notExecuted, AssertionError("earlier")))
+
+        val noMeta = decideNpuProof(true, EnnStatus.SUCCESS, null)
+        assertEquals(NpuProofStatus.EXECUTED_EVIDENCE_INCOMPLETE, noMeta.status)
+        assertNotNull(npuProofAcceptanceFailure(noMeta, null))
+
+        assertEquals(NpuProofStatus.EXECUTED_EVIDENCE_INCOMPLETE, decideNpuProof(true, EnnStatus.SUCCESS, "").status)
+        assertEquals(NpuProofStatus.EXECUTED_EVIDENCE_INCOMPLETE, decideNpuProof(true, EnnStatus.SUCCESS, "unavailable").status)
+        assertEquals(NpuProofStatus.OBSERVED, decideNpuProof(true, EnnStatus.SUCCESS, "npu-compiler-1").status)
+        assertNull(npuProofAcceptanceFailure(decideNpuProof(true, EnnStatus.SUCCESS, "npu-compiler-1"), null))
+        assertEquals(NpuProofStatus.EXECUTION_FAILED, decideNpuProof(true, EnnStatus.IO, "npu-compiler-1").status)
+    }
+
+    @Test
+    fun proofFailureIsPersistedBeforeItBecomesTerminalAndWriteFailureIsSuppressed() {
+        val proofFailure = npuProofAcceptanceFailure(
+            decideNpuProof(true, EnnStatus.SUCCESS, "unavailable"),
+            null,
+        )!!
+        var persisted = false
+        val finalized = finalizeProbeReport({ persisted = true }, proofFailure, null)
+        assertTrue(persisted)
+        assertEquals(proofFailure, finalized.primaryFailure)
+
+        val writeFailure = IOException("report unavailable")
+        val failed = finalizeProbeReport({ throw writeFailure }, proofFailure, null)
+        assertEquals(proofFailure, failed.primaryFailure)
+        assertTrue(proofFailure.suppressed.contains(writeFailure))
+    }
+
     // Prepared-file deletion outcome classification (deterministic seam).
     @Test
     fun preparedFileDeletionOutcomeClassificationIsTruthful() {
