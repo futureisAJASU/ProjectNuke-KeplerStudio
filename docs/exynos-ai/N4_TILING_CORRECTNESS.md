@@ -1,7 +1,11 @@
 # N4 Tiling Correctness — Full-Image Tiling / Seam Correctness
 
 Phase: N4 — Full-Image Tiling / Seam Correctness (KeplerStudio)
-Document status: FINAL (host-proven gates closed; device gates pending physical S24)
+Real HEAD: `46c7ea89e786e51fb4a79e7bde1bef397fc40a19` (base `9e5e349e77c9b94cf03f675f2b7942fc667810bd`)
+
+N4 HOST GATE: PASS
+N4 DEVICE GATE: PENDING
+N4 FINAL GATE: OPEN
 
 ---
 
@@ -132,7 +136,17 @@ The following canonical fixtures were generated, committed as exact CHW FP32 inp
 | noise_301x227 | deterministic noise | 301 × 227 | 4 × 3 | 12 |
 | mixed_301x227 | mixed photo-like | 301 × 227 | 4 × 3 | 12 |
 
-**Total**: 25 fixtures, 4 → 16 tiles each, 248 tiles across the corpus. All inputs are exact, deterministic, CHW FP32, committed under `app/src/androidTest/assets/exynos_n4/` with SHA-256 hashes in `n4_fixtures_manifest.json`.
+**Total**: 25 fixtures, 4 → 16 tiles each, **280 tiles** across the corpus:
+
+| Sized group | Tiles each | Count | Subtotal |
+|---|---:|---:|---:|
+| 188 × 188 | 4 | 5 | 20 |
+| 257 × 191 | 12 | 5 | 60 |
+| 191 × 257 | 12 | 5 | 60 |
+| 257 × 257 | 16 | 5 | 80 |
+| 301 × 227 | 12 | 5 | 60 |
+
+Warm-up and decomposition reruns are additional executions and are **not** counted in this 280. All inputs are exact, deterministic, CHW FP32, committed under `app/src/androidTest/assets/exynos_n4/` with SHA-256 hashes in `n4_fixtures_manifest.json`.
 
 **Status**: The instrumentation test compiles and is ready to run on a retail Galaxy S24 (Exynos 2400). Device run is pending physical access; host-proven geometry is complete.
 
@@ -222,7 +236,7 @@ These are captured by the instrumentation test and reported in the per-fixture t
 | `compileDebugKotlin` | PASS |
 | `compileDebugUnitTestKotlin` | PASS |
 | `compileDebugAndroidTestKotlin` | PASS |
-| `testDebugUnitTest` (×2) | PASS — **all 1073+ unit tests pass** (new: `TilePlannerTest`, `TileInferenceOrchestratorTest`, plus session refactor) |
+| `testDebugUnitTest` (×2) | PASS — **all 1091 unit tests pass** (1090 baseline + `TileInferenceOrchestratorTest.nativeExecuteThrowOnInteriorTileIsTotalAndCapturesStage`) |
 | `lintDebug` | PASS |
 | `assembleDebug` | PASS |
 | `assembleDebugAndroidTest` | PASS |
@@ -239,6 +253,12 @@ Static review (N4.21) confirmed:
 - **Memory**: N4 bounded test path not falsely advertised as unrestricted production.
 - **N3 integrity**: FP16 NNC SHA unchanged (`9cff7af6...`), GENERAL identity unchanged, rounding fix retained.
 
+### Git footprint note (reproducible tensors removed)
+
+The ~982 MiB of deterministic-seeded raw reference tensors (`artifacts/exynos-n4-reference-20260829/reference/{full,tiled}/*.f32le|*.npy`) were removed from the active Git tree. `.gitignore` now excludes regenerated N4 raw reference directories (`artifacts/exynos-n4-reference-*/reference/{full,tiled}/`). The canonical inputs are deterministic and `n4_reference.py` regenerates them on demand, so the durable small evidence (manifest, checkpoint identity/hash, scripts, `halo_sweep.json`/`halo_summary.csv`, heatmaps) is sufficient.
+
+This **does not** shrink the existing Git pack: those blob bytes remain in pack history. Destructive history rewriting was deliberately **not** performed in this phase.
+
 ---
 
 ## 11. Conclusion
@@ -254,14 +274,23 @@ Static review (N4.21) confirmed:
 | Seam-band error contains no localized penalty beyond compiler drift | **PENDING S24** (host tiling drift = 0 proven) |
 | Outer borders/corners correct | **PENDING S24** (host geometry proven) |
 | Cancellation/failure cannot publish partial success | PASS (host fake backend) |
+| Native-throw regression (interior tile native execute throws) | PASS (host fake backend) |
+| Fixture input SHA-256 hard gate (corrupt APK asset fails) | PASS (instrumented gate) |
+| Decomposition tile silent-skip removed (fail + count assert) | PASS (instrumented gate) |
+| Close settles all native steps + registry not session-active | PASS (instrumented gate) |
+| General reference identity enforced fail-closed (never mix weights) | PASS (compare_n4.py gate) |
 | Repeated operation lifecycle-safe | PASS (host fake backend) |
 | All host regressions/build gates green | PASS |
 | Limitations around giant full-image memory explicitly preserved | PASS (documented) |
 
-**Device gates (N4.12–N4.17)** require a retail Galaxy S24 (Exynos 2400) and are **externally blocked** pending physical access. The instrumentation test, host reference corpus, comparison scripts, and all scaffolding are complete and ready.
+**Device gates (N4.12–N4.17)** require a retail Galaxy S24 (Exynos 2400): the physical 280-tile FP16 corpus, real GENERAL-vs-NNC seam metrics, error decomposition, and positive NPU proof. They are **externally blocked** and remain **PENDING**; the instrumentation test, host reference tooling, comparison scripts, and all scaffolding are ready.
 
-**Next phase**: **N5 Bounded-Memory Full-Image Execution / Streaming Sink** — address full-resolution output streaming, memory-bounded sinks, backpressure, and endurance.
+The large deterministic-seeded raw reference tensors have been removed from the active Git tree and `.gitignore` now excludes regenerated N4 raw reference directories. See the note below; the earlier blob bytes remain in existing Git pack history.
+
+**Next phase**: **N5 Bounded-Memory Full-Image Execution / Streaming Sink** — address full-resolution output streaming, memory-bounded sinks, backpressure, and endurance. Do not begin N5 until the N4 device gate closes.
 
 ---
 
-**N4 FULL-IMAGE TILING / SEAM CORRECTNESS: HOST-PROVEN GATES CLOSED; DEVICE GATES EXTERNALLY BLOCKED.**
+**N4 HOST GATE: PASS — N4 DEVICE GATE: PENDING — N4 FINAL GATE: OPEN.**
+
+Only after every physical S24 condition passes may the final acceptance read `N4 FULL-IMAGE TILING / SEAM CORRECTNESS: PASS`.

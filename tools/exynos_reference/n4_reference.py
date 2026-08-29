@@ -37,6 +37,15 @@ sys.path.insert(0, os.path.join(THIS_DIR, "shim"))
 sys.path.insert(0, os.path.join(THIS_DIR, "upstream"))
 
 from halo_sweep import build_model, init_deterministic, plan_axis, tiled_assembly  # noqa: E402
+from checkpoint_identity import (  # noqa: E402
+    GENERAL_CHECKPOINT_SHA256,
+    GENERAL_CHECKPOINT_FILENAME,
+    UPSTREAM_COMMIT,
+    ARCHITECTURE,
+    STATE_DICT_KEY,
+    WEIGHTS_IDENTITY_GENERAL,
+    WEIGHTS_IDENTITY_GEOMETRY,
+)
 
 HALO = 34
 C = 3
@@ -62,20 +71,43 @@ def main():
     args = ap.parse_args()
 
     model = build_model()
-    if args.weights_dir and os.path.exists(os.path.join(args.weights_dir, "realesr-general-x4v3.pth")):
-        d = torch.load(os.path.join(args.weights_dir, "realesr-general-x4v3.pth"), map_location="cpu", weights_only=True)
-        key = "params_ema" if "params_ema" in d else "params"
-        model.load_state_dict(d[key], strict=True)
+    weights_identity = WEIGHTS_IDENTITY_GEOMETRY
+    weights_note = "deterministic seeded (20260828) - geometry only; run with --weights-dir for GENERAL"
+    checkpoint_sha256 = None
+    state_dict_key = STATE_DICT_KEY
+    if args.weights_dir:
+        ckpt_path = os.path.join(args.weights_dir, GENERAL_CHECKPOINT_FILENAME)
+        if not os.path.exists(ckpt_path):
+            raise SystemExit(
+                f"--weights-dir {args.weights_dir!r} does not contain "
+                f"{GENERAL_CHECKPOINT_FILENAME}; cannot produce a GENERAL reference"
+            )
+        checkpoint_sha256 = sha256_file(ckpt_path)
+        if checkpoint_sha256 != GENERAL_CHECKPOINT_SHA256:
+            raise SystemExit(
+                f"checkpoint identity mismatch: {GENERAL_CHECKPOINT_FILENAME} hashed to "
+                f"{checkpoint_sha256}, expected {GENERAL_CHECKPOINT_SHA256}; refusing to "
+                f"generate a reference from a non-pinned GENERAL checkpoint"
+            )
+        d = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        state_dict_key = "params_ema" if "params_ema" in d else "params"
+        model.load_state_dict(d[state_dict_key], strict=True)
+        weights_identity = WEIGHTS_IDENTITY_GENERAL
         weights_note = "GENERAL checkpoint"
     else:
         init_deterministic(model)
-        weights_note = "deterministic seeded (20260828) - geometry only; run with --weights-dir for GENERAL"
 
     manifest = json.load(open(os.path.join(args.fixtures_dir, "n4_fixtures_manifest.json")))
     ref_manifest = {
         "weights": weights_note,
+        "weights_identity": weights_identity,
         "halo": HALO,
-        "architecture": "SRVGGNetCompact(num_in_ch=3,num_out_ch=3,num_feat=64,num_conv=32,upscale=4,act_type=prelu)",
+        "architecture": ARCHITECTURE,
+        "upstream_commit": UPSTREAM_COMMIT,
+        "checkpoint_filename": GENERAL_CHECKPOINT_FILENAME,
+        "general_checkpoint_sha256": GENERAL_CHECKPOINT_SHA256,
+        "checkpoint_sha256": checkpoint_sha256,
+        "state_dict_key": state_dict_key,
         "fixtures": {},
     }
 

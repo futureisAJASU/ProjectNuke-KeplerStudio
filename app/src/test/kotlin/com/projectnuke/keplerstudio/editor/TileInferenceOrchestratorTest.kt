@@ -70,6 +70,9 @@ class TileInferenceOrchestratorTest {
         val closeModelCalls = AtomicInteger()
         val deinitializeCalls = AtomicInteger()
 
+        /** When set to a call index >= 0, native execute throws before returning at that call. */
+        var executeThrowAtCall: Int = -1
+
         var outputFiller: ((callIndex: Int, ByteArray) -> Unit)? = null
         var executeGate: CompletableDeferred<Unit>? = null
         var executeStarted: CompletableDeferred<Unit>? = null
@@ -115,6 +118,7 @@ class TileInferenceOrchestratorTest {
             val call = executeCalls.getAndIncrement()
             executeStarted?.complete(Unit)
             executeGate?.let { gate -> runBlocking { gate.await() } }
+            if (call == executeThrowAtCall) throw IllegalStateException("native execute boom")
             return executeStatuses[minOf(call, executeStatuses.size - 1)]
         }
 
@@ -328,6 +332,30 @@ class TileInferenceOrchestratorTest {
         } finally {
             session.close()
         }
+    }
+
+    @Test
+    fun nativeExecuteThrowOnInteriorTileIsTotalAndCapturesStage() = runBlocking {
+        val enn = FakeEnn().apply { executeThrowAtCall = 1 }
+        val session = session(enn)
+        try {
+            assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+            val orchestrator = TileInferenceOrchestrator(session)
+            val result = orchestrator.upscaleRaw(sourceBytes(257, 128), 257, 128, ModelOperationContext(1L, "g1"))
+            assertTrue("expected Failure, got $result", result is TiledUpscaleResult.Failure)
+            result as TiledUpscaleResult.Failure
+            assertEquals(TileFailureReason.NativeThrew, result.reason)
+            assertEquals(1, result.failedTileIndex)
+            assertEquals(1, result.completedTiles)
+            // Tile 0 succeeds; tile 1 enters native execute then throws; tiles 2+ never run.
+            assertEquals(2, enn.executeCalls.get())
+            assertEquals("throwing stage must be captured as execute", "execute", session.lastRunDiagnostics.throwableStage)
+            assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
+        } finally {
+            session.close()
+        }
+        assertTrue(enn.closeModelCalls.get() >= 1)
+        assertTrue(enn.deinitializeCalls.get() >= 1)
     }
 
     @Test

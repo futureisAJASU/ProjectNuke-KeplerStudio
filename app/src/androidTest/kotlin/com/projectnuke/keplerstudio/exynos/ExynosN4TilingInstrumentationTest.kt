@@ -150,6 +150,10 @@ class ExynosN4TilingInstrumentationTest {
                     val assembled = runOne(session, reportDir, fixture, operationContext, fixture.name, perTile, timing, saveTiles)
                     fj.put("assembled_output_sha256", assembled.outputSha256)
                     fj.put("assembled_output_bytes", assembled.outputBytes)
+                    fj.put("actual_input_sha256", assembled.actualInputSha256)
+                    if (assembled.decompTilesSaved >= 0) {
+                        fj.put("decomposition_tiles_saved", assembled.decompTilesSaved)
+                    }
                     fj.put("tiles", perTile)
                     fj.put("timing_ms", timing)
                     fixturesJson.put(fj)
@@ -161,6 +165,13 @@ class ExynosN4TilingInstrumentationTest {
                 session.close()
                 val teardown = checkNotNull(session.lastTeardownResult)
                 assertTrue("close must settle all attempted native steps", teardown.allAttemptedSucceeded)
+                val sessionActiveAfterClose =
+                    ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive
+                assertTrue(
+                    "ExynosUpscale must not remain session-active after close (state=$sessionActiveAfterClose)",
+                    sessionActiveAfterClose != true,
+                )
+                metadata.put("registry_session_active_after_close", sessionActiveAfterClose ?: false)
                 metadata.put("close", "PASS")
                 metadata.put("status", "PASS")
             } catch (t: Throwable) {
@@ -224,7 +235,12 @@ class ExynosN4TilingInstrumentationTest {
         }
     }
 
-    private data class AssembledInfo(val outputSha256: String, val outputBytes: Long)
+    private data class AssembledInfo(
+        val outputSha256: String,
+        val outputBytes: Long,
+        val actualInputSha256: String,
+        val decompTilesSaved: Int = -1,
+    )
 
     private suspend fun runOne(
         session: ExynosUpscaleSession,
@@ -237,6 +253,12 @@ class ExynosN4TilingInstrumentationTest {
         saveTiles: Boolean,
     ): AssembledInfo {
         val inputBytes = testContext.assets.open("exynos_n4/${fixture.name}_input.f32le").use { it.readBytes() }
+        val actualInputSha = sha256Bytes(inputBytes)
+        assertEquals(
+            "stale/corrupt test asset for ${fixture.name}: input bytes diverge from the pinned fixture SHA",
+            fixture.inputSha256,
+            actualInputSha,
+        )
         val orchestrator = TileInferenceOrchestrator(session)
 
         val started = SystemClock.elapsedRealtimeNanos()
@@ -278,9 +300,11 @@ class ExynosN4TilingInstrumentationTest {
             }
         }
 
+        var decompTilesSaved = -1
         if (saveTiles) {
             val tilesDir = File(reportDir, "tiles/${fixture.name}").apply { mkdirs() }
-            saveDecompositionTiles(session, tilesDir, inputBytes, fixture.width, fixture.height, operationContext, label)
+            decompTilesSaved =
+                saveDecompositionTiles(session, tilesDir, inputBytes, fixture.width, fixture.height, operationContext, label)
         }
 
         if (timingJson != null) {
@@ -290,7 +314,7 @@ class ExynosN4TilingInstrumentationTest {
             timingJson.put("assembly_ms", (totalNanos - totalInferenceNanos) / 1_000_000L)
         }
 
-        return AssembledInfo(outSha, outFile.length())
+        return AssembledInfo(outSha, outFile.length(), actualInputSha, decompTilesSaved)
     }
 
     private suspend fun saveDecompositionTiles(
@@ -301,17 +325,42 @@ class ExynosN4TilingInstrumentationTest {
         height: Int,
         operationContext: ModelOperationContext,
         label: String,
-    ) {
+    ): Int {
         val plan = com.projectnuke.keplerstudio.editor.TilePlanner.plan(width, height)
-        if (plan !is com.projectnuke.keplerstudio.editor.TilePlanResult.Planned) return
+        if (plan !is com.projectnuke.keplerstudio.editor.TilePlanResult.Planned) {
+            throw AssertionError("decomposition fixture ${width}x$height must produce a tiled plan")
+        }
+        val expected = plan.plan.tiles.size
+        var saved = 0
         for (tile in plan.plan.tiles) {
             val tileInput =
                 TileInferenceOrchestrator.extractChwSubTile(inputBytes, width, height, tile.source.left, tile.source.top)
             val raw = session.runRawFp32Chw(tileInput, operationContext, "$label/decomp-tile-${tile.index}")
-            if (!raw.succeeded) continue
+            if (!raw.succeeded) {
+                val stage = raw.throwableStage
+                val detail =
+                    when {
+                        raw.threw -> raw.throwableDetail ?: "native threw"
+                        raw.h2dStatus != EnnStatus.SUCCESS -> "H2D status=${raw.h2dStatus?.let(EnnStatus::describe)}"
+                        raw.executeStatus != EnnStatus.SUCCESS -> "execute status=${raw.executeStatus?.let(EnnStatus::describe)}"
+                        raw.d2hStatus != EnnStatus.SUCCESS -> "D2H status=${raw.d2hStatus?.let(EnnStatus::describe)}"
+                        else -> "no output bytes produced"
+                    }
+                throw AssertionError(
+                    "decomposition tile ${tile.index} of $label did not succeed " +
+                        "(stage=$stage detail=$detail); all $expected planned tiles must persist",
+                )
+            }
             File(tilesDir, "tile_${tile.index}_input.f32le").writeBytes(tileInput)
             File(tilesDir, "tile_${tile.index}_output.f32le").writeBytes(checkNotNull(raw.outputBytes))
+            saved++
         }
+        assertEquals(
+            "saved decomposition tile count must equal the planned tile count for $label",
+            expected,
+            saved,
+        )
+        return saved
     }
 
     private inner class N4Fixture(val name: String, val width: Int, val height: Int, val inputSha256: String)

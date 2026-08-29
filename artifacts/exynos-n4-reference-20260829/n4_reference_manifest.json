@@ -1,205 +1,162 @@
 {
   "weights": "deterministic seeded (20260828) - geometry only; run with --weights-dir for GENERAL",
+  "weights_identity": "deterministic-seeded-geometry-only",
   "halo": 34,
   "architecture": "SRVGGNetCompact(num_in_ch=3,num_out_ch=3,num_feat=64,num_conv=32,upscale=4,act_type=prelu)",
+  "upstream_commit": "a4abfb2979a7bbff3f69f58f58ae324608821e27",
+  "checkpoint_filename": "realesr-general-x4v3.pth",
+  "general_checkpoint_sha256": "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+  "checkpoint_sha256": null,
+  "state_dict_key": "params",
+  "raw_reference_tensors": "removed from active tree (regenerate via n4_reference.py --weights-dir)",
   "fixtures": {
     "smooth_188x188": {
       "width": 188,
       "height": 188,
-      "full_raw_sha256": "81a5654f5d23e1231025a54660ab0c0a189fd14369c70c0bce4a5b68d27b97c9",
-      "tiled_raw_sha256": "81a5654f5d23e1231025a54660ab0c0a189fd14369c70c0bce4a5b68d27b97c9",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "seam_stress_188x188": {
       "width": 188,
       "height": 188,
-      "full_raw_sha256": "a3ac2dee73ad7a86a37ebba5c782b574bca95ebd18d16fd6892662bcc7f057a0",
-      "tiled_raw_sha256": "a3ac2dee73ad7a86a37ebba5c782b574bca95ebd18d16fd6892662bcc7f057a0",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "high_frequency_188x188": {
       "width": 188,
       "height": 188,
-      "full_raw_sha256": "80c2a5d6fc0cbdd7a82cdbbcc1bd271beb1ab67d93c79d8c4a12b8d3164be663",
-      "tiled_raw_sha256": "80c2a5d6fc0cbdd7a82cdbbcc1bd271beb1ab67d93c79d8c4a12b8d3164be663",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "noise_188x188": {
       "width": 188,
       "height": 188,
-      "full_raw_sha256": "2bb5c0c46c944f8ab836b96daa2e46da6aa990c19ddff5ee6816fdd09605d2f7",
-      "tiled_raw_sha256": "2bb5c0c46c944f8ab836b96daa2e46da6aa990c19ddff5ee6816fdd09605d2f7",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "mixed_188x188": {
       "width": 188,
       "height": 188,
-      "full_raw_sha256": "8143d926db557f533518ef36c157073403ba230443d1afb602570c3a104c6aae",
-      "tiled_raw_sha256": "8143d926db557f533518ef36c157073403ba230443d1afb602570c3a104c6aae",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "smooth_257x191": {
       "width": 257,
       "height": 191,
-      "full_raw_sha256": "773dce10a5a1472c59b177b377a10e71c8d2f0d8d368429a9a87ebf900fb69c0",
-      "tiled_raw_sha256": "773dce10a5a1472c59b177b377a10e71c8d2f0d8d368429a9a87ebf900fb69c0",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "seam_stress_257x191": {
       "width": 257,
       "height": 191,
-      "full_raw_sha256": "d13be01b379e232de46bdc496f775b942868e4055412dcc2c68c7a26ac7e29e4",
-      "tiled_raw_sha256": "d13be01b379e232de46bdc496f775b942868e4055412dcc2c68c7a26ac7e29e4",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "high_frequency_257x191": {
       "width": 257,
       "height": 191,
-      "full_raw_sha256": "a6814c66b373bf5fa2113f04897ef7db727cfd878c48e6110f2a310dc2896daf",
-      "tiled_raw_sha256": "a6814c66b373bf5fa2113f04897ef7db727cfd878c48e6110f2a310dc2896daf",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "noise_257x191": {
       "width": 257,
       "height": 191,
-      "full_raw_sha256": "67bda1ed50ca829e02c1dc1b7de60103893764ff3c16f10eae024a5663eda619",
-      "tiled_raw_sha256": "67bda1ed50ca829e02c1dc1b7de60103893764ff3c16f10eae024a5663eda619",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "mixed_257x191": {
       "width": 257,
       "height": 191,
-      "full_raw_sha256": "11ce126b0d7ef46e2008fd5e93ff999803a23bb42092f4340ac051f90658e4d0",
-      "tiled_raw_sha256": "11ce126b0d7ef46e2008fd5e93ff999803a23bb42092f4340ac051f90658e4d0",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "smooth_191x257": {
       "width": 191,
       "height": 257,
-      "full_raw_sha256": "53f148e79c99e74a41437d3ff2622fe799a6698f0c5f70550dda79f4ad374e6f",
-      "tiled_raw_sha256": "53f148e79c99e74a41437d3ff2622fe799a6698f0c5f70550dda79f4ad374e6f",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "seam_stress_191x257": {
       "width": 191,
       "height": 257,
-      "full_raw_sha256": "2fc0be01e552473224c439293da2351d5b163345ba9fc1d132dab712a1c3ebee",
-      "tiled_raw_sha256": "2fc0be01e552473224c439293da2351d5b163345ba9fc1d132dab712a1c3ebee",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "high_frequency_191x257": {
       "width": 191,
       "height": 257,
-      "full_raw_sha256": "abad8e3c3c04f0a38c7f512914d5bec63cdfc4a1d72df34d26047120349c00c3",
-      "tiled_raw_sha256": "abad8e3c3c04f0a38c7f512914d5bec63cdfc4a1d72df34d26047120349c00c3",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "noise_191x257": {
       "width": 191,
       "height": 257,
-      "full_raw_sha256": "69591b7da03973f48b99d7d2fd2d4ba61a3178907703f1643179bcba104553aa",
-      "tiled_raw_sha256": "69591b7da03973f48b99d7d2fd2d4ba61a3178907703f1643179bcba104553aa",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "mixed_191x257": {
       "width": 191,
       "height": 257,
-      "full_raw_sha256": "640b775d283445d26d5099a7bb62a0684d74c47e59987b9489f5cb7b47a7df33",
-      "tiled_raw_sha256": "640b775d283445d26d5099a7bb62a0684d74c47e59987b9489f5cb7b47a7df33",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "smooth_257x257": {
       "width": 257,
       "height": 257,
-      "full_raw_sha256": "cdc4e825c233af8f5c22f88ba9f08f4525ced58ea5e531c79c540694e157862e",
-      "tiled_raw_sha256": "cdc4e825c233af8f5c22f88ba9f08f4525ced58ea5e531c79c540694e157862e",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "seam_stress_257x257": {
       "width": 257,
       "height": 257,
-      "full_raw_sha256": "6dc3ddc92d80bd2241d196b031b7af9c4b776639efd43f5249a9e4d88ad1897e",
-      "tiled_raw_sha256": "6dc3ddc92d80bd2241d196b031b7af9c4b776639efd43f5249a9e4d88ad1897e",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "high_frequency_257x257": {
       "width": 257,
       "height": 257,
-      "full_raw_sha256": "67f16f2dd410a8039a89a252c12c97c1b80a8039cd00e176ebc78350f8a259fe",
-      "tiled_raw_sha256": "67f16f2dd410a8039a89a252c12c97c1b80a8039cd00e176ebc78350f8a259fe",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "noise_257x257": {
       "width": 257,
       "height": 257,
-      "full_raw_sha256": "2f64e242a15a27ce5496b3558e15480320fca6857d9f001c5ab765435bb53176",
-      "tiled_raw_sha256": "2f64e242a15a27ce5496b3558e15480320fca6857d9f001c5ab765435bb53176",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "mixed_257x257": {
       "width": 257,
       "height": 257,
-      "full_raw_sha256": "0f9c4c96a5bcb2802903557c8951efa91f2c6fbccc7fa022dfebe8f427721c31",
-      "tiled_raw_sha256": "0f9c4c96a5bcb2802903557c8951efa91f2c6fbccc7fa022dfebe8f427721c31",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "smooth_301x227": {
       "width": 301,
       "height": 227,
-      "full_raw_sha256": "afa39e32c6746febf6703092a0fee7f834d1f608105082ded8012d651e7c644f",
-      "tiled_raw_sha256": "afa39e32c6746febf6703092a0fee7f834d1f608105082ded8012d651e7c644f",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "seam_stress_301x227": {
       "width": 301,
       "height": 227,
-      "full_raw_sha256": "d1ec8fef219350f3dfff5f2bb1f1340df7512cd6fc9fba5957432e9e911e4342",
-      "tiled_raw_sha256": "d1ec8fef219350f3dfff5f2bb1f1340df7512cd6fc9fba5957432e9e911e4342",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "high_frequency_301x227": {
       "width": 301,
       "height": 227,
-      "full_raw_sha256": "502ebe448e483f2f8d7edf55bb4529d869f132eb41af211a5eab43d046626a66",
-      "tiled_raw_sha256": "502ebe448e483f2f8d7edf55bb4529d869f132eb41af211a5eab43d046626a66",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "noise_301x227": {
       "width": 301,
       "height": 227,
-      "full_raw_sha256": "5142b73b1ba83e89d580cbdc4d4a55599954ec2c8179f0eafcace7d727c363e7",
-      "tiled_raw_sha256": "5142b73b1ba83e89d580cbdc4d4a55599954ec2c8179f0eafcace7d727c363e7",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     },
     "mixed_301x227": {
       "width": 301,
       "height": 227,
-      "full_raw_sha256": "bd1663aecaeb22d2fa5b2967899bf5c2741c77f4421050add58056603d4627ca",
-      "tiled_raw_sha256": "bd1663aecaeb22d2fa5b2967899bf5c2741c77f4421050add58056603d4627ca",
       "full_eq_tiled": true,
       "full_vs_tiled_max_abs": 0.0
     }

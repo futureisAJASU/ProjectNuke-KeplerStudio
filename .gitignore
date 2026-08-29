@@ -35,6 +35,11 @@ Thumbs.db
 __pycache__/
 *.py[cod]
 
+# Generated N4 host reference tensors (large, reproducible) — regenerate on demand.
+# Keep manifests/identity/SHA records; do not commit hundreds of MB of .f32le/.npy.
+artifacts/exynos-n4-reference-*/reference/full/
+artifacts/exynos-n4-reference-*/reference/tiled/
+
 # Local debug/test artifacts
 # Only root-level text files are ignored so docs and tool requirements stay trackable.
 /*.txt

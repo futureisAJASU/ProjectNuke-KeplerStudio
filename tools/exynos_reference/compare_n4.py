@@ -35,11 +35,14 @@ sys.path.insert(0, os.path.join(THIS_DIR, "upstream"))
 
 from halo_sweep import (  # noqa: E402
     build_model,
-    init_deterministic,
     plan_axis,
-    tiled_assembly,
     SEAM_BAND,
     BORDER_BAND,
+)
+from checkpoint_identity import (  # noqa: E402
+    GENERAL_CHECKPOINT_SHA256,
+    GENERAL_CHECKPOINT_FILENAME,
+    WEIGHTS_IDENTITY_GENERAL,
 )
 
 HALO = 34
@@ -116,6 +119,75 @@ def write_diff_image(path, diff, vmax=None):
     _write_png_rgb8(path, img)
 
 
+def load_reference_identity(ref_dir):
+    """Read and validate the N4 reference manifest, failing closed.
+
+    The real S24 device comparison may only run against the exact N3-accepted GENERAL
+    checkpoint reference. A reference manifest whose stored tensors were produced with
+    deterministic seeded weights (geometry-only) is NOT a valid reference for this
+    comparison and must be refused, never silently mixed.
+    """
+    manifest_path = os.path.join(ref_dir, "n4_reference_manifest.json")
+    if not os.path.exists(manifest_path):
+        raise SystemExit(
+            f"reference manifest not found at {manifest_path}; run n4_reference.py "
+            f"--weights-dir <dir> to generate a GENERAL reference first"
+        )
+    manifest = json.load(open(manifest_path))
+    identity = manifest.get("weights_identity")
+    if identity != WEIGHTS_IDENTITY_GENERAL:
+        raise SystemExit(
+            f"refusing N4 device comparison: reference manifest weights_identity is "
+            f"{identity!r}, not {WEIGHTS_IDENTITY_GENERAL!r}; the stored full/tiled "
+            f"tensors are unsuitable as a device reference. Regenerate with "
+            f"n4_reference.py --weights-dir <dir> using the pinned GENERAL checkpoint."
+        )
+    recorded_sha = manifest.get("general_checkpoint_sha256") or manifest.get("checkpoint_sha256")
+    if recorded_sha != GENERAL_CHECKPOINT_SHA256:
+        raise SystemExit(
+            f"refusing N4 device comparison: reference manifest checkpoint SHA "
+            f"{recorded_sha!r} does not match the pinned GENERAL checkpoint "
+            f"{GENERAL_CHECKPOINT_SHA256!r}"
+        )
+    return manifest
+
+
+def load_general_model(weights_dir):
+    """Load the pinned GENERAL checkpoint, hashing it against the accepted SHA first."""
+    if not weights_dir:
+        raise SystemExit(
+            "N4 device comparison requires --weights-dir pointing at the pinned GENERAL "
+            "checkpoint; a deterministic seeded fallback is not permitted for device metrics"
+        )
+    ckpt_path = os.path.join(weights_dir, GENERAL_CHECKPOINT_FILENAME)
+    if not os.path.exists(ckpt_path):
+        raise SystemExit(
+            f"--weights-dir {weights_dir!r} does not contain {GENERAL_CHECKPOINT_FILENAME}"
+        )
+    actual = sha256_file(ckpt_path)
+    if actual != GENERAL_CHECKPOINT_SHA256:
+        raise SystemExit(
+            f"checkpoint identity mismatch: {GENERAL_CHECKPOINT_FILENAME} hashed to "
+            f"{actual}, expected {GENERAL_CHECKPOINT_SHA256}; refusing to compare against "
+            f"a non-pinned GENERAL checkpoint"
+        )
+    d = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    key = "params_ema" if "params_ema" in d else "params"
+    model = build_model()
+    model.load_state_dict(d[key], strict=True)
+    return model
+
+
+def sha256_file(path):
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fixtures-dir", required=True)
@@ -127,18 +199,19 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    model = build_model()
-    weights_note = "deterministic seeded"
-    if args.weights_dir and os.path.exists(os.path.join(args.weights_dir, "realesr-general-x4v3.pth")):
-        d = torch.load(os.path.join(args.weights_dir, "realesr-general-x4v3.pth"), map_location="cpu", weights_only=True)
-        key = "params_ema" if "params_ema" in d else "params"
-        model.load_state_dict(d[key], strict=True)
-        weights_note = "GENERAL checkpoint"
-    else:
-        init_deterministic(model)
+    ref_manifest = load_reference_identity(args.ref_dir)
+    model = load_general_model(args.weights_dir)
+    weights_note = "GENERAL checkpoint"
 
     manifest = json.load(open(os.path.join(args.fixtures_dir, "n4_fixtures_manifest.json")))
-    summary = {"halo": HALO, "weights": weights_note, "fixtures": {}}
+    summary = {
+        "halo": HALO,
+        "weights": weights_note,
+        "reference_weights_identity": ref_manifest.get("weights_identity"),
+        "reference_checkpoint_sha256": ref_manifest.get("general_checkpoint_sha256")
+        or ref_manifest.get("checkpoint_sha256"),
+        "fixtures": {},
+    }
     rows = []
 
     for f in manifest["fixtures"]:
