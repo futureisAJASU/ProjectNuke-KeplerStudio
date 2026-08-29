@@ -1,0 +1,3 @@
+# Large raw float32 heatmaps (MB each)
+# Keep 8-bit compact visualizations
+*_raw_abs.png

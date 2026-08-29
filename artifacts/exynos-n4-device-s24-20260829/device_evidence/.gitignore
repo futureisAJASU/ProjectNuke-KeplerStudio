@@ -1,0 +1,3 @@
+# Large raw assembled output tensors (hundreds of MB)
+# Keep metadata.json and tiles/ for decomposition evidence
+*.f32le
