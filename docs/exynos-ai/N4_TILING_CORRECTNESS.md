@@ -1,7 +1,12 @@
 # N4 Tiling Correctness — Full-Image Tiling / Seam Correctness
 
 Phase: N4 — Full-Image Tiling / Seam Correctness (KeplerStudio)
-Real HEAD: `46c7ea89e786e51fb4a79e7bde1bef397fc40a19` (base `9e5e349e77c9b94cf03f675f2b7942fc667810bd`)
+
+**HEAD labels (unambiguous, non-self-referential):**
+- N4 BASE HEAD = `9e5e349e77c9b94cf03f675f2b7942fc667810bd`
+- PREVIOUS CORRECTIVE PARENT = `46c7ea89e786e51fb4a79e7bde1bef397fc40a19`
+- THIS CORRECTIVE START HEAD = `0c65e380b19549901e50bcff0e7ba10e26355db0`
+- Final reviewed HEAD: obtain from `git rev-parse HEAD` / external gate report.
 
 N4 HOST GATE: PASS
 N4 DEVICE GATE: PENDING
@@ -154,9 +159,13 @@ Warm-up and decomposition reruns are additional executions and are **not** count
 
 ## 5. Seam Metrics (N4.13) — PyTorch vs Tiled NPU
 
-**Status**: *Pending on-device NNC output capture.* The host PyTorch reference (full + tiled) has been generated and is bit-identical at halo 34 for all 25 fixtures (`artifacts/exynos-n4-reference-20260829/`). The comparison script `compare_n4.py` is written and will consume the pulled S24 assembled outputs.
+**Status**: *Pending on-device NNC output capture.* The host PyTorch reference (full + tiled) must be regenerated locally with `n4_reference.py --weights-dir <dir>` using the pinned GENERAL checkpoint (`realesr-general-x4v3.pth`). The committed `n4_reference_manifest.json` in `artifacts/exynos-n4-reference-20260829/` is **geometry-only** (deterministic-seeded weights) and is **NOT valid for device correctness comparison** — it lacks the real GENERAL checkpoint weights and full reference tensor SHAs. The comparison script `compare_n4.py` is written and will consume the pulled S24 assembled outputs, but it will **fail closed** unless the reference manifest has:
+- `weights_identity == "GENERAL"`
+- `general_checkpoint_sha256 == pinned GENERAL SHA`
+- `checkpoint_sha256 == pinned GENERAL SHA` (non-null)
+- Every fixture has a recorded `full_raw_sha256` that matches the current `.f32le` bytes
 
-When the device outputs are available, the following will be recorded per fixture:
+When the device outputs are available and a valid GENERAL reference is present, the following will be recorded per fixture:
 
 | Region | MAE | RMSE | P95 | P99 | MAX |
 |---|---|---|---|---|---|
@@ -171,7 +180,7 @@ Plus the seam/non-seam ratio, 8-bit postprocess parity (clamp→255→rint), and
 
 ## 6. Error Decomposition (N4.14) — Compiler Drift vs Tiling Drift
 
-**Status**: *Framework complete; pending per-tile device outputs.* For the decomposition fixtures (`seam_stress_188x188`, `smooth_257x257`), the instrumentation saves every tile's 128×128 input + NNC raw output. `compare_n4.py` then computes:
+**Status**: *Framework complete; pending per-tile device outputs and GENERAL reference.* For the decomposition fixtures (`seam_stress_188x188`, `smooth_257x257`), the instrumentation saves every tile's 128×128 input + NNC raw output. `compare_n4.py` then computes (fail-closed for designated fixtures):
 
 | Component | Definition |
 |---|---|
@@ -180,6 +189,8 @@ Plus the seam/non-seam ratio, 8-bit postprocess parity (clamp→255→rint), and
 | **Total N4 error** | NNC tiled assembly vs PyTorch full-image reference ≈ compiler drift + tiling drift. |
 
 On host, the tiling drift is **exactly 0** (bit-identical) at halo 34 for all 25 fixtures, proving that the *geometric* tiling component adds no measurable error. The compiler drift is the only remaining component and matches the N3-accepted floor (~2–4e-4 MAE).
+
+**N4 compiler drift has NOT yet been measured on this physical corpus** — the N3 floor suggests the expected compiler-drift baseline, but N4 device decomposition remains PENDING until the S24 run completes.
 
 ---
 
@@ -252,42 +263,15 @@ Static review (N4.21) confirmed:
 - **Failure**: per-tile H2D/Execute/D2H/assembly injected; totality proved.
 - **Memory**: N4 bounded test path not falsely advertised as unrestricted production.
 - **N3 integrity**: FP16 NNC SHA unchanged (`9cff7af6...`), GENERAL identity unchanged, rounding fix retained.
+- **Harness integrity**: compare_n4.py fail-closed on identity, fixtures, decomposition; instrumentation hard-gates corpus cardinality.
 
 ### Git footprint note (reproducible tensors removed)
 
-The ~982 MiB of deterministic-seeded raw reference tensors (`artifacts/exynos-n4-reference-20260829/reference/{full,tiled}/*.f32le|*.npy`) were removed from the active Git tree. `.gitignore` now excludes regenerated N4 raw reference directories (`artifacts/exynos-n4-reference-*/reference/{full,tiled}/`). The canonical inputs are deterministic and `n4_reference.py` regenerates them on demand, so the durable small evidence (manifest, checkpoint identity/hash, scripts, `halo_sweep.json`/`halo_summary.csv`, heatmaps) is sufficient.
+The ~982 MiB of deterministic-seeded raw reference tensors (`artifacts/exynos-n4-reference-20260829/reference/{full,tiled}/*.f32le|*.npy`) were **already removed** from the active Git tree in a prior corrective. `.gitignore` now excludes regenerated N4 raw reference directories (`artifacts/exynos-n4-reference-*/reference/{full,tiled}/`). The canonical inputs are deterministic and `n4_reference.py` regenerates them on demand, so the durable small evidence (manifest, checkpoint identity/hash, scripts, `halo_sweep.json`/`halo_summary.csv`, heatmaps) is sufficient.
+
+**The committed `n4_reference_manifest.json` is currently geometry-only and is NOT valid for device correctness comparison** — it has `weights_identity = "deterministic-seeded-geometry-only"`, `checkpoint_sha256 = null`, and no `full_raw_sha256` per fixture. Real GENERAL references must be regenerated locally with `--weights-dir` before final device comparison.
 
 This **does not** shrink the existing Git pack: those blob bytes remain in pack history. Destructive history rewriting was deliberately **not** performed in this phase.
-
----
-
-## 11. Conclusion
-
-**Host gates (N4.0–N4.7, N4.9–N4.11, N4.18–N4.21): CLOSED.**
-
-| Gate | Status |
-|---|---|
-| Tile planner exact coverage (no gaps/overlaps) | PASS (host) |
-| Receptive-field halo derived & empirically confirmed | PASS (host, halo=34) |
-| Host full-vs-tiled PyTorch proves halo removes artificial boundary error | PASS (bit-identical at halo 34) |
-| S24 multi-tile NNC output completes using FP16 NPU path | **PENDING S24** |
-| Seam-band error contains no localized penalty beyond compiler drift | **PENDING S24** (host tiling drift = 0 proven) |
-| Outer borders/corners correct | **PENDING S24** (host geometry proven) |
-| Cancellation/failure cannot publish partial success | PASS (host fake backend) |
-| Native-throw regression (interior tile native execute throws) | PASS (host fake backend) |
-| Fixture input SHA-256 hard gate (corrupt APK asset fails) | PASS (instrumented gate) |
-| Decomposition tile silent-skip removed (fail + count assert) | PASS (instrumented gate) |
-| Close settles all native steps + registry not session-active | PASS (instrumented gate) |
-| General reference identity enforced fail-closed (never mix weights) | PASS (compare_n4.py gate) |
-| Repeated operation lifecycle-safe | PASS (host fake backend) |
-| All host regressions/build gates green | PASS |
-| Limitations around giant full-image memory explicitly preserved | PASS (documented) |
-
-**Device gates (N4.12–N4.17)** require a retail Galaxy S24 (Exynos 2400): the physical 280-tile FP16 corpus, real GENERAL-vs-NNC seam metrics, error decomposition, and positive NPU proof. They are **externally blocked** and remain **PENDING**; the instrumentation test, host reference tooling, comparison scripts, and all scaffolding are ready.
-
-The large deterministic-seeded raw reference tensors have been removed from the active Git tree and `.gitignore` now excludes regenerated N4 raw reference directories. See the note below; the earlier blob bytes remain in existing Git pack history.
-
-**Next phase**: **N5 Bounded-Memory Full-Image Execution / Streaming Sink** — address full-resolution output streaming, memory-bounded sinks, backpressure, and endurance. Do not begin N5 until the N4 device gate closes.
 
 ---
 

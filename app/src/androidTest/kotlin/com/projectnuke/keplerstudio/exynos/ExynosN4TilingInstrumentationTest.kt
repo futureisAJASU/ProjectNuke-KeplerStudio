@@ -56,6 +56,10 @@ class ExynosN4TilingInstrumentationTest {
     /** Fixtures for which per-tile inputs/outputs are retained for N4.14 decomposition. */
     private val decompositionFixtures = setOf("seam_stress_188x188", "smooth_257x257")
 
+    /** Canonical corpus cardinality (hard gates). */
+    private val EXPECTED_FIXTURE_COUNT = 25
+    private val EXPECTED_TOTAL_TILE_COUNT = 280
+
     private fun isProbeRequested(): Boolean {
         val bundle = runCatching {
             androidx.test.platform.app.InstrumentationRegistry.getArguments()
@@ -133,6 +137,19 @@ class ExynosN4TilingInstrumentationTest {
 
                 val operationContext = ModelOperationContext(operationToken = 4L, documentGeneration = "n4-tiling")
                 val fixtures = loadFixtures()
+
+                // Hard gates: canonical corpus cardinality must match exactly.
+                assertEquals("canonical fixture count must be 25", EXPECTED_FIXTURE_COUNT, fixtures.size)
+                var plannedTileSum = 0
+                for (fixture in fixtures) {
+                    val planResult = com.projectnuke.keplerstudio.editor.TilePlanner.plan(fixture.width, fixture.height)
+                    val plan = when (planResult) {
+                        is com.projectnuke.keplerstudio.editor.TilePlanResult.Planned -> planResult.plan
+                        else -> throw AssertionError("fixture ${fixture.name} must produce a tiled plan, got $planResult")
+                    }
+                    plannedTileSum += plan.tiles.size
+                }
+                assertEquals("canonical total planned tile count must be 280", EXPECTED_TOTAL_TILE_COUNT, plannedTileSum)
 
                 // Warm-up with the first fixture (smallest), then the recorded corpus.
                 val warmup = fixtures.first()

@@ -4,7 +4,7 @@ N4 comparison: tiled Samsung FP16 NNC vs full-image PyTorch reference.
 
 Consumes:
   - <fixtures-dir>/n4_fixtures_manifest.json       canonical inputs
-  - <ref-dir>/reference/full/<name>_raw.npy         full-image PyTorch reference
+  - <ref-dir>/reference/full/<name>_raw.f32le      full-image PyTorch reference (RAW FP32)
   - <device-dir>/assembled_<name>.f32le             tiled NNC output (raw FP32)
   - <device-dir>/tiles/<name>/tile_<i>_input.f32le  (optional) per-tile inputs for decomposition
   - <device-dir>/tiles/<name>/tile_<i>_output.f32le (optional) per-tile NNC raw outputs
@@ -50,13 +50,33 @@ C = 3
 TILE = 128
 SCALE = 4
 
+# Designated decomposition fixtures with expected tile counts.
+DECOMPOSITION_FIXTURES = {
+    "seam_stress_188x188": 4,
+    "smooth_257x257": 16,
+}
+
+# Expected byte sizes
+INPUT_TILE_BYTES = C * TILE * TILE * 4      # 3*128*128*4 = 196608
+OUTPUT_TILE_BYTES = C * (TILE * SCALE) * (TILE * SCALE) * 4  # 3*512*512*4 = 3145728
+
 
 def load_f32le(path):
     return np.fromfile(path, dtype=np.float32)
 
 
-def load_ref_npy(path):
-    return np.load(path)
+def load_ref_f32le(path, expected_sha256, fixture_name):
+    """Load full reference .f32le and validate its SHA-256."""
+    import hashlib
+    with open(path, "rb") as f:
+        data = f.read()
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected_sha256:
+        raise SystemExit(
+            f"reference tensor SHA mismatch for {fixture_name}: "
+            f"manifest={expected_sha256} actual={actual} path={path}"
+        )
+    return np.frombuffer(data, dtype=np.float32)
 
 
 def seam_border_masks(w, h):
@@ -126,6 +146,12 @@ def load_reference_identity(ref_dir):
     checkpoint reference. A reference manifest whose stored tensors were produced with
     deterministic seeded weights (geometry-only) is NOT a valid reference for this
     comparison and must be refused, never silently mixed.
+
+    Validation:
+      - weights_identity == GENERAL
+      - general_checkpoint_sha256 == pinned GENERAL SHA
+      - checkpoint_sha256 == pinned GENERAL SHA AND non-null
+      - Every fixture in manifest has full_raw_sha256 recorded (cryptographic binding)
     """
     manifest_path = os.path.join(ref_dir, "n4_reference_manifest.json")
     if not os.path.exists(manifest_path):
@@ -134,6 +160,7 @@ def load_reference_identity(ref_dir):
             f"--weights-dir <dir> to generate a GENERAL reference first"
         )
     manifest = json.load(open(manifest_path))
+
     identity = manifest.get("weights_identity")
     if identity != WEIGHTS_IDENTITY_GENERAL:
         raise SystemExit(
@@ -142,13 +169,37 @@ def load_reference_identity(ref_dir):
             f"tensors are unsuitable as a device reference. Regenerate with "
             f"n4_reference.py --weights-dir <dir> using the pinned GENERAL checkpoint."
         )
-    recorded_sha = manifest.get("general_checkpoint_sha256") or manifest.get("checkpoint_sha256")
-    if recorded_sha != GENERAL_CHECKPOINT_SHA256:
+
+    general_sha = manifest.get("general_checkpoint_sha256")
+    if general_sha != GENERAL_CHECKPOINT_SHA256:
         raise SystemExit(
-            f"refusing N4 device comparison: reference manifest checkpoint SHA "
-            f"{recorded_sha!r} does not match the pinned GENERAL checkpoint "
+            f"refusing N4 device comparison: reference manifest general_checkpoint_sha256 "
+            f"{general_sha!r} does not match the pinned GENERAL checkpoint "
             f"{GENERAL_CHECKPOINT_SHA256!r}"
         )
+
+    checkpoint_sha = manifest.get("checkpoint_sha256")
+    if checkpoint_sha is None:
+        raise SystemExit(
+            f"refusing N4 device comparison: reference manifest checkpoint_sha256 is null; "
+            f"must be the pinned GENERAL checkpoint SHA {GENERAL_CHECKPOINT_SHA256!r}"
+        )
+    if checkpoint_sha != GENERAL_CHECKPOINT_SHA256:
+        raise SystemExit(
+            f"refusing N4 device comparison: reference manifest checkpoint_sha256 "
+            f"{checkpoint_sha!r} does not match the pinned GENERAL checkpoint "
+            f"{GENERAL_CHECKPOINT_SHA256!r}"
+        )
+
+    # Ensure every fixture has a recorded full_raw_sha256 (cryptographic binding)
+    fixtures = manifest.get("fixtures", {})
+    for name, info in fixtures.items():
+        if "full_raw_sha256" not in info:
+            raise SystemExit(
+                f"refusing N4 device comparison: fixture {name!r} missing full_raw_sha256 "
+                f"in manifest; reference tensors not cryptographically bound"
+            )
+
     return manifest
 
 
@@ -164,7 +215,12 @@ def load_general_model(weights_dir):
         raise SystemExit(
             f"--weights-dir {weights_dir!r} does not contain {GENERAL_CHECKPOINT_FILENAME}"
         )
-    actual = sha256_file(ckpt_path)
+    import hashlib
+    h = hashlib.sha256()
+    with open(ckpt_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    actual = h.hexdigest()
     if actual != GENERAL_CHECKPOINT_SHA256:
         raise SystemExit(
             f"checkpoint identity mismatch: {GENERAL_CHECKPOINT_FILENAME} hashed to "
@@ -180,12 +236,171 @@ def load_general_model(weights_dir):
 
 def sha256_file(path):
     import hashlib
-
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def expected_tile_indices(w, h):
+    """Compute the TilePlanner-equivalent tile indices for a fixture.
+    Returns (num_tiles_x, num_tiles_y, total_tiles).
+    """
+    sx, ex = plan_axis(w, HALO)
+    sy, ey = plan_axis(h, HALO)
+    return len(sx), len(sy), len(sx) * len(sy)
+
+
+def validate_decomposition_fixture(device_dir, name, expected_tiles, w, h):
+    """Validate all decomposition artifacts for a designated fixture.
+    Fails with detailed fixture name + tile index + reason.
+    """
+    tiles_dir = os.path.join(device_dir, "tiles", name)
+    if not os.path.isdir(tiles_dir):
+        raise SystemExit(
+            f"decomposition fixture {name!r}: tiles directory missing at {tiles_dir}"
+        )
+
+    files = os.listdir(tiles_dir)
+    input_files = sorted(f for f in files if f.endswith("_input.f32le"))
+    output_files = sorted(f for f in files if f.endswith("_output.f32le"))
+
+    if len(input_files) != expected_tiles:
+        raise SystemExit(
+            f"decomposition fixture {name!r}: expected {expected_tiles} input tiles, "
+            f"found {len(input_files)}: {input_files}"
+        )
+    if len(output_files) != expected_tiles:
+        raise SystemExit(
+            f"decomposition fixture {name!r}: expected {expected_tiles} output tiles, "
+            f"found {len(output_files)}: {output_files}"
+        )
+
+    # Validate tile indices are unique, sequential 0..expected_tiles-1
+    # and correspond to TilePlanner-equivalent plan
+    indices = []
+    for f in input_files:
+        # file format: "tile_<i>_input.f32le"
+        try:
+            idx = int(f[len("tile_"):-len("_input.f32le")])
+        except ValueError:
+            raise SystemExit(
+                f"decomposition fixture {name!r}: invalid input tile filename {f!r}"
+            )
+        indices.append(idx)
+
+    expected_indices = set(range(expected_tiles))
+    actual_indices = set(indices)
+    if actual_indices != expected_indices:
+        raise SystemExit(
+            f"decomposition fixture {name!r}: tile indices {sorted(actual_indices)} "
+            f"do not match expected {sorted(expected_indices)}"
+        )
+    if len(indices) != len(actual_indices):
+        raise SystemExit(
+            f"decomposition fixture {name!r}: duplicate tile indices found: {indices}"
+        )
+
+    # Validate byte sizes
+    for idx in range(expected_tiles):
+        inp_path = os.path.join(tiles_dir, f"tile_{idx}_input.f32le")
+        out_path = os.path.join(tiles_dir, f"tile_{idx}_output.f32le")
+        if not os.path.exists(inp_path):
+            raise SystemExit(
+                f"decomposition fixture {name!r}: missing input tile {idx} at {inp_path}"
+            )
+        if not os.path.exists(out_path):
+            raise SystemExit(
+                f"decomposition fixture {name!r}: missing output tile {idx} at {out_path}"
+            )
+        inp_size = os.path.getsize(inp_path)
+        out_size = os.path.getsize(out_path)
+        if inp_size != INPUT_TILE_BYTES:
+            raise SystemExit(
+                f"decomposition fixture {name!r} tile {idx}: input size {inp_size} "
+                f"!= expected {INPUT_TILE_BYTES} bytes"
+            )
+        if out_size != OUTPUT_TILE_BYTES:
+            raise SystemExit(
+                f"decomposition fixture {name!r} tile {idx}: output size {out_size} "
+                f"!= expected {OUTPUT_TILE_BYTES} bytes"
+            )
+
+    return tiles_dir
+
+
+def decompose(model, device_dir, name, w, h, full, ref_fixtures):
+    """Returns compiler_drift_mae / tiling_drift_mae over validated tiles."""
+    tiles_dir = os.path.join(device_dir, "tiles", name)
+    if not os.path.isdir(tiles_dir):
+        # Non-designated fixtures: optional decomposition (return empty)
+        if name in DECOMPOSITION_FIXTURES:
+            raise SystemExit(
+                f"designated decomposition fixture {name!r}: tiles directory missing at {tiles_dir}"
+            )
+        return {}
+
+    # Designated fixtures MUST have complete decomposition
+    if name in DECOMPOSITION_FIXTURES:
+        expected = DECOMPOSITION_FIXTURES[name]
+        tiles_dir = validate_decomposition_fixture(device_dir, name, expected, w, h)
+    else:
+        # Non-designated: if dir exists but incomplete, still return {} (optional)
+        pass
+
+    input_files = sorted(f for f in os.listdir(tiles_dir) if f.endswith("_input.f32le"))
+    if not input_files:
+        return {}
+
+    compiler = []
+    tiling = []
+    sx, ex = plan_axis(w, HALO)
+    sy, ey = plan_axis(h, HALO)
+
+    for inp in input_files:
+        idx = inp[:-len("_input.f32le")]
+        out_f = os.path.join(tiles_dir, f"{idx}_output.f32le")
+        if not os.path.exists(out_f):
+            # Should not happen for designated (already validated), but be strict anyway
+            if name in DECOMPOSITION_FIXTURES:
+                raise SystemExit(
+                    f"decomposition fixture {name!r}: missing output for {idx} at {out_f}"
+                )
+            continue
+        raw = open(os.path.join(tiles_dir, inp), "rb").read()
+        arr = np.frombuffer(raw, dtype=np.float32).reshape(C, TILE, TILE).copy()
+        x = torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(0)
+        with torch.no_grad():
+            pt_tile = model(x).squeeze(0).cpu().numpy().astype(np.float32)
+        nnc_tile = load_f32le(out_f).reshape(C, TILE * SCALE, TILE * SCALE)
+
+        ti = int(idx.split("_")[1])
+        iy, ix = divmod(ti, len(sx))
+        ox0, ox1 = ex[ix], ex[ix + 1]
+        oy0, oy1 = ey[iy], ey[iy + 1]
+        lx0, lx1 = ox0 - sx[ix] * SCALE, ox1 - sx[ix] * SCALE
+        ly0, ly1 = oy0 - sy[iy] * SCALE, oy1 - sy[iy] * SCALE
+
+        core_pt = pt_tile[:, ly0:ly1, lx0:lx1]
+        core_nnc = nnc_tile[:, ly0:ly1, lx0:lx1]
+        full_core = full[:, oy0:oy1, ox0:ox1]
+        compiler.append(np.abs(core_pt.astype(np.float64) - core_nnc.astype(np.float64)).mean())
+        tiling.append(np.abs(core_pt.astype(np.float64) - full_core.astype(np.float64)).mean())
+
+    if name in DECOMPOSITION_FIXTURES:
+        expected = DECOMPOSITION_FIXTURES[name]
+        if len(compiler) != expected:
+            raise SystemExit(
+                f"decomposition fixture {name!r}: decomposed {len(compiler)} tiles "
+                f"but expected {expected}"
+            )
+
+    return {
+        "tiles_decomposed": len(compiler),
+        "compiler_drift_mae": float(np.mean(compiler)) if compiler else None,
+        "tiling_drift_mae": float(np.mean(tiling)) if tiling else None,
+    }
 
 
 def main():
@@ -204,6 +419,12 @@ def main():
     weights_note = "GENERAL checkpoint"
 
     manifest = json.load(open(os.path.join(args.fixtures_dir, "n4_fixtures_manifest.json")))
+    expected_fixture_count = len(manifest["fixtures"])
+    if expected_fixture_count != 25:
+        raise SystemExit(
+            f"canonical fixtures manifest has {expected_fixture_count} fixtures, expected 25"
+        )
+
     summary = {
         "halo": HALO,
         "weights": weights_note,
@@ -214,15 +435,33 @@ def main():
     }
     rows = []
 
+    compared_count = 0
+
     for f in manifest["fixtures"]:
         name = f["name"]
         w, h = f["width"], f["height"]
-        full = load_ref_npy(os.path.join(args.ref_dir, "reference", "full", f"{name}_raw.npy"))
+        # Load full reference .f32le and validate SHA
+        ref_path = os.path.join(args.ref_dir, "reference", "full", f"{name}_raw.f32le")
+        if not os.path.exists(ref_path):
+            raise SystemExit(
+                f"reference tensor not found for {name!r} at {ref_path}"
+            )
+        expected_sha = ref_manifest["fixtures"][name]["full_raw_sha256"]
+        full = load_ref_f32le(ref_path, expected_sha, name)
         assert full.shape == (C, h * SCALE, w * SCALE), full.shape
+
         device_path = os.path.join(args.device_dir, f"assembled_{name}.f32le")
         if not os.path.exists(device_path):
-            print(f"SKIP {name}: missing device output {device_path}")
-            continue
+            raise SystemExit(
+                f"FAIL: assembled device output missing for fixture {name!r} at {device_path}"
+            )
+        device_size = os.path.getsize(device_path)
+        expected_size = C * h * SCALE * w * SCALE * 4
+        if device_size != expected_size:
+            raise SystemExit(
+                f"FAIL: assembled device output for {name!r} has size {device_size} "
+                f"bytes, expected {expected_size}"
+            )
         nnc = load_f32le(device_path).reshape(C, h * SCALE, w * SCALE)
 
         diff = full.astype(np.float64) - nnc.astype(np.float64)
@@ -253,8 +492,8 @@ def main():
         write_diff_image(os.path.join(heatmap_dir, f"{name}_raw_abs.png"), ab)
         write_diff_image(os.path.join(heatmap_dir, f"{name}_8bit_abs.png"), np.abs(d8.astype(np.float64)))
 
-        # N4.14 decomposition (per-tile data optional)
-        decomp = decompose(model, args.device_dir, name, w, h, full)
+        # N4.14 decomposition (fail-closed for designated fixtures)
+        decomp = decompose(model, args.device_dir, name, w, h, full, ref_manifest["fixtures"])
         m["decomposition"] = decomp
 
         summary["fixtures"][name] = m
@@ -277,6 +516,13 @@ def main():
         print(f"{name}: global_MAE {m['global']['mae']:.6g} seam_MAE "
               f"{m['seam']['mae'] if m['seam']['count'] else float('nan'):.6g} "
               f"non-seam_MAE {m['non_seam']['mae']:.6g} seam/non-seam {m['seam_vs_non_seam']}")
+        compared_count += 1
+
+    # Final assertion: must compare exactly 25 fixtures
+    if compared_count != 25:
+        raise SystemExit(
+            f"N4 comparison incomplete: compared {compared_count} fixtures, expected 25"
+        )
 
     with open(os.path.join(args.out_dir, "n4_comparison.json"), "w") as fp:
         json.dump(summary, fp, indent=2)
@@ -288,50 +534,6 @@ def main():
             for r in rows:
                 wr.writerow(r)
     print(f"\ncomparison -> {args.out_dir}")
-
-
-def decompose(model, device_dir, name, w, h, full):
-    """Returns compiler_drift_mae / tiling_drift_mae over any saved tiles."""
-    tiles_dir = os.path.join(device_dir, "tiles", name)
-    if not os.path.isdir(tiles_dir):
-        return {}
-    input_files = sorted(f for f in os.listdir(tiles_dir) if f.endswith("_input.f32le"))
-    if not input_files:
-        return {}
-    compiler = []
-    tiling = []
-    sx, ex = plan_axis(w, HALO)
-    sy, ey = plan_axis(h, HALO)
-    for inp in input_files:
-        idx = inp[:-len("_input.f32le")]  # e.g. "tile_0"
-        out_f = os.path.join(tiles_dir, f"{idx}_output.f32le")
-        if not os.path.exists(out_f):
-            continue
-        raw = open(os.path.join(tiles_dir, inp), "rb").read()
-        arr = np.frombuffer(raw, dtype=np.float32).reshape(C, TILE, TILE).copy()
-        x = torch.from_numpy(np.ascontiguousarray(arr)).unsqueeze(0)
-        with torch.no_grad():
-            pt_tile = model(x).squeeze(0).cpu().numpy().astype(np.float32)
-        nnc_tile = load_f32le(out_f).reshape(C, TILE * SCALE, TILE * SCALE)
-
-        # Find this tile's source origin + dest crop to know its retained core.
-        ti = int(idx.split("_")[1])
-        iy, ix = divmod(ti, len(sx))
-        ox0, ox1 = ex[ix], ex[ix + 1]
-        oy0, oy1 = ey[iy], ey[iy + 1]
-        lx0, lx1 = ox0 - sx[ix] * SCALE, ox1 - sx[ix] * SCALE
-        ly0, ly1 = oy0 - sy[iy] * SCALE, oy1 - sy[iy] * SCALE
-
-        core_pt = pt_tile[:, ly0:ly1, lx0:lx1]
-        core_nnc = nnc_tile[:, ly0:ly1, lx0:lx1]
-        full_core = full[:, oy0:oy1, ox0:ox1]
-        compiler.append(np.abs(core_pt.astype(np.float64) - core_nnc.astype(np.float64)).mean())
-        tiling.append(np.abs(core_pt.astype(np.float64) - full_core.astype(np.float64)).mean())
-    return {
-        "tiles_decomposed": len(compiler),
-        "compiler_drift_mae": float(np.mean(compiler)) if compiler else None,
-        "tiling_drift_mae": float(np.mean(tiling)) if tiling else None,
-    }
 
 
 if __name__ == "__main__":

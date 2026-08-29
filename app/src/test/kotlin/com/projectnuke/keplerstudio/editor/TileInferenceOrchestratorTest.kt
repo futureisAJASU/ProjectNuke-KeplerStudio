@@ -14,6 +14,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -338,9 +339,10 @@ class TileInferenceOrchestratorTest {
     fun nativeExecuteThrowOnInteriorTileIsTotalAndCapturesStage() = runBlocking {
         val enn = FakeEnn().apply { executeThrowAtCall = 1 }
         val session = session(enn)
+        val sink = TrackingSink(257 * 4, 128 * 4)
         try {
             assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
-            val orchestrator = TileInferenceOrchestrator(session)
+            val orchestrator = TileInferenceOrchestrator(session, sinkFactory = { w, h -> sink })
             val result = orchestrator.upscaleRaw(sourceBytes(257, 128), 257, 128, ModelOperationContext(1L, "g1"))
             assertTrue("expected Failure, got $result", result is TiledUpscaleResult.Failure)
             result as TiledUpscaleResult.Failure
@@ -351,6 +353,12 @@ class TileInferenceOrchestratorTest {
             assertEquals(2, enn.executeCalls.get())
             assertEquals("throwing stage must be captured as execute", "execute", session.lastRunDiagnostics.throwableStage)
             assertEquals(ModelRunnerLifecycle.Loaded, session.lifecycle)
+
+            // TrackingSink assertions
+            assertEquals("tile 0 must have written exactly once", 1, sink.writeCount.get())
+            assertEquals("tile 0 output must be 3*512*512*4 bytes", 3 * 512 * 512 * 4, sink.lastWriteBytes.get())
+            assertTrue("sink.invalidate() must be called on native throw", sink.invalidateCalled.get())
+            assertFalse("sink.finish() must NOT be called on failure", sink.finishCalled.get())
         } finally {
             session.close()
         }
@@ -388,6 +396,32 @@ class TileInferenceOrchestratorTest {
 
         override fun invalidate() = Unit
         override fun finish(): ByteArray = throw IllegalStateException("not finished")
+    }
+
+    /**
+     * Tracking sink that observes write/invalidate/finish calls for failure contract verification.
+     */
+    private class TrackingSink(outputWidth: Int, outputHeight: Int) : TileOutputSink {
+        override val outputWidth = outputWidth
+        override val outputHeight = outputHeight
+        val writeCount = AtomicInteger()
+        val invalidateCalled = AtomicBoolean()
+        val finishCalled = AtomicBoolean()
+        val lastWriteBytes: AtomicInteger = AtomicInteger()
+
+        override fun writeTile(outputCrop: Rect, dest: Rect, tileOutput: ByteArray) {
+            writeCount.incrementAndGet()
+            lastWriteBytes.set(tileOutput.size)
+        }
+
+        override fun invalidate() {
+            invalidateCalled.set(true)
+        }
+
+        override fun finish(): ByteArray {
+            finishCalled.set(true)
+            throw IllegalStateException("finish must not be called on failure")
+        }
     }
 
     @Test
