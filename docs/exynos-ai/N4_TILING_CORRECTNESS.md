@@ -188,7 +188,7 @@ Plus the seam/non-seam ratio, 8-bit postprocess parity (clamp→255→rint), and
 | **Tiling / context drift** | PyTorch tiled retained core vs PyTorch full-image corresponding region (should be ~0 at halo 34). |
 | **Total N4 error** | NNC tiled assembly vs PyTorch full-image reference ≈ compiler drift + tiling drift. |
 
-On host, the tiling drift is **exactly 0** (bit-identical) at halo 34 for all 25 fixtures, proving that the *geometric* tiling component adds no measurable error. The compiler drift is the only remaining component and matches the N3-accepted floor (~2–4e-4 MAE).
+On host, the **tiling/context drift is exactly 0** (bit-identical) at halo 34 for all 25 fixtures, proving that the *geometric* tiling component adds no measurable error. The N3 corpus provides the expected **compiler-drift baseline/floor** (~2–4e-4 MAE). N4 compiler drift and seam localization have **not** yet been measured on this physical corpus and remain pending the S24 run.
 
 **N4 compiler drift has NOT yet been measured on this physical corpus** — the N3 floor suggests the expected compiler-drift baseline, but N4 device decomposition remains PENDING until the S24 run completes.
 

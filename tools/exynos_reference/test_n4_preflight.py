@@ -16,16 +16,25 @@ import sys
 import tempfile
 import unittest
 
+import numpy as np
+
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
 
 from n4_preflight import (
     validate_reference_identity,
     validate_full_reference_tensor,
+    load_full_reference_f32le,
     validate_decomposition_artifacts,
+    require_decomposition_artifacts,
+    require_assembled_device_output,
     validate_canonical_fixture_count,
     validate_planned_tile_count,
+    sha256_bytes,
+    full_reference_expected_bytes,
     DECOMPOSITION_FIXTURES,
+    C,
+    SCALE,
     INPUT_TILE_BYTES,
     OUTPUT_TILE_BYTES,
 )
@@ -123,25 +132,121 @@ class TestPreflightC(unittest.TestCase):
 class TestPreflightD(unittest.TestCase):
     """D. one canonical assembled device fixture missing -> rejected"""
 
+    def _write_assembled(self, device_dir, name, w, h):
+        """Write an assembled device output with the exact canonical byte size."""
+        path = os.path.join(device_dir, f"assembled_{name}.f32le")
+        size = full_reference_expected_bytes(w, h)
+        with open(path, "wb") as fh:
+            fh.seek(size - 1)
+            fh.write(b"\x00")
+        return path
+
     def test_missing_assembled_device_output(self):
-        # This test validates the preflight logic that would be used in compare_n4.py
-        # The actual compare_n4.py does the check in main(), but we test the principle
         with tempfile.TemporaryDirectory() as tmp:
             device_dir = os.path.join(tmp, "device")
             os.makedirs(device_dir)
-            # Create 24 fixtures, leave one missing
             manifest = make_canonical_fixtures_manifest()
-            for f in manifest["fixtures"][:24]:
-                path = os.path.join(device_dir, f"assembled_{f['name']}.f32le")
-                with open(path, "wb") as fh:
-                    fh.write(b"x" * (3 * f["width"] * 4 * f["height"] * 4 * 4))
-            # The 25th is missing
-            missing = manifest["fixtures"][24]["name"]
-            missing_path = os.path.join(device_dir, f"assembled_{missing}.f32le")
+            fixtures = manifest["fixtures"]
+            self.assertEqual(len(fixtures), 25)
+
+            # 24 canonical fixtures present, 1 intentionally absent.
+            for f in fixtures[:24]:
+                self._write_assembled(device_dir, f["name"], f["width"], f["height"])
+
+            missing = fixtures[24]
+            missing_path = os.path.join(device_dir, f"assembled_{missing['name']}.f32le")
             self.assertFalse(os.path.exists(missing_path))
-            # In compare_n4.py this would raise SystemExit
-            # Here we just verify the file is missing
-            self.assertTrue(True)
+
+            # Present fixtures pass the shared production validator.
+            for f in fixtures[:24]:
+                require_assembled_device_output(device_dir, f["name"], f["width"], f["height"])
+
+            # The absent fixture must be rejected with exact fixture/path.
+            with self.assertRaises(SystemExit) as cm:
+                require_assembled_device_output(device_dir, missing["name"], missing["width"], missing["height"])
+            msg = str(cm.exception)
+            self.assertIn(missing["name"], msg)
+            self.assertIn(f"assembled_{missing['name']}.f32le", msg)
+            self.assertIn(missing_path, msg)
+
+    def test_wrong_assembled_device_output_size(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            device_dir = os.path.join(tmp, "device")
+            os.makedirs(device_dir)
+            name, w, h = "seam_stress_188x188", 188, 188
+            path = os.path.join(device_dir, f"assembled_{name}.f32le")
+            with open(path, "wb") as fh:
+                fh.write(b"\x00" * (full_reference_expected_bytes(w, h) - 16))
+            with self.assertRaises(SystemExit) as cm:
+                require_assembled_device_output(device_dir, name, w, h)
+            msg = str(cm.exception)
+            self.assertIn(name, msg)
+            self.assertIn("size", msg)
+
+
+class TestDecompositionCardinality(unittest.TestCase):
+    """Lock designated decomposition fixture cardinality."""
+
+    def test_designated_fixture_tile_counts(self):
+        self.assertEqual(DECOMPOSITION_FIXTURES["seam_stress_188x188"], 4)
+        self.assertEqual(DECOMPOSITION_FIXTURES["smooth_257x257"], 16)
+
+
+class TestProductionF32leLoader(unittest.TestCase):
+    """Regression: production full-reference .f32le must load as 3-D CHW."""
+
+    SYNTH_W = 3
+    SYNTH_H = 2
+
+    def _synthetic(self):
+        shape = (C, self.SYNTH_H * SCALE, self.SYNTH_W * SCALE)
+        arr = np.arange(np.prod(shape), dtype=np.float32).reshape(shape) / 1000.0
+        return arr, shape
+
+    def _path_and_sha(self, tmp, data):
+        path = os.path.join(tmp, "synthetic_raw.f32le")
+        with open(path, "wb") as f:
+            f.write(data)
+        return path, sha256_bytes(data)
+
+    def test_valid_loads_exact_3d_chw(self):
+        arr, shape = self._synthetic()
+        data = arr.astype("<f4").tobytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            path, sha = self._path_and_sha(tmp, data)
+            loaded = load_full_reference_f32le(path, sha, "synthetic", self.SYNTH_W, self.SYNTH_H)
+            self.assertEqual(loaded.shape, shape)
+            self.assertEqual(loaded.ndim, 3)
+            self.assertTrue(np.array_equal(loaded, arr))
+
+    def test_wrong_sha_fails(self):
+        arr, _ = self._synthetic()
+        data = arr.astype("<f4").tobytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            path, _ = self._path_and_sha(tmp, data)
+            with self.assertRaises(SystemExit) as cm:
+                load_full_reference_f32le(path, "0" * 64, "synthetic", self.SYNTH_W, self.SYNTH_H)
+            self.assertIn("SHA-256 mismatch", str(cm.exception))
+
+    def test_truncated_byte_count_fails(self):
+        arr, _ = self._synthetic()
+        data = arr.astype("<f4").tobytes()
+        data = data[:-1]
+        with tempfile.TemporaryDirectory() as tmp:
+            path, sha = self._path_and_sha(tmp, data)
+            with self.assertRaises(SystemExit) as cm:
+                load_full_reference_f32le(path, sha, "synthetic", self.SYNTH_W, self.SYNTH_H)
+            self.assertIn("byte count", str(cm.exception))
+
+    def test_oversized_byte_count_fails(self):
+        arr, _ = self._synthetic()
+        data = arr.astype("<f4").tobytes()
+        data = data + b"\x00\x00\x00\x00"
+        with tempfile.TemporaryDirectory() as tmp:
+            path, sha = self._path_and_sha(tmp, data)
+            with self.assertRaises(SystemExit) as cm:
+                load_full_reference_f32le(path, sha, "synthetic", self.SYNTH_W, self.SYNTH_H)
+            self.assertIn("byte count", str(cm.exception))
 
 
 class TestPreflightE(unittest.TestCase):
@@ -203,6 +308,23 @@ class TestPreflightE(unittest.TestCase):
             ok, err = validate_decomposition_artifacts(device_dir, "seam_stress_188x188", 188, 188)
             self.assertFalse(ok)
             self.assertIn("output size", err)
+
+    def test_production_missing_decomposition_output_rejects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            device_dir = os.path.join(tmp, "device")
+            tiles_dir = os.path.join(device_dir, "tiles", "seam_stress_188x188")
+            os.makedirs(tiles_dir)
+            for i in range(4):
+                inp = os.path.join(tiles_dir, f"tile_{i}_input.f32le")
+                with open(inp, "wb") as f:
+                    f.write(b"x" * INPUT_TILE_BYTES)
+            for i in [0, 1, 3]:
+                out = os.path.join(tiles_dir, f"tile_{i}_output.f32le")
+                with open(out, "wb") as f:
+                    f.write(b"y" * OUTPUT_TILE_BYTES)
+            with self.assertRaises(SystemExit) as cm:
+                require_decomposition_artifacts(device_dir, "seam_stress_188x188", 188, 188)
+            self.assertIn("seam_stress_188x188", str(cm.exception))
 
 
 class TestCanonicalCardinality(unittest.TestCase):

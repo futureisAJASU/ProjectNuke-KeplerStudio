@@ -1,12 +1,17 @@
 """Pure validation helpers for N4 device comparison preflight.
 
-This module contains no torch/numpy dependencies and can be imported
-in environments without heavy ML libraries (e.g., for host contract tests).
+This module has no torch dependency and is the single source of truth for
+correctness-critical N4 validation. ``compare_n4.py`` (production) and the host
+contract tests both import these helpers so production cannot diverge from the
+tested behavior. Only ``numpy`` (a lightweight host dependency) is used by the
+``.f32le`` loader functions; the remaining validators are pure Python.
 """
 import hashlib
 import json
 import os
 import sys
+
+import numpy as np
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)
@@ -29,12 +34,22 @@ DECOMPOSITION_FIXTURES = {
 }
 
 
+def full_reference_expected_bytes(w, h):
+    """Expected byte size of a full-reference .f32le tensor (C, h*SCALE, w*SCALE)."""
+    return C * h * SCALE * w * SCALE * 4
+
+
+def full_reference_expected_shape(w, h):
+    """Expected 3-D CHW shape of a full-reference .f32le tensor."""
+    return (C, h * SCALE, w * SCALE)
+
+
 def validate_reference_identity(manifest):
     """Validate N4 reference manifest identity for device comparison.
-    
+
     Args:
         manifest: dict loaded from n4_reference_manifest.json
-        
+
     Returns:
         tuple (bool, str): (is_valid, error_message)
     """
@@ -66,6 +81,28 @@ def validate_reference_identity(manifest):
     return True, ""
 
 
+def load_reference_identity(ref_dir):
+    """Read and validate the N4 reference manifest, failing closed.
+
+    Returns the manifest dict or raises SystemExit if the manifest is absent or
+    its identity does not match the pinned GENERAL checkpoint.
+    """
+    manifest_path = os.path.join(ref_dir, "n4_reference_manifest.json")
+    if not os.path.exists(manifest_path):
+        raise SystemExit(
+            f"reference manifest not found at {manifest_path}; run n4_reference.py "
+            f"--weights-dir <dir> to generate a GENERAL reference first"
+        )
+    manifest = json.load(open(manifest_path))
+    ok, err = validate_reference_identity(manifest)
+    if not ok:
+        raise SystemExit(
+            f"refusing N4 device comparison: {err}. Regenerate with "
+            f"n4_reference.py --weights-dir <dir> using the pinned GENERAL checkpoint."
+        )
+    return manifest
+
+
 def sha256_bytes(b):
     return hashlib.sha256(b).hexdigest()
 
@@ -80,12 +117,12 @@ def sha256_file(path):
 
 def validate_full_reference_tensor(ref_path, expected_sha, fixture_name):
     """Validate a single full reference .f32le tensor against manifest SHA.
-    
+
     Args:
         ref_path: path to .f32le file
         expected_sha: expected SHA-256 from manifest
         fixture_name: name for error messages
-        
+
     Returns:
         tuple (bool, str): (is_valid, error_message)
     """
@@ -95,6 +132,81 @@ def validate_full_reference_tensor(ref_path, expected_sha, fixture_name):
     if actual != expected_sha:
         return False, f"fixture {fixture_name!r} SHA mismatch: manifest={expected_sha} actual={actual}"
     return True, ""
+
+
+def load_full_reference_f32le(ref_path, expected_sha, fixture_name, w, h):
+    """Load a full-reference .f32le tensor and return a 3-D CHW float32 array.
+
+    Fails closed (SystemExit) with fixture name, path, and actual-vs-expected
+    bytes/elements on any SHA, byte-count, or element-count mismatch. Never
+    relies on ``assert``.
+
+    Returns:
+        numpy.ndarray of shape (C, h * SCALE, w * SCALE), dtype float32.
+    """
+    if not os.path.exists(ref_path):
+        raise SystemExit(
+            f"full reference {fixture_name!r}: file not found at {ref_path}"
+        )
+    with open(ref_path, "rb") as f:
+        data = f.read()
+
+    actual = sha256_bytes(data)
+    if actual != expected_sha:
+        raise SystemExit(
+            f"full reference {fixture_name!r}: SHA-256 mismatch "
+            f"manifest={expected_sha} actual={actual} path={ref_path}"
+        )
+
+    expected_elements = C * h * SCALE * w * SCALE
+    expected_bytes = expected_elements * 4
+    if len(data) != expected_bytes:
+        raise SystemExit(
+            f"full reference {fixture_name!r}: byte count {len(data)} != "
+            f"expected {expected_bytes} path={ref_path}"
+        )
+
+    arr = np.frombuffer(data, dtype="<f4")
+    if arr.size != expected_elements:
+        raise SystemExit(
+            f"full reference {fixture_name!r}: element count {arr.size} != "
+            f"expected {expected_elements} path={ref_path}"
+        )
+
+    full = arr.copy()
+    return full.reshape(C, h * SCALE, w * SCALE)
+
+
+def validate_assembled_device_output(device_dir, name, w, h):
+    """Validate canonical assembled device output existence and exact byte size.
+
+    Args:
+        device_dir: path to the device output directory
+        name: fixture name
+        w, h: fixture dimensions
+
+    Returns:
+        tuple (bool, str): (is_valid, error_message)
+    """
+    path = os.path.join(device_dir, f"assembled_{name}.f32le")
+    if not os.path.exists(path):
+        return False, f"assembled device output missing for fixture {name!r} at {path}"
+    expected = full_reference_expected_bytes(w, h)
+    size = os.path.getsize(path)
+    if size != expected:
+        return False, (
+            f"assembled device output for {name!r} has size {size} bytes, "
+            f"expected {expected} (path={path})"
+        )
+    return True, ""
+
+
+def require_assembled_device_output(device_dir, name, w, h):
+    """Fail closed if the canonical assembled device output is absent or wrong-sized."""
+    ok, err = validate_assembled_device_output(device_dir, name, w, h)
+    if not ok:
+        raise SystemExit(f"FAIL: {err}")
+    return None
 
 
 def plan_axis(dim, halo=HALO):
@@ -130,18 +242,18 @@ def expected_tile_indices(w, h):
 
 def validate_decomposition_artifacts(device_dir, name, w, h):
     """Validate all decomposition artifacts for a designated fixture.
-    
+
     Args:
         device_dir: path to device output directory
         name: fixture name (must be in DECOMPOSITION_FIXTURES)
         w, h: fixture dimensions
-        
+
     Returns:
         tuple (bool, str): (is_valid, error_message)
     """
     if name not in DECOMPOSITION_FIXTURES:
         return True, ""  # non-designated: optional
-    
+
     expected = DECOMPOSITION_FIXTURES[name]
     tiles_dir = os.path.join(device_dir, "tiles", name)
     if not os.path.isdir(tiles_dir):
@@ -188,6 +300,14 @@ def validate_decomposition_artifacts(device_dir, name, w, h):
     return True, ""
 
 
+def require_decomposition_artifacts(device_dir, name, w, h):
+    """Fail closed if a designated decomposition fixture's artifacts are invalid."""
+    ok, err = validate_decomposition_artifacts(device_dir, name, w, h)
+    if not ok:
+        raise SystemExit(f"decomposition fixture {name!r}: {err}")
+    return None
+
+
 def validate_canonical_fixture_count(manifest):
     """Assert canonical fixtures manifest has exactly 25 fixtures."""
     fixtures = manifest.get("fixtures", [])
@@ -206,3 +326,14 @@ def validate_planned_tile_count(manifest):
     if total != 280:
         return False, f"planned tile total {total} != 280"
     return True, ""
+
+
+def require_canonical_corpus(manifest):
+    """Fail closed if the canonical fixtures manifest is not 25 fixtures / 280 tiles."""
+    ok, err = validate_canonical_fixture_count(manifest)
+    if not ok:
+        raise SystemExit(err)
+    ok, err = validate_planned_tile_count(manifest)
+    if not ok:
+        raise SystemExit(err)
+    return None
