@@ -16,6 +16,7 @@ import com.projectnuke.keplerstudio.editor.ModelLoadResult
 import com.projectnuke.keplerstudio.editor.ModelOperationContext
 import com.projectnuke.keplerstudio.editor.ValidatedModelCapabilityToken
 import com.projectnuke.keplerstudio.editor.decideNpuProof
+import com.projectnuke.keplerstudio.editor.finalizeProbeReport
 import com.projectnuke.keplerstudio.editor.npuProofAcceptanceFailure
 import com.projectnuke.keplerstudio.editor.sha256Bytes
 import java.io.File
@@ -149,7 +150,7 @@ class ExynosN3RawReferenceInstrumentationTest {
 
                 // Warm-up with the first fixture (not recorded), then two recorded runs.
                 val warmupName = fixtures.first().first
-                runRawOnce(session, warmupName, operationContext, "warmup", reportDir, null, metadata)
+                runRawOnce(session, warmupName, fixtures.first().second, operationContext, "warmup", reportDir, null, metadata)
 
                 var maxAbsRepeatabilityDiff = 0.0
                 var bitIdenticalCount = 0
@@ -171,7 +172,7 @@ class ExynosN3RawReferenceInstrumentationTest {
                         runJson.put("input_sha256", "")
                         runJson.put("output_sha256", "")
                         runJson.put("output_bytes", 0)
-                        runRawOnce(session, name, operationContext, "$name#$runIndex", reportDir, runJson, metadata)
+                        runRawOnce(session, name, expectedInputSha, operationContext, "$name#$runIndex", reportDir, runJson, metadata)
                         val outFile = File(reportDir, "npu_raw_output_${name}_${runIndex}.f32le")
                         if (outFile.exists()) {
                             outputs.add(FileInputStream(outFile).readBytes())
@@ -251,10 +252,22 @@ class ExynosN3RawReferenceInstrumentationTest {
                     metadata.put("status", "FAILED")
                     metadata.put("failure_stage", "npu_proof")
                     metadata.put("failure_message", proofFailure.message ?: "accelerator proof incomplete")
-                    if (testFailure == null) throw proofFailure
                 }
-                File(reportDir, "metadata.json").writeText(metadata.toString(2))
-                println("EXYNOS_N3_REPORT=${reportDir.absolutePath}")
+
+                // N2 total-reporting pattern: failure determination -> metadata write
+                // attempt -> original/proof failure surfaced. Persist BEFORE surfacing any
+                // synthesized proof failure so evidence is never lost to the throw.
+                val report = finalizeProbeReport(
+                    writeReport = { File(reportDir, "metadata.json").writeText(metadata.toString(2)) },
+                    originalFailure = testFailure ?: proofFailure,
+                    closeFailure = closeFailure,
+                )
+                if (report.persisted) {
+                    println("EXYNOS_N3_REPORT=${reportDir.absolutePath}")
+                } else {
+                    println("EXYNOS_N3_REPORT_WRITE_FAILED=${reportDir.absolutePath}")
+                }
+                if (testFailure == null && report.primaryFailure != null) throw report.primaryFailure
             }
         }
     }
@@ -262,6 +275,7 @@ class ExynosN3RawReferenceInstrumentationTest {
     private suspend fun runRawOnce(
         session: ExynosUpscaleSession,
         fixtureName: String,
+        expectedInputSha: String,
         operationContext: ModelOperationContext,
         label: String,
         reportDir: File,
@@ -283,6 +297,11 @@ class ExynosN3RawReferenceInstrumentationTest {
         assertTrue("raw H2D failed for $label", result.h2dStatus == EnnStatus.SUCCESS)
         assertTrue("raw execute failed for $label", result.executeStatus == EnnStatus.SUCCESS)
         assertTrue("raw D2H failed for $label", result.d2hStatus == EnnStatus.SUCCESS)
+        assertEquals(
+            "input-parity gate: H2D payload must be byte-identical to the canonical fixture for $label",
+            expectedInputSha,
+            result.inputSha256,
+        )
         val output = checkNotNull(result.outputBytes)
         assertEquals("raw output byte count for $label", 3 * 512 * 512 * 4, output.size)
         val outFile = File(reportDir, "npu_raw_output_${fixtureName}_${label.substringAfter('#', label)}.f32le")

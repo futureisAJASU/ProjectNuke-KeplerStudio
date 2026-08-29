@@ -26,7 +26,25 @@ tools/exynos_reference/
   generate_fixtures.py        deterministic 128x128 RGB corpus + canonical CHW f32le.
   reference_runner.py         loads GENERAL/WDN/DNI-0.5, runs FP32 (and optional --half).
   compare.py                  raw + image-domain metrics, comparison.csv / summary.json.
+  reproducible_gzip.py        mtime=0 gzip (de)compress for manifest-hashed evidence containers.
+  halo_sweep.py               N4.6 host halo sweep (full-vs-tiled geometry proof).
+  generate_n4_fixtures.py     N4 canonical multi-tile fixture inputs (+ manifest).
+  n4_reference.py             N4 host full + tiled PyTorch reference generation.
+  compare_n4.py               N4 NNC-vs-PyTorch metrics, seam/border, error decomposition.
 ```
+
+## Evidence-container reproducibility
+
+Any `.gz` container whose hash is recorded in a manifest MUST be produced with a
+deterministic compressor, otherwise the gzip header mtime makes the recorded SHA go
+stale even when the payload is unchanged. Use:
+
+```
+python reproducible_gzip.py compress <payload> <out.gz>
+```
+
+which wraps `gzip.compress(..., compresslevel=9, mtime=0)`. The manifest records the
+payload (decompressed) SHA (never altered) plus the reproducible container SHA.
 
 ## Reproduction
 

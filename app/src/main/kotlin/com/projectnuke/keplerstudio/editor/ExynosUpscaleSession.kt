@@ -284,7 +284,29 @@ internal class ExynosUpscaleSession(
                         "raw input must be exactly $INPUT_BYTES bytes (FP32 CHW 3x${INPUT_WIDTH}x${INPUT_HEIGHT})",
                     )
                 }
-                rawRunLocked(inputBytes, attemptLabel)
+                try {
+                    rawRunLocked(inputBytes, attemptLabel)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (t: Throwable) {
+                    // A native boundary threw. The shared core already recorded the
+                    // throwing stage/detail into [lastRunDiagnostics]; surface it as a
+                    // structured failure (never an exception) so a tiled orchestrator can
+                    // treat a native throw as one tile's failure, not a process-wide abort.
+                    val diag = lastRunDiagnostics
+                    ExynosRawRunResult(
+                        diag.h2dStatus,
+                        diag.executeStatus,
+                        diag.d2hStatus,
+                        null,
+                        null,
+                        throwableStage = diag.throwableStage,
+                        throwableDetail = diag.throwableDetail ?: (t.message ?: t.javaClass.simpleName),
+                    ).also {
+                        val stage = diag.throwableStage ?: "unknown"
+                        it.log("native boundary threw at $stage: ${diag.throwableDetail ?: t.message}")
+                    }
+                }
             }
         }
 
@@ -547,73 +569,41 @@ internal class ExynosUpscaleSession(
         )
 
     private suspend fun runLocked(argbPixels: IntArray, attemptLabel: String? = null): ModelRunResult<Bitmap> {
-        val diagnostics = ExynosRunDiagnostics()
-        lastRunDiagnostics = diagnostics
-        diagnostics.attemptLabel = attemptLabel
-        runDiagnosticsHistoryInternal += diagnostics
-        lifecycle = ModelRunnerLifecycle.Inferencing
-        try {
         val inputBuffer = preprocess(argbPixels)
         val inputBytes = ByteArray(INPUT_BYTES)
         inputBuffer.get(inputBytes)
-        preH2dCheck?.invoke()
-        coroutineContext.ensureActive()
-        val memcpyInStatus =
-            nativeRunStage(diagnostics, "h2d") { native.memcpyHostToDevice(bufferSet, 0, inputBytes) }
-        diagnostics.h2dStatus = memcpyInStatus
-        if (memcpyInStatus != EnnStatus.SUCCESS) {
-            return ModelRunResult.Failure(
-                ModelFailure(
-                    ModelFailureReason.InvalidInput,
-                    "input copy into the ENN buffer failed: EnnReturn=${EnnStatus.describe(memcpyInStatus)}",
-                ),
-                DeterministicModelFallback.NoResult,
-            )
-        }
-            checkCancellation()
-            coroutineContext.ensureActive()
-            preExecuteCheck?.invoke()
-            // Authoritative coroutine cancellation boundary AFTER the test-only park
-            // seam, immediately before native EnnExecuteModel execution.
-            coroutineContext.ensureActive()
-            // Reached the native execute boundary — recorded BEFORE the call so a throw
-            // still proves EnnExecuteModel was entered (status stays null, throwable set).
-            diagnostics.executeReached = true
-            val executeStatus = nativeRunStage(diagnostics, "execute") { native.execute(modelId) }
-            diagnostics.executeStatus = executeStatus
-            if (executeStatus != EnnStatus.SUCCESS) {
-                return ModelRunResult.Failure(
+        return when (val outcome = executeNativeLocked(inputBytes, attemptLabel)) {
+            is NativeRunOutcome.Success -> {
+                val decodeResult = buildOutputBitmap(outcome.outputBytes)
+                if (decodeResult is ModelRunResult.Success) {
+                    lastRunDiagnostics.outputDecodePassed = true
+                }
+                decodeResult
+            }
+            is NativeRunOutcome.H2dFailed ->
+                ModelRunResult.Failure(
                     ModelFailure(
-                        ModelFailureReason.InferenceFailed,
-                        "EnnExecuteModel failed: EnnReturn=${EnnStatus.describe(executeStatus)}",
+                        ModelFailureReason.InvalidInput,
+                        "input copy into the ENN buffer failed: EnnReturn=${EnnStatus.describe(outcome.h2dStatus)}",
                     ),
                     DeterministicModelFallback.NoResult,
                 )
-            }
-        val outputBytes = ByteArray(OUTPUT_BYTES)
-        preD2hCheck?.invoke()
-        coroutineContext.ensureActive()
-        val memcpyOutStatus =
-            nativeRunStage(diagnostics, "d2h") {
-                native.memcpyDeviceToHost(bufferSet, ENN_OUTPUT_INDEX, outputBytes)
-            }
-        diagnostics.d2hStatus = memcpyOutStatus
-        if (memcpyOutStatus != EnnStatus.SUCCESS) {
-            return ModelRunResult.Failure(
-                ModelFailure(
-                    ModelFailureReason.InvalidOutput,
-                    "output copy from the ENN buffer failed: EnnReturn=${EnnStatus.describe(memcpyOutStatus)}",
-                ),
-                DeterministicModelFallback.NoResult,
-            )
-        }
-        val decodeResult = buildOutputBitmap(outputBytes)
-        if (decodeResult is ModelRunResult.Success) {
-            diagnostics.outputDecodePassed = true
-        }
-        return decodeResult
-        } finally {
-            lifecycle = ModelRunnerLifecycle.Loaded
+            is NativeRunOutcome.ExecuteFailed ->
+                ModelRunResult.Failure(
+                    ModelFailure(
+                        ModelFailureReason.InferenceFailed,
+                        "EnnExecuteModel failed: EnnReturn=${EnnStatus.describe(outcome.executeStatus)}",
+                    ),
+                    DeterministicModelFallback.NoResult,
+                )
+            is NativeRunOutcome.D2hFailed ->
+                ModelRunResult.Failure(
+                    ModelFailure(
+                        ModelFailureReason.InvalidOutput,
+                        "output copy from the ENN buffer failed: EnnReturn=${EnnStatus.describe(outcome.d2hStatus)}",
+                    ),
+                    DeterministicModelFallback.NoResult,
+                )
         }
     }
 
@@ -623,50 +613,119 @@ internal class ExynosUpscaleSession(
      * the caller and surfacing the untouched D2H payload instead of a decoded bitmap.
      */
     private suspend fun rawRunLocked(inputBytes: ByteArray, attemptLabel: String?): ExynosRawRunResult {
+        val inputSha = runCatching { sha256Bytes(inputBytes) }.getOrNull()
+        return when (val outcome = executeNativeLocked(inputBytes, attemptLabel)) {
+            is NativeRunOutcome.Success ->
+                ExynosRawRunResult(
+                    outcome.h2dStatus, outcome.executeStatus, outcome.d2hStatus, inputSha, outcome.outputBytes,
+                )
+            is NativeRunOutcome.H2dFailed ->
+                ExynosRawRunResult(outcome.h2dStatus, null, null, inputSha, null)
+                    .also { it.log("H2D failed: EnnReturn=${EnnStatus.describe(outcome.h2dStatus)}") }
+            is NativeRunOutcome.ExecuteFailed ->
+                ExynosRawRunResult(outcome.h2dStatus, outcome.executeStatus, null, inputSha, null)
+                    .also { it.log("execute failed: EnnReturn=${EnnStatus.describe(outcome.executeStatus)}") }
+            is NativeRunOutcome.D2hFailed ->
+                ExynosRawRunResult(outcome.h2dStatus, outcome.executeStatus, outcome.d2hStatus, inputSha, null)
+                    .also { it.log("D2H failed: EnnReturn=${EnnStatus.describe(outcome.d2hStatus)}") }
+        }
+    }
+
+    /**
+     * THE single source of truth for a native inference's physical boundaries.
+     *
+     * Every production path (Bitmap [run] and raw [runRawFp32Chw]) funnels through this
+     * method, so there is exactly one implementation of:
+     *   - lifecycle flip (Loaded -> Inferencing -> Loaded),
+     *   - H2D (`memcpyHostToDevice`),
+     *   - authoritative cancellation/staleness checks (`checkCancellation`,
+     *     `coroutineContext.ensureActive`) plus the parked-fake test seams
+     *     ([preH2dCheck]/[preExecuteCheck]/[preD2hCheck]),
+     *   - EnnExecuteModel boundary recording (`executeReached` set immediately before the
+     *     call so a throw still proves the boundary was entered),
+     *   - D2H (`memcpyDeviceToHost`),
+     *   - per-stage diagnostic recording.
+     *
+     * Native status failures are returned as a structured [NativeRunOutcome] (never an
+     * exception) so callers can distinguish each stage. A native call that THROWS still
+     * propagates here and is handled by each wrapper's own policy.
+     */
+    private suspend fun executeNativeLocked(
+        inputBytes: ByteArray,
+        attemptLabel: String?,
+    ): NativeRunOutcome {
         val diagnostics = ExynosRunDiagnostics()
         lastRunDiagnostics = diagnostics
         diagnostics.attemptLabel = attemptLabel
         runDiagnosticsHistoryInternal += diagnostics
         lifecycle = ModelRunnerLifecycle.Inferencing
         try {
-            val inputSha = runCatching { sha256Bytes(inputBytes) }.getOrNull()
             preH2dCheck?.invoke()
-            val h2dStatus = nativeRunStage(diagnostics, "h2d") {
-                native.memcpyHostToDevice(bufferSet, 0, inputBytes)
-            }
+            coroutineContext.ensureActive()
+            val h2dStatus =
+                nativeRunStage(diagnostics, "h2d") { native.memcpyHostToDevice(bufferSet, 0, inputBytes) }
             diagnostics.h2dStatus = h2dStatus
-            if (h2dStatus != EnnStatus.SUCCESS) {
-                return ExynosRawRunResult(
-                    h2dStatus, null, null, inputSha, null,
-                ).also { it.log("H2D failed: EnnReturn=${EnnStatus.describe(h2dStatus)}") }
-            }
+            if (h2dStatus != EnnStatus.SUCCESS) return NativeRunOutcome.H2dFailed(h2dStatus)
+
             checkCancellation()
+            coroutineContext.ensureActive()
             preExecuteCheck?.invoke()
+            // Authoritative coroutine cancellation boundary AFTER the test-only park
+            // seam, immediately before native EnnExecuteModel execution.
             coroutineContext.ensureActive()
             diagnostics.executeReached = true
             val executeStatus = nativeRunStage(diagnostics, "execute") { native.execute(modelId) }
             diagnostics.executeStatus = executeStatus
             if (executeStatus != EnnStatus.SUCCESS) {
-                return ExynosRawRunResult(
-                    h2dStatus, executeStatus, null, inputSha, null,
-                ).also { it.log("execute failed: EnnReturn=${EnnStatus.describe(executeStatus)}") }
+                return NativeRunOutcome.ExecuteFailed(h2dStatus, executeStatus)
             }
+
             val outputBytes = ByteArray(OUTPUT_BYTES)
             preD2hCheck?.invoke()
             coroutineContext.ensureActive()
-            val d2hStatus = nativeRunStage(diagnostics, "d2h") {
-                native.memcpyDeviceToHost(bufferSet, ENN_OUTPUT_INDEX, outputBytes)
-            }
+            val d2hStatus =
+                nativeRunStage(diagnostics, "d2h") {
+                    native.memcpyDeviceToHost(bufferSet, ENN_OUTPUT_INDEX, outputBytes)
+                }
             diagnostics.d2hStatus = d2hStatus
             if (d2hStatus != EnnStatus.SUCCESS) {
-                return ExynosRawRunResult(
-                    h2dStatus, executeStatus, d2hStatus, inputSha, null,
-                ).also { it.log("D2H failed: EnnReturn=${EnnStatus.describe(d2hStatus)}") }
+                return NativeRunOutcome.D2hFailed(h2dStatus, executeStatus, d2hStatus)
             }
-            return ExynosRawRunResult(h2dStatus, executeStatus, d2hStatus, inputSha, outputBytes)
+            return NativeRunOutcome.Success(h2dStatus, executeStatus, d2hStatus, outputBytes)
         } finally {
             lifecycle = ModelRunnerLifecycle.Loaded
         }
+    }
+
+    private sealed interface NativeRunOutcome {
+        val h2dStatus: Int?
+        val executeStatus: Int?
+        val d2hStatus: Int?
+
+        data class Success(
+            override val h2dStatus: Int,
+            override val executeStatus: Int,
+            override val d2hStatus: Int,
+            val outputBytes: ByteArray,
+        ) : NativeRunOutcome
+
+        data class H2dFailed(override val h2dStatus: Int) : NativeRunOutcome {
+            override val executeStatus: Int? = null
+            override val d2hStatus: Int? = null
+        }
+
+        data class ExecuteFailed(
+            override val h2dStatus: Int,
+            override val executeStatus: Int,
+        ) : NativeRunOutcome {
+            override val d2hStatus: Int? = null
+        }
+
+        data class D2hFailed(
+            override val h2dStatus: Int,
+            override val executeStatus: Int,
+            override val d2hStatus: Int,
+        ) : NativeRunOutcome
     }
 
     private fun buildOutputBitmap(outputBytes: ByteArray): ModelRunResult<Bitmap> {
@@ -975,9 +1034,13 @@ internal data class ExynosRawRunResult(
     val d2hStatus: Int?,
     val inputSha256: String?,
     val outputBytes: ByteArray?,
+    val throwableStage: String? = null,
+    val throwableDetail: String? = null,
 ) {
     val reachedExecute: Boolean
         get() = executeStatus != null
+    val threw: Boolean
+        get() = throwableStage != null
     val succeeded: Boolean
         get() =
             h2dStatus == EnnStatus.SUCCESS &&

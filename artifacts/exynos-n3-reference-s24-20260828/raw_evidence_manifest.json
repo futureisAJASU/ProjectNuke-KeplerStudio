@@ -2,7 +2,7 @@
   "retained_gzipped": [
     {
       "path": "device_raw/n2_original_fp16cpu.npy.gz",
-      "gz_sha256": "41162013aba89270881ed0adb806fa593508f35ccfecf98b6979d3da77440261",
+      "gz_sha256": "84f731cb21fc62a8cfae3f2694ca8c2ba97fb0e179f8baca848c8e3632016302",
       "orig_sha256": "33b22df409b74a4c1467fb9d5115c3904ec011c5ae7c4d32aa11a3bfce14c379"
     },
     {

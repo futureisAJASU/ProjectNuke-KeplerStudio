@@ -31,6 +31,10 @@ app/src/main/assets/models/*.gguf
 .DS_Store
 Thumbs.db
 
+# Python bytecode / caches (host reference tooling must not commit compiled artifacts)
+__pycache__/
+*.py[cod]
+
 # Local debug/test artifacts
 # Only root-level text files are ignored so docs and tool requirements stay trackable.
 /*.txt

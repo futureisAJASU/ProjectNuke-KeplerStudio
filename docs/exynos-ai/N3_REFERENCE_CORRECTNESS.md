@@ -42,13 +42,21 @@ Full provenance pinned in [`N3_REFERENCE_CONTRACT.md`](N3_REFERENCE_CONTRACT.md)
 
 ## Candidate identification
 
-Aggregate raw-tensor error (NNC vs each candidate), across all six fixtures:
+Aggregate raw-tensor error (NNC vs each candidate), across all six fixtures. The
+percentile columns are **macro-averages** of six fixture-specific percentiles (the
+mean of each fixture's own P95/P99), not percentiles of a single pooled distribution:
 
-| Candidate | aggregate MAE | aggregate RMSE | aggregate MAX | P95 | P99 |
+| Candidate | aggregate MAE | aggregate RMSE | aggregate MAX | macro_fixture_p95 | macro_fixture_p99 |
 |---|---|---|---|---|---|
 | **GENERAL** | **0.000270** | **0.000430** | **0.010898** | 0.000784 | 0.001507 |
 | WDN | 0.045861 | 0.100874 | 1.482201 | 0.133999 | 0.240020 |
 | DNI-0.5 | 0.025644 | 0.053056 | 0.752744 | 0.078869 | 0.140827 |
+
+For completeness, the **pooled all-element** percentiles (computed over the single
+concatenated |NNC − GENERAL| distribution across all six retained raw tensors,
+4,718,592 elements) are: pooled P95 ≈ 0.000863, pooled P99 ≈ 0.001559. These pooled
+values agree closely with the macro-averages and are provided for readers who prefer a
+single pooled statistic.
 
 GENERAL is ~95× closer than DNI-0.5 and ~170× closer than WDN on aggregate MAE — an
 unambiguous, fixture-consistent identification (see per-fixture table below). Correlation
@@ -182,7 +190,8 @@ compiler = NPU, NPUC v2.4.11.l
 MATCHED REFERENCE: GENERAL
 
 RAW NNC vs REFERENCE (GENERAL, aggregate):
-MAE=0.000270  RMSE=0.000430  P95=0.000784  P99=0.001507  MAX=0.010898
+MAE=0.000270  RMSE=0.000430  macro_fixture_p95=0.000784  macro_fixture_p99=0.001507  MAX=0.010898
+pooled_all_element: P95=0.000863  P99=0.001559  (4,718,592 elements)
 per-channel MAE: R=0.000267 G=0.000238 B=0.000303
 
 REPEATABILITY: bit-identical = yes (6/6 fixtures, max abs diff 0.0)
