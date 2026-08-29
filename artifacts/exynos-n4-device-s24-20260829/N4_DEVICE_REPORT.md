@@ -16,7 +16,7 @@ Full-image tiling / seam correctness against the pinned GENERAL PyTorch referenc
 ## Repository state
 
 - START HEAD: `f1d03cb4d15905aa8ecbaade0594e86906f4fb2f`
-- FINAL HEAD: `__FINAL_HEAD__`
+- FINAL HEAD: `1bbb0dda95af279650cf0a26dea82883b48242d0`
 - Branch: `feature/exynos-ai-runtime`
 
 ## Device identity
