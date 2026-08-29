@@ -3,6 +3,13 @@
 Phase N4 physical-device closure on the real Galaxy S24 (Exynos 2400).
 Full-image tiling / seam correctness against the pinned GENERAL PyTorch reference.
 
+> **Normative note.** This commit is an evidence/report normalization corrective
+> over the already accepted physical run (evidence commit `1bbb0dd`). No new
+> device execution occurred. The aggregate region definitions now match
+> `compare_n4.py` exactly, pooled P95/P99 are recomputed from the retained raw
+> outputs using production masks, and a machine-readable
+> `n4_aggregate.json` is committed.
+
 ## Execution summary
 
 | Gate | Status |
@@ -13,10 +20,15 @@ Full-image tiling / seam correctness against the pinned GENERAL PyTorch referenc
 | N4 FINAL GATE | PASS |
 | N4 FULL-IMAGE TILING / SEAM CORRECTNESS | PASS |
 
+> This report was normalized after independent bundle review. The physical S24 execution
+> (SM-S921N, Exynos 2400, 25/25 fixtures, 280/280 tiles) was accepted without re-run.
+> The normalization corrected aggregate SEAM/NON-SEAM values to use the exact region
+> masks from `compare_n4.py`: SEAM = `seam & ~border`, NON-SEAM = `~seam & ~border`.
+
 ## Repository state
 
 - START HEAD: `f1d03cb4d15905aa8ecbaade0594e86906f4fb2f`
-- FINAL HEAD: `1bbb0dda95af279650cf0a26dea82883b48242d0`
+- FINAL HEAD: `e49a3d96ecb6893f9d7594fc5e528aa8790ed879`
 - Branch: `feature/exynos-ai-runtime`
 
 ## Device identity
@@ -73,20 +85,44 @@ Kotlin → `System.loadLibrary("enn_kepler_jni")` → app JNI →
 
 ## Aggregate corpus metrics (raw FP32 abs-diff vs GENERAL full reference, 64,294,560 elements)
 
-| Region | MAE | RMSE | P95 | P99 | MAX |
-|---|---|---|---|---|---|
-| GLOBAL | 0.000295646 | 0.000454904 | 0.001012 | 0.001541 | 0.010799 |
-| SEAM | 0.000294079 | 0.000460703 | 0.001014 | 0.001553 | 0.010773 |
-| NON-SEAM | 0.000295779 | 0.000454406 | 0.001012 | 0.001540 | 0.010799 |
-| BORDER | 0.000305787 | 0.000416593 | 0.000872 | 0.001309 | 0.006450 |
+Region definitions (from `compare_n4.py`, these three partition GLOBAL):
+
+- **SEAM:** `seam & ~border`
+- **NON-SEAM:** `~seam & ~border`
+- **BORDER:** `border`
+
+| Region | count | MAE | RMSE | P95 | P99 | MAX |
+|---|---:|---:|---:|---:|---:|---:|
+| GLOBAL | 64,294,560 | 0.000295646 | 0.000454904 | 0.001012 | 0.001541 | 0.010799 |
+| SEAM | 4,964,160 | 0.000293767 | 0.000461322 | 0.001017 | 0.001556 | 0.010773 |
+| NON-SEAM | 57,128,160 | 0.000295418 | 0.000455756 | 0.001018 | 0.001546 | 0.010799 |
+| BORDER | 2,202,240 | 0.000305787 | 0.000416593 | 0.000872 | 0.001309 | 0.006450 |
 
 Seam / non-seam ratios (aggregate):
 
-- `seam_mae / non_seam_mae = 0.994253`
-- `seam_rmse / non_seam_rmse = 1.013858`
+- `seam_mae / non_seam_mae = 0.994413`
+- `seam_rmse / non_seam_rmse = 1.012213`
 
-Per-fixture metrics are in `n4_comparison/n4_comparison.json` and
+> **Previous aggregate divergence.** The earlier report computed SEAM using the raw
+> `seam` mask and NON-SEAM using `~seam`, without excluding border pixels. With the
+> production masks above, SEAM shrinks from 5,052,480 → 4,964,160 and NON-SEAM
+> from 59,242,080 → 57,128,160; GLOBAL and BORDER are unaffected. P95/P99 are
+> now pooled directly from the retained raw files using production masks.
+
+Machine-readable aggregate: `n4_comparison/n4_aggregate.json`.
+
+Per-fixture metrics: `n4_comparison/n4_comparison.json` and
 `n4_comparison/n4_comparison.csv`.
+
+## Notable per-fixture result: mixed_188x188
+
+`seam/non-seam MAE ratio ≈ 1.753`. This is **not** classified as a tiling seam
+defect. The canonical fixture generator intentionally writes `r[:, w//2] = 255`
+and `g[h//2, :] = 255`, placing strong image-content edges directly at
+`w//2 = h//2 = 94` LR → `376` HR, which coincides with the 188×188 ownership
+seam. The elevation is therefore **content-localized compiler error** (edge
+amplification), not systematic tiling discontinuity. All other fixtures have
+seam/non-seam ratios near 1.0.
 
 ## Error decomposition (N4.14)
 
@@ -164,7 +200,18 @@ Actual JUnit XML totals: **1091 tests, 0 failures, 0 errors, 0 skipped**.
 | `device_evidence/metadata.json` | Device identity, model identity, per-tile records, NPU proof, timing, close/registry state. |
 | `n4_comparison/n4_comparison.json` | Full GLOBAL/SEAM/NON-SEAM/BORDER metrics per fixture + decomposition. |
 | `n4_comparison/n4_comparison.csv` | Per-fixture metric rows. |
+| `n4_comparison/n4_aggregate.json` | Machine-readable pooled aggregate: region defs, counts, MAE/RMSE/P95/P99/MAX, ratios, identities. |
 | `n4_comparison/heatmaps/*_8bit_abs.png` | Compact 8-bit absolute-error heatmaps. |
 
-Raw assembled `.f32le` tensors and raw `*_raw_abs.png` heapmaps are kept local only
-(regenerable / large), not committed.
+Raw-tensor retention (intentional, not lost / not committed):
+
+- **raw assembled outputs** (`device_evidence/assembled_*.f32le`): local only
+- **raw decomposition tile inputs/outputs** (`device_evidence/tiles/`): local only
+- **raw GENERAL reference tensors** (`reference/full/*_raw.f32le`): local / regenerable via `reference_runner.py` with the pinned GENERAL checkpoint
+
+All `.f32le` under `device_evidence/` and under `reference/full/` and
+`reference/tiled/` are excluded via `.gitignore`. The compact metadata,
+machine-readable aggregate, per-fixture JSON/CSV, and 8-bit heatmaps above are
+the committed durable evidence. The on-disk device run remains identical
+(25/25 fixtures, 280/280 canonical tiles; see `device_evidence/metadata.json`);
+no raw file has been altered in this reporting commit.

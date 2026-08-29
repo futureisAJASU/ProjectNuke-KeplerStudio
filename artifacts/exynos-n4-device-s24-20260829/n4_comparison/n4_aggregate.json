@@ -1,0 +1,80 @@
+{
+  "region_definitions": {
+    "global": "all pixels",
+    "seam": "seam & ~border",
+    "non_seam": "~seam & ~border",
+    "border": "border"
+  },
+  "note": "SEAM + NON-SEAM + BORDER partition GLOBAL. Masks from compare_n4.py seam_border_masks().",
+  "reference_identity": {
+    "weights_identity": "GENERAL",
+    "general_checkpoint_sha256": "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+    "upstream_commit": "a4abfb2979a7bbff3f69f58f58ae324608821e27"
+  },
+  "device_identity": {
+    "model": "SM-S921N",
+    "device": "e1s",
+    "soc": "S5E9945 / Exynos 2400",
+    "android": "16",
+    "serial": "R3CX40A15GB"
+  },
+  "nnc_identity": {
+    "size_bytes": 3112960,
+    "sha256": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+  },
+  "corpus": {
+    "fixtures": 25,
+    "canonical_tiles": 280
+  },
+  "aggregate": {
+    "global": {
+      "count": 64294560,
+      "mae": 0.00029564572754280403,
+      "rmse": 0.0004549037226524186,
+      "p95": 0.0010124444961547852,
+      "p99": 0.001540541648864746,
+      "max": 0.010799288749694824
+    },
+    "seam": {
+      "count": 4964160,
+      "mae": 0.0002937674667493496,
+      "rmse": 0.0004613222206764764,
+      "p95": 0.0010173916816711426,
+      "p99": 0.0015560388565063477,
+      "max": 0.01077258586883545
+    },
+    "non_seam": {
+      "count": 57128160,
+      "mae": 0.00029541799565732804,
+      "rmse": 0.0004557558925573604,
+      "p95": 0.0010178983211517334,
+      "p99": 0.0015457868576049805,
+      "max": 0.010799288749694824
+    },
+    "border": {
+      "count": 2202240,
+      "mae": 0.00030578717020618657,
+      "rmse": 0.000416593494068658,
+      "p95": 0.0008715391159057617,
+      "p99": 0.0013093625009059848,
+      "max": 0.006449580192565918
+    }
+  },
+  "ratios": {
+    "seam_mae_non_seam_mae": 0.9944129033022991,
+    "seam_rmse_non_seam_rmse": 1.0122133980273562
+  },
+  "decomposition": {
+    "seam_stress_188x188": {
+      "tiles": 4,
+      "compiler_drift_mae": 0.00011677768273883126,
+      "tiling_drift_mae": 0.0
+    },
+    "smooth_257x257": {
+      "tiles": 16,
+      "compiler_drift_mae": 0.0002539313731067892,
+      "tiling_drift_mae": 0.0
+    }
+  },
+  "mixed_188x188_note": "seam/non-seam MAE ratio ~1.753. Fixture intentionally places strong image-content edges (w//2=94, h//2=94 -> HR 376) directly on the ownership seam. This is content-localized compiler error, not systematic tiling discontinuity."
+}
