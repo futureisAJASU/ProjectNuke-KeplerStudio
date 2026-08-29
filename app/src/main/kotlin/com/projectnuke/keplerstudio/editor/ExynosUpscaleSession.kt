@@ -311,6 +311,70 @@ internal class ExynosUpscaleSession(
         }
 
     /**
+     * N5 reusable-buffer raw-output seam.
+     *
+     * Identical ownership/lifecycle/cancellation discipline to [runRawFp32Chw], but writes
+     * the untouched FP32 D2H payload into the caller-provided [outputBytes] (exactly
+     * [OUTPUT_BYTES]) rather than allocating a fresh buffer each run. This lets a tiled
+     * orchestrator reuse one output buffer for thousands of tiles without per-tile ~3 MiB
+     * allocations. The caller must not read [outputBytes] as a result until the returned
+     * [ExynosRawRunResult] reports [ExynosRawRunResult.succeeded]; a failed run never
+     * publishes the buffer.
+     */
+    internal suspend fun runRawFp32ChwInto(
+        inputBytes: ByteArray,
+        outputBytes: ByteArray,
+        operationContext: ModelOperationContext,
+        attemptLabel: String? = null,
+    ): ExynosRawRunResult =
+        withContext(ioDispatcher) {
+            lifecycleMutex.withLock {
+                if (operationContext.isCancelled()) {
+                    return@withLock ExynosRawRunResult.cancelled()
+                }
+                if (!operationContext.isCurrent(
+                        operationContext.operationToken,
+                        operationContext.documentGeneration,
+                    )
+                ) {
+                    return@withLock ExynosRawRunResult.failure("stale operation context")
+                }
+                if (lifecycle != ModelRunnerLifecycle.Loaded) {
+                    return@withLock ExynosRawRunResult.failure("session is not Loaded")
+                }
+                if (inputBytes.size != INPUT_BYTES) {
+                    return@withLock ExynosRawRunResult.failure(
+                        "raw input must be exactly $INPUT_BYTES bytes (FP32 CHW 3x${INPUT_WIDTH}x${INPUT_HEIGHT})",
+                    )
+                }
+                if (outputBytes.size != OUTPUT_BYTES) {
+                    return@withLock ExynosRawRunResult.failure(
+                        "raw output buffer must be exactly $OUTPUT_BYTES bytes (FP32 CHW 3x${OUTPUT_WIDTH}x${OUTPUT_HEIGHT})",
+                    )
+                }
+                try {
+                    rawRunLockedInto(inputBytes, outputBytes, attemptLabel)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (t: Throwable) {
+                    val diag = lastRunDiagnostics
+                    ExynosRawRunResult(
+                        diag.h2dStatus,
+                        diag.executeStatus,
+                        diag.d2hStatus,
+                        null,
+                        null,
+                        throwableStage = diag.throwableStage,
+                        throwableDetail = diag.throwableDetail ?: (t.message ?: t.javaClass.simpleName),
+                    ).also {
+                        val stage = diag.throwableStage ?: "unknown"
+                        it.log("native boundary threw at $stage: ${diag.throwableDetail ?: t.message}")
+                    }
+                }
+            }
+        }
+
+    /**
      * Terminal ownership boundary; safe to call repeatedly and from any thread.
      * When a previous teardown could not delete the prepared model file, calling close()
      * again is the explicit later cleanup attempt that retries the deletion of that
@@ -572,7 +636,7 @@ internal class ExynosUpscaleSession(
         val inputBuffer = preprocess(argbPixels)
         val inputBytes = ByteArray(INPUT_BYTES)
         inputBuffer.get(inputBytes)
-        return when (val outcome = executeNativeLocked(inputBytes, attemptLabel)) {
+        return when (val outcome = executeNativeLocked(inputBytes, ByteArray(OUTPUT_BYTES), attemptLabel)) {
             is NativeRunOutcome.Success -> {
                 val decodeResult = buildOutputBitmap(outcome.outputBytes)
                 if (decodeResult is ModelRunResult.Success) {
@@ -612,9 +676,24 @@ internal class ExynosUpscaleSession(
      * boundaries, same diagnostic recording) but feeding the exact H2D payload provided by
      * the caller and surfacing the untouched D2H payload instead of a decoded bitmap.
      */
-    private suspend fun rawRunLocked(inputBytes: ByteArray, attemptLabel: String?): ExynosRawRunResult {
+    private suspend fun rawRunLocked(inputBytes: ByteArray, attemptLabel: String?): ExynosRawRunResult =
+        rawRunLockedInto(inputBytes, ByteArray(OUTPUT_BYTES), attemptLabel)
+
+    /**
+     * Reusable-buffer raw-run core (N5): writes the untouched D2H payload into the
+     * caller-provided [outputBytes] (exactly [OUTPUT_BYTES]) instead of allocating a fresh
+     * ~3 MiB buffer per tile. On any H2D/execute/D2H failure or native throw the returned
+     * result carries a null outputBytes: the partially-written caller buffer is never
+     * published as output.
+     */
+    private suspend fun rawRunLockedInto(
+        inputBytes: ByteArray,
+        outputBytes: ByteArray,
+        attemptLabel: String?,
+    ): ExynosRawRunResult {
+        require(outputBytes.size == OUTPUT_BYTES) { "reusable output buffer must be exactly $OUTPUT_BYTES bytes" }
         val inputSha = runCatching { sha256Bytes(inputBytes) }.getOrNull()
-        return when (val outcome = executeNativeLocked(inputBytes, attemptLabel)) {
+        return when (val outcome = executeNativeLocked(inputBytes, outputBytes, attemptLabel)) {
             is NativeRunOutcome.Success ->
                 ExynosRawRunResult(
                     outcome.h2dStatus, outcome.executeStatus, outcome.d2hStatus, inputSha, outcome.outputBytes,
@@ -652,8 +731,10 @@ internal class ExynosUpscaleSession(
      */
     private suspend fun executeNativeLocked(
         inputBytes: ByteArray,
+        outputBytes: ByteArray,
         attemptLabel: String?,
     ): NativeRunOutcome {
+        require(outputBytes.size == OUTPUT_BYTES) { "raw output buffer must be exactly $OUTPUT_BYTES bytes" }
         val diagnostics = ExynosRunDiagnostics()
         lastRunDiagnostics = diagnostics
         diagnostics.attemptLabel = attemptLabel
@@ -680,7 +761,6 @@ internal class ExynosUpscaleSession(
                 return NativeRunOutcome.ExecuteFailed(h2dStatus, executeStatus)
             }
 
-            val outputBytes = ByteArray(OUTPUT_BYTES)
             preD2hCheck?.invoke()
             coroutineContext.ensureActive()
             val d2hStatus =

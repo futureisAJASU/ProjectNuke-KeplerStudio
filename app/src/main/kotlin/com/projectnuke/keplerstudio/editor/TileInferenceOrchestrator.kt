@@ -196,6 +196,8 @@ internal enum class TileFailureReason {
     NativeThrew,
     DecodeFailed,
     AssemblyFailed,
+    SourceReadFailed,
+    ArtifactPublishFailed,
 }
 
 internal data class TileRunRecord(
