@@ -37,5 +37,15 @@ data class SavedExport(
     val uriString: String,
     val formatLabel: String,
     val resolutionLabel: String,
-    val timestampMillis: Long
+    val timestampMillis: Long,
+    // N6 provenance — optional, backwards-compatible; old 5-field rows decode with nulls
+    val provenanceFeature: String? = null,
+    val provenanceScale: Int? = null,
+    val provenanceModelId: String? = null,
+    val provenanceModelSha: String? = null,
+    val provenanceInputWidth: Int? = null,
+    val provenanceInputHeight: Int? = null,
+    val provenanceOutputWidth: Int? = null,
+    val provenanceOutputHeight: Int? = null,
+    val provenanceRoute: String? = null
 )

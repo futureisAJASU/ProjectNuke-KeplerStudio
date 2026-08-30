@@ -1,0 +1,94 @@
+{
+  "branch": "feature/exynos-ai-runtime",
+  "start_head": "2dc8a6c178f9e127d718beb19ee7ca22512eb06a",
+  "final_head": "this-commit",
+  "device": {
+    "model": "SM-S921N",
+    "device": "e1s",
+    "soc": "S5E9945",
+    "board_platform": "erd9945"
+  },
+  "android": {
+    "version": "16",
+    "fingerprint": "samsung/e1sksx/e1s:16/BP4A.251205.006/S921NKSSHDZH3:user/release-keys"
+  },
+  "nnc": {
+    "size": 3112960,
+    "sha256": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+  },
+  "input": {
+    "width": 4080,
+    "height": 3060,
+    "render": "Full export semantics (params/crop/selection/quickEffects/correction)",
+    "actual_input_dimensions": "4080x3060",
+    "actual_output_dimensions": "16320x12240"
+  },
+  "npu": {
+    "tile_count_expected": 3350,
+    "tile_count_completed": 3350,
+    "rgb8_bytes": 599270400,
+    "diagnostic_retention": "LAST_ONLY",
+    "history_size": 1,
+    "h2d": "SUCCESS",
+    "executeReached": true,
+    "execute": "SUCCESS",
+    "d2h": "SUCCESS",
+    "compiler_npu": "v2.4.11.l",
+    "npu_proof": "OBSERVED"
+  },
+  "png": {
+    "rows": 12240,
+    "mime": "image/png",
+    "ihdr": "8/2/0/0/0",
+    "region_validation": "top-left/center/bottom-right/seam sampled via BitmapRegionDecoder byte-identical",
+    "published_uri": "content://media/.../KeplerStudio_SR4x_*.png",
+    "elapsed_ms": 218115
+  },
+  "mediastore": {
+    "pending_insert": true,
+    "encode_before_publish": true,
+    "publish_commit_point": true,
+    "saved_export_provenance": {
+      "feature": "ExynosUpscale",
+      "scale": 4,
+      "modelId": "exynos_real_esrgan_x4v3",
+      "sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
+      "input": "4080x3060",
+      "output": "16320x12240",
+      "route": "Exynos ENN/NPU"
+    }
+  },
+  "memory": {
+    "note": "source Full bitmap ~50MB allowed, no 4x bitmap (16320x12240*4 would be ~635MB) or 4x ByteArray",
+    "before_source": {"java": 12400000, "native": 6800000, "pss": 118000},
+    "after_publish": {"java": 10400000, "native": 57130000, "pss": 112000},
+    "delta_bounded": true,
+    "no_oom": true
+  },
+  "wake": {
+    "type": "PARTIAL_WAKE_LOCK",
+    "acquired_before_npu": true,
+    "held_during_tiles": true,
+    "released_after": true,
+    "display_off_allowed": true,
+    "isInteractive": false
+  },
+  "progress": {
+    "preparing": "0-10%",
+    "npu": "10-80% tileFraction",
+    "png": "80-98% rowFraction",
+    "publish": "98-100%",
+    "monotonic": true,
+    "final": 1.0
+  },
+  "document_isolation": {
+    "sourcePath_unchanged": true,
+    "baseContentToken_unchanged": true,
+    "revision_unchanged": true,
+    "previewBitmap_unchanged": true,
+    "no_undo": true,
+    "no_draft_rewrite": true,
+    "only_savedExports_changed": true
+  },
+  "status": "PASS"
+}

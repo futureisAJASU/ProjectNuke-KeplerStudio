@@ -454,26 +454,65 @@ internal class SavedExportHistoryStore(
     private fun decodeHistory(raw: String?): List<SavedExport> =
         raw?.lines()?.mapNotNull { decodeSavedExport(it) }.orEmpty()
 
-    private fun encodeSavedExport(item: SavedExport): String =
-        listOf(
-                item.displayName,
-                item.uriString,
-                item.formatLabel,
-                item.resolutionLabel,
-                item.timestampMillis.toString(),
-            )
-            .joinToString("|") { it.replace("|", " ").replace("\n", " ") }
+    private fun encodeSavedExport(item: SavedExport): String {
+        val base = listOf(
+            item.displayName,
+            item.uriString,
+            item.formatLabel,
+            item.resolutionLabel,
+            item.timestampMillis.toString(),
+        )
+        // If no provenance, keep old 5-field form for backward compat; otherwise append 9 optional fields
+        val hasProvenance = item.provenanceFeature != null || item.provenanceScale != null
+        if (!hasProvenance) {
+            return base.joinToString("|") { it.replace("|", " ").replace("\n", " ") }
+        }
+        val ext = listOf(
+            item.provenanceFeature ?: "",
+            item.provenanceScale?.toString() ?: "",
+            item.provenanceModelId ?: "",
+            item.provenanceModelSha ?: "",
+            item.provenanceInputWidth?.toString() ?: "",
+            item.provenanceInputHeight?.toString() ?: "",
+            item.provenanceOutputWidth?.toString() ?: "",
+            item.provenanceOutputHeight?.toString() ?: "",
+            item.provenanceRoute ?: "",
+        )
+        return (base + ext).joinToString("|") { it.replace("|", " ").replace("\n", " ") }
+    }
 
     private fun decodeSavedExport(raw: String): SavedExport? {
         val parts = raw.split("|")
-        if (parts.size != 5) return null
-        return SavedExport(
-            displayName = parts[0],
-            uriString = parts[1],
-            formatLabel = parts[2],
-            resolutionLabel = parts[3],
-            timestampMillis = parts[4].toLongOrNull() ?: return null,
-        )
+        if (parts.size == 5) {
+            return SavedExport(
+                displayName = parts[0],
+                uriString = parts[1],
+                formatLabel = parts[2],
+                resolutionLabel = parts[3],
+                timestampMillis = parts[4].toLongOrNull() ?: return null,
+            )
+        }
+        if (parts.size == 14) {
+            return SavedExport(
+                displayName = parts[0],
+                uriString = parts[1],
+                formatLabel = parts[2],
+                resolutionLabel = parts[3],
+                timestampMillis = parts[4].toLongOrNull() ?: return null,
+                provenanceFeature = parts[5].ifBlank { null },
+                provenanceScale = parts[6].toIntOrNull(),
+                provenanceModelId = parts[7].ifBlank { null },
+                provenanceModelSha = parts[8].ifBlank { null },
+                provenanceInputWidth = parts[9].toIntOrNull(),
+                provenanceInputHeight = parts[10].toIntOrNull(),
+                provenanceOutputWidth = parts[11].toIntOrNull(),
+                provenanceOutputHeight = parts[12].toIntOrNull(),
+                provenanceRoute = parts[13].ifBlank { null },
+            )
+        }
+        // Legacy 5-field or future tolerant: if >5 but <14, treat extra as provenance truncated
+        if (parts.size in 6..13) return null // corrupted, skip
+        return null
     }
 
     private fun mimeTypeToExportLabel(mimeType: String, displayName: String): String =

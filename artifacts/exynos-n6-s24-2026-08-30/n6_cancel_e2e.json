@@ -1,0 +1,15 @@
+{
+  "test": "n6CancellationBeforePublish",
+  "input": "512x512",
+  "operation": "SuperResolutionExportOrchestrator.exportBitmap with isCancelled=true",
+  "result": "Cancelled",
+  "non_zero_tiles_before_cancel": true,
+  "no_published_uri": true,
+  "pending_row_deleted": true,
+  "rgb8_deleted": true,
+  "session_closed": true,
+  "wake_released": true,
+  "registry_inactive": true,
+  "document_unchanged": true,
+  "status": "PASS"
+}

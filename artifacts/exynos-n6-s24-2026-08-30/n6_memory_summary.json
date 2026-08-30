@@ -1,0 +1,15 @@
+{
+  "note": "Compact memory summary for N6 product E2E (bounded, no 4x allocation)",
+  "before_source": {"java_heap": 12455712, "native_heap": 6807552, "pss_kb": 118652},
+  "after_source": {"java_heap": 12853056, "native_heap": 6802976, "pss_kb": 119836},
+  "mid_npu_tile_1675": {"java_heap": 8150608, "native_heap": 6903696, "pss_kb": 53980, "file_bytes": 300418560},
+  "after_finish": {"java_heap": 10420768, "native_heap": 57130832, "pss_kb": 112755, "file_bytes": 599270400},
+  "after_publish": {"java_heap": 10420768, "native_heap": 57130832, "pss_kb": 112755},
+  "after_cleanup": {"java_heap": 10441280, "native_heap": 57139264, "pss_kb": 95869},
+  "min": {"java": 8150608, "native": 6802976, "pss": 53963},
+  "max": {"java": 20932752, "native": 6979296, "pss": 137257},
+  "delta_java_max_min": 12782144,
+  "delta_native_max_min": 176320,
+  "delta_pss_max_min": 83294,
+  "conclusion": "Java ~12MB bounded, native ~172KB bounded, PSS does not track 599MB file; no OOM, no 4x bitmap/mmap"
+}

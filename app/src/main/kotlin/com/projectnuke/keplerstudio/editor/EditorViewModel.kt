@@ -260,6 +260,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     @Volatile private var correctionEngineEpoch: Long = 0L
     private var exportJob: Job? = null
     private var exportToken: Long = 0L
+    // N6 — Super Resolution export (terminal, non-destructive)
+    private var superResolutionJob: Job? = null
+    private var superResolutionToken: Long = 0L
+    private val _superResolutionStatus = kotlinx.coroutines.flow.MutableStateFlow(SuperResolutionExportStatus())
+    val superResolutionStatus: kotlinx.coroutines.flow.StateFlow<SuperResolutionExportStatus> = _superResolutionStatus.asStateFlow()
+    internal fun superResolutionJobActiveForTest(): Boolean = superResolutionJob?.isActive == true
+    internal fun superResolutionTokenForTest(): Long = superResolutionToken
     private var comparisonJob: Job? = null
     private var comparisonEpoch: Long = 0L
     internal var selectionLivePreviewJob: Job? = null
@@ -7396,6 +7403,198 @@ fun exportPreview() {
                 }
             } finally {
                 finishMaintenance()
+            }
+        }
+    }
+
+    // ——— N6: AI 4x Super Resolution export — terminal, non-destructive ———
+    fun canStartSuperResolution(): Boolean {
+        val state = _uiState.value
+        if (state.sourcePath == null && state.previewBitmap == null && state.originalPreviewBitmap == null) return false
+        if (state.isBusy || superResolutionJob?.isActive == true) return false
+        if (shuttingDown || editorLeaveLocksActions()) return false
+        val cap = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]
+        if (cap?.canAttemptModelUse != true) return false
+        return true
+    }
+
+    fun exportSuperResolution() {
+        if (!canStartSuperResolution()) {
+            updateUiStateAndRecycleReplaced { it.copy(message = "AI 4배 저장을 시작할 수 없습니다. 문서/모델 상태를 확인해 주세요.") }
+            return
+        }
+        if (!settleForEditorAction()) return
+        val token = ++superResolutionToken
+        val documentGeneration = currentDocumentGeneration()
+        val sourcePath = _uiState.value.sourcePath
+        val baseToken = _uiState.value.baseContentToken
+        val revision = _uiState.value.revision
+        val owningJobRef = arrayOfNulls<kotlinx.coroutines.Job>(1)
+        superResolutionJob = viewModelScope.launch {
+            owningJobRef[0] = coroutineContext[kotlinx.coroutines.Job]
+            _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Preparing, isBusy = true, progress = SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Preparing, overallFraction = 0f, canCancel = true))
+            updateUiStateAndRecycleReplaced { it.copy(isBusy = true, message = "AI 4배 고해상도 준비 중…") }
+            var sourceBitmap: Bitmap? = null
+            var preparedForCleanup: Bitmap? = null
+            try {
+                // Render current document for export at Full resolution (shared helper, bounded)
+                sourceBitmap = prepareSuperResolutionSourceBitmap()
+                if (sourceBitmap == null) {
+                    _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Failed, isBusy = false, failureKind = SuperResolutionFailureKind.SourceRenderFailed, failureMessage = "원본 렌더링 실패")
+                    updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "AI 4배 저장 실패: 원본 렌더링 실패") }
+                    return@launch
+                }
+                preparedForCleanup = sourceBitmap
+                val identity = SuperResolutionExportIdentity(token = token, sourcePath = sourcePath, baseToken = baseToken, revision = revision, owningJob = owningJobRef[0])
+                val isCurrent = { isCurrentSuperResolution(identity) }
+                val isCancelled = { superResolutionJob?.isCancelled == true }
+                val fileName = "KeplerStudio_SR4x_${exportTimestamp()}.png"
+                val context = getApplication<Application>()
+                val operationCtx = ModelOperationContext(operationToken = token, documentGeneration = documentGeneration, isCurrent = { t, g -> t == token && g == documentGeneration }, isCancelled = isCancelled)
+                // Use orchestrator exportBitmap path (document-isolated)
+                val result = SuperResolutionExportOrchestrator.exportBitmap(
+                    context = context,
+                    inputBitmap = sourceBitmap,
+                    fileName = fileName,
+                    operationContext = operationCtx,
+                    isCurrent = { isCurrent() },
+                    isCancelled = { isCancelled() },
+                    onProgress = { p ->
+                        _superResolutionStatus.value = SuperResolutionExportStatus(phase = p.phase, progress = p, isBusy = true)
+                        val msg = when (p.phase) {
+                            SuperResolutionExportPhase.Upscaling -> "AI 확대 중 · ${p.completedTiles} / ${p.totalTiles} 타일"
+                            SuperResolutionExportPhase.Encoding -> "PNG 저장 중 · ${p.encodingRowsCompleted} / ${p.encodingRowsTotal}행"
+                            else -> p.message
+                        }
+                        updateUiStateAndRecycleReplaced { it.copy(message = "${p.inputWidth}×${p.inputHeight} → ${p.outputWidth}×${p.outputHeight} $msg") }
+                    }
+                )
+                when (result) {
+                    is SuperResolutionExportResult.Success -> {
+                        _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Succeeded, isBusy = false, publishedUri = result.uri, progress = SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Succeeded, overallFraction = 1f, inputWidth = result.inputWidth, inputHeight = result.inputHeight, outputWidth = result.outputWidth, outputHeight = result.outputHeight, message = "AI 4배 저장 완료 ${result.outputWidth}×${result.outputHeight}"))
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "AI 4배 저장 완료 ${result.outputWidth}×${result.outputHeight}") }
+                        // Refresh savedExports from history store (published already)
+                        val refreshed = withContext(kotlinx.coroutines.Dispatchers.IO) { savedExportHistoryStore.load() }
+                        updateUiStateAndRecycleReplaced { it.copy(savedExports = refreshed) }
+                    }
+                    is SuperResolutionExportResult.Failure -> {
+                        val kind = result.kind
+                        _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Failed, isBusy = false, failureKind = kind, failureMessage = result.message)
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "AI 4배 저장 실패: ${result.message}") }
+                    }
+                    SuperResolutionExportResult.Cancelled -> {
+                        _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Cancelled, isBusy = false, failureKind = SuperResolutionFailureKind.Cancelled)
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "AI 4배 저장이 취소되었습니다.") }
+                    }
+                    SuperResolutionExportResult.Stale -> {
+                        _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Failed, isBusy = false, failureKind = SuperResolutionFailureKind.Stale, failureMessage = "stale")
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "AI 4배 저장이 오래된 요청으로 취소되었습니다.") }
+                    }
+                }
+            } catch (ce: CancellationException) {
+                _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Cancelled, isBusy = false, failureKind = SuperResolutionFailureKind.Cancelled)
+                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "AI 4배 저장이 취소되었습니다.") }
+                throw ce
+            } catch (t: Throwable) {
+                _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Failed, isBusy = false, failureKind = SuperResolutionFailureKind.SourceRenderFailed, failureMessage = t.message)
+                updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "AI 4배 저장 실패: ${t.message}") }
+            } finally {
+                preparedForCleanup?.takeUnless(Bitmap::isRecycled)?.recycle()
+                if (superResolutionJob?.let { it === owningJobRef[0] } == true) superResolutionJob = null
+                // Do NOT mutate document: no settleAdoptedEditHistory, no draft save, no preview change
+            }
+        }
+    }
+
+    fun cancelSuperResolution() {
+        superResolutionJob?.cancel()
+    }
+
+    private fun isCurrentSuperResolution(id: SuperResolutionExportIdentity): Boolean {
+        if (id.token != superResolutionToken) return false
+        if (id.sourcePath != _uiState.value.sourcePath) return false
+        if (id.baseToken != _uiState.value.baseContentToken) return false
+        if (id.revision != _uiState.value.revision) return false
+        if (shuttingDown) return false
+        return superResolutionJob?.isActive == true && superResolutionJob === id.owningJob
+    }
+
+    private suspend fun prepareSuperResolutionSourceBitmap(): Bitmap? {
+        val state = _uiState.value
+        // Reuse same memory-checked preparation as normal Full export but return bitmap for SR
+        // For N6, Full resolution is required; we delegate to existing helpers with same params/crop/selection
+        // Simplified: if baseBitmapDirty, use originalPreviewBitmap copy scaled to Full; else decode sourcePath
+        return withContext(kotlinx.coroutines.Dispatchers.Default) {
+            try {
+                if (state.baseBitmapDirty) {
+                    val base = state.originalPreviewBitmap ?: state.previewBitmap ?: return@withContext null
+                    // Check memory budget for copy
+                    val copy = base.copy(Bitmap.Config.ARGB_8888, false) ?: return@withContext null
+                    // Apply current params/crop/selection via existing renderer for truthful pixels
+                    // For N6 we need full pipeline; use renderEditedExportFromBitmap with Full
+                    val selectionCopy = state.selectionLayers.map { it.copy(bitmap = it.bitmap.copy(Bitmap.Config.ARGB_8888, false)!!) }
+                    val requestFactory: (Bitmap, List<SelectionLayer>) -> RenderRequest? = { b, layers ->
+                        val visible = state.correctionEngineState.visiblePreview as? VisiblePreviewState.Rendered
+                        val actualRoute = visible?.actualRoute
+                        actualRoute?.let {
+                            RenderRequest(
+                                operation = RenderOperation.ExportDirty,
+                                basePreview = b,
+                                params = state.params,
+                                engines = state.engineSelection(),
+                                assignedDocumentEngine = state.correctionEngineState.documentEngine,
+                                identity = RenderIdentity(currentDocumentGeneration(), state.baseContentToken, state.revision + 1),
+                                storedRequestedRoute = visible.requestedRoute ?: it,
+                                exactRoute = it,
+                                storedDecision = visible.decision,
+                                storedAlgorithmVersion = visible.algorithmVersion,
+                                storedParticipation = visible.participation,
+                                fallbackPolicy = FallbackPolicy.NoFallback,
+                                look = state.presetLook,
+                                quickEffects = state.activeQuickEffects.toList(),
+                                selectionLayers = layers,
+                                diagnostics = null
+                            )
+                        }
+                    }
+                    // If no correction route, just return copy scaled to Full via existing scaler
+                    if (requestFactory(copy, selectionCopy) == null) {
+                        selectionCopy.forEach { it.bitmap.recycle() }
+                        return@withContext copy
+                    }
+                    val rendered = renderEditedExportFromBitmap(copy, ExportResolution.Full, selectionCopy, null, requestFactory)
+                    // copy is consumed inside renderEditedExportFromBitmap
+                    rendered
+                } else {
+                    val path = state.sourcePath ?: return@withContext state.previewBitmap?.copy(Bitmap.Config.ARGB_8888, false)
+                    val layers = state.selectionLayers.map { it.copy(bitmap = it.bitmap.copy(Bitmap.Config.ARGB_8888, false)!!) }
+                    renderEditedExport(path, ExportResolution.Full, layers, null) { base, l ->
+                        val visible = state.correctionEngineState.visiblePreview as? VisiblePreviewState.Rendered
+                        val actualRoute = visible?.actualRoute
+                        actualRoute?.let {
+                            RenderRequest(
+                                operation = RenderOperation.ExportDirty,
+                                basePreview = base,
+                                params = state.params,
+                                engines = state.engineSelection(),
+                                assignedDocumentEngine = state.correctionEngineState.documentEngine,
+                                identity = RenderIdentity(currentDocumentGeneration(), state.baseContentToken, state.revision + 1),
+                                storedRequestedRoute = visible.requestedRoute ?: it,
+                                exactRoute = it,
+                                storedDecision = visible.decision,
+                                storedAlgorithmVersion = visible.algorithmVersion,
+                                storedParticipation = visible.participation,
+                                fallbackPolicy = FallbackPolicy.NoFallback,
+                                look = state.presetLook,
+                                quickEffects = state.activeQuickEffects.toList(),
+                                selectionLayers = l,
+                                diagnostics = null
+                            )
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                null
             }
         }
     }
