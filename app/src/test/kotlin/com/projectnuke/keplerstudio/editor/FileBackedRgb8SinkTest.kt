@@ -188,6 +188,8 @@ class FileBackedRgb8SinkTest {
         var writeBehavior: (Long, ByteArray, Int, Int) -> Int = { _, _, _, l -> l }
         var forceThrows: Throwable? = null
         var renameResult = true
+        var atomicMoveThrows: Throwable? = null
+        var atomicMoveCalled = false
         var deleteResult = true
         val created = mutableListOf<File>()
         val deleted = mutableListOf<File>()
@@ -206,6 +208,12 @@ class FileBackedRgb8SinkTest {
         override fun close() = Unit
 
         override fun length(): Long = 3L * 512 * 512
+
+        override fun atomicMove(from: File, to: File) {
+            atomicMoveCalled = true
+            atomicMoveThrows?.let { throw it }
+            if (!renameResult) throw java.io.IOException("atomic move failed")
+        }
 
         override fun rename(from: File, to: File): Boolean = renameResult
 
@@ -296,5 +304,74 @@ class FileBackedRgb8SinkTest {
         assertTrue(artifact.file.exists())
         // Late cleanup by the caller (simulated) must succeed.
         assertTrue(artifact.file.delete())
+    }
+
+    @Test
+    fun atomicPublicationSuccessUsesAtomicMove() = runBlocking {
+        val io = FakeIo()
+        val sink = FileBackedRgb8TileSink(File(workDir, "atomic.rgb8"), 512, 512, "tok", io)
+        sink.writeTile(Rect(0, 0, 512, 512), Rect(0, 0, 512, 512), syntheticTileFp32())
+        sink.finish()
+        assertTrue("atomicMove must be invoked", io.atomicMoveCalled)
+        assertEquals(0, io.deleted.size)
+    }
+
+    @Test
+    fun atomicMoveUnsupportedFailsAndSettlesStaging() = runBlocking {
+        val io = FakeIo().apply { atomicMoveThrows = java.nio.file.AtomicMoveNotSupportedException("src", "dst", "unsupported") }
+        val sink = FileBackedRgb8TileSink(File(workDir, "atomicfail.rgb8"), 512, 512, "tok", io)
+        sink.writeTile(Rect(0, 0, 512, 512), Rect(0, 0, 512, 512), syntheticTileFp32())
+        try {
+            sink.finish()
+            fail("expected atomic move unsupported failure")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message!!.contains("atomic"))
+        }
+        assertFalse(File(workDir, "atomicfail.rgb8").exists())
+        assertEquals(1, io.deleted.size)
+    }
+
+    @Test
+    fun existingDestinationRefusalDoesNotOverwrite() = runBlocking {
+        val target = File(workDir, "exists.rgb8")
+        target.writeBytes(ByteArray(10))
+        val sink = FileBackedRgb8TileSink(target, 512, 512, "tok2")
+        sink.writeTile(Rect(0, 0, 512, 512), Rect(0, 0, 512, 512), syntheticTileFp32())
+        try {
+            sink.finish()
+            fail("expected existing destination refusal")
+        } catch (e: java.io.IOException) {
+            assertTrue(e.message!!.contains("already exists"))
+        }
+        // Original file must remain
+        assertTrue(target.exists())
+        assertEquals(10, target.length().toInt())
+    }
+
+    @Test
+    fun noStagingLeakOnAtomicPublicationFailure() = runBlocking {
+        val io = FakeIo().apply { renameResult = false }
+        val sink = FileBackedRgb8TileSink(File(workDir, "leak.rgb8"), 512, 512, "tok", io)
+        sink.writeTile(Rect(0, 0, 512, 512), Rect(0, 0, 512, 512), syntheticTileFp32())
+        try { sink.finish() } catch (_: Throwable) {}
+        assertEquals(1, io.deleted.size)
+        assertFalse(File(workDir, "leak.rgb8").exists())
+        // Staging tmp should be deleted
+        assertTrue(io.deleted.first().name.contains("leak.rgb8"))
+    }
+
+    @Test
+    fun publicationGuardPreventsAtomicMove() = runBlocking {
+        val io = FakeIo()
+        val sink = FileBackedRgb8TileSink(File(workDir, "guard.rgb8"), 512, 512, "tok", io)
+        sink.writeTile(Rect(0, 0, 512, 512), Rect(0, 0, 512, 512), syntheticTileFp32())
+        try {
+            sink.finish { false }
+            fail("expected guard rejection")
+        } catch (e: PublicationGuardException) {
+        }
+        assertFalse(io.atomicMoveCalled)
+        assertEquals(1, io.deleted.size)
+        assertFalse(File(workDir, "guard.rgb8").exists())
     }
 }

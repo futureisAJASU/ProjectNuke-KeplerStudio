@@ -98,8 +98,9 @@ internal class BitmapTileInputSource(
     override val sourceHeight: Int = bitmap.height
 
     private val tilePixelCount = TILE_SIZE * TILE_SIZE
+    // Bounded scratch: 128x128 IntArray pixel buffer (64 KiB). No FloatArray scratch;
+    // channel values are written directly into the caller-provided reusable FP32 buffer.
     private val tilePixels = IntArray(tilePixelCount)
-    private val tileFloats = FloatArray(tilePixelCount * ExynosUpscaleSession.INPUT_CHANNELS)
 
     init {
         require(sourceWidth >= TILE_SIZE && sourceHeight >= TILE_SIZE) {
@@ -118,14 +119,17 @@ internal class BitmapTileInputSource(
         }
         bitmap.getPixels(tilePixels, 0, TILE_SIZE, sx, sy, TILE_SIZE, TILE_SIZE)
         currentCoroutineContext().ensureActive()
+        // Write directly into the caller-provided reusable FP32 buffer: CHW planar,
+        // channels normalized to [0,1] (pixel /255), little-endian FP32, no intermediate
+        // FloatArray allocation.
+        val floatBuffer = ByteBuffer.wrap(into).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
         val plane = tilePixelCount
         for (i in 0 until plane) {
             val color = tilePixels[i]
-            tileFloats[i] = ((color shr 16) and 0xFF) / 255f
-            tileFloats[plane + i] = ((color shr 8) and 0xFF) / 255f
-            tileFloats[2 * plane + i] = (color and 0xFF) / 255f
+            floatBuffer.put(i, ((color shr 16) and 0xFF) / 255f)
+            floatBuffer.put(plane + i, ((color shr 8) and 0xFF) / 255f)
+            floatBuffer.put(2 * plane + i, (color and 0xFF) / 255f)
         }
-        ByteBuffer.wrap(into).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().put(tileFloats)
     }
 
     private companion object {

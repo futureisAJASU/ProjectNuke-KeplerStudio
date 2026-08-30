@@ -521,6 +521,9 @@ class TileFileBackedUpscalerTest {
                     override fun force() = Unit
                     override fun close() = Unit
                     override fun length(): Long = 0L
+                    override fun atomicMove(from: File, to: File) {
+                        throw java.io.IOException("atomic move should not be reached on write failure")
+                    }
                     override fun rename(from: File, to: File): Boolean = false
                     override fun delete(file: File): Boolean {
                         deleted += file
@@ -558,6 +561,9 @@ class TileFileBackedUpscalerTest {
                     override fun force() = Unit
                     override fun close() = Unit
                     override fun length(): Long = length
+                    override fun atomicMove(from: File, to: File) {
+                        throw java.io.IOException("atomic move failed")
+                    }
                     override fun rename(from: File, to: File): Boolean = false
                     override fun delete(file: File): Boolean = true
                 }

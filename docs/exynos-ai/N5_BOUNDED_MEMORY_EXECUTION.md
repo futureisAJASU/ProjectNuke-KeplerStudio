@@ -74,7 +74,7 @@ New components:
 - Fails closed on wrong dimensions/buffer size
 - Cancellation checked via `currentCoroutineContext().ensureActive()`
 
-**No full-image FP32 duplicate** — the Bitmap implementation uses a reusable 128×128 IntArray scratch (64 KB) and FloatArray (196 KB).
+**No full-image FP32 duplicate** — the Bitmap implementation uses a single reusable 128×128 `IntArray` scratch (65,536 bytes / 64 KiB) and writes channel values directly into the caller-provided reusable FP32 buffer; no additional `FloatArray` scratch remains.
 
 ---
 
@@ -290,11 +290,14 @@ Geometries tested: 188×188, 257×191, 191×257, 257×257, 301×227
 
 | Component | Size | Scales with Output? |
 |---|---|---|
-| Input tile buffer | 196,608 bytes | NO |
-| Output tile buffer | 3,145,728 bytes | NO |
-| Row scratch (sink) | 1,536 bytes | NO |
-| TileRunSummary | ~100 bytes | NO |
-| **Total engine-owned** | **~3.3 MB** | **NO** |
+| Input tile buffer (reusable `ByteArray`, 128×128×3×4) | 196,608 bytes | NO |
+| Output tile buffer (reusable `ByteArray`, 512×512×3×4) | 3,145,728 bytes | NO |
+| Bitmap tile pixel scratch (`IntArray`, 128×128) | 65,536 bytes | NO |
+| Row scratch (sink, 512×3 RGB) | 1,536 bytes | NO |
+| TileRunSummary (bounded) | ~100 bytes | NO |
+| **Total engine-owned working set** | **~3,409,408 bytes (~3.25 MiB)** | **NO** |
+
+No `FloatArray` tile scratch remains; channel values are written directly into the caller-provided reusable FP32 buffer.
 
 **Contrast with N4:**
 - N4 full-output FP32: ~2.3 GB for 12 MP x4

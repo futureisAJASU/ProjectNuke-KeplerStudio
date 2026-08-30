@@ -4,6 +4,9 @@ import java.io.File
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -30,6 +33,11 @@ internal data class FileBackedRgb8Artifact(
  * N5 file-backed output seam. [writeTile] writes only a [TilePlacement.dest] ownership
  * rectangle; [finish] validates, forces, closes, and atomically publishes the artifact;
  * [invalidate] settles partial staging state on cancellation/staleness/failure.
+ *
+ * Publication linearization boundary: [finish] evaluates the caller-provided publication
+ * guard immediately BEFORE the atomic move. If the guard reports cancelled/stale, publication
+ * is prevented, staging is deleted, and no Success is returned. After the atomic move has
+ * succeeded, ownership has transferred and the operation truthfully returns Success.
  */
 internal interface Rgb8TileSink {
     val outputWidth: Int
@@ -37,6 +45,7 @@ internal interface Rgb8TileSink {
     suspend fun writeTile(outputCrop: Rect, dest: Rect, tileOutput: ByteArray)
     fun invalidate()
     fun finish(): FileBackedRgb8Artifact
+    fun finish(publicationGuard: () -> Boolean): FileBackedRgb8Artifact
 }
 
 /**
@@ -45,7 +54,15 @@ internal interface Rgb8TileSink {
  * failures, and rename failures without touching the host filesystem critically.
  */
 internal interface FileBackedSinkIo {
-    /** Open the staging file exclusively and pre-size it to [length] bytes. */
+    /**
+     * Open the staging file exclusively, truncating any existing content.
+     *
+     * Truthful contract: staging starts empty and grows through positional writes.
+     * No logical pre-sizing or physical block reservation is claimed; [StoragePressure]
+     * admission governs headroom, and exact final byte-length is validated at [finish].
+     * The [length] parameter is retained for API compatibility and validation accounting
+     * but does NOT imply `truncate(length)` extends a zero-length file (which it does not).
+     */
     fun createTruncate(file: File, length: Long)
 
     /** Positional write of `length` bytes from `bytes[offset..]`; may write fewer. */
@@ -60,25 +77,47 @@ internal interface FileBackedSinkIo {
     /** Current file length in bytes. */
     fun length(): Long
 
-    /** Same-volume atomic rename. */
+    /**
+     * Same-volume atomic publication.
+     *
+     * Must be implemented via an explicit atomic move primitive
+     * (`Files.move(..., ATOMIC_MOVE)`) or another Android/API-29-compatible primitive
+     * with equivalent explicit same-volume atomic guarantee. Do NOT silently fall back
+     * to a non-atomic move; if atomic move is unsupported or fails, publication fails.
+     */
+    fun atomicMove(from: File, to: File)
+
+    /** Legacy non-atomic rename — retained for compatibility tests; production must not use. */
     fun rename(from: File, to: File): Boolean
 
     /** Best-effort delete. */
     fun delete(file: File): Boolean
 }
 
+/**
+ * Thrown when the authoritative publication guard observed cancellation/staleness
+ * immediately before the atomic move. The sink has already settled staging (deleted).
+ */
+internal class PublicationGuardException(message: String) : IOException(message)
+
+internal enum class PublicationGuardOutcome { ALLOW, CANCELLED, STALE }
+
 /** Real [FileChannel]-backed I/O. */
 internal class RealFileBackedSinkIo : FileBackedSinkIo {
     private var channel: FileChannel? = null
 
     override fun createTruncate(file: File, length: Long) {
+        // Truthful contract: staging starts empty; do NOT claim truncate(length) extends
+        // a zero-length file (it does not). Positional writes grow the file, and finish()
+        // validates exact requiredBytes.
         channel =
             FileChannel.open(
                 file.toPath(),
                 StandardOpenOption.CREATE,
                 StandardOpenOption.WRITE,
                 StandardOpenOption.TRUNCATE_EXISTING,
-            ).apply { truncate(length) }
+            )
+        // Ensure file is truncated empty; logical length validated only at finish.
     }
 
     override fun write(position: Long, bytes: ByteArray, offset: Int, length: Int): Int =
@@ -95,6 +134,12 @@ internal class RealFileBackedSinkIo : FileBackedSinkIo {
     }
 
     override fun length(): Long = requireNotNull(channel) { "sink channel not open" }.size()
+
+    override fun atomicMove(from: File, to: File) {
+        // Explicit same-volume atomic move; no silent fallback to non-atomic rename.
+        // Caller ensures channel is closed before move, destination does not exist.
+        Files.move(from.toPath(), to.toPath(), StandardCopyOption.ATOMIC_MOVE)
+    }
 
     override fun rename(from: File, to: File): Boolean = from.renameTo(to)
 
@@ -122,8 +167,17 @@ internal class FileBackedRgb8TileSink(
     private val channels = ExynosUpscaleSession.OUTPUT_CHANNELS
     private val tileWidth = TilePlanner.TILE_SIZE * TilePlanner.SCALE
     private val planeSize = tileWidth * tileWidth
-    private val rowStride = outputWidth * channels
-    private val requiredBytes = outputWidth.toLong() * outputHeight * channels.toLong()
+    // Derive rowStride/requiredBytes from the SAME validated geometry contract as the orchestrator,
+    // using Long-based checked arithmetic to avoid unchecked Int overflow.
+    private val geometryVerdict = computeRgb8OutputGeometry(outputWidth, outputHeight)
+    private val rowStride: Int = when (geometryVerdict) {
+        is Rgb8SizeVerdict.Valid -> (geometryVerdict.outputWidth.toLong() * channels).toInt()
+        is Rgb8SizeVerdict.Invalid -> throw IllegalArgumentException(geometryVerdict.detail)
+    }
+    private val requiredBytes: Long = when (geometryVerdict) {
+        is Rgb8SizeVerdict.Valid -> geometryVerdict.requiredBytes
+        is Rgb8SizeVerdict.Invalid -> throw IllegalArgumentException(geometryVerdict.detail)
+    }
 
     internal val stagingFile: File =
         File(
@@ -186,7 +240,9 @@ internal class FileBackedRgb8TileSink(
         runCatching { io.delete(stagingFile) }
     }
 
-    override fun finish(): FileBackedRgb8Artifact {
+    override fun finish(): FileBackedRgb8Artifact = finish { true }
+
+    override fun finish(publicationGuard: () -> Boolean): FileBackedRgb8Artifact {
         check(state == State.Open) {
             "finish after invalidate/finish is invalid (state=$state)"
         }
@@ -201,8 +257,15 @@ internal class FileBackedRgb8TileSink(
             if (destinationFile.exists()) {
                 throw IOException("destination ${destinationFile.name} already exists; refusing to overwrite")
             }
-            if (!io.rename(stagingFile, destinationFile)) {
-                throw IOException("same-volume rename to ${destinationFile.name} failed")
+            // Authoritative publication linearization boundary: guard evaluated immediately
+            // BEFORE the atomic move. If guard reports cancelled/stale, publication is prevented.
+            if (!publicationGuard()) {
+                throw PublicationGuardException("publication guard rejected: cancelled or stale before atomic move")
+            }
+            try {
+                io.atomicMove(stagingFile, destinationFile)
+            } catch (e: AtomicMoveNotSupportedException) {
+                throw IOException("atomic move unsupported for ${destinationFile.name}", e)
             }
             state = State.HandedOff
             return FileBackedRgb8Artifact(

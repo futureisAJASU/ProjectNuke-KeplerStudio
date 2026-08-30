@@ -51,7 +51,44 @@ internal class TileFileBackedUpscaler(
                 "source dimensions must be positive",
             )
         }
+        // Cheap fail-closed overflow preflight BEFORE TilePlanner, whose TilePlan
+        // computes outputWidth = sourceWidth * SCALE with Int arithmetic.
+        if (sourceWidth > Int.MAX_VALUE / TilePlanner.SCALE ||
+            sourceHeight > Int.MAX_VALUE / TilePlanner.SCALE
+        ) {
+            return FileBackedUpscaleResult.InvalidDimensions(
+                sourceWidth,
+                sourceHeight,
+                "source dimensions overflow output Int when scaled by ${TilePlanner.SCALE}",
+            )
+        }
 
+        // Explicitly select bounded diagnostic retention for the N5 production path.
+        // Ownership of retention is at the session/native boundary; the orchestrator
+        // must not merely clear a list periodically.
+        val previousRetention = session.diagnosticRetention
+        session.diagnosticRetention = DiagnosticRetention.LAST_ONLY
+        try {
+            return upscaleToFileInternal(
+                source, destinationFile, operationContext, attemptLabel, observer,
+                sourceWidth, sourceHeight,
+            )
+        } finally {
+            // Restore previous retention so a session reused for N4/full diagnostics
+            // retains its evidence; bounded retention is scoped to this N5 operation.
+            session.diagnosticRetention = previousRetention
+        }
+    }
+
+    private suspend fun upscaleToFileInternal(
+        source: TileInputSource,
+        destinationFile: File,
+        operationContext: ModelOperationContext,
+        attemptLabel: String?,
+        observer: TileRunObserver?,
+        sourceWidth: Int,
+        sourceHeight: Int,
+    ): FileBackedUpscaleResult {
         val planResult = planner(sourceWidth, sourceHeight)
         if (planResult is TilePlanResult.UnsupportedSourceSize) {
             return FileBackedUpscaleResult.UnsupportedSourceSize(sourceWidth, sourceHeight)
@@ -156,6 +193,30 @@ internal class TileFileBackedUpscaler(
                     )
                 val durationNanos = System.nanoTime() - started
 
+                // Typed gate truth: distinguish pre-native cancellation/staleness from genuine H2D failure.
+                when (raw.gateDisposition) {
+                    GateDisposition.CANCELLED -> {
+                        sink.invalidate()
+                        return FileBackedUpscaleResult.Cancelled(completedTiles)
+                    }
+                    GateDisposition.STALE -> {
+                        sink.invalidate()
+                        return FileBackedUpscaleResult.Stale(completedTiles)
+                    }
+                    GateDisposition.NOT_LOADED,
+                    GateDisposition.INVALID_INPUT,
+                    GateDisposition.INVALID_OUTPUT_BUFFER -> {
+                        sink.invalidate()
+                        return FileBackedUpscaleResult.Failure(
+                            completedTiles = completedTiles,
+                            failedTileIndex = tile.index,
+                            reason = TileFailureReason.AssemblyFailed,
+                            detail = "tile ${tile.index} gate rejected: ${raw.gateDisposition}",
+                        )
+                    }
+                    GateDisposition.NONE -> Unit
+                }
+
                 val record =
                     TileRunRecord(
                         index = tile.index,
@@ -222,7 +283,8 @@ internal class TileFileBackedUpscaler(
         }
 
         // Cancellation/staleness immediately after the LAST tile but BEFORE publication must
-        // not publish success.
+        // not publish success. The authoritative linearization guard is evaluated INSIDE finish()
+        // immediately before the atomic move; the outer checks are early-exit optimizations.
         if (operationContext.isCancelled()) {
             sink.invalidate()
             return FileBackedUpscaleResult.Cancelled(completedTiles)
@@ -237,12 +299,35 @@ internal class TileFileBackedUpscaler(
         }
         coroutineContext.ensureActive()
 
+        // Authoritative publication guard evaluated at the linearization boundary (inside finish).
+        val publicationGuard: () -> Boolean = {
+            // Must be checked atomically before move; no intermediate suspension.
+            when {
+                operationContext.isCancelled() -> false
+                !operationContext.isCurrent(operationContext.operationToken, operationContext.documentGeneration) -> false
+                else -> true
+            }
+        }
+
         val artifact =
             try {
-                sink.finish()
+                sink.finish(publicationGuard)
             } catch (cancelled: CancellationException) {
                 sink.invalidate()
                 throw cancelled
+            } catch (guard: PublicationGuardException) {
+                // Staging already settled inside finish(); distinguish cancel vs stale for truth.
+                return when {
+                    operationContext.isCancelled() -> FileBackedUpscaleResult.Cancelled(completedTiles)
+                    !operationContext.isCurrent(operationContext.operationToken, operationContext.documentGeneration) ->
+                        FileBackedUpscaleResult.Stale(completedTiles)
+                    else -> FileBackedUpscaleResult.Failure(
+                        completedTiles = completedTiles,
+                        failedTileIndex = -1,
+                        reason = TileFailureReason.ArtifactPublishFailed,
+                        detail = guard.message ?: "publication guard rejected",
+                    )
+                }
             } catch (t: Throwable) {
                 sink.invalidate()
                 return FileBackedUpscaleResult.Failure(

@@ -53,12 +53,28 @@ import kotlin.coroutines.coroutineContext
  * stage/detail) — they are updated the moment each native call returns and are never
  * inferred from the overall [ModelLoadResult]/[ModelRunResult].
  */
+internal enum class DiagnosticRetention { FULL, LAST_ONLY }
+
+internal enum class GateDisposition {
+    NONE,
+    CANCELLED,
+    STALE,
+    NOT_LOADED,
+    INVALID_INPUT,
+    INVALID_OUTPUT_BUFFER,
+}
+
 internal class ExynosUpscaleSession(
     private val context: Context,
     private val native: ExynosEnnNativeInterface = ExynosEnnNative,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val preparedModelFileProvider: ((ModelAssetContract) -> ModelLoadResult<File>)? = null,
+    diagnosticRetention: DiagnosticRetention = DiagnosticRetention.FULL,
 ) : ModelRunnerContract {
+
+    @Volatile
+    var diagnosticRetention: DiagnosticRetention = diagnosticRetention
+        internal set
 
     @Volatile
     override var lifecycle: ModelRunnerLifecycle = ModelRunnerLifecycle.Unloaded
@@ -267,20 +283,20 @@ internal class ExynosUpscaleSession(
         withContext(ioDispatcher) {
             lifecycleMutex.withLock {
                 if (operationContext.isCancelled()) {
-                    return@withLock ExynosRawRunResult.cancelled()
+                    return@withLock ExynosRawRunResult.cancelled().also { it.log("cancelled before native work") }
                 }
                 if (!operationContext.isCurrent(
                         operationContext.operationToken,
                         operationContext.documentGeneration,
                     )
                 ) {
-                    return@withLock ExynosRawRunResult.failure("stale operation context")
+                    return@withLock ExynosRawRunResult.staleFailure("stale operation context")
                 }
                 if (lifecycle != ModelRunnerLifecycle.Loaded) {
-                    return@withLock ExynosRawRunResult.failure("session is not Loaded")
+                    return@withLock ExynosRawRunResult.notLoadedFailure("session is not Loaded")
                 }
                 if (inputBytes.size != INPUT_BYTES) {
-                    return@withLock ExynosRawRunResult.failure(
+                    return@withLock ExynosRawRunResult.invalidInputFailure(
                         "raw input must be exactly $INPUT_BYTES bytes (FP32 CHW 3x${INPUT_WIDTH}x${INPUT_HEIGHT})",
                     )
                 }
@@ -330,25 +346,25 @@ internal class ExynosUpscaleSession(
         withContext(ioDispatcher) {
             lifecycleMutex.withLock {
                 if (operationContext.isCancelled()) {
-                    return@withLock ExynosRawRunResult.cancelled()
+                    return@withLock ExynosRawRunResult.cancelled().also { it.log("cancelled before native work") }
                 }
                 if (!operationContext.isCurrent(
                         operationContext.operationToken,
                         operationContext.documentGeneration,
                     )
                 ) {
-                    return@withLock ExynosRawRunResult.failure("stale operation context")
+                    return@withLock ExynosRawRunResult.staleFailure("stale operation context")
                 }
                 if (lifecycle != ModelRunnerLifecycle.Loaded) {
-                    return@withLock ExynosRawRunResult.failure("session is not Loaded")
+                    return@withLock ExynosRawRunResult.notLoadedFailure("session is not Loaded")
                 }
                 if (inputBytes.size != INPUT_BYTES) {
-                    return@withLock ExynosRawRunResult.failure(
+                    return@withLock ExynosRawRunResult.invalidInputFailure(
                         "raw input must be exactly $INPUT_BYTES bytes (FP32 CHW 3x${INPUT_WIDTH}x${INPUT_HEIGHT})",
                     )
                 }
                 if (outputBytes.size != OUTPUT_BYTES) {
-                    return@withLock ExynosRawRunResult.failure(
+                    return@withLock ExynosRawRunResult.invalidOutputFailure(
                         "raw output buffer must be exactly $OUTPUT_BYTES bytes (FP32 CHW 3x${OUTPUT_WIDTH}x${OUTPUT_HEIGHT})",
                     )
                 }
@@ -738,7 +754,17 @@ internal class ExynosUpscaleSession(
         val diagnostics = ExynosRunDiagnostics()
         lastRunDiagnostics = diagnostics
         diagnostics.attemptLabel = attemptLabel
-        runDiagnosticsHistoryInternal += diagnostics
+        // Bounded retention: N5 reusable path must not accumulate one diagnostic per tile.
+        when (diagnosticRetention) {
+            DiagnosticRetention.FULL -> runDiagnosticsHistoryInternal += diagnostics
+            DiagnosticRetention.LAST_ONLY -> {
+                if (runDiagnosticsHistoryInternal.isEmpty()) {
+                    runDiagnosticsHistoryInternal += diagnostics
+                } else {
+                    runDiagnosticsHistoryInternal[0] = diagnostics
+                }
+            }
+        }
         lifecycle = ModelRunnerLifecycle.Inferencing
         try {
             preH2dCheck?.invoke()
@@ -1107,6 +1133,11 @@ internal enum class NpuProofStatus {
  * Result of the N3 raw-output observation seam.
  * [outputBytes] is the untouched FP32 D2H payload (3x512x512, little-endian) on success.
  * [inputSha256] is the hash of the exact bytes handed to H2D (input-parity evidence).
+ *
+ * [gateDisposition] is the typed pre-native truth so callers can distinguish
+ * cancellation/staleness/not-loaded/invalid-buffer before any H2D work from genuine
+ * native H2D/execute/D2H failures. A NONE disposition means the run reached native
+ * boundaries (h2dStatus may be success or failure).
  */
 internal data class ExynosRawRunResult(
     val h2dStatus: Int?,
@@ -1116,6 +1147,7 @@ internal data class ExynosRawRunResult(
     val outputBytes: ByteArray?,
     val throwableStage: String? = null,
     val throwableDetail: String? = null,
+    val gateDisposition: GateDisposition = GateDisposition.NONE,
 ) {
     val reachedExecute: Boolean
         get() = executeStatus != null
@@ -1123,7 +1155,8 @@ internal data class ExynosRawRunResult(
         get() = throwableStage != null
     val succeeded: Boolean
         get() =
-            h2dStatus == EnnStatus.SUCCESS &&
+            gateDisposition == GateDisposition.NONE &&
+                h2dStatus == EnnStatus.SUCCESS &&
                 executeStatus == EnnStatus.SUCCESS &&
                 d2hStatus == EnnStatus.SUCCESS &&
                 outputBytes != null
@@ -1133,8 +1166,16 @@ internal data class ExynosRawRunResult(
     }
 
     companion object {
-        fun cancelled() = ExynosRawRunResult(null, null, null, null, null)
+        fun cancelled() = ExynosRawRunResult(null, null, null, null, null, gateDisposition = GateDisposition.CANCELLED)
+        fun stale() = ExynosRawRunResult(null, null, null, null, null, gateDisposition = GateDisposition.STALE)
+        fun notLoaded() = ExynosRawRunResult(null, null, null, null, null, gateDisposition = GateDisposition.NOT_LOADED)
+        fun invalidInput() = ExynosRawRunResult(null, null, null, null, null, gateDisposition = GateDisposition.INVALID_INPUT)
+        fun invalidOutputBuffer() = ExynosRawRunResult(null, null, null, null, null, gateDisposition = GateDisposition.INVALID_OUTPUT_BUFFER)
         fun failure(reason: String): ExynosRawRunResult = cancelled().also { it.log(reason) }
+        fun staleFailure(reason: String): ExynosRawRunResult = stale().also { it.log(reason) }
+        fun notLoadedFailure(reason: String): ExynosRawRunResult = notLoaded().also { it.log(reason) }
+        fun invalidInputFailure(reason: String): ExynosRawRunResult = invalidInput().also { it.log(reason) }
+        fun invalidOutputFailure(reason: String): ExynosRawRunResult = invalidOutputBuffer().also { it.log(reason) }
     }
 }
 
