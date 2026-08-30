@@ -7490,6 +7490,26 @@ fun exportPreview() {
                         _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Failed, isBusy = false, failureKind = SuperResolutionFailureKind.Stale, failureMessage = "stale")
                         updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "AI 4배 저장이 오래된 요청으로 취소되었습니다.") }
                     }
+                    is SuperResolutionExportResult.PublishedWithMetadataFailure -> {
+                        val partial = result
+                        _superResolutionStatus.value = SuperResolutionExportStatus(
+                            phase = SuperResolutionExportPhase.Succeeded,
+                            isBusy = false,
+                            publishedUri = partial.uri,
+                            failureKind = partial.failure,
+                            failureMessage = partial.message,
+                            progress = SuperResolutionExportProgress(
+                                phase = SuperResolutionExportPhase.Succeeded,
+                                overallFraction = 1f,
+                                inputWidth = partial.inputWidth,
+                                inputHeight = partial.inputHeight,
+                                outputWidth = partial.outputWidth,
+                                outputHeight = partial.outputHeight,
+                                message = "이미지는 갤러리에 저장되었지만 앱 내 내보낸 사진 기록을 저장하지 못했습니다."
+                            )
+                        )
+                        updateUiStateAndRecycleReplaced { it.copy(isBusy = false, message = "이미지는 갤러리에 저장되었지만 앱 내 내보낸 사진 기록을 저장하지 못했습니다.") }
+                    }
                 }
             } catch (ce: CancellationException) {
                 _superResolutionStatus.value = SuperResolutionExportStatus(phase = SuperResolutionExportPhase.Cancelled, isBusy = false, failureKind = SuperResolutionFailureKind.Cancelled)
@@ -7573,7 +7593,7 @@ fun exportPreview() {
                         val actualRoute = visible?.actualRoute
                         actualRoute?.let {
                             RenderRequest(
-                                operation = RenderOperation.ExportDirty,
+                                operation = RenderOperation.ExportClean,
                                 basePreview = base,
                                 params = state.params,
                                 engines = state.engineSelection(),

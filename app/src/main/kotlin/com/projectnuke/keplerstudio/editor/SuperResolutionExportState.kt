@@ -83,6 +83,18 @@ sealed interface SuperResolutionExportResult {
         val cause: Throwable? = null
     ) : SuperResolutionExportResult
 
+    data class PublishedWithMetadataFailure(
+        val uri: Uri,
+        val inputWidth: Int,
+        val inputHeight: Int,
+        val outputWidth: Int,
+        val outputHeight: Int,
+        val tileCount: Int,
+        val failure: SuperResolutionFailureKind,
+        val message: String,
+        val cause: Throwable? = null
+    ) : SuperResolutionExportResult
+
     data object Cancelled : SuperResolutionExportResult
     data object Stale : SuperResolutionExportResult
 }

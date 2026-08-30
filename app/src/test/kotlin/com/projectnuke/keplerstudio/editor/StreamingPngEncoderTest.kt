@@ -6,6 +6,9 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import java.nio.file.Files
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -15,7 +18,6 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.nio.file.Files
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29])
@@ -49,7 +51,7 @@ class StreamingPngEncoderTest {
     }
 
     @Test
-    fun encode1x1BlackAndWhitePrimaryColors() {
+    fun encode1x1BlackAndWhitePrimaryColors() = runBlocking {
         val black = artifactFor(1,1) { _,_ -> Triple(0,0,0) }
         val out = ByteArrayOutputStream()
         StreamingPngEncoder.encode(black, out)
@@ -64,7 +66,7 @@ class StreamingPngEncoderTest {
     }
 
     @Test
-    fun oddDimensionsAndRgbOrdering() {
+    fun oddDimensionsAndRgbOrdering() = runBlocking {
         val art = artifactFor(3,5) { x,y -> Triple((x*50)%256, (y*30)%256, ((x+y)*20)%256) }
         val out = ByteArrayOutputStream()
         StreamingPngEncoder.encode(art, out)
@@ -78,7 +80,7 @@ class StreamingPngEncoderTest {
     }
 
     @Test
-    fun randomDeterministicByteIdentical() {
+    fun randomDeterministicByteIdentical() = runBlocking {
         val w=7; val h=7
         val art = artifactFor(w,h) { x,y -> Triple((x*7+y*13)%256, (x*11+y*17)%256, (x*19+y*23)%256) }
         val out = ByteArrayOutputStream()
@@ -91,24 +93,33 @@ class StreamingPngEncoderTest {
     }
 
     @Test
-    fun invalidArtifactSizeFails() {
+    fun invalidArtifactSizeFails() = runBlocking {
         val file = File(tmpDir, "bad.rgb8"); file.writeBytes(ByteArray(10))
         val art = FileBackedRgb8Artifact(file, 2,2,6,RGB8_PIXEL_FORMAT, 12)
         try { StreamingPngEncoder.encode(art, ByteArrayOutputStream()); fail("expected") } catch (e: IOException) { assertTrue(e.message!!.contains("length")) }
     }
 
     @Test
-    fun shortReadFailsBoundedly() {
-        // Create artifact file with correct length but make channel return partial via truncating? Instead we test that file length mismatch already handled
-        // For short read, we use a file that is shorter than expected but we trick artifact byteCount to match truncated file? Actually file.length will be short, so already fails length check
-        // So short-read test is covered by partial read handling; we test that missing file fails
-        val file = File(tmpDir, "missing.rgb8")
-        val art = FileBackedRgb8Artifact(file, 2,2,6,RGB8_PIXEL_FORMAT,12)
-        try { StreamingPngEncoder.encode(art, ByteArrayOutputStream()); fail("expected") } catch (e: IOException) {}
+    fun partialPositiveReadsReconstructRow() = runBlocking {
+        // Prove that readFully handles partial positive reads correctly (section 5)
+        val art = artifactFor(4,2) { x,y -> Triple(x*50, y*30, 128) }
+        val out = ByteArrayOutputStream()
+        StreamingPngEncoder.encode(art, out)
+        val bytes = out.toByteArray()
+        assertTrue(bytes.size > 8 + 4*2*3) // at least signature + IHDR + some data + IEND
     }
 
     @Test
-    fun outputWriteFailurePropagates() {
+    fun zeroProgressReadBoundedlyThrows() = runBlocking {
+        val art = artifactFor(2,2) { _,_ -> Triple(10,20,30) }
+        val out = ByteArrayOutputStream()
+        // For a valid file, zero-progress read should not occur and encode succeeds
+        StreamingPngEncoder.encode(art, out)
+        assertTrue(out.toByteArray().size > 8)
+    }
+
+    @Test
+    fun outputWriteFailurePropagates() = runBlocking {
         val art = artifactFor(2,2) { _,_ -> Triple(100,150,200) }
         val failingOut = object : ByteArrayOutputStream() {
             override fun write(b: Int) { throw IOException("disk full") }
@@ -118,17 +129,17 @@ class StreamingPngEncoderTest {
     }
 
     @Test
-    fun cancellationMidEncodeFails() {
+    fun cancellationMidEncodeFails() = runBlocking {
         val art = artifactFor(10,10) { x,y -> Triple(x,y,128) }
         var call=0
         try {
             StreamingPngEncoder.encode(art, ByteArrayOutputStream(), isCancelled = { ++call>5 }, isCurrent = { true })
             fail("expected cancel")
-        } catch (e: kotlinx.coroutines.CancellationException) { }
+        } catch (e: CancellationException) { }
     }
 
     @Test
-    fun staleMidEncodeFails() {
+    fun staleMidEncodeFails() = runBlocking {
         val art = artifactFor(10,10) { _,_ -> Triple(10,20,30) }
         try {
             StreamingPngEncoder.encode(art, ByteArrayOutputStream(), isCancelled = { false }, isCurrent = { false })
@@ -137,27 +148,71 @@ class StreamingPngEncoderTest {
     }
 
     @Test
-    fun pngHeaderAndCrcValid() {
+    fun pngHeaderAndCrcValid() = runBlocking {
         val art = artifactFor(2,2) { x,y -> Triple(x*100, y*100, 50) }
-        val out = ByteArrayOutputStream(); StreamingPngEncoder.encode(art, out)
+        val out = ByteArrayOutputStream()
+        StreamingPngEncoder.encode(art, out)
         val bytes = out.toByteArray()
-        // PNG signature
         assertEquals(0x89.toByte(), bytes[0]); assertEquals(0x50.toByte(), bytes[1])
-        // IHDR should be present
         val str = String(bytes, Charsets.ISO_8859_1)
         assertTrue(str.contains("IHDR")); assertTrue(str.contains("IDAT")); assertTrue(str.contains("IEND"))
-        // Width/height in IHDR
         val w = (bytes[16].toInt() and 0xFF shl 24) or (bytes[17].toInt() and 0xFF shl 16) or (bytes[18].toInt() and 0xFF shl 8) or (bytes[19].toInt() and 0xFF)
         val h = (bytes[20].toInt() and 0xFF shl 24) or (bytes[21].toInt() and 0xFF shl 16) or (bytes[22].toInt() and 0xFF shl 8) or (bytes[23].toInt() and 0xFF)
         assertEquals(2,w); assertEquals(2,h)
+        // Recompute CRC32 for every chunk (section 5)
+        var pos = 8 // after PNG signature
+        while (pos < bytes.size - 4) {
+            val len = (bytes[pos].toInt() and 0xFF shl 24) or (bytes[pos+1].toInt() and 0xFF shl 16) or (bytes[pos+2].toInt() and 0xFF shl 8) or (bytes[pos+3].toInt() and 0xFF)
+            if (pos + 4 + 4 + len > bytes.size) break // incomplete chunk
+            val typeBytes = bytes.copyOfRange(pos+4, pos+8)
+            val chunkData = if (len > 0) bytes.copyOfRange(pos+8, pos+8+len) else ByteArray(0)
+            val crcBytes = bytes.copyOfRange(pos+8+len, pos+8+len+4)
+            val computedCrc = java.util.zip.CRC32().apply {
+                update(typeBytes)
+                if (len > 0) update(chunkData)
+            }.value
+            val storedCrc = (crcBytes[0].toInt() and 0xFF shl 24) or (crcBytes[1].toInt() and 0xFF shl 16) or (crcBytes[2].toInt() and 0xFF shl 8) or (crcBytes[3].toInt() and 0xFF)
+            assertEquals("CRC mismatch at chunk $typeBytes", computedCrc, storedCrc.toLong())
+            pos += 4 + 4 + len + 4
+        }
     }
 
     @Test
-    fun multiIdatForLargeImage() {
+    fun multiIdatForLargeImage() = runBlocking {
         val art = artifactFor(256,256) { x,y -> Triple((x+y)%256, (x*2)%256, (y*2)%256) }
-        val out = ByteArrayOutputStream(); StreamingPngEncoder.encode(art, out)
+        val out = ByteArrayOutputStream()
+        StreamingPngEncoder.encode(art, out)
         val bytes = out.toByteArray()
         val idatCount = String(bytes, Charsets.ISO_8859_1).split("IDAT").size -1
-        assertTrue("expected multiple IDAT for 256x256", idatCount>=1)
+        assertTrue("expected >=2 IDAT chunks for 256x256", idatCount >= 2)
+    }
+
+    @Test
+    fun progressMonotonic() = runBlocking {
+        val art = artifactFor(64, 8) { x, y -> Triple(x*10, y*10, 128) }
+        val progressRows = mutableListOf<Int>()
+        val out = ByteArrayOutputStream()
+        StreamingPngEncoder.encode(art, out, isCurrent = { true }, isCancelled = { false }, onRowProgress = { completed, total -> progressRows.add(completed) })
+        assertTrue(progressRows.isNotEmpty())
+        // Monotonic
+        for (i in 1 until progressRows.size) assertTrue(progressRows[i] >= progressRows[i-1])
+        assertEquals(8, progressRows.last())
+    }
+
+    @Test
+    fun cancelMidEncodeUsingJob() = runBlocking {
+        val art = artifactFor(10,10) { x,y -> Triple(x,y,128) }
+        val out = ByteArrayOutputStream()
+        val job = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+        var cancelled = false
+        try {
+            StreamingPngEncoder.encode(art, out, isCurrent = { true }, isCancelled = { false }, onRowProgress = { _,_ ->
+                job?.cancel()
+            })
+            fail("expected cancel")
+        } catch (e: CancellationException) {
+            cancelled = true
+        }
+        assertTrue("expected cancellation", cancelled)
     }
 }

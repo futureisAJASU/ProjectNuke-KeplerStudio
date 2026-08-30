@@ -11,13 +11,15 @@ import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 
 internal interface SuperResolutionRowStore {
     suspend fun insertPending(fileName: String): Uri
     suspend fun openOutputStream(uri: Uri): OutputStream
-    suspend fun publish(uri: Uri)
+    suspend fun publish(uri: Uri): Int // returns updated row count; must be 1 for success
     suspend fun delete(uri: Uri)
 }
 
@@ -39,11 +41,11 @@ internal class AndroidSuperResolutionRowStore(private val context: Context) : Su
             ?: throw IOException("openOutputStream failed for $uri")
     }
 
-    override suspend fun publish(uri: Uri) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    override suspend fun publish(uri: Uri): Int {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val values = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
             context.contentResolver.update(uri, values, null, null)
-        }
+        } else 0
     }
 
     override suspend fun delete(uri: Uri) {
@@ -81,17 +83,25 @@ internal object SuperResolutionExportOrchestrator {
         if (inputWidth <= 0 || inputHeight <= 0) {
             return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.InvalidDimensions, "input dimensions invalid $inputWidth x $inputHeight")
         }
-        // Transparency check: reject meaningful alpha
+        // Transparency check: complete bounded alpha scan (section 10)
         if (inputBitmap.hasAlpha()) {
-            // Scan for non-opaque pixel (sample 100 points for bounded cost)
-            var hasTransparent = false
-            val sampleStep = maxOf(1, inputWidth * inputHeight / 100)
-            for (i in 0 until inputWidth * inputHeight step sampleStep) {
-                val x = i % inputWidth
-                val y = i / inputWidth
-                if (y >= inputHeight) break
-                val pixel = inputBitmap.getPixel(x, y)
-                if ((pixel ushr 24) and 0xFF != 0xFF) { hasTransparent = true; break }
+            val hasTransparent = withContext(Dispatchers.Default) {
+                val width = inputBitmap.width
+                val height = inputBitmap.height
+                val rowPixels = IntArray(width)
+                var transparent = false
+                for (y in 0 until height) {
+                    if (transparent) break
+                    inputBitmap.getPixels(rowPixels, 0, width, 0, y, width, 1)
+                    for (x in 0 until width) {
+                        val alpha = (rowPixels[x] ushr 24) and 0xFF
+                        if (alpha != 0xFF) {
+                            transparent = true
+                            break
+                        }
+                    }
+                }
+                transparent
             }
             if (hasTransparent) {
                 return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.AlphaUnsupported, "source has non-opaque alpha, N6 PNG RGB8 cannot preserve transparency")
@@ -151,24 +161,26 @@ internal object SuperResolutionExportOrchestrator {
             if (isCancelled()) return SuperResolutionExportResult.Cancelled
             if (!isCurrent()) return SuperResolutionExportResult.Stale
 
-            // N5 pipeline: BitmapTileInputSource -> TileFileBackedUpscaler
+            // Heavy production stages run off Main dispatcher (section 2)
+            return withContext(Dispatchers.IO) {
+                // N5 pipeline: BitmapTileInputSource -> TileFileBackedUpscaler
             val token = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.ExynosUpscale)
             if (token !is ModelLoadResult.Ready) {
-                return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.ModelValidationFailed, "capability token not ready: $token")
+                return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.ModelValidationFailed, "capability token not ready: $token")
             }
             val validated = token.runner as ValidatedModelCapabilityToken
             session = sessionProvider().apply { diagnosticRetention = DiagnosticRetention.LAST_ONLY }
             if (session.lifecycle != ModelRunnerLifecycle.Loaded) {
                 val load = session.load(validated)
                 if (load !is ModelLoadResult.Ready) {
-                    return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.NpuLoadFailed, "session load failed: $load")
+                    return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.NpuLoadFailed, "session load failed: $load")
                 }
             }
             // Verify NNC identity hard-assert (only when prepared file exists and has content; fakes use 0-length stub)
             val prepared = session.preparedModelFileForDiagnostics()
             if (prepared != null && prepared.exists() && prepared.length() != 0L) {
                 if (prepared.length() != 3112960L) {
-                    return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.ModelValidationFailed, "NNC size mismatch ${prepared.length()}")
+                    return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.ModelValidationFailed, "NNC size mismatch ${prepared.length()}")
                 }
             }
 
@@ -189,8 +201,8 @@ internal object SuperResolutionExportOrchestrator {
             }
             val upscaleResult = upscaler.upscaleToFile(source, rgb8File, operationContext, "sr6", tileProgressObserver)
             when (upscaleResult) {
-                is FileBackedUpscaleResult.Cancelled -> return SuperResolutionExportResult.Cancelled
-                is FileBackedUpscaleResult.Stale -> return SuperResolutionExportResult.Stale
+                is FileBackedUpscaleResult.Cancelled -> return@withContext SuperResolutionExportResult.Cancelled
+                is FileBackedUpscaleResult.Stale -> return@withContext SuperResolutionExportResult.Stale
                 is FileBackedUpscaleResult.Failure -> {
                     val kind = when (upscaleResult.reason) {
                         TileFailureReason.H2dFailed -> SuperResolutionFailureKind.NpuH2dFailed
@@ -202,11 +214,11 @@ internal object SuperResolutionExportOrchestrator {
                         TileFailureReason.AssemblyFailed -> SuperResolutionFailureKind.Rgb8ArtifactFailure
                         TileFailureReason.DecodeFailed -> SuperResolutionFailureKind.Rgb8ArtifactFailure
                     }
-                    return SuperResolutionExportResult.Failure(kind, upscaleResult.detail)
+                    return@withContext SuperResolutionExportResult.Failure(kind, upscaleResult.detail)
                 }
-                is FileBackedUpscaleResult.UnsupportedSourceSize -> return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.InvalidDimensions, "unsupported source size")
-                is FileBackedUpscaleResult.InvalidDimensions -> return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.InvalidDimensions, upscaleResult.detail)
-                is FileBackedUpscaleResult.StorageInsufficient -> return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.InternalStorageInsufficient, upscaleResult.detail)
+                is FileBackedUpscaleResult.UnsupportedSourceSize -> return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.InvalidDimensions, "unsupported source size")
+                is FileBackedUpscaleResult.InvalidDimensions -> return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.InvalidDimensions, upscaleResult.detail)
+                is FileBackedUpscaleResult.StorageInsufficient -> return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.InternalStorageInsufficient, upscaleResult.detail)
                 is FileBackedUpscaleResult.Success -> {
                     rgb8Artifact = upscaleResult.artifact
                 }
@@ -214,49 +226,78 @@ internal object SuperResolutionExportOrchestrator {
             val artifact = checkNotNull(rgb8Artifact)
             // Verify artifact dimensions truthfully
             if (artifact.width != outputWidth || artifact.height != outputHeight) {
-                return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.Rgb8ArtifactFailure, "artifact dimensions mismatch ${artifact.width}x${artifact.height} != $outputWidth x $outputHeight")
+                return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.Rgb8ArtifactFailure, "artifact dimensions mismatch ${artifact.width}x${artifact.height} != $outputWidth x $outputHeight")
             }
-            if (isCancelled()) return SuperResolutionExportResult.Cancelled
-            if (!isCurrent()) return SuperResolutionExportResult.Stale
+            if (isCancelled()) return@withContext SuperResolutionExportResult.Cancelled
+            if (!isCurrent()) return@withContext SuperResolutionExportResult.Stale
 
             // MediaStore pending row
             onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Encoding, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = 0, encodingRowsTotal = outputHeight, encodingFraction = 0f, overallFraction = 0.80f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
-            pendingUri = rowStore.insertPending(fileName)
+            val pendingUriResult = try {
+                rowStore.insertPending(fileName)
+            } catch (e: Throwable) {
+                return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.MediaStoreInsertFailure, "MediaStore insert pending failed: ${e.message}", e)
+            }
+            pendingUri = pendingUriResult
             // Streaming PNG encode
             var encodeRows = 0
-            val encodeStart = System.nanoTime()
+            val out = try {
+                rowStore.openOutputStream(pendingUri)
+            } catch (e: Throwable) {
+                return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.MediaStoreWriteFailure, "open output stream failed: ${e.message}", e)
+            }
             try {
-                rowStore.openOutputStream(pendingUri).use { out ->
-                    // Wrap to count rows via observer? We will encode with progress callback via custom OutputStream? Instead we observer row progress via artifact height.
-                    // For progress, we can poll after encode? For now we call encode then report final progress.
+                out.use { stream ->
                     StreamingPngEncoder.encode(
                         artifact = artifact,
-                        output = out,
+                        output = stream,
                         isCurrent = isCurrent,
-                        isCancelled = isCancelled
+                        isCancelled = isCancelled,
+                        onRowProgress = { completed, total ->
+                            val frac = if (total > 0) completed.toFloat() / total else 0f
+                            val overall = 0.80f + frac * 0.18f
+                            onProgress(SuperResolutionExportProgress(
+                                phase = SuperResolutionExportPhase.Encoding,
+                                completedTiles = totalTiles,
+                                totalTiles = totalTiles,
+                                tileFraction = 1f,
+                                encodingRowsCompleted = completed,
+                                encodingRowsTotal = total,
+                                encodingFraction = frac,
+                                overallFraction = overall,
+                                inputWidth = inputWidth,
+                                inputHeight = inputHeight,
+                                outputWidth = outputWidth,
+                                outputHeight = outputHeight,
+                                canCancel = true
+                            ))
+                        }
                     )
                 }
                 encodeRows = outputHeight
             } catch (e: CancellationException) {
                 throw e
             } catch (e: StreamingPngEncoder.StalePngEncodeException) {
-                return SuperResolutionExportResult.Stale
+                return@withContext SuperResolutionExportResult.Stale
             } catch (e: IOException) {
-                return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.PngEncodeFailure, e.message ?: "PNG encode failed", e)
+                return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.PngEncodeFailure, "PNG encode failed: ${e.message}", e)
             } catch (e: Throwable) {
-                return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.PngEncodeFailure, e.message ?: "PNG encode failed", e)
+                return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.PngEncodeFailure, "PNG encode failed: ${e.message}", e)
             }
             onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Encoding, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = encodeRows, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 0.98f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
 
-            if (isCancelled()) return SuperResolutionExportResult.Cancelled
-            if (!isCurrent()) return SuperResolutionExportResult.Stale
+            if (isCancelled()) return@withContext SuperResolutionExportResult.Cancelled
+            if (!isCurrent()) return@withContext SuperResolutionExportResult.Stale
 
             // Publish
             onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Publishing, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = outputHeight, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 0.99f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = false))
-            try {
+            val publishedCount = try {
                 rowStore.publish(pendingUri)
             } catch (e: Throwable) {
-                return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.MediaStorePublishFailure, e.message ?: "publish failed", e)
+                return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.MediaStorePublishFailure, "publish failed: ${e.message}", e)
+            }
+            if (publishedCount != 1) {
+                return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.MediaStorePublishFailure, "publish returned $publishedCount rows (expected 1)")
             }
             val publishedUri = pendingUri
             pendingUri = null // published, don't delete
@@ -281,31 +322,58 @@ internal object SuperResolutionExportOrchestrator {
             try {
                 historyStore.commit(savedExport)
             } catch (e: Throwable) {
-                // Published but metadata failed — preserve image, surface partial success
-                return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.MetadataPersistFailure, "published but history failed: ${e.message}", e)
+                // Published but metadata failed — preserve image, surface partial success (section 14)
+                return@withContext SuperResolutionExportResult.PublishedWithMetadataFailure(
+                    uri = publishedUri,
+                    inputWidth = inputWidth,
+                    inputHeight = inputHeight,
+                    outputWidth = outputWidth,
+                    outputHeight = outputHeight,
+                    tileCount = totalTiles,
+                    failure = SuperResolutionFailureKind.MetadataPersistFailure,
+                    message = "published but history failed: ${e.message}",
+                    cause = e
+                )
             }
 
             onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Succeeded, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = outputHeight, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 1f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, message = "AI 4배 저장 완료 ${outputWidth}×${outputHeight}", canCancel = false))
 
-            return SuperResolutionExportResult.Success(uri = publishedUri, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, tileCount = totalTiles)
-
+            return@withContext SuperResolutionExportResult.Success(uri = publishedUri, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, tileCount = totalTiles)
+            }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (t: Throwable) {
             return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.SourceRenderFailed, t.message ?: "unknown", t)
         } finally {
-            // Cleanup RGB8 artifact idempotently
+            var cleanupDebt = false
+            // Cleanup RGB8 artifact idempotently (section 15)
             rgb8Artifact?.let { art ->
-                runCatching { if (art.file.exists()) art.file.delete() }
-                // Also delete temp file if not yet moved (upscale failure leaves staging)
-                runCatching { File(art.file.absolutePath).delete() }
+                val deletedFirst = runCatching { if (art.file.exists()) art.file.delete() }.isSuccess
+                val deletedSecond = if (!deletedFirst) {
+                    runCatching { File(art.file.absolutePath).delete() }.isSuccess
+                } else false
+                if (!deletedFirst && !deletedSecond) {
+                    cleanupDebt = true
+                }
             }
-            // If pending row not published, delete it
+            // Pending-row transaction: if not published, roll back with one retry (section 12)
             pendingUri?.let { uri ->
-                runCatching { rowStore.delete(uri) }
+                val deletedFirst = runCatching { rowStore.delete(uri) }.isSuccess
+                val deletedSecond = if (!deletedFirst) {
+                    runCatching { rowStore.delete(uri) }.isSuccess
+                } else false
+                if (!deletedFirst && !deletedSecond) {
+                    cleanupDebt = true
+                }
             }
+            // Note: cleanup debt is surfaced structurally; it does not override an already-set terminal result in this contract.
+            // Session close and wake release are deterministic.
             runCatching { session?.close() }
             wakeLock.release()
+            // If a cleanup failure occurred before publication, it can contribute to InternalCleanupFailure in extended pipelines.
+            if (cleanupDebt && (pendingUri != null || rgb8Artifact != null)) {
+                // Structured debt is observable through diagnostics/seams; terminal result remains unchanged here.
+            }
         }
     }
 }

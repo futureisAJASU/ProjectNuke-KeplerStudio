@@ -7,33 +7,24 @@ import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption
 import java.util.zip.CRC32
 import java.util.zip.Deflater
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlin.coroutines.coroutineContext
 
-/**
- * Phase N6 — bounded streaming PNG encoder for FileBackedRgb8Artifact.
- *
- * Contract:
- * - signature IHDR bit depth 8 color type 2 (RGB) comp 0 filter 0 interlace 0
- * - one bounded raw scanline buffer (width*3 + 1)
- * - filter byte per row (0 = None)
- * - bounded compressed chunk buffer (64-256 KiB)
- * - Deflater zlib stream, valid IDAT CRC32, IEND
- * - no whole-image Bitmap/ByteArray
- * - reads N5 RGB8 artifact row-by-row with partial-read handling, zero-progress bounded failure
- */
 internal object StreamingPngEncoder {
 
-    private const val CHUNK_SIZE = 64 * 1024 // bounded IDAT chunk
+    private const val CHUNK_SIZE = 64 * 1024
+    private const val PROGRESS_COALESCE_ROWS = 32
 
-    fun encode(
+    suspend fun encode(
         artifact: FileBackedRgb8Artifact,
         output: OutputStream,
         isCurrent: () -> Boolean = { true },
         isCancelled: () -> Boolean = { false },
+        onRowProgress: suspend (completedRows: Int, totalRows: Int) -> Unit = { _, _ -> },
     ) {
         validate(artifact)
-        // Check artifact file length exactly
         val file = artifact.file
         if (!file.exists()) throw IOException("RGB8 artifact does not exist: ${file.absolutePath}")
         if (file.length() != artifact.byteCount) throw IOException("artifact length ${file.length()} != expected ${artifact.byteCount}")
@@ -41,95 +32,95 @@ internal object StreamingPngEncoder {
         if (artifact.rowStride != artifact.width * 3) throw IOException("rowStride ${artifact.rowStride} != width*3")
         if (artifact.pixelFormat != RGB8_PIXEL_FORMAT) throw IOException("unsupported pixelFormat ${artifact.pixelFormat}")
 
-        FileChannel.open(file.toPath(), StandardOpenOption.READ).use { channel ->
-            // Write PNG signature
-            output.write(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+        // Deflater ownership wrapped in total try/finally contract (section 4)
+        val deflater = Deflater(6)
+        try {
+            FileChannel.open(file.toPath(), StandardOpenOption.READ).use { channel ->
+                output.write(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
 
-            // IHDR
-            val ihdr = ByteBuffer.allocate(13)
-            ihdr.putInt(artifact.width)
-            ihdr.putInt(artifact.height)
-            ihdr.put(8) // bit depth
-            ihdr.put(2) // color type RGB
-            ihdr.put(0) // compression
-            ihdr.put(0) // filter
-            ihdr.put(0) // interlace
-            writeChunk(output, "IHDR", ihdr.array())
+                val ihdr = ByteBuffer.allocate(13)
+                ihdr.putInt(artifact.width)
+                ihdr.putInt(artifact.height)
+                ihdr.put(8)
+                ihdr.put(2)
+                ihdr.put(0)
+                ihdr.put(0)
+                ihdr.put(0)
+                writeChunk(output, "IHDR", ihdr.array())
 
-            // IDAT streaming via Deflater
-            val deflater = Deflater(6) // default compression
-            val rawRow = ByteArray(artifact.rowStride + 1) // +1 filter byte
-            val compBuffer = ByteArray(CHUNK_SIZE)
-            val pendingBaos = java.io.ByteArrayOutputStream()
+                val rawRow = ByteArray(artifact.rowStride + 1)
+                val compBuffer = ByteArray(CHUNK_SIZE)
+                val pendingBaos = java.io.ByteArrayOutputStream()
 
-            fun drainPendingToIdat() {
-                // Write pendingBaos content as bounded IDAT chunks
-                val bytes = pendingBaos.toByteArray()
-                var offset = 0
-                while (offset < bytes.size) {
-                    val chunkSize = minOf(CHUNK_SIZE, bytes.size - offset)
-                    val chunk = bytes.copyOfRange(offset, offset + chunkSize)
-                    writeChunk(output, "IDAT", chunk)
-                    offset += chunkSize
+                fun drainPendingToIdat() {
+                    val bytes = pendingBaos.toByteArray()
+                    var offset = 0
+                    while (offset < bytes.size) {
+                        val chunkSize = minOf(CHUNK_SIZE, bytes.size - offset)
+                        val chunk = bytes.copyOfRange(offset, offset + chunkSize)
+                        writeChunk(output, "IDAT", chunk)
+                        offset += chunkSize
+                    }
+                    pendingBaos.reset()
                 }
-                pendingBaos.reset()
-            }
 
-            fun flushIfNeeded(force: Boolean = false) {
-                if (force) {
-                    // Drain any pending after finish
-                    // First collect remaining deflater output
+                fun appendCompressed(n: Int) {
+                    if (n > 0) pendingBaos.write(compBuffer, 0, n)
                 }
-                if (pendingBaos.size() >= CHUNK_SIZE) {
-                    drainPendingToIdat()
+
+                val rowBytes = artifact.rowStride
+                val totalRows = artifact.height
+                var completedRows = 0
+                var lastEmittedRows = 0
+
+                for (y in 0 until totalRows) {
+                    // Use actual calling coroutine cancellation (section 3)
+                    coroutineContext.ensureActive()
+                    if (isCancelled()) throw kotlinx.coroutines.CancellationException("encode cancelled at row $y")
+                    if (!isCurrent()) throw StalePngEncodeException("stale before row $y")
+
+                    rawRow[0] = 0
+                    val filePos = y.toLong() * rowBytes
+                    readFully(channel, filePos, rawRow, 1, rowBytes)
+
+                    deflater.setInput(rawRow, 0, rawRow.size)
+                    while (!deflater.needsInput()) {
+                        val n = deflater.deflate(compBuffer)
+                        if (n > 0) {
+                            appendCompressed(n)
+                            if (pendingBaos.size() >= CHUNK_SIZE) drainPendingToIdat()
+                        } else break
+                    }
+
+                    completedRows++
+                    // Emit coalesced progress
+                    if (completedRows - lastEmittedRows >= PROGRESS_COALESCE_ROWS || completedRows == totalRows) {
+                        onRowProgress(completedRows, totalRows)
+                        lastEmittedRows = completedRows
+                    }
                 }
-            }
 
-            fun appendCompressed(n: Int) {
-                if (n > 0) pendingBaos.write(compBuffer, 0, n)
-            }
-
-            // Edge: ensure we handle source reads with partial
-            val rowBytes = artifact.rowStride
-            for (y in 0 until artifact.height) {
-                if (isCancelled()) throw kotlinx.coroutines.CancellationException("encode cancelled at row $y")
-                if (!isCurrent()) throw StalePngEncodeException("stale before row $y")
-                coroutineContextOrNullEnsureActive()
-
-                // filter byte 0
-                rawRow[0] = 0
-                val filePos = y.toLong() * rowBytes
-                readFully(channel, filePos, rawRow, 1, rowBytes)
-
-                // Feed to deflater
-                deflater.setInput(rawRow, 0, rawRow.size)
-                while (!deflater.needsInput()) {
+                deflater.finish()
+                while (!deflater.finished()) {
                     val n = deflater.deflate(compBuffer)
                     if (n > 0) {
                         appendCompressed(n)
                         if (pendingBaos.size() >= CHUNK_SIZE) drainPendingToIdat()
-                    } else break
+                    } else if (deflater.needsInput()) break
                 }
-                // Check cancellation between rows
-                if (isCancelled()) throw kotlinx.coroutines.CancellationException("encode cancelled after row $y")
-                if (!isCurrent()) throw StalePngEncodeException("stale after row $y")
-            }
-            // Finish deflater
-            deflater.finish()
-            while (!deflater.finished()) {
-                val n = deflater.deflate(compBuffer)
-                if (n > 0) {
-                    appendCompressed(n)
-                    if (pendingBaos.size() >= CHUNK_SIZE) drainPendingToIdat()
-                } else if (deflater.needsInput()) break
-            }
-            // Drain remaining
-            if (pendingBaos.size() > 0) drainPendingToIdat()
-            deflater.end()
 
-            // IEND
-            writeChunk(output, "IEND", ByteArray(0))
-            output.flush()
+                if (pendingBaos.size() > 0) drainPendingToIdat()
+
+                // Always emit final height/height on success
+                if (lastEmittedRows != totalRows) {
+                    onRowProgress(totalRows, totalRows)
+                }
+
+                writeChunk(output, "IEND", ByteArray(0))
+                output.flush()
+            }
+        } finally {
+            deflater.end()
         }
     }
 
@@ -145,7 +136,7 @@ internal object StreamingPngEncoder {
         var remaining = length
         while (remaining > 0) {
             val read = channel.read(ByteBuffer.wrap(buf, off, remaining), pos)
-            if (read <= 0) throw IOException("RGB8 source read made no progress at pos $pos remaining $remaining")
+            if (read <= 0) throw IOException("RGB8 source read made no progress at pos $pos remaining $remaining (possible partial/zero-progress)")
             pos += read
             off += read
             remaining -= read
@@ -155,16 +146,12 @@ internal object StreamingPngEncoder {
     private fun writeChunk(out: OutputStream, type: String, data: ByteArray) {
         val typeBytes = type.toByteArray(Charsets.US_ASCII)
         val len = data.size
-        // length
         out.write((len shr 24) and 0xFF)
         out.write((len shr 16) and 0xFF)
         out.write((len shr 8) and 0xFF)
         out.write(len and 0xFF)
-        // type
         out.write(typeBytes)
-        // data
         if (data.isNotEmpty()) out.write(data)
-        // CRC over type + data
         val crc = CRC32()
         crc.update(typeBytes)
         if (data.isNotEmpty()) crc.update(data)
@@ -173,13 +160,6 @@ internal object StreamingPngEncoder {
         out.write(((c shr 16) and 0xFF).toInt())
         out.write(((c shr 8) and 0xFF).toInt())
         out.write((c and 0xFF).toInt())
-    }
-
-    private fun coroutineContextOrNullEnsureActive() {
-        // In unit tests there may be no coroutine context; ignore
-        try {
-            kotlinx.coroutines.runBlocking { coroutineContext.ensureActive() }
-        } catch (_: Throwable) { }
     }
 
     internal class StalePngEncodeException(msg: String) : IOException(msg)
