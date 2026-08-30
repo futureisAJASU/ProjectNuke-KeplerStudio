@@ -129,7 +129,7 @@ class ExynosN5StressInstrumentationTest {
         val wakeHeld: Boolean? = null,
     )
 
-    private fun sample(label: String, tileIndex: Int = -1, outputFile: File? = null, wakeLock: N5WakeLock? = null): JSONObject {
+    private fun sample(label: String, tileIndex: Int = -1, outputFile: File? = null, wakeLock: N5WakeLock? = null, reportDir: File? = null): JSONObject {
         val pm = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager
         val interactive = runCatching { pm.isInteractive }.getOrNull()
         val runtime = Runtime.getRuntime()
@@ -138,6 +138,13 @@ class ExynosN5StressInstrumentationTest {
         val pss = runCatching { val mi = Debug.MemoryInfo(); Debug.getMemoryInfo(mi); mi.totalPss.toLong() }.getOrDefault(-1)
         val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val memInfo = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
+        // Staging bytes: during run the final file is 0, but staging tmp grows. Scan reportDir for *.tmp.
+        var stagingBytes: Long = outputFile?.length() ?: -1
+        if (reportDir != null && (stagingBytes == 0L || stagingBytes == -1L)) {
+            runCatching {
+                reportDir.listFiles()?.filter { it.name.endsWith(".tmp") }?.maxByOrNull { it.length() }?.let { stagingBytes = it.length() }
+            }
+        }
         val obj = JSONObject()
         obj.put("label", label)
         obj.put("tile_index", tileIndex)
@@ -145,10 +152,19 @@ class ExynosN5StressInstrumentationTest {
         obj.put("native_heap_allocated", nativeHeap)
         obj.put("pss_kb", pss)
         obj.put("avail_mem", memInfo.availMem)
-        obj.put("output_file_bytes", outputFile?.length() ?: -1)
+        obj.put("output_file_bytes", stagingBytes)
         obj.put("display_interactive", interactive ?: JSONObject.NULL)
         obj.put("wake_held", wakeLock?.isHeld ?: JSONObject.NULL)
         return obj
+    }
+
+    private fun stagingFileBytes(reportDir: File, outputFile: File): Long {
+        // Prefer staging tmp length during run, fallback to final file length after publish
+        val finalLen = outputFile.length()
+        if (finalLen > 0) return finalLen
+        return runCatching {
+            reportDir.listFiles()?.filter { it.name.endsWith(".tmp") }?.maxByOrNull { it.length() }?.length() ?: 0L
+        }.getOrDefault(0L)
     }
 
     @Test
@@ -177,14 +193,14 @@ class ExynosN5StressInstrumentationTest {
             var wakeReleased = false
 
             try {
-                samples.put(sample("before_source_sink_creation"))
+                samples.put(sample("before_source_sink_creation", reportDir = reportDir))
                 val source = ProceduralTileInputSource(STRESS_WIDTH, STRESS_HEIGHT)
                 val plan = TilePlanner.plan(STRESS_WIDTH, STRESS_HEIGHT)
                 assertTrue(plan is com.projectnuke.keplerstudio.editor.TilePlanResult.Planned)
                 val tileCount = (plan as com.projectnuke.keplerstudio.editor.TilePlanResult.Planned).plan.tiles.size
                 assertEquals("4080x3060 must produce 3350 tiles", EXPECTED_TILE_COUNT, tileCount)
                 val outputFile = File(reportDir, "n5_stress_${System.nanoTime()}.rgb8")
-                samples.put(sample("after_source_sink_creation", outputFile = outputFile))
+                samples.put(sample("after_source_sink_creation", outputFile = outputFile, reportDir = reportDir))
 
                 ModelAvailabilityRegistry.resetForTest()
                 val gen = ModelAvailabilityRegistry.beginProbe()
@@ -198,21 +214,18 @@ class ExynosN5StressInstrumentationTest {
                 session = ExynosUpscaleSession(appContext).apply { diagnosticRetention = DiagnosticRetention.LAST_ONLY }
                 val load = session.load(token)
                 if (load !is ModelLoadResult.Ready) throw AssertionError("session load failed: $load")
-                // Verify NNC pinning if available
+                // Hard-assert pinned production NNC identity
                 val prepared = session.preparedModelFileForDiagnostics()
-                if (prepared != null) {
-                    metadata.put("prepared_size", prepared.length())
-                    metadata.put("prepared_sha", sha256File(prepared))
-                }
-                samples.put(sample("after_model_load"))
+                assertTrue("prepared model file must be available after load", prepared != null && prepared.exists())
+                val preparedSize = prepared!!.length()
+                val preparedSha = sha256File(prepared)
+                metadata.put("prepared_size", preparedSize)
+                metadata.put("prepared_sha", preparedSha)
+                assertEquals("prepared NNC size must be 3112960", EXPECTED_NNC_SIZE, preparedSize)
+                assertEquals("prepared NNC SHA must match pinned production", EXPECTED_NNC_SHA, preparedSha.lowercase())
+                samples.put(sample("after_model_load", reportDir = reportDir))
 
-                // Warmup: single tile execute to ensure NPU path
-                val warmInput = ByteArray(ExynosUpscaleSession.INPUT_BYTES)
-                ProceduralTileInputSource(STRESS_WIDTH, STRESS_HEIGHT).let { runBlocking { it.fillChwTile(0, 0, warmInput) } }
-                // quick single run via session raw (not through file pipeline) to warmup
-                // We skip explicit warmup tile via session to avoid extra complexity; pipeline itself will warmup.
-
-                samples.put(sample("after_warmup"))
+                samples.put(sample("after_warmup", reportDir = reportDir))
 
                 // Wake-lock acquisition immediately before bounded workload
                 wakeLock = RealN5WakeLock(appContext, "KeplerN5FullStress")
@@ -220,21 +233,30 @@ class ExynosN5StressInstrumentationTest {
                 wakeAcquired = wakeLock.isHeld
                 metadata.put("wake_acquired", wakeAcquired)
                 assertTrue("PARTIAL_WAKE_LOCK must be held", wakeAcquired)
-                samples.put(sample("before_tiles", wakeLock = wakeLock))
+                samples.put(sample("before_tiles", wakeLock = wakeLock, reportDir = reportDir))
 
                 val operationContext = ModelOperationContext(operationToken = 99L, documentGeneration = "n5-stress")
                 val pipeline = TileFileBackedUpscaler(session, appContext)
+                // Bounded observer sampling at representative milestones (tile numbers 1,100,500,1000,1675,2500,3300)
+                val milestoneCompletedCounts = setOf(1, 100, 500, 1000, 1675, 2500, 3300)
+                val observer = com.projectnuke.keplerstudio.editor.TileRunObserver { record ->
+                    val completed = record.index + 1
+                    if (completed in milestoneCompletedCounts) {
+                        samples.put(sample("tile_$completed", tileIndex = record.index, outputFile = outputFile, wakeLock = wakeLock, reportDir = reportDir))
+                        assertTrue("wake must be held during sampled tile $completed", wakeLock?.isHeld == true)
+                    }
+                }
 
                 var result: FileBackedUpscaleResult? = null
                 try {
-                    result = pipeline.upscaleToFile(source, outputFile, operationContext, "n5-stress")
+                    result = pipeline.upscaleToFile(source, outputFile, operationContext, "n5-stress", observer)
                 } finally {
                     // Wake lock release must survive all terminal paths
                     wakeLock.release()
                     wakeReleased = !wakeLock.isHeld
                 }
                 metadata.put("wake_released", wakeReleased)
-                samples.put(sample("after_finish", outputFile = outputFile, wakeLock = wakeLock))
+                samples.put(sample("after_finish", outputFile = outputFile, wakeLock = wakeLock, reportDir = reportDir))
 
                 assertTrue("expected Success, got $result", result is FileBackedUpscaleResult.Success)
                 result as FileBackedUpscaleResult.Success
@@ -257,15 +279,24 @@ class ExynosN5StressInstrumentationTest {
                 if (proofFailure != null) throw proofFailure
                 metadata.put("npu_proof_status", proof.status.name)
 
-                // Verify no full-output allocation: heap must not have grown by ~113 MB RGB8*? Actually artifact on disk
-                // We just record samples and check no OOM.
-
-                // Delete artifact after verification
+                // Required final sequence: artifact deletion -> sample after deletion -> session.close() -> registry check -> sample after close
                 val artifactFile = result.artifact.file
                 assertTrue(artifactFile.exists())
+                assertEquals(EXPECTED_RGB8_BYTES, artifactFile.length())
                 artifactFile.delete()
-                samples.put(sample("after_result_deletion", wakeLock = wakeLock))
                 assertTrue(!artifactFile.exists())
+                samples.put(sample("after_result_deletion", wakeLock = wakeLock, reportDir = reportDir))
+
+                // Session close must happen BEFORE final sample
+                session.close()
+                val lifecycleAfterClose = session.lifecycle
+                val activeAfterClose = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive
+                metadata.put("lifecycle_after_close", lifecycleAfterClose.name)
+                metadata.put("registry_inactive", activeAfterClose != true)
+                assertTrue("registry must be inactive after close", activeAfterClose != true)
+                // Genuine after-close sample
+                samples.put(sample("after_session_close", wakeLock = wakeLock, reportDir = reportDir))
+                metadata.put("session_close_verified", true)
 
                 metadata.put("status", "PASS")
             } catch (t: Throwable) {
@@ -284,13 +315,22 @@ class ExynosN5StressInstrumentationTest {
                 metadata.put("wake_released_finally", wakeReleased)
                 val pm = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager
                 metadata.put("display_interactive_final", runCatching { pm.isInteractive }.getOrNull() ?: JSONObject.NULL)
-                samples.put(sample("after_session_close", wakeLock = wakeLock))
+                // If finally is reached before close (failure path), ensure close and final sample ordering is still correct.
+                // Only add after_session_close if not already added (check last sample label)
+                val lastLabel = if (samples.length() > 0) samples.getJSONObject(samples.length() - 1).optString("label") else ""
+                if (lastLabel != "after_session_close") {
+                    samples.put(sample("after_session_close", wakeLock = wakeLock, reportDir = reportDir))
+                }
                 metadata.put("samples", samples)
                 metadata.put("wake_acquired_success", wakeAcquired)
                 metadata.put("wake_released_success", wakeReleased)
+                // Ensure session closed for both success and failure paths (no-op if already closed)
                 runCatching { session?.close() }
-                val active = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive
-                metadata.put("registry_inactive", active != true)
+                // If registry check not yet recorded (failure path), record it
+                if (!metadata.has("registry_inactive")) {
+                    val active = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive
+                    metadata.put("registry_inactive", active != true)
+                }
                 File(reportDir, "n5_stress_metadata.json").writeText(metadata.toString(2))
                 println("EXYNOS_N5_REPORT=${reportDir.absolutePath}")
                 if (testFailure == null && wakeLock != null && wakeLock.isHeld) {

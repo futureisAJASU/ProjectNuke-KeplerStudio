@@ -1,0 +1,7 @@
+{
+  "wake_acquired": true,
+  "completed_before_cancel": 2,
+  "status": "PASS",
+  "wake_released": true,
+  "registry_inactive": true
+}

@@ -1,0 +1,127 @@
+{
+  "branch": "feature/exynos-ai-runtime",
+  "start_head": "c7dbef43693c9c154a34f1d9a2c8df3cdbf0d625",
+  "final_head": "a690f71e4c3a953ed8d5c4cb74fd93145d61bf07",
+  "device": {
+    "model": "SM-S921N",
+    "device": "e1s",
+    "soc": "S5E9945",
+    "soc_model": "s5e9945",
+    "board_platform": "erd9945",
+    "manufacturer": "Samsung",
+    "hardware": "s5e9945"
+  },
+  "android": {
+    "version": "16",
+    "fingerprint": "samsung/e1sksx/e1s:16/BP4A.251205.006/S921NKSSHDZH3:user/release-keys"
+  },
+  "nnc": {
+    "expected_size": 3112960,
+    "expected_sha256": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
+    "prepared_size": 3112960,
+    "prepared_sha256": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
+    "hard_assert": "PASS"
+  },
+  "geometry": {
+    "source_width": 4080,
+    "source_height": 3060,
+    "output_width": 16320,
+    "output_height": 12240,
+    "tile_count_expected": 3350,
+    "tile_count_completed": 3350,
+    "rgb8_bytes_expected": 599270400,
+    "rgb8_bytes_actual": 599270400,
+    "elapsed_seconds": 160.94
+  },
+  "memory": {
+    "samples_labels": ["before_source_sink_creation","after_source_sink_creation","after_model_load","after_warmup","before_tiles","tile_1","tile_100","tile_500","tile_1000","tile_1675","tile_2500","tile_3300","after_finish","after_result_deletion","after_session_close"],
+    "java_heap": {
+      "min": 8150608,
+      "max": 20932752,
+      "start": 12455712,
+      "end": 16093440,
+      "midpoint_tile_1675": 8150608,
+      "delta_max_min": 12782144,
+      "delta_end_start": 3637728
+    },
+    "native_heap": {
+      "min": 6802976,
+      "max": 6979296,
+      "start": 6807552,
+      "end": 6952288,
+      "delta_max_min": 176320
+    },
+    "pss_kb": {
+      "min": 53963,
+      "max": 137257,
+      "start": 118652,
+      "end": 57820,
+      "delta_max_min": 83294
+    },
+    "output_bytes_at_milestones": {
+      "tile_1": 18361128,
+      "tile_100": 30134568,
+      "tile_500": 100635528,
+      "tile_1000": 182910648,
+      "tile_1675": 300418560,
+      "tile_2500": 453140328,
+      "tile_3300": 599234088,
+      "after_finish": 599270400
+    },
+    "acceptance": "PASS: Java ~12 MB bounded, native ~172 KB bounded, PSS does not grow proportionally with 599 MB artifact; samples show mid-run PSS drop due to GC, no OOM, no whole-output mmap, bounded diagnostic history O(1)"
+  },
+  "diagnostics": {
+    "history_size": 1,
+    "last_h2d": "SUCCESS",
+    "last_execute_reached": true,
+    "last_execute": "SUCCESS",
+    "last_d2h": "SUCCESS",
+    "compiler_npu": "v2.4.11.l",
+    "npu_proof": "OBSERVED"
+  },
+  "display_and_wake": {
+    "display_interactive_during_tiles": [false, false, false, false, true, true, true],
+    "display_allows_off": true,
+    "wake_acquired": true,
+    "wake_held_during_milestones": [true, true, true, true, true, true, true],
+    "wake_released": true,
+    "wake_released_finally": true,
+    "wake_type": "PARTIAL_WAKE_LOCK"
+  },
+  "artifact_lifecycle": {
+    "exists_at_handoff": true,
+    "byte_count_validated": true,
+    "deleted_after_validation": true,
+    "staging_settled": true
+  },
+  "session": {
+    "lifecycle_after_close": "Unloaded",
+    "registry_inactive": true,
+    "close_verified": true
+  },
+  "cancellation_probe": {
+    "test": "n5CancellationProbeWithDisplayOff",
+    "completed_tiles": 2,
+    "result": "Cancelled",
+    "non_zero": true,
+    "no_final_artifact": true,
+    "bounded_history": true,
+    "wake_held": true,
+    "wake_released": true,
+    "registry_inactive": true,
+    "status": "PASS"
+  },
+  "evidence_files": [
+    "n5_stress_metadata.json",
+    "n5_cancel_metadata.json",
+    "n5_physical_summary.json"
+  ],
+  "gates": {
+    "N4_REGRESSION": "PASS",
+    "N5_HOST_BOUNDED_MEMORY": "PASS",
+    "N5_STORAGE_LIFECYCLE": "PASS",
+    "N5_S24_PHYSICAL_STRESS": "PASS",
+    "N5_FINAL": "PASS",
+    "N5_BOUNDED_MEMORY_FULL_IMAGE_EXECUTION": "PASS"
+  }
+}
