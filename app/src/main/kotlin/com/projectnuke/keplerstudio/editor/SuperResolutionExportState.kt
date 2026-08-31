@@ -63,8 +63,16 @@ data class SuperResolutionExportStatus(
     val failureKind: SuperResolutionFailureKind? = null,
     val failureMessage: String? = null,
     val publishedUri: Uri? = null,
+    val cleanupDebt: Boolean = false,
     val isBusy: Boolean = false
 )
+
+internal sealed interface SuperResolutionRowDeleteResult {
+    data object Deleted : SuperResolutionRowDeleteResult
+    data object AlreadyAbsent : SuperResolutionRowDeleteResult
+    data object StillExistsAfterZero : SuperResolutionRowDeleteResult
+    data class Exception(val cause: Throwable) : SuperResolutionRowDeleteResult
+}
 
 sealed interface SuperResolutionExportResult {
     data class Success(
@@ -74,13 +82,15 @@ sealed interface SuperResolutionExportResult {
         val outputWidth: Int,
         val outputHeight: Int,
         val tileCount: Int,
-        val pngBytes: Long? = null
+        val pngBytes: Long? = null,
+        val cleanupDebt: Boolean = false,
     ) : SuperResolutionExportResult
 
     data class Failure(
         val kind: SuperResolutionFailureKind,
         val message: String,
-        val cause: Throwable? = null
+        val cause: Throwable? = null,
+        val cleanupDebt: Boolean = false,
     ) : SuperResolutionExportResult
 
     data class PublishedWithMetadataFailure(
@@ -92,8 +102,19 @@ sealed interface SuperResolutionExportResult {
         val tileCount: Int,
         val failure: SuperResolutionFailureKind,
         val message: String,
-        val cause: Throwable? = null
-    ) : SuperResolutionExportResult
+        val cause: Throwable? = null,
+        val cleanupDebt: Boolean = false,
+        /** Structured debts: independent preservation of simultaneous partial-success facts. */
+        val metadataCause: Throwable? = cause?.takeIf { failure == SuperResolutionFailureKind.MetadataPersistFailure },
+        val rgb8CleanupCause: Throwable? = null,
+        val pendingRowCleanupCause: Throwable? = null,
+        val suppressedCleanupCauses: List<Throwable> = emptyList(),
+    ) : SuperResolutionExportResult {
+        /** True if history/metadata persistence failed (image is published but history not). */
+        val hasMetadataFailure: Boolean get() = failure == SuperResolutionFailureKind.MetadataPersistFailure
+        /** True if any post-publication cleanup debt remains (RGB8 or pending row). */
+        val hasCleanupDebt: Boolean get() = cleanupDebt
+    }
 
     data object Cancelled : SuperResolutionExportResult
     data object Stale : SuperResolutionExportResult

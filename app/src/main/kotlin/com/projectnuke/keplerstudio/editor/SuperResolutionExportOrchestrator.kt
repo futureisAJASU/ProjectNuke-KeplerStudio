@@ -10,8 +10,10 @@ import android.provider.MediaStore
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
+import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -20,7 +22,7 @@ internal interface SuperResolutionRowStore {
     suspend fun insertPending(fileName: String): Uri
     suspend fun openOutputStream(uri: Uri): OutputStream
     suspend fun publish(uri: Uri): Int // returns updated row count; must be 1 for success
-    suspend fun delete(uri: Uri)
+    suspend fun delete(uri: Uri): SuperResolutionRowDeleteResult
 }
 
 internal class AndroidSuperResolutionRowStore(private val context: Context) : SuperResolutionRowStore {
@@ -48,9 +50,77 @@ internal class AndroidSuperResolutionRowStore(private val context: Context) : Su
         } else 0
     }
 
-    override suspend fun delete(uri: Uri) {
-        context.contentResolver.delete(uri, null, null)
+    override suspend fun delete(uri: Uri): SuperResolutionRowDeleteResult {
+        return try {
+            val count = context.contentResolver.delete(uri, null, null)
+            when {
+                count > 0 -> SuperResolutionRowDeleteResult.Deleted
+                !rowExists(uri) -> SuperResolutionRowDeleteResult.AlreadyAbsent
+                else -> SuperResolutionRowDeleteResult.StillExistsAfterZero
+            }
+        } catch (failure: Throwable) {
+            SuperResolutionRowDeleteResult.Exception(failure)
+        }
     }
+
+    private fun rowExists(uri: Uri): Boolean =
+        context.contentResolver.query(uri, arrayOf(MediaStore.Images.Media._ID), null, null, null)
+            ?.use { it.moveToFirst() }
+            ?: false
+}
+
+internal fun deleteRgb8ArtifactBounded(
+    file: File,
+    exists: (File) -> Boolean = File::exists,
+    delete: (File) -> Boolean = File::delete,
+): Throwable? {
+    var lastFailure: Throwable? = null
+    repeat(2) {
+        if (!exists(file)) return null
+        try {
+            if (delete(file) && !exists(file)) return null
+            if (!exists(file)) return null
+            lastFailure = IOException("RGB8 artifact delete returned false and file remains: ${file.absolutePath}")
+        } catch (failure: Throwable) {
+            lastFailure = failure
+        }
+    }
+    return lastFailure ?: IOException("RGB8 artifact remains: ${file.absolutePath}")
+}
+
+internal suspend fun deletePendingRowBounded(
+    rowStore: SuperResolutionRowStore,
+    uri: Uri,
+): Throwable? {
+    fun settled(result: SuperResolutionRowDeleteResult): Boolean =
+        result is SuperResolutionRowDeleteResult.Deleted ||
+            result is SuperResolutionRowDeleteResult.AlreadyAbsent
+
+    var result = runCatching { rowStore.delete(uri) }
+        .getOrElse { SuperResolutionRowDeleteResult.Exception(it) }
+    if (settled(result)) return null
+    result = runCatching { rowStore.delete(uri) }
+        .getOrElse { SuperResolutionRowDeleteResult.Exception(it) }
+    if (settled(result)) return null
+    return when (result) {
+        is SuperResolutionRowDeleteResult.Exception -> result.cause
+        SuperResolutionRowDeleteResult.StillExistsAfterZero ->
+            IOException("pending MediaStore row still exists after delete returned 0: $uri")
+        else -> null
+    }
+}
+
+private fun sha256File(file: File): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+        val buffer = ByteArray(32 * 1024)
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
 internal fun pngUpperBound(width: Int, height: Int): Long {
@@ -76,7 +146,11 @@ internal object SuperResolutionExportOrchestrator {
         historyStore: SavedExportHistoryStore = SavedExportHistoryStore(context),
         wakeLockFactory: (Context, String) -> N5WakeLock = { c, t -> RealN5WakeLock(c, t) },
         onProgress: (SuperResolutionExportProgress) -> Unit = {},
-        tileObserverFactory: ((SuperResolutionExportProgress) -> Unit) -> TileRunObserver? = { null }
+        tileObserverFactory: ((SuperResolutionExportProgress) -> Unit) -> TileRunObserver? = { null },
+        heavyWorkerObserver: ((String, Thread) -> Unit)? = null,
+        progressObserver: ((SuperResolutionExportProgress) -> Unit)? = null,
+        rgb8ArtifactObserver: ((FileBackedRgb8Artifact) -> Unit)? = null,
+        milestoneObserver: ((String) -> Unit)? = null,
     ): SuperResolutionExportResult {
         val inputWidth = inputBitmap.width
         val inputHeight = inputBitmap.height
@@ -148,14 +222,24 @@ internal object SuperResolutionExportOrchestrator {
         }
 
         // Progress initial
-        onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Preparing, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, overallFraction = 0f, canCancel = true))
+        val testSeam = SuperResolutionTestSeam.capture()
+        fun report(progress: SuperResolutionExportProgress) {
+            onProgress(progress)
+            (progressObserver ?: testSeam?.progressObserver)?.invoke(progress)
+        }
+        report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Preparing, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, overallFraction = 0f, canCancel = true))
 
         // Wake lock tightly scoped
         val wakeLock = wakeLockFactory(context, "KeplerSR6")
         wakeLock.acquire()
         var rgb8Artifact: FileBackedRgb8Artifact? = null
         var pendingUri: Uri? = null
+        var publishedUri: Uri? = null
         var session: ExynosUpscaleSession? = null
+        var cancellationCause: CancellationException? = null
+        var completedTileCount = 0
+        var pendingMetadataFailure: Throwable? = null
+        var pendingPublishedResult: SuperResolutionExportResult? = null
         try {
             coroutineContext.ensureActive()
             if (isCancelled()) return SuperResolutionExportResult.Cancelled
@@ -163,6 +247,7 @@ internal object SuperResolutionExportOrchestrator {
 
             // Heavy production stages run off Main dispatcher (section 2)
             return withContext(Dispatchers.IO) {
+                heavyWorkerObserver?.invoke("npu", Thread.currentThread())
                 // N5 pipeline: BitmapTileInputSource -> TileFileBackedUpscaler
             val token = ModelAvailabilityRegistry.validatedCapabilityToken(ModelFeature.ExynosUpscale)
             if (token !is ModelLoadResult.Ready) {
@@ -182,11 +267,16 @@ internal object SuperResolutionExportOrchestrator {
                 if (prepared.length() != 3112960L) {
                     return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.ModelValidationFailed, "NNC size mismatch ${prepared.length()}")
                 }
+                val preparedSha = sha256File(prepared)
+                if (!preparedSha.equals("9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12", ignoreCase = true)) {
+                    return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.ModelValidationFailed, "NNC SHA mismatch $preparedSha")
+                }
             }
 
             // Progress: upscaling phase
             val totalTiles = (TilePlanner.plan(inputWidth, inputHeight) as? TilePlanResult.Planned)?.plan?.tiles?.size ?: 0
-            onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Upscaling, completedTiles = 0, totalTiles = totalTiles, tileFraction = 0f, overallFraction = 0.10f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
+            report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Upscaling, completedTiles = 0, totalTiles = totalTiles, tileFraction = 0f, overallFraction = 0.10f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
+            (milestoneObserver ?: testSeam?.milestoneObserver)?.invoke("after_model_load")
 
             val rgb8File = File(context.cacheDir, "sr6_${System.nanoTime()}_${(0..Int.MAX_VALUE).random()}.rgb8")
             if (rgb8File.exists()) rgb8File.delete()
@@ -195,9 +285,10 @@ internal object SuperResolutionExportOrchestrator {
             // Tile progress observer
             val tileProgressObserver = TileRunObserver { record ->
                 val completed = record.index + 1
+                completedTileCount = completed
                 val frac = if (totalTiles > 0) completed.toFloat() / totalTiles else 0f
                 val overall = 0.10f + frac * 0.70f
-                onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Upscaling, completedTiles = completed, totalTiles = totalTiles, tileFraction = frac, overallFraction = overall, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
+                report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Upscaling, completedTiles = completed, totalTiles = totalTiles, tileFraction = frac, overallFraction = overall, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
             }
             val upscaleResult = upscaler.upscaleToFile(source, rgb8File, operationContext, "sr6", tileProgressObserver)
             when (upscaleResult) {
@@ -224,6 +315,7 @@ internal object SuperResolutionExportOrchestrator {
                 }
             }
             val artifact = checkNotNull(rgb8Artifact)
+            (rgb8ArtifactObserver ?: testSeam?.rgb8ArtifactObserver)?.invoke(artifact)
             // Verify artifact dimensions truthfully
             if (artifact.width != outputWidth || artifact.height != outputHeight) {
                 return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.Rgb8ArtifactFailure, "artifact dimensions mismatch ${artifact.width}x${artifact.height} != $outputWidth x $outputHeight")
@@ -232,7 +324,7 @@ internal object SuperResolutionExportOrchestrator {
             if (!isCurrent()) return@withContext SuperResolutionExportResult.Stale
 
             // MediaStore pending row
-            onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Encoding, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = 0, encodingRowsTotal = outputHeight, encodingFraction = 0f, overallFraction = 0.80f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
+            report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Encoding, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = 0, encodingRowsTotal = outputHeight, encodingFraction = 0f, overallFraction = 0.80f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
             val pendingUriResult = try {
                 rowStore.insertPending(fileName)
             } catch (e: Throwable) {
@@ -256,7 +348,7 @@ internal object SuperResolutionExportOrchestrator {
                         onRowProgress = { completed, total ->
                             val frac = if (total > 0) completed.toFloat() / total else 0f
                             val overall = 0.80f + frac * 0.18f
-                            onProgress(SuperResolutionExportProgress(
+                            report(SuperResolutionExportProgress(
                                 phase = SuperResolutionExportPhase.Encoding,
                                 completedTiles = totalTiles,
                                 totalTiles = totalTiles,
@@ -284,13 +376,14 @@ internal object SuperResolutionExportOrchestrator {
             } catch (e: Throwable) {
                 return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.PngEncodeFailure, "PNG encode failed: ${e.message}", e)
             }
-            onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Encoding, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = encodeRows, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 0.98f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
+            report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Encoding, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = encodeRows, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 0.98f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
 
             if (isCancelled()) return@withContext SuperResolutionExportResult.Cancelled
             if (!isCurrent()) return@withContext SuperResolutionExportResult.Stale
 
             // Publish
-            onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Publishing, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = outputHeight, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 0.99f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = false))
+            (milestoneObserver ?: testSeam?.milestoneObserver)?.invoke("before_mediastore_publish")
+            report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Publishing, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = outputHeight, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 0.99f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = false))
             val publishedCount = try {
                 rowStore.publish(pendingUri)
             } catch (e: Throwable) {
@@ -299,13 +392,15 @@ internal object SuperResolutionExportOrchestrator {
             if (publishedCount != 1) {
                 return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.MediaStorePublishFailure, "publish returned $publishedCount rows (expected 1)")
             }
-            val publishedUri = pendingUri
+            publishedUri = pendingUri
             pendingUri = null // published, don't delete
+            (milestoneObserver ?: testSeam?.milestoneObserver)?.invoke("after_mediastore_publish")
 
             // SavedExport history
+            val committedUri = checkNotNull(publishedUri)
             val savedExport = SavedExport(
                 displayName = fileName,
-                uriString = publishedUri.toString(),
+                uriString = committedUri.toString(),
                 formatLabel = "PNG",
                 resolutionLabel = "${outputWidth}x${outputHeight}",
                 timestampMillis = System.currentTimeMillis(),
@@ -322,9 +417,9 @@ internal object SuperResolutionExportOrchestrator {
             try {
                 historyStore.commit(savedExport)
             } catch (e: Throwable) {
-                // Published but metadata failed — preserve image, surface partial success (section 14)
-                return@withContext SuperResolutionExportResult.PublishedWithMetadataFailure(
-                    uri = publishedUri,
+                pendingMetadataFailure = e
+                pendingPublishedResult = SuperResolutionExportResult.PublishedWithMetadataFailure(
+                    uri = committedUri,
                     inputWidth = inputWidth,
                     inputHeight = inputHeight,
                     outputWidth = outputWidth,
@@ -332,47 +427,92 @@ internal object SuperResolutionExportOrchestrator {
                     tileCount = totalTiles,
                     failure = SuperResolutionFailureKind.MetadataPersistFailure,
                     message = "published but history failed: ${e.message}",
-                    cause = e
+                    cause = e,
+                    metadataCause = e
                 )
             }
-
-            onProgress(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Succeeded, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = outputHeight, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 1f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, message = "AI 4배 저장 완료 ${outputWidth}×${outputHeight}", canCancel = false))
-
-            return@withContext SuperResolutionExportResult.Success(uri = publishedUri, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, tileCount = totalTiles)
+            if (pendingMetadataFailure == null) {
+                report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Succeeded, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = outputHeight, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 1f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, message = "AI 4배 저장 완료 ${outputWidth}×${outputHeight}", canCancel = false))
+                pendingPublishedResult = SuperResolutionExportResult.Success(uri = committedUri, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, tileCount = totalTiles)
+            }
+            return@withContext checkNotNull(pendingPublishedResult)
             }
         } catch (cancel: CancellationException) {
+            cancellationCause = cancel
             throw cancel
         } catch (t: Throwable) {
             return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.SourceRenderFailed, t.message ?: "unknown", t)
         } finally {
-            var cleanupDebt = false
-            // Cleanup RGB8 artifact idempotently (section 15)
-            rgb8Artifact?.let { art ->
-                val deletedFirst = runCatching { if (art.file.exists()) art.file.delete() }.isSuccess
-                val deletedSecond = if (!deletedFirst) {
-                    runCatching { File(art.file.absolutePath).delete() }.isSuccess
-                } else false
-                if (!deletedFirst && !deletedSecond) {
-                    cleanupDebt = true
+            val cleanupFailures = mutableListOf<Throwable>()
+            val cleanupFailure: Throwable? = withContext(NonCancellable) {
+                rgb8Artifact?.let { deleteRgb8ArtifactBounded(it.file) }?.also { cleanupFailures.add(it) }
+                // Pending-row transaction: distinguish delete truth and retry once.
+                pendingUri?.let { uri ->
+                    deletePendingRowBounded(rowStore, uri)?.also { cleanupFailures.add(it) }
+                }
+                runCatching { session?.close() }
+                wakeLock.release()
+                when (cleanupFailures.size) {
+                    0 -> null
+                    1 -> cleanupFailures.first()
+                    else -> {
+                        val aggregated = cleanupFailures.first()
+                        cleanupFailures.drop(1).forEach { aggregated.addSuppressed(it) }
+                        aggregated
+                    }
                 }
             }
-            // Pending-row transaction: if not published, roll back with one retry (section 12)
-            pendingUri?.let { uri ->
-                val deletedFirst = runCatching { rowStore.delete(uri) }.isSuccess
-                val deletedSecond = if (!deletedFirst) {
-                    runCatching { rowStore.delete(uri) }.isSuccess
-                } else false
-                if (!deletedFirst && !deletedSecond) {
-                    cleanupDebt = true
+            if (cleanupFailure != null) {
+                cancellationCause?.let { cleanupFailure.addSuppressed(it) }
+                // Distinguish which cleanup artifacts contributed; preserve via suppressed chain.
+                // pendingPublishedResult already holds metadata failure if any — do not lose it.
+                val message = "internal N6 cleanup debt: ${cleanupFailure.message}"
+                if (publishedUri != null) {
+                    val existing = pendingPublishedResult as? SuperResolutionExportResult.PublishedWithMetadataFailure
+                    if (existing != null && existing.failure == SuperResolutionFailureKind.MetadataPersistFailure) {
+                        // Preserve both: metadata failure is primary, cleanup debt is additional.
+                        // Chain causes so no fact is lost.
+                        existing.cause?.let { cleanupFailure.addSuppressed(it) }
+                        // Also chain existing suppressed
+                        return SuperResolutionExportResult.PublishedWithMetadataFailure(
+                            uri = existing.uri,
+                            inputWidth = existing.inputWidth,
+                            inputHeight = existing.inputHeight,
+                            outputWidth = existing.outputWidth,
+                            outputHeight = existing.outputHeight,
+                            tileCount = existing.tileCount,
+                            failure = SuperResolutionFailureKind.MetadataPersistFailure,
+                            message = "${existing.message}; also ${message}",
+                            cause = existing.cause?.also { it.addSuppressed(cleanupFailure) } ?: cleanupFailure,
+                            cleanupDebt = true,
+                            metadataCause = existing.metadataCause,
+                            suppressedCleanupCauses = listOf(cleanupFailure)
+                        )
+                    }
+                    // Pure cleanup debt after otherwise-successful publish
+                    return SuperResolutionExportResult.PublishedWithMetadataFailure(
+                        uri = publishedUri!!,
+                        inputWidth = inputWidth,
+                        inputHeight = inputHeight,
+                        outputWidth = outputWidth,
+                        outputHeight = outputHeight,
+                        tileCount = completedTileCount,
+                        failure = SuperResolutionFailureKind.InternalCleanupFailure,
+                        message = message,
+                        cause = cleanupFailure,
+                        cleanupDebt = true,
+                        suppressedCleanupCauses = listOf(cleanupFailure)
+                    )
                 }
-            }
-            // Note: cleanup debt is surfaced structurally; it does not override an already-set terminal result in this contract.
-            // Session close and wake release are deterministic.
-            runCatching { session?.close() }
-            wakeLock.release()
-            // If a cleanup failure occurred before publication, it can contribute to InternalCleanupFailure in extended pipelines.
-            if (cleanupDebt && (pendingUri != null || rgb8Artifact != null)) {
-                // Structured debt is observable through diagnostics/seams; terminal result remains unchanged here.
+                return SuperResolutionExportResult.Failure(
+                    SuperResolutionFailureKind.InternalCleanupFailure,
+                    message,
+                    cleanupFailure,
+                    cleanupDebt = true,
+                )
+            } else {
+                // No cleanup debt — if we had a pending metadata failure, return it; otherwise propagate success.
+                pendingPublishedResult?.let { return it }
             }
         }
     }

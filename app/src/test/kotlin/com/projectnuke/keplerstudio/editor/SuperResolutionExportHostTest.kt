@@ -3,11 +3,16 @@ package com.projectnuke.keplerstudio.editor
 import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.OutputStream
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.SupervisorJob
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -70,9 +75,10 @@ class SuperResolutionExportHostTest {
             published.add(uri)
             return 1
         }
-        override suspend fun delete(uri: Uri) {
+        override suspend fun delete(uri: Uri): SuperResolutionRowDeleteResult {
             deleteCalls++
             buffers.remove(uri); published.remove(uri)
+            return SuperResolutionRowDeleteResult.Deleted
         }
     }
 
@@ -130,40 +136,6 @@ class SuperResolutionExportHostTest {
         // This is ViewModel-level; we test orchestrator rejects invalid dimensions via 0x0 bitmap not possible, so we test via ViewModel canStart
         val vm = EditorViewModel(context)
         assertFalse(vm.canStartSuperResolution())
-    }
-
-    @Test
-    fun successLeavesDocumentUnchanged() = runBlocking {
-        makeAvailable()
-        val vm = EditorViewModel(context)
-        // Set up document state via reflection
-        val field = EditorViewModel::class.java.getDeclaredField("_uiState")
-        field.isAccessible=true
-        val flow = field.get(vm) as kotlinx.coroutines.flow.MutableStateFlow<EditorUiState>
-        val bmp = bitmap(128,128)
-        val before = EditorUiState(sourcePath="/tmp/a.jpg", baseContentToken="tok1", revision=5, previewBitmap=bmp, originalPreviewBitmap=bmp, params=EditParams(exposure=0.5f))
-        flow.value = before
-        val beforeRevision = before.revision
-        val beforeToken = before.baseContentToken
-        // We test orchestrator directly with bitmap copy to ensure doc not mutated; ViewModel export would use same bitmap but not mutate state
-        val rowStore = FakeRowStore()
-        val history = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
-            var s=SavedExportPersistedState(null,false,ExportHistoryRetention.Never)
-            override suspend fun readState()=s
-            override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s=transform(s); return s }
-        })
-        val session = makeSession()
-        session.load(fakeToken())
-        val bmp2 = bitmap(128,128)
-        val ctx = ModelOperationContext(2L,"g1")
-        // Use orchestrator directly to avoid ViewModel complexity for this test, but verify doc fields unchanged
-        val result = SuperResolutionExportOrchestrator.exportBitmap(context,bmp2,"sr.png",ctx, rowStore=rowStore, historyStore=history, sessionProvider={session})
-        // Document should still have same revision/token (we didn't call ViewModel export, so trivially true)
-        assertEquals(beforeRevision, flow.value.revision)
-        assertEquals(beforeToken, flow.value.baseContentToken)
-        // Also ensure no draft generation change (we can't easily check, but we verify no history mutation beyond savedExport)
-        bmp.recycle(); bmp2.recycle()
-        session.close()
     }
 
     @Test
@@ -241,7 +213,7 @@ class SuperResolutionExportHostTest {
             override suspend fun insertPending(fileName: String)=Uri.parse("content://media/99")
             override suspend fun openOutputStream(uri: Uri): OutputStream { throw IOException("write fail") }
             override suspend fun publish(uri: Uri): Int { return 0 }
-            override suspend fun delete(uri: Uri) {}
+            override suspend fun delete(uri: Uri) = SuperResolutionRowDeleteResult.Deleted
         }
         val history = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
             var s=SavedExportPersistedState(null,false,ExportHistoryRetention.Never)
@@ -264,7 +236,7 @@ class SuperResolutionExportHostTest {
         val history = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
             var s=SavedExportPersistedState(null,false,ExportHistoryRetention.Never)
             override suspend fun readState()=s
-            override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s=transform(s); return s }
+            override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { throw IOException("metadata write failed") }
         })
         val session = makeSession()
         session.load(fakeToken())
@@ -359,7 +331,7 @@ class SuperResolutionExportHostTest {
     fun heavyWorkerRunsOffMainThread() = runBlocking {
         makeAvailable()
         val bmp = bitmap(128,128)
-        var executedOffMain = false
+        var workerThread: Thread? = null
         val rowStore = FakeRowStore()
         val history = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
             var s=SavedExportPersistedState(null,false,ExportHistoryRetention.Never)
@@ -369,17 +341,719 @@ class SuperResolutionExportHostTest {
         val session = makeSession()
         session.load(fakeToken())
         val ctx = ModelOperationContext(99L,"g1")
-        val result = SuperResolutionExportOrchestrator.exportBitmap(
-            context,bmp,"sr.png",ctx,
-            rowStore=rowStore, historyStore=history, sessionProvider={session},
-            onProgress={ p ->
-                // Progress updates may occur on IO dispatcher; ensure they don't crash
-                assertTrue(p.overallFraction >= 0f)
-            }
-        )
-        // Verify the work did not run on the main looper thread by checking session dispatcher usage indirectly
+        val workerEntered = java.util.concurrent.CountDownLatch(1)
+        val workerRelease = java.util.concurrent.CountDownLatch(1)
+        val mainHeartbeatLatch = java.util.concurrent.CountDownLatch(1)
+        // Run export on a background dispatcher so we can gate the worker.
+        val deferred = async(kotlinx.coroutines.Dispatchers.Default) {
+            SuperResolutionExportOrchestrator.exportBitmap(
+                context,bmp,"sr.png",ctx,
+                rowStore=rowStore, historyStore=history, sessionProvider={session},
+                heavyWorkerObserver={ _, thread ->
+                    workerThread = thread
+                    workerEntered.countDown()
+                    // Keep worker blocked so Main must execute while heavy stage is still active.
+                    workerRelease.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                },
+                onProgress={ p ->
+                    assertTrue(p.overallFraction >= 0f)
+                }
+            )
+        }
+        assertTrue("worker must enter heavy stage", workerEntered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        // Post heartbeat to Main while worker gate remains blocked.
+        Handler(Looper.getMainLooper()).post { mainHeartbeatLatch.countDown() }
+        // Pump Robolectric Main looper: ensure heartbeat executes while worker is still blocked.
+        val heartbeatDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+        while (System.nanoTime() < heartbeatDeadline && mainHeartbeatLatch.count != 0L) {
+            org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+            delay(5)
+        }
+        assertTrue("Main heartbeat must execute while worker gate remains blocked", mainHeartbeatLatch.await(1, java.util.concurrent.TimeUnit.SECONDS))
+        // Release worker and finish operation.
+        workerRelease.countDown()
+        val result = deferred.await()
         assertTrue(result is SuperResolutionExportResult.Success || result is SuperResolutionExportResult.Failure)
-        // The actual dispatcher contract is enforced by withContext(Dispatchers.IO) in orchestrator.
+        assertNotNull(workerThread)
+        assertNotSame(Looper.getMainLooper().thread, workerThread)
         bmp.recycle(); session.close()
+    }
+
+    @Test
+    fun rgb8DeleteFalseWithNoExceptionIsCleanupDebtUntilGone() {
+        val file = File(cacheDir, "artifact.rgb8").apply { writeBytes(byteArrayOf(1)) }
+        var deleteCalls = 0
+        val failure = deleteRgb8ArtifactBounded(
+            file,
+            exists = { true },
+            delete = { deleteCalls++; false },
+        )
+        assertNotNull(failure)
+        assertEquals(2, deleteCalls)
+    }
+
+    @Test
+    fun rgb8DeleteTrueRequiresFileToBeGone() {
+        val file = File(cacheDir, "artifact.rgb8")
+        var exists = true
+        val failure = deleteRgb8ArtifactBounded(
+            file,
+            exists = { exists },
+            delete = { exists = false; true },
+        )
+        assertNull(failure)
+    }
+
+    @Test
+    fun pendingRowDeleteRetriesAfterFirstFailure() = runBlocking {
+        val results = ArrayDeque<SuperResolutionRowDeleteResult>().apply {
+            add(SuperResolutionRowDeleteResult.Exception(IOException("first")))
+            add(SuperResolutionRowDeleteResult.Deleted)
+        }
+        val store = object : SuperResolutionRowStore {
+            var calls = 0
+            override suspend fun insertPending(fileName: String) = Uri.parse("content://test/pending")
+            override suspend fun openOutputStream(uri: Uri): OutputStream = ByteArrayOutputStream()
+            override suspend fun publish(uri: Uri) = 1
+            override suspend fun delete(uri: Uri): SuperResolutionRowDeleteResult {
+                calls++
+                return results.removeFirst()
+            }
+        }
+        assertNull(deletePendingRowBounded(store, Uri.parse("content://test/pending")))
+        assertEquals(2, store.calls)
+    }
+
+    @Test
+    fun pendingRowDeleteZeroWithRowStillPresentIsDebt() = runBlocking {
+        val store = object : SuperResolutionRowStore {
+            var calls = 0
+            override suspend fun insertPending(fileName: String) = Uri.parse("content://test/pending")
+            override suspend fun openOutputStream(uri: Uri): OutputStream = ByteArrayOutputStream()
+            override suspend fun publish(uri: Uri) = 1
+            override suspend fun delete(uri: Uri): SuperResolutionRowDeleteResult {
+                calls++
+                return SuperResolutionRowDeleteResult.StillExistsAfterZero
+            }
+        }
+        assertNotNull(deletePendingRowBounded(store, Uri.parse("content://test/pending")))
+        assertEquals(2, store.calls)
+    }
+
+    @Test
+    fun pendingRowDeleteFailsTwiceIsDebt() = runBlocking {
+        val store = object : SuperResolutionRowStore {
+            var calls = 0
+            override suspend fun insertPending(fileName: String) = Uri.parse("content://test/pending")
+            override suspend fun openOutputStream(uri: Uri): OutputStream = ByteArrayOutputStream()
+            override suspend fun publish(uri: Uri) = 1
+            override suspend fun delete(uri: Uri): SuperResolutionRowDeleteResult {
+                calls++
+                return SuperResolutionRowDeleteResult.Exception(IOException("failure $calls"))
+            }
+        }
+        assertNotNull(deletePendingRowBounded(store, Uri.parse("content://test/pending")))
+        assertEquals(2, store.calls)
+    }
+
+    @Test
+    fun normalFullAndN6SourcesHaveByteForByteParityForEditedDocument() = runBlocking {
+        val base = bitmap(8, 8, 0xff234567.toInt())
+        val source = File(cacheDir, "edited-source.png").also {
+            it.outputStream().use { stream -> check(base.compress(Bitmap.CompressFormat.PNG, 100, stream)) }
+        }
+        val layer = SelectionLayer("selection", "selection", SelectionLayerKind.Subject, bitmap(8, 8, 0xffabcdef.toInt()))
+        val harness = OwnedEditorViewModelHarness(context)
+        val vm = harness.createEditor()
+        val stateField = EditorViewModel::class.java.getDeclaredField("_uiState").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val stateFlow = stateField.get(vm) as kotlinx.coroutines.flow.MutableStateFlow<EditorUiState>
+        val params = EditParams(exposure = 0.35f, contrast = -0.2f, saturation = 0.4f)
+            stateFlow.value = EditorUiState(
+            sourcePath = source.absolutePath,
+            baseBitmapDirty = true,
+            baseContentToken = "edited-token",
+            originalPreviewBitmap = base,
+            previewBitmap = base,
+            params = params,
+            presetLook = createPresetColorLookFromParams(params, size = 5, strength = 0.5f),
+            activeQuickEffects = listOf(ActiveQuickEffect(QuickEffectKind.VignetteCorrection)),
+            selectionLayers = listOf(layer),
+            cropState = CropState(CropAspectRatio.Free, 0.1f, 0.1f, 0.9f, 0.9f),
+            correctionEngineState = CorrectionEngineState(
+                visiblePreview = VisiblePreviewState.Rendered(
+                    requestedRoute = NativeRenderRoute.V1,
+                    actualRoute = NativeRenderRoute.V1,
+                    decision = RenderRouteDecision.FollowDocument,
+                    algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                ),
+                ),
+            )
+            // This fixture represents a settled editor document. The real
+            // parameter path updates this private baseline when its render
+            // commits; bypassing that path would otherwise make SR's required
+            // action settlement look like an SR document mutation.
+            EditorViewModel::class.java.getDeclaredField("lastSuccessfullyRenderedParams").apply {
+                isAccessible = true
+                set(vm, params)
+            }
+        val requests = mutableListOf<RenderRequest>()
+        val renderer = EditorRenderer.installRendererOverrideForTest { request ->
+            requests += request
+            RenderResult.Success(
+                operation = request.operation,
+                requestedRoute = NativeRenderRoute.V1,
+                output = request.basePreview.copy(Bitmap.Config.ARGB_8888, true),
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
+        val crop = installCropTransformForTest { input, _ -> input.copy(Bitmap.Config.ARGB_8888, true) }
+        try {
+            val normal = vm.prepareNormalFullExportSourceBitmapForTest()
+            val n6 = vm.prepareFullExportSourceBitmapForTest()
+            assertEquals(normal.width, n6.width)
+            assertEquals(normal.height, n6.height)
+            val normalPixels = IntArray(normal.width * normal.height)
+            val n6Pixels = IntArray(n6.width * n6.height)
+            normal.getPixels(normalPixels, 0, normal.width, 0, 0, normal.width, normal.height)
+            n6.getPixels(n6Pixels, 0, n6.width, 0, 0, n6.width, n6.height)
+            assertArrayEquals(normalPixels, n6Pixels)
+            assertEquals(2, requests.size)
+            assertEquals(RenderOperation.ExportDirty, requests[0].operation)
+            assertEquals(RenderOperation.ExportDirty, requests[1].operation)
+            assertEquals(params, requests[0].params)
+            assertEquals(requests[0].quickEffects, requests[1].quickEffects)
+            assertEquals(requests[0].selectionLayers.size, requests[1].selectionLayers.size)
+            normal.recycle()
+            n6.recycle()
+
+            stateFlow.value = stateFlow.value.copy(baseBitmapDirty = false)
+            val cleanNormal = vm.prepareNormalFullExportSourceBitmapForTest()
+            val cleanN6 = vm.prepareFullExportSourceBitmapForTest()
+            assertEquals(cleanNormal.width, cleanN6.width)
+            assertEquals(cleanNormal.height, cleanN6.height)
+            val cleanNormalPixels = IntArray(cleanNormal.width * cleanNormal.height)
+            val cleanN6Pixels = IntArray(cleanN6.width * cleanN6.height)
+            cleanNormal.getPixels(cleanNormalPixels, 0, cleanNormal.width, 0, 0, cleanNormal.width, cleanNormal.height)
+            cleanN6.getPixels(cleanN6Pixels, 0, cleanN6.width, 0, 0, cleanN6.width, cleanN6.height)
+            assertArrayEquals(cleanNormalPixels, cleanN6Pixels)
+            assertEquals(4, requests.size)
+            assertEquals(RenderOperation.ExportClean, requests[2].operation)
+            assertEquals(RenderOperation.ExportClean, requests[3].operation)
+            cleanNormal.recycle()
+            cleanN6.recycle()
+
+            // Real product-path parity: observe exact pre-compression bitmaps via
+            // read-only seams at the actual ViewModel entrypoints.
+            // Run both real actions against equivalent settled documents and
+            // byte-compare with bounded row scratch; must fail if either product
+            // action stops using the shared Full-export renderer.
+            fun hashBitmapBounded(bmp: Bitmap): String {
+                val md = java.security.MessageDigest.getInstance("SHA-256")
+                val w = bmp.width; val h = bmp.height
+                val row = IntArray(w)
+                val buf = java.nio.ByteBuffer.allocate(4)
+                for (y in 0 until h) {
+                    bmp.getPixels(row, 0, w, 0, y, w, 1)
+                    for (px in row) {
+                        buf.clear()
+                        buf.putInt(px)
+                        md.update(buf.array())
+                    }
+                }
+                return md.digest().joinToString("") { "%02x".format(it) }
+            }
+            // Helper to run one parity round (dirty vs clean) via real ViewModel actions.
+            suspend fun runParityRound(isDirty: Boolean) {
+                // Normal Full export observation
+                var normalHash: String? = null
+                var normalW = -1; var normalH = -1
+                val normalLatch = java.util.concurrent.CountDownLatch(1)
+                val normalRowStore = object : ExportRowStore {
+                    override suspend fun insertPending(request: ExportRowRequest): Uri { return Uri.parse("content://test/normal") }
+                    override suspend fun encode(uri: Uri, bitmap: Bitmap, format: ExportFormat) { }
+                    override suspend fun publish(uri: Uri) { }
+                    override suspend fun delete(uri: Uri) { }
+                }
+                val normalHistory = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
+                    var s=SavedExportPersistedState(null,false,ExportHistoryRetention.Never)
+                    override suspend fun readState()=s
+                    override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s=transform(s); return s }
+                })
+                val exportSeam = ExportTestSeam(
+                    rowStore = normalRowStore,
+                    historyStore = normalHistory,
+                    sourceBitmapObserver = { bmp ->
+                        normalW = bmp.width; normalH = bmp.height
+                        normalHash = hashBitmapBounded(bmp)
+                        normalLatch.countDown()
+                    }
+                )
+                val exportHandle = ExportTestSeam.install(exportSeam)
+                try {
+                    // Ensure Full resolution is selected for parity.
+                    stateFlow.value = stateFlow.value.copy(baseBitmapDirty = isDirty, exportResolution = ExportResolution.Full)
+                    // Wait for any prior busy to settle.
+                    while (vm.uiState.value.isBusy) {
+                        org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                        yieldToEditorBackgroundForTest()
+                        kotlinx.coroutines.delay(5)
+                    }
+                    vm.exportPreview()
+                    // Wait for observer (bounded)
+                    val d1 = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+                    while (System.nanoTime() < d1 && normalLatch.count != 0L) {
+                        org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                        kotlinx.coroutines.delay(5)
+                    }
+                    assertTrue("normal Full export must hit shared renderer observer", normalLatch.count == 0L)
+                    assertNotNull(normalHash)
+                } finally { exportHandle.close() }
+                // Drain pipeline settlement
+                val drain1 = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+                while (System.nanoTime() < drain1 && vm.uiState.value.isBusy) {
+                    org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    kotlinx.coroutines.delay(5)
+                }
+                // N6 observation via real exportSuperResolution
+                var n6Hash: String? = null
+                var n6W = -1; var n6H = -1
+                val n6Latch = java.util.concurrent.CountDownLatch(1)
+                val srSeam2 = SuperResolutionTestSeam(
+                    rowStore = FakeRowStore(),
+                    historyStore = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
+                        var s=SavedExportPersistedState(null,false,ExportHistoryRetention.Never)
+                        override suspend fun readState()=s
+                        override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s=transform(s); return s }
+                    }),
+                    sessionProvider = { makeSession() },
+                    sourceBitmapObserver = { bmp ->
+                        n6W = bmp.width; n6H = bmp.height
+                        n6Hash = hashBitmapBounded(bmp)
+                        n6Latch.countDown()
+                    }
+                )
+                val srHandle2 = SuperResolutionTestSeam.install(srSeam2)
+                try {
+                    makeAvailable()
+                    // Ensure document still settled for SR.
+                    while (vm.uiState.value.isBusy) {
+                        org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                        yieldToEditorBackgroundForTest()
+                        kotlinx.coroutines.delay(5)
+                    }
+                    assertTrue("SR must be startable for parity", vm.canStartSuperResolution())
+                    vm.exportSuperResolution()
+                    val d2 = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+                    while (System.nanoTime() < d2 && n6Latch.count != 0L) {
+                        org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                        kotlinx.coroutines.delay(5)
+                    }
+                    assertTrue("N6 must hit shared renderer observer", n6Latch.count == 0L)
+                    assertNotNull(n6Hash)
+                } finally { srHandle2.close() }
+                // Drain SR settlement
+                val drain2 = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+                while (System.nanoTime() < drain2 && vm.superResolutionStatus.value.isBusy) {
+                    org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    kotlinx.coroutines.delay(5)
+                }
+                assertEquals("Exact dimensions must match (Full) dirty=$isDirty", normalW, n6W)
+                assertEquals("Exact height must match", normalH, n6H)
+                assertEquals("Byte-exact RGB/ARGB pixels must match — shared Full renderer", normalHash, n6Hash)
+            }
+            runParityRound(isDirty = true)
+            runParityRound(isDirty = false)
+        } finally {
+            crop.close()
+            renderer.close()
+            layer.bitmap.recycle()
+            base.recycle()
+            harness.close()
+        }
+    }
+
+    @Test
+    fun viewModelProductActionSuccessPreservesDocumentAndHistoryState() = runBlocking {
+        makeAvailable()
+        val harness = OwnedEditorViewModelHarness(context)
+        val vm = harness.createEditor()
+        try {
+            val initDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+            while (System.nanoTime() < initDeadline && (!vm.startupInitCompletion.isCompleted || vm.startupCoordinatorActiveForTest())) {
+                org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                yieldToEditorBackgroundForTest()
+                Thread.sleep(5L)
+            }
+            val preview = bitmap(256, 256, 0xff102030.toInt())
+            vm.updateUiState {
+                it.copy(
+                    sourcePath = null,
+                    baseBitmapDirty = true,
+                    baseContentToken = "vm-product-token",
+                    originalPreviewBitmap = preview,
+                    previewBitmap = preview,
+                    params = EditParams(exposure = 0.4f, contrast = -0.15f),
+                    revision = 7,
+                )
+            }
+            while (vm.uiState.value.isBusy) {
+                org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                yieldToEditorBackgroundForTest()
+                Thread.sleep(5L)
+            }
+            // This directly seeded state is already the result of a settled
+            // parameter render. Keep the same private baseline the real
+            // parameter path records before an external action is admitted.
+            EditorViewModel::class.java.getDeclaredField("lastSuccessfullyRenderedParams").apply {
+                isAccessible = true
+                set(vm, vm.uiState.value.params)
+            }
+            val rowStore = FakeRowStore()
+            val history = SavedExportHistoryStore(context, persistence = object : SavedExportHistoryPersistence {
+                var state = SavedExportPersistedState(null, false, ExportHistoryRetention.Never)
+                override suspend fun readState() = state
+                override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState {
+                    state = transform(state)
+                    return state
+                }
+            })
+            val seam = SuperResolutionTestSeam(
+                rowStore = rowStore,
+                historyStore = history,
+                sessionProvider = { makeSession() },
+            )
+            val seamHandle = SuperResolutionTestSeam.install(seam)
+            try {
+                makeAvailable()
+                val before = vm.uiState.value
+                val beforePreview = before.previewBitmap
+                val beforeOriginal = before.originalPreviewBitmap
+                assertTrue("ViewModel product action must be admitted", vm.canStartSuperResolution())
+                vm.exportSuperResolution()
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20)
+                while (System.nanoTime() < deadline && vm.superResolutionStatus.value.phase !in setOf(
+                        SuperResolutionExportPhase.Succeeded,
+                        SuperResolutionExportPhase.Failed,
+                        SuperResolutionExportPhase.Cancelled,
+                    )) {
+                    org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    yieldToEditorBackgroundForTest()
+                    Thread.sleep(5L)
+                }
+                assertEquals(SuperResolutionExportPhase.Succeeded, vm.superResolutionStatus.value.phase)
+                val historyDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+                while (System.nanoTime() < historyDeadline && vm.uiState.value.savedExports.isEmpty()) {
+                    org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    yieldToEditorBackgroundForTest()
+                    Thread.sleep(5L)
+                }
+                val after = vm.uiState.value
+                assertEquals(before.sourcePath, after.sourcePath)
+                assertEquals(before.baseContentToken, after.baseContentToken)
+                assertEquals(before.revision, after.revision)
+                assertSame(beforePreview, after.previewBitmap)
+                assertSame(beforeOriginal, after.originalPreviewBitmap)
+                assertEquals(before.params, after.params)
+                assertEquals(before.cropState, after.cropState)
+                assertEquals(before.selectionLayers, after.selectionLayers)
+                assertEquals(before.canUndo, after.canUndo)
+                assertEquals(before.canRedo, after.canRedo)
+                assertEquals(before.draftGenerationId, after.draftGenerationId)
+                assertEquals(before.draftSourcePath, after.draftSourcePath)
+                assertEquals(before.draftBaseContentToken, after.draftBaseContentToken)
+                assertEquals(1, rowStore.published.size)
+                assertEquals(1, after.savedExports.size)
+                preview.recycle()
+            } finally {
+                seamHandle.close()
+            }
+        } finally {
+            harness.close()
+        }
+    }
+
+    @Test
+    fun viewModelProductActionSurfacesSourceMemoryRejection() = runBlocking {
+        makeAvailable()
+        val harness = OwnedEditorViewModelHarness(context)
+        val vm = harness.createEditor()
+        val preview = bitmap(32, 32)
+        val stateField = EditorViewModel::class.java.getDeclaredField("_uiState").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val stateFlow = stateField.get(vm) as kotlinx.coroutines.flow.MutableStateFlow<EditorUiState>
+        stateFlow.value = vm.uiState.value.copy(
+            previewBitmap = preview,
+            originalPreviewBitmap = preview,
+            baseBitmapDirty = true,
+            baseContentToken = "memory-rejected",
+        )
+        val initDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+        while (System.nanoTime() < initDeadline && (!vm.startupInitCompletion.isCompleted || vm.startupCoordinatorActiveForTest())) {
+            org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
+            Thread.sleep(5L)
+        }
+        makeAvailable()
+        EditorViewModel::class.java.getDeclaredField("lastSuccessfullyRenderedParams").apply {
+            isAccessible = true
+            set(vm, vm.uiState.value.params)
+        }
+        val recovery = MemoryRecoveryTestSeam(rejectExportPreparation = true)
+        val recoveryHandle = MemoryRecoveryTestSeam.install(recovery)
+        try {
+            assertTrue(vm.canStartSuperResolution())
+            vm.exportSuperResolution()
+            val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            while (System.nanoTime() < deadline &&
+                (vm.superResolutionStatus.value.phase == SuperResolutionExportPhase.Idle ||
+                    vm.superResolutionStatus.value.isBusy)
+            ) {
+                org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                yieldToEditorBackgroundForTest()
+                Thread.sleep(5L)
+            }
+            assertEquals(SuperResolutionExportPhase.Failed, vm.superResolutionStatus.value.phase)
+            assertEquals(SuperResolutionFailureKind.SourceRenderMemoryRejected, vm.superResolutionStatus.value.failureKind)
+        } finally {
+            recoveryHandle.close()
+            harness.close()
+        }
+    }
+
+    @Test
+    fun viewModelArbitrationAllowsSrSupersessionButBlocksNormalConflict() {
+        makeAvailable()
+        val vm = EditorViewModel(context)
+        val preview = bitmap(16, 16)
+        vm.updateUiState { it.copy(previewBitmap = preview, originalPreviewBitmap = preview, isBusy = true) }
+        makeAvailable()
+        assertFalse("normal export owns the busy state", vm.canStartSuperResolution())
+        val oldSrOwner = SupervisorJob()
+        EditorViewModel::class.java.getDeclaredField("superResolutionJob").apply {
+            isAccessible = true
+            set(vm, oldSrOwner)
+        }
+        assertTrue("a newer SR may supersede an older SR", vm.canStartSuperResolution())
+        vm.shutdownForTest()
+        assertTrue(oldSrOwner.isCancelled)
+    }
+
+    @Test
+    fun arbitrationNewerSrSupersedesOlderSr() = runBlocking {
+        makeAvailable()
+        val harness = OwnedEditorViewModelHarness(context)
+        val vm = harness.createEditor()
+        val preview = bitmap(128, 128)
+        try {
+            vm.updateUiState {
+                it.copy(
+                    previewBitmap = preview,
+                    originalPreviewBitmap = preview,
+                    sourcePath = null,
+                    baseBitmapDirty = true,
+                    baseContentToken = "arbitration-token",
+                    params = EditParams(),
+                    revision = 1,
+                )
+            }
+            val initDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+            while (System.nanoTime() < initDeadline && (!vm.startupInitCompletion.isCompleted || vm.startupCoordinatorActiveForTest())) {
+                org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                yieldToEditorBackgroundForTest()
+                Thread.sleep(5L)
+            }
+            EditorViewModel::class.java.getDeclaredField("lastSuccessfullyRenderedParams").apply {
+                isAccessible = true
+                set(vm, vm.uiState.value.params)
+            }
+            val seam = SuperResolutionTestSeam(
+                sessionProvider = { makeSession() },
+                rowStore = FakeRowStore(),
+                historyStore = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
+                    var s = SavedExportPersistedState(null, false, ExportHistoryRetention.Never)
+                    override suspend fun readState() = s
+                    override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s = transform(s); return s }
+                }),
+            )
+            val handle = SuperResolutionTestSeam.install(seam)
+            try {
+                // Start first SR.
+                makeAvailable()
+                assertTrue(vm.canStartSuperResolution())
+                vm.exportSuperResolution()
+                val firstToken = vm.superResolutionTokenForTest()
+                val firstJob = vm.superResolutionJobForTest()
+                assertNotNull(firstToken)
+                assertNotNull(firstJob)
+                // Before first settles, start second SR — this should supersede first.
+                kotlinx.coroutines.delay(50)
+                assertTrue("newer SR supersedes older", vm.canStartSuperResolution())
+                vm.exportSuperResolution()
+                val secondToken = vm.superResolutionTokenForTest()
+                val secondJob = vm.superResolutionJobForTest()
+                assertNotEquals("second SR must have newer token", firstToken, secondToken)
+                assertNotEquals("second SR must have different owning Job", firstJob, secondJob)
+                // Second is now authoritative.
+                assertEquals(secondToken, vm.superResolutionTokenForTest())
+            } finally {
+                handle.close()
+            }
+        } finally {
+            harness.close()
+        }
+    }
+
+    @Test
+    fun srUserCancellationPreservesDocumentIdentity() = runBlocking {
+        makeAvailable()
+        val harness = OwnedEditorViewModelHarness(context)
+        val vm = harness.createEditor()
+        val preview = bitmap(64, 64)
+        try {
+            vm.updateUiState {
+                it.copy(
+                    previewBitmap = preview,
+                    originalPreviewBitmap = preview,
+                    sourcePath = null,
+                    baseBitmapDirty = true,
+                    baseContentToken = "cancel-token",
+                    params = EditParams(saturation = 0.5f),
+                    revision = 4,
+                )
+            }
+            val initDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+            while (System.nanoTime() < initDeadline && (!vm.startupInitCompletion.isCompleted || vm.startupCoordinatorActiveForTest())) {
+                org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                yieldToEditorBackgroundForTest()
+                Thread.sleep(5L)
+            }
+            EditorViewModel::class.java.getDeclaredField("lastSuccessfullyRenderedParams").apply {
+                isAccessible = true
+                set(vm, vm.uiState.value.params)
+            }
+            val seam = SuperResolutionTestSeam(
+                sessionProvider = { makeSession() },
+                rowStore = FakeRowStore(),
+                historyStore = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
+                    var s = SavedExportPersistedState(null, false, ExportHistoryRetention.Never)
+                    override suspend fun readState() = s
+                    override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s = transform(s); return s }
+                }),
+            )
+            val handle = SuperResolutionTestSeam.install(seam)
+            try {
+                makeAvailable()
+                val before = vm.uiState.value
+                assertTrue(vm.canStartSuperResolution())
+                vm.exportSuperResolution()
+                // Cancel shortly after start.
+                kotlinx.coroutines.delay(50)
+                vm.cancelSuperResolution()
+                // Wait for terminal Cancelled state.
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+                while (System.nanoTime() < deadline && vm.superResolutionStatus.value.phase != SuperResolutionExportPhase.Cancelled && vm.superResolutionStatus.value.failureKind != SuperResolutionFailureKind.Cancelled) {
+                    org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    yieldToEditorBackgroundForTest()
+                    Thread.sleep(5L)
+                }
+                val status = vm.superResolutionStatus.value
+                assertTrue("should be cancelled or failed", status.phase == SuperResolutionExportPhase.Cancelled || status.failureKind == SuperResolutionFailureKind.Cancelled)
+                assertEquals(false, status.isBusy)
+                val after = vm.uiState.value
+                // Document identity must be unchanged.
+                assertEquals(before.sourcePath, after.sourcePath)
+                assertEquals(before.baseContentToken, after.baseContentToken)
+                assertEquals(before.revision, after.revision)
+                assertSame(before.previewBitmap, after.previewBitmap)
+                assertSame(before.originalPreviewBitmap, after.originalPreviewBitmap)
+                assertEquals(before.params, after.params)
+                assertEquals(before.cropState, after.cropState)
+                assertEquals(before.selectionLayers, after.selectionLayers)
+                assertEquals(before.canUndo, after.canUndo)
+                assertEquals(before.canRedo, after.canRedo)
+            } finally {
+                handle.close()
+            }
+        } finally {
+            harness.close()
+        }
+    }
+
+    @Test
+    fun srStaleOperationPreservesDocumentIdentity() = runBlocking {
+        makeAvailable()
+        val harness = OwnedEditorViewModelHarness(context)
+        val vm = harness.createEditor()
+        val preview = bitmap(64, 64)
+        try {
+            vm.updateUiState {
+                it.copy(
+                    previewBitmap = preview,
+                    originalPreviewBitmap = preview,
+                    sourcePath = null,
+                    baseBitmapDirty = true,
+                    baseContentToken = "stale-token",
+                    params = EditParams(),
+                    revision = 1,
+                )
+            }
+            val initDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+            while (System.nanoTime() < initDeadline && (!vm.startupInitCompletion.isCompleted || vm.startupCoordinatorActiveForTest())) {
+                org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                yieldToEditorBackgroundForTest()
+                Thread.sleep(5L)
+            }
+            EditorViewModel::class.java.getDeclaredField("lastSuccessfullyRenderedParams").apply {
+                isAccessible = true
+                set(vm, vm.uiState.value.params)
+            }
+            val seam = SuperResolutionTestSeam(
+                sessionProvider = { makeSession() },
+                rowStore = FakeRowStore(),
+                historyStore = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
+                    var s = SavedExportPersistedState(null, false, ExportHistoryRetention.Never)
+                    override suspend fun readState() = s
+                    override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s = transform(s); return s }
+                }),
+            )
+            val handle = SuperResolutionTestSeam.install(seam)
+            try {
+                makeAvailable()
+                val before = vm.uiState.value
+                assertTrue(vm.canStartSuperResolution())
+                vm.exportSuperResolution()
+                // Start second SR to make first stale.
+                kotlinx.coroutines.delay(50)
+                vm.exportSuperResolution()
+                // Wait for settlement.
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+                while (System.nanoTime() < deadline && vm.superResolutionStatus.value.isBusy) {
+                    org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    yieldToEditorBackgroundForTest()
+                    Thread.sleep(5L)
+                }
+                val after = vm.uiState.value
+                // Document identity must be unchanged.
+                assertEquals(before.sourcePath, after.sourcePath)
+                assertEquals(before.baseContentToken, after.baseContentToken)
+                assertEquals(before.revision, after.revision)
+                assertSame(before.previewBitmap, after.previewBitmap)
+                assertSame(before.originalPreviewBitmap, after.originalPreviewBitmap)
+                assertEquals(before.params, after.params)
+                assertEquals(before.cropState, after.cropState)
+                assertEquals(before.selectionLayers, after.selectionLayers)
+            } finally {
+                handle.close()
+            }
+        } finally {
+            harness.close()
+        }
     }
 }

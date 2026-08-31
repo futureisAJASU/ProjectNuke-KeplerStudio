@@ -27,6 +27,8 @@ package com.projectnuke.keplerstudio.editor
 internal class ExportTestSeam(
     internal val rowStore: ExportRowStore? = null,
     internal val historyStore: SavedExportHistoryStore? = null,
+    /** Read-only observation seam: exact pre-compression Full bitmap (bounded row copy, never retained). */
+    internal val sourceBitmapObserver: ((android.graphics.Bitmap) -> Unit)? = null,
 ) {
     internal companion object Registry {
         private val lock = Any()

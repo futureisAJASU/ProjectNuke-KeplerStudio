@@ -12,6 +12,14 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlin.coroutines.coroutineContext
 
+internal interface Rgb8Reader : AutoCloseable {
+    fun read(position: Long, into: ByteBuffer): Int
+}
+
+internal fun interface Rgb8ReaderFactory {
+    fun open(file: java.io.File): Rgb8Reader
+}
+
 internal object StreamingPngEncoder {
 
     private const val CHUNK_SIZE = 64 * 1024
@@ -23,6 +31,13 @@ internal object StreamingPngEncoder {
         isCurrent: () -> Boolean = { true },
         isCancelled: () -> Boolean = { false },
         onRowProgress: suspend (completedRows: Int, totalRows: Int) -> Unit = { _, _ -> },
+        readerFactory: Rgb8ReaderFactory = Rgb8ReaderFactory { file ->
+            val channel = FileChannel.open(file.toPath(), StandardOpenOption.READ)
+            object : Rgb8Reader {
+                override fun read(position: Long, into: ByteBuffer): Int = channel.read(into, position)
+                override fun close() = channel.close()
+            }
+        },
     ) {
         validate(artifact)
         val file = artifact.file
@@ -35,7 +50,7 @@ internal object StreamingPngEncoder {
         // Deflater ownership wrapped in total try/finally contract (section 4)
         val deflater = Deflater(6)
         try {
-            FileChannel.open(file.toPath(), StandardOpenOption.READ).use { channel ->
+            readerFactory.open(file).use { reader ->
                 output.write(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
 
                 val ihdr = ByteBuffer.allocate(13)
@@ -81,7 +96,7 @@ internal object StreamingPngEncoder {
 
                     rawRow[0] = 0
                     val filePos = y.toLong() * rowBytes
-                    readFully(channel, filePos, rawRow, 1, rowBytes)
+                    readFully(reader, filePos, rawRow, 1, rowBytes)
 
                     deflater.setInput(rawRow, 0, rawRow.size)
                     while (!deflater.needsInput()) {
@@ -96,6 +111,7 @@ internal object StreamingPngEncoder {
                     // Emit coalesced progress
                     if (completedRows - lastEmittedRows >= PROGRESS_COALESCE_ROWS || completedRows == totalRows) {
                         onRowProgress(completedRows, totalRows)
+                        coroutineContext.ensureActive()
                         lastEmittedRows = completedRows
                     }
                 }
@@ -130,12 +146,12 @@ internal object StreamingPngEncoder {
         require(artifact.byteCount == artifact.width.toLong() * artifact.height * 3) { "byteCount mismatch" }
     }
 
-    private fun readFully(channel: FileChannel, position: Long, buf: ByteArray, offset: Int, length: Int) {
+    private fun readFully(reader: Rgb8Reader, position: Long, buf: ByteArray, offset: Int, length: Int) {
         var pos = position
         var off = offset
         var remaining = length
         while (remaining > 0) {
-            val read = channel.read(ByteBuffer.wrap(buf, off, remaining), pos)
+            val read = reader.read(pos, ByteBuffer.wrap(buf, off, remaining))
             if (read <= 0) throw IOException("RGB8 source read made no progress at pos $pos remaining $remaining (possible partial/zero-progress)")
             pos += read
             off += read

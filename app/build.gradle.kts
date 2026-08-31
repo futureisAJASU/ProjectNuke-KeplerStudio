@@ -9,6 +9,24 @@ android {
     namespace = "com.projectnuke.keplerstudio"
     compileSdk = 36
 
+    // Stable DEBUG signing — user-local, never committed, never used for release.
+    // Location: %USERPROFILE%\.projectnuke\keplerstudio\keplerstudio-stable-debug.jks
+    // Bootstrap: .\tools\pin_debug_keystore.ps1
+    // After pinning, packaging MUST fail closed if the pinned keystore is missing — no silent fallback to ~/.android/debug.keystore.
+    val stableDebugKeystoreFile = File(System.getProperty("user.home"), ".projectnuke/keplerstudio/keplerstudio-stable-debug.jks")
+    val hasStableDebugKeystore = stableDebugKeystoreFile.exists()
+
+    signingConfigs {
+        create("debugStable") {
+            storeFile = stableDebugKeystoreFile
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+            // Fail closed at packaging time if missing: Gradle will error when trying to sign with missing file.
+            // Do not fallback to default debug keystore.
+        }
+    }
+
     defaultConfig {
         applicationId = "com.projectnuke.keplerstudio"
         minSdk = 29
@@ -24,6 +42,22 @@ android {
 
         ndk {
             abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    buildTypes {
+        debug {
+            // Use pinned stable key when present; otherwise warn but still point to pinned path so packaging fails closed.
+            signingConfig = signingConfigs.getByName("debugStable")
+            if (!hasStableDebugKeystore) {
+                logger.warn("[Kepler] Stable debug keystore not found at ${stableDebugKeystoreFile.absolutePath}. Run .\\tools\\pin_debug_keystore.ps1 to bootstrap. Packaging will fail until pinned.")
+                // Keep signingConfig pointing to missing file — forces actionable failure at :app:packageDebug, not silent fallback.
+            }
+        }
+        release {
+            // Release signing remains independent and unconfigured here — never use debugStable for release.
+            // Configure release signing via local properties/CI only when needed; keep debugStable isolated.
+            isMinifyEnabled = false
         }
     }
 
