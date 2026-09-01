@@ -1,2 +1,2 @@
-# Preserve immutable device log bytes exactly; do not normalize captured whitespace.
-artifacts/**/enn-logcat.txt -text
+# No special end-of-line handling. (Device logcat evidence was removed from the tree;
+# raw logcat dumps must not be committed per hygiene gate.)

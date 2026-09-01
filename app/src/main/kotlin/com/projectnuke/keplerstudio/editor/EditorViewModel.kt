@@ -7506,18 +7506,15 @@ fun exportPreview() {
                     documentGeneration = documentGeneration,
                     documentIdentity = "${sourcePath}:${baseToken}:${revision}",
                     isCurrent = { t, g ->
-                        if (t != token || g != documentGeneration) false
-                        else {
-                            val currentToken = superResolutionToken
-                            val currentState = _uiState.value
-                            if (token != currentToken) false
-                            else if (owningJobRef[0] == null) false
-                            else if (owningJobRef[0] !== superResolutionJob) false
-                            else if (superResolutionJob?.isActive != true) false
-                            else if (sourcePath != currentState.sourcePath || baseToken != currentState.baseContentToken || revision != currentState.revision) false
-                            else if (shuttingDown) false
-                            else true
-                        }
+                        if (t != token) false
+                        else if (g != documentGeneration) false
+                        else if (documentGeneration != currentDocumentGeneration()) false
+                        else if (token != superResolutionToken) false
+                        else if (owningJobRef[0] == null || owningJobRef[0] !== superResolutionJob) false
+                        else if (superResolutionJob?.isActive != true) false
+                        else if (sourcePath != _uiState.value.sourcePath || baseToken != _uiState.value.baseContentToken || revision != _uiState.value.revision) false
+                        else if (shuttingDown) false
+                        else true
                     },
                     isCancelled = { owningJob.isCancelled }
                 )

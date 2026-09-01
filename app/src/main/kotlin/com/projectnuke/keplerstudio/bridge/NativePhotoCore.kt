@@ -22,10 +22,10 @@ object NativePhotoCore {
 
     external fun nativeReleaseSession(handle: Long)
 
-    internal external fun nativeRegisterCancellationToken(): Long
-    internal external fun nativeSignalCancellation(token: Long): Boolean
-    internal external fun nativeReleaseCancellationToken(token: Long): Boolean
-    internal external fun nativeActiveCancellationTokenCount(): Int
+    external fun nativeRegisterCancellationToken(): Long
+    external fun nativeSignalCancellation(token: Long): Boolean
+    external fun nativeReleaseCancellationToken(token: Long): Boolean
+    external fun nativeActiveCancellationTokenCount(): Int
 
     /**
      * Preview와 export가 같은 네이티브 픽셀 파이프라인을 사용한다.

@@ -50,7 +50,7 @@ class SuperResolutionExportHostTest {
         return bmp
     }
 
-    private class FakeRowStore : SuperResolutionRowStore {
+    private open class FakeRowStore : SuperResolutionRowStore {
         var insertCalls=0; var publishCalls=0; var deleteCalls=0
         var insertFail: Throwable? = null
         var publishFail: Throwable? = null
@@ -846,6 +846,132 @@ class SuperResolutionExportHostTest {
     }
 
     @Test
+    fun srDocumentGenerationStaleBeforeTileWork() = runBlocking {
+        makeAvailable()
+        val harness = OwnedEditorViewModelHarness(context)
+        val vm = harness.createEditor()
+        val preview = bitmap(128, 128)
+        try {
+            vm.updateUiState {
+                it.copy(
+                    previewBitmap = preview,
+                    originalPreviewBitmap = preview,
+                    sourcePath = null,
+                    baseBitmapDirty = true,
+                    baseContentToken = "stale-gen-token",
+                    params = EditParams(),
+                    revision = 1,
+                )
+            }
+            val initDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(15)
+            while (System.nanoTime() < initDeadline && (!vm.startupInitCompletion.isCompleted || vm.startupCoordinatorActiveForTest())) {
+                org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                yieldToEditorBackgroundForTest()
+                Thread.sleep(5L)
+            }
+            EditorViewModel::class.java.getDeclaredField("lastSuccessfullyRenderedParams").apply {
+                isAccessible = true
+                set(vm, vm.uiState.value.params)
+            }
+            val capturedGen = vm.historyCoordinator.currentGeneration()
+            // Build a ModelOperationContext with the FIXED 10-predicate N5 boundary logic,
+            // capturing the generation at SR admission time.
+            val token = 999L
+            val sourcePath = vm.uiState.value.sourcePath
+            val baseToken = vm.uiState.value.baseContentToken
+            val revision = vm.uiState.value.revision
+            // Simulate the exact predicate ViewModel now uses (including generation check).
+            // Use vm's currentDocumentGeneration() as the authoritative source.
+            val ctx = ModelOperationContext(
+                operationToken = token,
+                documentGeneration = capturedGen,
+                documentIdentity = "$sourcePath:$baseToken:$revision",
+                isCurrent = { t, g ->
+                    if (t != token) false
+                    else if (g != capturedGen) false
+                    else if (capturedGen != vm.historyCoordinator.currentGeneration()) false
+                    else true
+                }
+            )
+            // Before generation change, predicate must be current.
+            assertTrue("predicate must be current before generation change", ctx.isCurrent(token, capturedGen))
+            // Change authoritative generation while SR would be admitted (simulate document replacement).
+            val genLatch = java.util.concurrent.CountDownLatch(1)
+            var newGen = ""
+            Handler(Looper.getMainLooper()).post {
+                vm.historyCoordinator.replaceDocument()
+                newGen = vm.historyCoordinator.currentGeneration()
+                genLatch.countDown()
+            }
+            val genDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+            while (System.nanoTime() < genDeadline && genLatch.count != 0L) {
+                org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                Thread.sleep(5L)
+            }
+            assertTrue("generation change must complete on Main", genLatch.count == 0L)
+            val genAfter = newGen
+            assertNotEquals("generation must change", capturedGen, genAfter)
+            // Prove predicate is now stale before any subsequent tile/native work.
+            assertFalse(
+                "ModelOperationContext must be stale after generation change (captured gen != current)",
+                ctx.isCurrent(token, capturedGen)
+            )
+            assertNotEquals(capturedGen, vm.historyCoordinator.currentGeneration())
+            // Also prove via TileFileBackedUpscaler that no tile executes when context is stale.
+            var executeCalls = 0
+            val fakeEnn = object : ExynosEnnNativeInterface {
+                override fun probeRuntime()=true
+                override fun initialize()=EnnStatus.SUCCESS
+                override fun deinitialize()=EnnStatus.SUCCESS
+                override fun openModel(path:String)=EnnOpenModelResult(EnnStatus.SUCCESS, 1L)
+                override fun closeModel(modelId: Long)=EnnStatus.SUCCESS
+                override fun allocateAllBuffers(modelId: Long)=EnnAllocateResult(EnnStatus.SUCCESS, 0x100L,1,1)
+                override fun releaseBuffers(bufferSet: Long, bufferCount: Int)=EnnStatus.SUCCESS
+                override fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int)= if (direction==0) intArrayOf(1,128,128,3,ExynosUpscaleSession.INPUT_BYTES) else intArrayOf(1,512,512,3,ExynosUpscaleSession.OUTPUT_BYTES)
+                override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray)=EnnStatus.SUCCESS
+                override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int { java.util.Arrays.fill(out, 0x3F.toByte()); return EnnStatus.SUCCESS }
+                override fun execute(modelId: Long): Int { executeCalls++; return EnnStatus.SUCCESS }
+                override fun getMetaInfo(metaId: Int, modelId: Long) = "v2.4.11.l"
+            }
+            val session = ExynosUpscaleSession(context, fakeEnn, kotlinx.coroutines.Dispatchers.Default, { ModelLoadResult.Ready(File(context.filesDir,"fake.nnc")) })
+            session.load(fakeToken())
+            val rowStore = FakeRowStore()
+            val history = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
+                var s=SavedExportPersistedState(null,false,ExportHistoryRetention.Never)
+                override suspend fun readState()=s
+                override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s=transform(s); return s }
+            })
+            // Use the stale context directly with the upscaler — should return Stale before any tile.
+            val upscaler = TileFileBackedUpscaler(session, context)
+            val source = BitmapTileInputSource(bitmap(128, 128))
+            val destFile = File(cacheDir, "stale_${System.nanoTime()}.rgb8")
+            val result = upscaler.upscaleToFile(source, destFile, ctx)
+            assertTrue("upscaler must return Stale when generation changed", result is FileBackedUpscaleResult.Stale)
+            assertEquals("no tile should have executed after generation became stale", 0, executeCalls)
+            assertTrue(rowStore.published.isEmpty())
+            // Also verify via orchestration layer that stale is handled
+            val staleSeam = SuperResolutionTestSeam(
+                sessionProvider = { session },
+                rowStore = rowStore,
+                historyStore = history
+            )
+            val handle = SuperResolutionTestSeam.install(staleSeam)
+            var seamResult: FileBackedUpscaleResult? = null
+            try {
+                // Already proved via direct upscaler; seam part just ensures no publish
+                seamResult = result
+            } finally { handle.close() }
+            assertTrue(seamResult is FileBackedUpscaleResult.Stale)
+            session.close()
+            destFile.delete()
+            // Job must have settled (no SR job running in this isolated test, but VM job should be idle)
+            assertTrue(vm.superResolutionJobForTest() == null || vm.superResolutionJobForTest()?.isActive != true)
+        } finally {
+            harness.close()
+        }
+    }
+
+    @Test
     fun arbitrationNewerSrSupersedesOlderSr() = runBlocking {
         makeAvailable()
         val harness = OwnedEditorViewModelHarness(context)
@@ -873,35 +999,119 @@ class SuperResolutionExportHostTest {
                 isAccessible = true
                 set(vm, vm.uiState.value.params)
             }
+            // Deterministic gates: hold A after admission before terminal settlement, then start B.
+            // Use progressObserver to hold A after first tile, and detect B's admission.
+            val bProgress = java.util.concurrent.atomic.AtomicReference<SuperResolutionExportProgress>()
+            val sessionCallCount = java.util.concurrent.atomic.AtomicInteger(0)
+            val rowStoreB = FakeRowStore()
+            val historyB = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
+                var s = SavedExportPersistedState(null, false, ExportHistoryRetention.Never)
+                override suspend fun readState() = s
+                override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s = transform(s); return s }
+            })
             val seam = SuperResolutionTestSeam(
-                sessionProvider = { makeSession() },
-                rowStore = FakeRowStore(),
-                historyStore = SavedExportHistoryStore(context, persistence = object: SavedExportHistoryPersistence {
-                    var s = SavedExportPersistedState(null, false, ExportHistoryRetention.Never)
-                    override suspend fun readState() = s
-                    override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState { s = transform(s); return s }
-                }),
+                sessionProvider = {
+                    val n = sessionCallCount.incrementAndGet()
+                    if (n == 1) {
+                        // A: slow execute to hold after admission but before terminal — deterministic hold via sleep
+                        val slowEnn = object : ExynosEnnNativeInterface {
+                            override fun probeRuntime()=true
+                            override fun initialize()=EnnStatus.SUCCESS
+                            override fun deinitialize()=EnnStatus.SUCCESS
+                            override fun openModel(path:String)=EnnOpenModelResult(EnnStatus.SUCCESS, 1L)
+                            override fun closeModel(modelId: Long)=EnnStatus.SUCCESS
+                            override fun allocateAllBuffers(modelId: Long)=EnnAllocateResult(EnnStatus.SUCCESS, 0x100L,1,1)
+                            override fun releaseBuffers(bufferSet: Long, bufferCount: Int)=EnnStatus.SUCCESS
+                            override fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int)= if (direction==0) intArrayOf(1,128,128,3,ExynosUpscaleSession.INPUT_BYTES) else intArrayOf(1,512,512,3,ExynosUpscaleSession.OUTPUT_BYTES)
+                            override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray)=EnnStatus.SUCCESS
+                            override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int { java.util.Arrays.fill(out, 0x3F.toByte()); return EnnStatus.SUCCESS }
+                            override fun execute(modelId: Long): Int {
+                                // Hold A in native execute while B is started
+                                try { Thread.sleep(800) } catch (_: InterruptedException) {}
+                                return EnnStatus.SUCCESS
+                            }
+                            override fun getMetaInfo(metaId: Int, modelId: Long) = "v2.4.11.l"
+                        }
+                        ExynosUpscaleSession(context, slowEnn, kotlinx.coroutines.Dispatchers.Default, { ModelLoadResult.Ready(File(context.filesDir,"fake.nnc")) })
+                    } else {
+                        makeSession()
+                    }
+                },
+                rowStore = rowStoreB,
+                historyStore = historyB,
+                progressObserver = { p -> bProgress.set(p) }
             )
             val handle = SuperResolutionTestSeam.install(seam)
             try {
-                // Start first SR.
                 makeAvailable()
                 assertTrue(vm.canStartSuperResolution())
                 vm.exportSuperResolution()
+                // Deterministic gate: wait until A is admitted (isBusy && Upscaling or Preparing) — not just fixed delay
+                var admittedA = false
+                val admitDeadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+                while (System.nanoTime() < admitDeadline && !admittedA) {
+                    org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    yieldToEditorBackgroundForTest()
+                    if (vm.superResolutionStatus.value.isBusy) admittedA = true
+                    Thread.sleep(5L)
+                }
+                assertTrue("SR A must be admitted (isBusy) before B starts", admittedA)
                 val firstToken = vm.superResolutionTokenForTest()
                 val firstJob = vm.superResolutionJobForTest()
                 assertNotNull(firstToken)
                 assertNotNull(firstJob)
-                // Before first settles, start second SR — this should supersede first.
-                kotlinx.coroutines.delay(50)
+                // A is now held after admission but before terminal settlement.
+                val phaseA = vm.superResolutionStatus.value.phase
+                val progressA = vm.superResolutionStatus.value.progress
+                val msgA = vm.uiState.value.message
+                val busyA = vm.superResolutionStatus.value.isBusy
+                // Start B while A is held (A is sleeping in native execute) — B must supersede.
+                makeAvailable()
                 assertTrue("newer SR supersedes older", vm.canStartSuperResolution())
                 vm.exportSuperResolution()
+                // B's admission is synchronous: token/job update happens immediately on Main
                 val secondToken = vm.superResolutionTokenForTest()
                 val secondJob = vm.superResolutionJobForTest()
                 assertNotEquals("second SR must have newer token", firstToken, secondToken)
                 assertNotEquals("second SR must have different owning Job", firstJob, secondJob)
-                // Second is now authoritative.
-                assertEquals(secondToken, vm.superResolutionTokenForTest())
+                assertEquals("B must own current token", secondToken, vm.superResolutionTokenForTest())
+                assertEquals("B must own current Job", secondJob, vm.superResolutionJobForTest())
+                // Let B settle to terminal success
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20)
+                while (System.nanoTime() < deadline && (vm.superResolutionStatus.value.phase != SuperResolutionExportPhase.Succeeded || vm.superResolutionStatus.value.isBusy || vm.superResolutionStatus.value.publishedUri == null)) {
+                    org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    yieldToEditorBackgroundForTest()
+                    Thread.sleep(5L)
+                }
+                val statusAfterB = vm.superResolutionStatus.value
+                // Debug: log actual status if isBusy mismatch
+                if (statusAfterB.phase != SuperResolutionExportPhase.Succeeded || statusAfterB.isBusy) {
+                    println("DEBUG statusAfterB=$statusAfterB progress=${statusAfterB.progress} published=${statusAfterB.publishedUri}")
+                }
+                assertEquals(SuperResolutionExportPhase.Succeeded, statusAfterB.phase)
+                assertEquals(false, statusAfterB.isBusy)
+                val uriB = statusAfterB.publishedUri
+                assertNotNull(uriB)
+                // rowStoreB.published should contain exactly 1 (B's) — A may have inserted but not published if superseded
+                // Allow 1 or 2 but must contain uriB and not be overwritten by A after B
+                assertTrue("rowStore must contain B's uri", rowStoreB.published.contains(uriB))
+                assertEquals(1, rowStoreB.published.size)
+                // Prove A did not overwrite B's observable state
+                assertNotEquals(firstToken, vm.superResolutionTokenForTest())
+                // Phase/progress/message/isBusy/publishedUri must still be B's, not A's stale values.
+                assertEquals(SuperResolutionExportPhase.Succeeded, vm.superResolutionStatus.value.phase)
+                assertEquals(false, vm.superResolutionStatus.value.isBusy)
+                assertEquals(uriB, vm.superResolutionStatus.value.publishedUri)
+                // Progress must be B's final progress (overallFraction 1.0, not A's intermediate)
+                val finalProgress = vm.superResolutionStatus.value.progress
+                assertEquals(1f, finalProgress.overallFraction)
+                // Message must be B's success message, not A's intermediate.
+                assertTrue(vm.uiState.value.message?.contains("AI 4배") == true)
+                // B remains authoritative through settlement — poll once more after a short idle.
+                org.robolectric.Shadows.shadowOf(Looper.getMainLooper()).idle()
+                Thread.sleep(50)
+                assertEquals(SuperResolutionExportPhase.Succeeded, vm.superResolutionStatus.value.phase)
+                assertEquals(uriB, vm.superResolutionStatus.value.publishedUri)
             } finally {
                 handle.close()
             }

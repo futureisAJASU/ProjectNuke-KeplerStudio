@@ -61,11 +61,11 @@ debug-signing.properties
 *.log
 *.tmp
 /logs/
- /test-output/
- /captures/
- /scratch/
- *.bundle
- *.hprof
- java_pid*.hprof*
- hs_err_pid*.log
- replay_pid*.log
+/test-output/
+/captures/
+/scratch/
+*.bundle
+*.hprof
+java_pid*.hprof*
+hs_err_pid*.log
+replay_pid*.log
