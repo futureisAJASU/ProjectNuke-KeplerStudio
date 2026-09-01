@@ -12,14 +12,13 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
-import android.provider.MediaStore
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -43,13 +42,30 @@ internal data class SuperResolutionServiceRequest(
     val documentGeneration: String,
     val documentIdentity: String,
     val preflight: SuperResolutionPreflight,
-    val prepareSource: suspend () -> Bitmap,
+    val sourceRequest: FullExportSourceRequest,
 )
 
 sealed interface SuperResolutionStartResult {
     data class Started(val operationId: Long) : SuperResolutionStartResult
     data class AlreadyRunning(val operationId: Long) : SuperResolutionStartResult
     data class Failed(val message: String) : SuperResolutionStartResult
+}
+
+/** Test-only seam; production delegates directly to Service.startForeground. */
+internal object SuperResolutionForegroundPromotionSeam {
+    @Volatile var start: ((Service, Int, Notification, Int?) -> Unit)? = null
+
+    internal fun resetForTest() {
+        start = null
+    }
+}
+
+internal object SuperResolutionServiceLaunchSeam {
+    @Volatile var beforeJobStart: ((Long) -> Unit)? = null
+
+    internal fun resetForTest() {
+        beforeJobStart = null
+    }
 }
 
 /**
@@ -74,9 +90,21 @@ object SuperResolutionOperationRegistry {
         context: Context,
         request: SuperResolutionServiceRequest,
     ): SuperResolutionStartResult {
+        if (SuperResolutionOperationJournal(context.applicationContext).hasData()) {
+            return SuperResolutionStartResult.Failed("previous SR operation debt is still being recovered")
+        }
         val admission = admit(request)
         if (admission !is SuperResolutionStartResult.Started) return admission
         return try {
+            val now = System.currentTimeMillis()
+            SuperResolutionOperationJournal(context.applicationContext).write(
+                SuperResolutionDebtRecord(
+                    operationId = request.operationId,
+                    phase = SuperResolutionJournalPhase.ADMITTED,
+                    startedAtMillis = now,
+                    updatedAtMillis = now,
+                ),
+            )
             val intent =
                 Intent(context, SuperResolutionMediaProcessingService::class.java)
                     .setAction(SuperResolutionMediaProcessingService.ACTION_START)
@@ -88,6 +116,9 @@ object SuperResolutionOperationRegistry {
             }
             admission
         } catch (failure: Throwable) {
+            runCatching {
+                SuperResolutionOperationJournal(context.applicationContext).clear(request.operationId)
+            }
             rollbackPending(request.operationId)
             SuperResolutionStartResult.Failed(failure.message ?: "foreground service start failed")
         }
@@ -115,12 +146,14 @@ object SuperResolutionOperationRegistry {
         }
 
     private fun rollbackPending(operationId: Long) {
+        var released: FullExportSourceRequest? = null
         synchronized(lock) {
-            if (pending?.operationId == operationId) pending = null
+            if (pending?.operationId == operationId) released = pending?.sourceRequest.also { pending = null }
             if (mutableState.value.operationId == operationId) {
                 mutableState.value = SuperResolutionProductOperationState()
             }
         }
+        released?.close()
     }
 
     internal fun admitForTest(request: SuperResolutionServiceRequest): SuperResolutionStartResult =
@@ -143,6 +176,15 @@ object SuperResolutionOperationRegistry {
             }
         }
 
+    internal fun releaseOwner(operationId: Long) {
+        synchronized(lock) {
+            if (activeOperationId == operationId) {
+                activeOperationId = null
+                cancelOwner = null
+            }
+        }
+    }
+
     internal fun publish(operationId: Long, status: SuperResolutionExportStatus) {
         synchronized(lock) {
             if (activeOperationId == operationId || pending?.operationId == operationId) {
@@ -159,23 +201,69 @@ object SuperResolutionOperationRegistry {
     }
 
     fun cancelCurrent(): Boolean {
-        val operationId = synchronized(lock) { activeOperationId } ?: return false
+        val operationId = synchronized(lock) { pending?.operationId ?: activeOperationId } ?: return false
         return cancel(operationId)
     }
 
     internal fun cancel(operationId: Long): Boolean {
-        val cancel = synchronized(lock) {
-            if (activeOperationId == operationId) cancelOwner else null
+        var pendingRequest: SuperResolutionServiceRequest? = null
+        var cancelOwnerToInvoke: (() -> Unit)? = null
+        var unboundCancellationAccepted = false
+        synchronized(lock) {
+            when {
+                pending?.operationId == operationId -> {
+                    pendingRequest = pending
+                    pending = null
+                    mutableState.value =
+                        mutableState.value.copy(
+                            status = cancelledStatus(),
+                        )
+                    null
+                }
+                activeOperationId == operationId && cancelOwner != null -> {
+                    cancelOwnerToInvoke = cancelOwner
+                }
+                activeOperationId == operationId && mutableState.value.status.isBusy -> {
+                    // The service has claimed the request but has not bound its Job yet. Mark
+                    // it terminal now; bindOwner() will fail and the service will self-stop.
+                    activeOperationId = null
+                    mutableState.value = mutableState.value.copy(status = cancelledStatus())
+                    unboundCancellationAccepted = true
+                    false
+                }
+                else -> null
+            }
         }
-        if (cancel == null) return false
-        cancel.invoke()
+        if (pendingRequest != null) {
+            pendingRequest?.sourceRequest?.close()
+            return true
+        }
+        if (unboundCancellationAccepted) return true
+        val cancel = cancelOwnerToInvoke ?: return false
+        cancel()
         return true
+    }
+
+    internal fun failClaim(operationId: Long, message: String) {
+        synchronized(lock) {
+            if (activeOperationId != operationId) return
+            cancelOwner = null
+            mutableState.value =
+                mutableState.value.copy(
+                    status =
+                        SuperResolutionExportStatus(
+                            phase = SuperResolutionExportPhase.Failed,
+                            isBusy = false,
+                            failureKind = SuperResolutionFailureKind.SourceRenderFailed,
+                            failureMessage = message,
+                        ),
+                )
+        }
     }
 
     internal fun finish(operationId: Long, status: SuperResolutionExportStatus) {
         synchronized(lock) {
             if (activeOperationId != operationId) return
-            activeOperationId = null
             cancelOwner = null
             mutableState.value = mutableState.value.copy(status = status)
         }
@@ -207,14 +295,17 @@ object SuperResolutionOperationRegistry {
     }
 
     internal fun resetForTest() {
+        var pendingRequest: SuperResolutionServiceRequest? = null
         synchronized(lock) {
             cancelOwner?.invoke()
+            pendingRequest = pending
             pending = null
             activeOperationId = null
             cancelOwner = null
             recoveryActive = false
             mutableState.value = SuperResolutionProductOperationState()
         }
+        pendingRequest?.sourceRequest?.close()
     }
 
     private fun preparingStatus(preflight: SuperResolutionPreflight) =
@@ -238,6 +329,7 @@ object SuperResolutionOperationRegistry {
 class SuperResolutionMediaProcessingService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var ownerJob: Job? = null
+    private var ownerOperationId: Long? = null
     private var lastNotificationPhase: SuperResolutionExportPhase? = null
     private var lastNotificationPercent = -1
 
@@ -252,21 +344,91 @@ class SuperResolutionMediaProcessingService : Service() {
         when (intent?.action) {
             ACTION_CANCEL -> {
                 val operationId = intent.getLongExtra(EXTRA_OPERATION_ID, -1L)
-                SuperResolutionOperationRegistry.cancel(operationId)
+                val accepted = SuperResolutionOperationRegistry.cancel(operationId)
+                if (accepted && !SuperResolutionOperationRegistry.hasActiveOperation()) {
+                    runCatching { SuperResolutionOperationJournal(applicationContext).clear(operationId) }
+                    stopSelf(startId)
+                }
+                if (!accepted && !SuperResolutionOperationRegistry.hasActiveOperation()) {
+                    stopSelf(startId)
+                }
                 return START_NOT_STICKY
             }
             ACTION_START -> {
                 val operationId = intent.getLongExtra(EXTRA_OPERATION_ID, -1L)
                 val request = SuperResolutionOperationRegistry.claim(operationId)
-                if (request == null || ownerJob?.isActive == true) {
-                    stopSelf(startId)
+                if (request == null) {
+                    // A stale/duplicate delivery must not stop the service instance that owns
+                    // a different valid operation. Only an idle service start is stoppable.
+                    if (!SuperResolutionOperationRegistry.hasActiveOperation()) stopSelf(startId)
                     return START_NOT_STICKY
                 }
-                startAsForeground(request)
-                val job = serviceScope.launch { execute(request, startId) }
+                ownerOperationId = operationId
+                if (ownerJob?.isActive == true) {
+                    SuperResolutionOperationRegistry.failClaim(operationId, "service owner already active")
+                    runCatching { SuperResolutionOperationJournal(applicationContext).clear(operationId) }
+                    request.sourceRequest.close()
+                    stopSelf(startId)
+                    SuperResolutionOperationRegistry.releaseOwner(operationId)
+                    ownerOperationId = null
+                    return START_NOT_STICKY
+                }
+                try {
+                    startAsForeground(request)
+                } catch (failure: Throwable) {
+                    SuperResolutionOperationRegistry.failClaim(
+                        operationId,
+                        failure.message ?: "foreground promotion failed",
+                    )
+                    runCatching { SuperResolutionOperationJournal(applicationContext).clear(operationId) }
+                    request.sourceRequest.close()
+                    stopSelf(startId)
+                    SuperResolutionOperationRegistry.releaseOwner(operationId)
+                    ownerOperationId = null
+                    return START_NOT_STICKY
+                }
+                val job = serviceScope.launch(start = CoroutineStart.LAZY) { execute(request, startId) }
                 ownerJob = job
-                check(SuperResolutionOperationRegistry.bindOwner(operationId) { job.cancel() })
+                if (!SuperResolutionOperationRegistry.bindOwner(operationId) { job.cancel() }) {
+                    job.cancel()
+                    SuperResolutionOperationRegistry.failClaim(operationId, "service owner bind failed")
+                    runCatching { SuperResolutionOperationJournal(applicationContext).clear(operationId) }
+                    request.sourceRequest.close()
+                    stopSelf(startId)
+                    SuperResolutionOperationRegistry.releaseOwner(operationId)
+                    ownerOperationId = null
+                    return START_NOT_STICKY
+                }
+                job.invokeOnCompletion { cause ->
+                    if (cause != null && SuperResolutionOperationRegistry.isOwner(operationId)) {
+                        SuperResolutionOperationRegistry.finish(operationId, cancelledStatus())
+                        request.sourceRequest.close()
+                        runCatching { stopForeground(STOP_FOREGROUND_DETACH) }
+                        stopSelf(startId)
+                        SuperResolutionOperationRegistry.releaseOwner(operationId)
+                        ownerOperationId = null
+                    } else if (cause != null) {
+                        request.sourceRequest.close()
+                    }
+                }
+                try {
+                    SuperResolutionServiceLaunchSeam.beforeJobStart?.invoke(operationId)
+                } catch (failure: Throwable) {
+                    job.cancel()
+                    SuperResolutionOperationRegistry.failClaim(
+                        operationId,
+                        failure.message ?: "service launch ordering failed",
+                    )
+                    runCatching { SuperResolutionOperationJournal(applicationContext).clear(operationId) }
+                    request.sourceRequest.close()
+                    stopSelf(startId)
+                    SuperResolutionOperationRegistry.releaseOwner(operationId)
+                    ownerOperationId = null
+                    return START_NOT_STICKY
+                }
+                job.start()
             }
+            else -> if (!SuperResolutionOperationRegistry.hasActiveOperation()) stopSelf(startId)
         }
         return START_NOT_STICKY
     }
@@ -274,22 +436,31 @@ class SuperResolutionMediaProcessingService : Service() {
     private fun startAsForeground(request: SuperResolutionServiceRequest) {
         val notification = buildNotification(request.operationId, preparingNotificationStatus(request.preflight))
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val type =
-                if (Build.VERSION.SDK_INT >= 35) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
-                else 0
-            startForeground(NOTIFICATION_ID, notification, type)
+            val type = superResolutionForegroundServiceType(Build.VERSION.SDK_INT)
+            SuperResolutionForegroundPromotionSeam.start?.invoke(this, NOTIFICATION_ID, notification, type)
+                ?: startForeground(NOTIFICATION_ID, notification, type)
         } else {
-            startForeground(NOTIFICATION_ID, notification)
+            SuperResolutionForegroundPromotionSeam.start?.invoke(this, NOTIFICATION_ID, notification, null)
+                ?: startForeground(NOTIFICATION_ID, notification)
         }
     }
 
     private suspend fun execute(request: SuperResolutionServiceRequest, startId: Int) {
         var source: Bitmap? = null
+        val journal = SuperResolutionOperationJournal(applicationContext)
         val terminal =
             try {
-                markJournal(request.operationId)
+                val now = System.currentTimeMillis()
+                journal.write(
+                    SuperResolutionDebtRecord(
+                        operationId = request.operationId,
+                        phase = SuperResolutionJournalPhase.SOURCE_PREPARING,
+                        startedAtMillis = now,
+                        updatedAtMillis = now,
+                    ),
+                )
                 currentCoroutineContext().ensureActive()
-                source = request.prepareSource()
+                source = prepareFullExportSourceBitmapFromRequest(request.sourceRequest)
                 currentCoroutineContext().ensureActive()
                 if (!SuperResolutionOperationRegistry.isOwner(request.operationId)) {
                     cancelledStatus()
@@ -323,6 +494,19 @@ class SuperResolutionMediaProcessingService : Service() {
                                 SuperResolutionOperationRegistry.publish(request.operationId, status)
                                 updateNotification(request.operationId, status)
                             },
+                            debtObserver = { event ->
+                                val current = journal.read()
+                                    ?: error("SR journal missing at ${event.phase}")
+                                journal.write(
+                                    current.withEvent(
+                                        phase = event.phase,
+                                        rgb8Path = event.rgb8Path,
+                                        rgb8StagingPath = event.rgb8StagingPath,
+                                        pendingUri = event.pendingUri?.toString(),
+                                        publicPublicationCommitted = event.publicPublicationCommitted,
+                                    ),
+                                )
+                            },
                         )
                     result.toProductStatus()
                 }
@@ -342,12 +526,14 @@ class SuperResolutionMediaProcessingService : Service() {
                 )
             } finally {
                 source?.takeUnless(Bitmap::isRecycled)?.recycle()
-                clearJournal(request.operationId)
             }
+        if (!terminal.cleanupDebt) journal.clear(request.operationId)
         SuperResolutionOperationRegistry.finish(request.operationId, terminal)
         settleNotification(request.operationId, terminal)
         stopForeground(STOP_FOREGROUND_DETACH)
         stopSelf(startId)
+        SuperResolutionOperationRegistry.releaseOwner(request.operationId)
+        ownerOperationId = null
     }
 
     private fun updateNotification(operationId: Long, status: SuperResolutionExportStatus) {
@@ -430,25 +616,25 @@ class SuperResolutionMediaProcessingService : Service() {
     override fun onDestroy() {
         ownerJob?.cancel()
         serviceScope.cancel()
+        // A destroyed service is no longer the owner. The journal remains authoritative for any
+        // cleanup debt that could not finish before destruction. Use this instance's claimed ID;
+        // a stale service instance must never release another service's owner.
+        ownerOperationId?.let {
+            SuperResolutionOperationRegistry.releaseOwner(it)
+            ownerOperationId = null
+        }
         super.onDestroy()
     }
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         ownerJob?.cancel(CancellationException("media processing foreground-service timeout"))
+        ownerOperationId?.let { operationId ->
+            SuperResolutionOperationRegistry.finish(operationId, cancelledStatus())
+            SuperResolutionOperationRegistry.releaseOwner(operationId)
+            ownerOperationId = null
+        }
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         stopSelf(startId)
-    }
-
-    private fun markJournal(operationId: Long) {
-        getSharedPreferences(JOURNAL_PREFS, MODE_PRIVATE)
-            .edit()
-            .putLong(JOURNAL_OPERATION_ID, operationId)
-            .putLong(JOURNAL_STARTED_AT, System.currentTimeMillis())
-            .apply()
-    }
-
-    private fun clearJournal(operationId: Long) {
-        val prefs = getSharedPreferences(JOURNAL_PREFS, MODE_PRIVATE)
-        if (prefs.getLong(JOURNAL_OPERATION_ID, -1L) == operationId) prefs.edit().clear().apply()
     }
 
     companion object {
@@ -456,8 +642,6 @@ class SuperResolutionMediaProcessingService : Service() {
         internal const val ACTION_CANCEL = "com.projectnuke.keplerstudio.action.CANCEL_AI4X"
         internal const val EXTRA_OPERATION_ID = "operation_id"
         internal const val JOURNAL_PREFS = "super_resolution_operation_journal"
-        internal const val JOURNAL_OPERATION_ID = "operation_id"
-        internal const val JOURNAL_STARTED_AT = "started_at"
         private const val CHANNEL_ID = "ai_4x_media_processing"
         private const val NOTIFICATION_ID = 4401
     }
@@ -550,49 +734,18 @@ private fun notificationStageText(status: SuperResolutionExportStatus): String =
 private fun productTimestamp(): String =
     SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
 
+internal fun superResolutionForegroundServiceType(sdkInt: Int): Int =
+    when {
+        sdkInt >= 35 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
+        sdkInt >= 29 -> ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        else -> 0
+    }
+
 internal suspend fun reconcileSuperResolutionProcessDeathDebt(context: Context) {
     if (!SuperResolutionOperationRegistry.beginDebtRecovery()) return
     try {
         withContext(Dispatchers.IO) {
-            context.cacheDir.listFiles()
-                .orEmpty()
-                .filter { file ->
-                    file.name.startsWith("sr6_") &&
-                        (file.name.endsWith(".rgb8") || file.name.endsWith(".tmp"))
-                }
-                .forEach { file -> runCatching { if (file.exists()) file.delete() } }
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val projection = arrayOf(MediaStore.Images.Media._ID)
-                val resolver = context.contentResolver
-                listOf("KeplerStudio_AI4x_%", "KeplerStudio_SR4x_%").forEach { prefix ->
-                    val selection =
-                        "${MediaStore.Images.Media.IS_PENDING} = 1 AND " +
-                            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?"
-                    runCatching {
-                        resolver.query(
-                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                            projection,
-                            selection,
-                            arrayOf(prefix),
-                            null,
-                        )?.use { cursor ->
-                            val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                            while (cursor.moveToNext()) {
-                                val uri = android.content.ContentUris.withAppendedId(
-                                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                                    cursor.getLong(idColumn),
-                                )
-                                runCatching { resolver.delete(uri, null, null) }
-                            }
-                        }
-                    }
-                }
-            }
-            context.getSharedPreferences(
-                SuperResolutionMediaProcessingService.JOURNAL_PREFS,
-                Context.MODE_PRIVATE,
-            ).edit().clear().apply()
+            recoverExactSuperResolutionDebt(context)
         }
     } finally {
         SuperResolutionOperationRegistry.endDebtRecovery()

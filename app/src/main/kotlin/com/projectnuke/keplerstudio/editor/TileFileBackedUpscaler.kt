@@ -41,6 +41,7 @@ internal class TileFileBackedUpscaler(
         operationContext: ModelOperationContext,
         attemptLabel: String? = null,
         observer: TileRunObserver? = null,
+        artifactPathObserver: ((FileBackedRgb8TileSink) -> Unit)? = null,
     ): FileBackedUpscaleResult {
         val sourceWidth = source.sourceWidth
         val sourceHeight = source.sourceHeight
@@ -70,7 +71,7 @@ internal class TileFileBackedUpscaler(
         session.diagnosticRetention = DiagnosticRetention.LAST_ONLY
         try {
             return upscaleToFileInternal(
-                source, destinationFile, operationContext, attemptLabel, observer,
+                source, destinationFile, operationContext, attemptLabel, observer, artifactPathObserver,
                 sourceWidth, sourceHeight,
             )
         } finally {
@@ -86,6 +87,7 @@ internal class TileFileBackedUpscaler(
         operationContext: ModelOperationContext,
         attemptLabel: String?,
         observer: TileRunObserver?,
+        artifactPathObserver: ((FileBackedRgb8TileSink) -> Unit)?,
         sourceWidth: Int,
         sourceHeight: Int,
     ): FileBackedUpscaleResult {
@@ -122,7 +124,6 @@ internal class TileFileBackedUpscaler(
                 "cannot admit $requiredBytes bytes of write headroom at ${volumeFile.absolutePath}",
             )
         }
-
         val sink =
             try {
                 FileBackedRgb8TileSink(
@@ -131,7 +132,7 @@ internal class TileFileBackedUpscaler(
                     outputHeight = plan.outputHeight,
                     operationToken = operationTokenFactory(),
                     io = sinkIoFactory(),
-                ).also(sinkConfigurator)
+                )
             } catch (t: Throwable) {
                 return FileBackedUpscaleResult.Failure(
                     completedTiles = 0,
@@ -140,6 +141,21 @@ internal class TileFileBackedUpscaler(
                     detail = t.message ?: t.javaClass.simpleName,
                 )
             }
+        try {
+            // The exact paths become operation debt immediately after the sink creates its
+            // staging file and before any NPU tile work begins. The observer is synchronous in
+            // production so a process death cannot leave an unjournaled staging artifact.
+            artifactPathObserver?.invoke(sink)
+            sinkConfigurator(sink)
+        } catch (t: Throwable) {
+            sink.invalidate()
+            return FileBackedUpscaleResult.Failure(
+                completedTiles = 0,
+                failedTileIndex = -1,
+                reason = TileFailureReason.AssemblyFailed,
+                detail = t.message ?: t.javaClass.simpleName,
+            )
+        }
 
         val inputBuffer = ByteArray(ExynosUpscaleSession.INPUT_BYTES)
         val outputBuffer = ByteArray(ExynosUpscaleSession.OUTPUT_BYTES)
@@ -429,7 +445,7 @@ internal fun computeRgb8OutputGeometry(outputWidth: Int, outputHeight: Int): Rgb
     }
     val w = outputWidth.toLong()
     val h = outputHeight.toLong()
-    if (w * h > Long.MAX_VALUE / 3L) {
+    if (w > Long.MAX_VALUE / h || w * h > Long.MAX_VALUE / 3L) {
         return Rgb8SizeVerdict.Invalid("output pixel count overflows 64-bit byte size")
     }
     val rowStride = w * RGB8_CHANNELS

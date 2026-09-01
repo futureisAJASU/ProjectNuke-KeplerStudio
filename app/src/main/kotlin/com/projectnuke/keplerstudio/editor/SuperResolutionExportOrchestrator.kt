@@ -25,6 +25,14 @@ internal interface SuperResolutionRowStore {
     suspend fun delete(uri: Uri): SuperResolutionRowDeleteResult
 }
 
+internal data class SuperResolutionDebtEvent(
+    val phase: SuperResolutionJournalPhase,
+    val rgb8Path: String? = null,
+    val rgb8StagingPath: String? = null,
+    val pendingUri: Uri? = null,
+    val publicPublicationCommitted: Boolean = false,
+)
+
 internal class AndroidSuperResolutionRowStore(private val context: Context) : SuperResolutionRowStore {
     override suspend fun insertPending(fileName: String): Uri {
         val resolver = context.contentResolver
@@ -125,12 +133,30 @@ private fun sha256File(file: File): String {
 
 internal fun pngUpperBound(width: Int, height: Int): Long {
     // Conservative zlib compressBound for (width*3+1)*height plus PNG overhead
-    val raw = (width.toLong() * 3 + 1) * height
+    if (width <= 0 || height <= 0) return Long.MAX_VALUE
+    val raw = saturatingMultiplyForPreflight(
+        saturatingAddForPreflight(saturatingMultiplyForPreflight(width.toLong(), 3L), 1L),
+        height.toLong(),
+    )
+    if (raw == Long.MAX_VALUE) return Long.MAX_VALUE
     // compressBound = raw + raw/1000 + 12 + raw/100 + overhead, be conservative: raw + raw/100 + 128
-    val bound = raw + raw / 100 + 128
-    val overhead = 8L + 25L + raw / (64L * 1024) * 12L + 12L // signature + IHDR + IDAT headers + IEND
-    return bound + overhead
+    val bound = saturatingAddForPreflight(saturatingAddForPreflight(raw, raw / 100), 128L)
+    val overhead = saturatingAddForPreflight(
+        saturatingAddForPreflight(8L + 25L, saturatingMultiplyForPreflight(raw / (64L * 1024), 12L)),
+        12L,
+    ) // signature + IHDR + IDAT headers + IEND
+    return saturatingAddForPreflight(bound, overhead)
 }
+
+private fun saturatingAddForPreflight(left: Long, right: Long): Long =
+    if (left < 0L || right < 0L || left > Long.MAX_VALUE - right) Long.MAX_VALUE else left + right
+
+private fun saturatingMultiplyForPreflight(left: Long, right: Long): Long =
+    if (left < 0L || right < 0L || (right != 0L && left > Long.MAX_VALUE / right)) {
+        Long.MAX_VALUE
+    } else {
+        left * right
+    }
 
 internal object SuperResolutionExportOrchestrator {
 
@@ -151,6 +177,7 @@ internal object SuperResolutionExportOrchestrator {
         progressObserver: ((SuperResolutionExportProgress) -> Unit)? = null,
         rgb8ArtifactObserver: ((FileBackedRgb8Artifact) -> Unit)? = null,
         milestoneObserver: ((String) -> Unit)? = null,
+        debtObserver: ((SuperResolutionDebtEvent) -> Unit)? = null,
     ): SuperResolutionExportResult {
         val inputWidth = inputBitmap.width
         val inputHeight = inputBitmap.height
@@ -196,29 +223,11 @@ internal object SuperResolutionExportOrchestrator {
         if (rgb8Geometry is Rgb8SizeVerdict.Invalid) {
             return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.InvalidDimensions, rgb8Geometry.detail)
         }
-        val requiredRgb8Bytes = (rgb8Geometry as Rgb8SizeVerdict.Valid).requiredBytes
-        // Storage admission for internal artifact (N5 already does, but preflight PNG bound too)
-        val pngBound = pngUpperBound(outputWidth, outputHeight)
-        // Check destination storage (MediaStore) capacity conservatively
-        val volumeFile = context.getExternalFilesDir(null) ?: context.filesDir
-        var destDenied = false
-        // Use same controller for both, but separate checks
-        // For PNG bound, check usableBytes
-        val destUsable = runCatching { volumeFile.usableSpace }.getOrNull()
-        if (destUsable != null && destUsable < pngBound) {
-            // Try sweep once via StoragePressure then recheck
-            var sweepDenied = false
-            StoragePressure.controller.ensureWriteHeadroom(
-                context = context,
-                targetVolumeFile = volumeFile,
-                requiredBytes = pngBound,
-                onInsufficient = { sweepDenied = true },
-                action = {}
-            )
-            if (sweepDenied) destDenied = true
-        }
-        if (destDenied) {
-            return SuperResolutionExportResult.Failure(SuperResolutionFailureKind.DestinationStorageInsufficient, "destination storage insufficient for PNG bound $pngBound")
+        // Admission covers the simultaneous RGB8 + pending-PNG peak on the actual MediaStore
+        // backing volume. This runs before model load and before any large artifact exists.
+        val storagePreflight = computeSuperResolutionPreflight(context, inputWidth, inputHeight)
+        if (storagePreflight is SuperResolutionPreflightResult.Rejected) {
+            return SuperResolutionExportResult.Failure(storagePreflight.failure, storagePreflight.userMessage)
         }
 
         // Progress initial
@@ -293,7 +302,22 @@ internal object SuperResolutionExportOrchestrator {
                 val overall = 0.10f + frac * 0.70f
                 report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Upscaling, completedTiles = completed, totalTiles = totalTiles, tileFraction = frac, overallFraction = overall, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
             }
-            val upscaleResult = upscaler.upscaleToFile(source, rgb8File, operationContext, "sr6", tileProgressObserver)
+            val upscaleResult = upscaler.upscaleToFile(
+                source,
+                rgb8File,
+                operationContext,
+                "sr6",
+                tileProgressObserver,
+                artifactPathObserver = { sink ->
+                    debtObserver?.invoke(
+                        SuperResolutionDebtEvent(
+                            phase = SuperResolutionJournalPhase.RGB8_CREATED,
+                            rgb8Path = sink.destinationFile.absolutePath,
+                            rgb8StagingPath = sink.stagingFile.absolutePath,
+                        ),
+                    )
+                },
+            )
             when (upscaleResult) {
                 is FileBackedUpscaleResult.Cancelled -> return@withContext SuperResolutionExportResult.Cancelled
                 is FileBackedUpscaleResult.Stale -> return@withContext SuperResolutionExportResult.Stale
@@ -319,6 +343,12 @@ internal object SuperResolutionExportOrchestrator {
             }
             val artifact = checkNotNull(rgb8Artifact)
             (rgb8ArtifactObserver ?: testSeam?.rgb8ArtifactObserver)?.invoke(artifact)
+            debtObserver?.invoke(
+                SuperResolutionDebtEvent(
+                    phase = SuperResolutionJournalPhase.RGB8_CREATED,
+                    rgb8Path = artifact.file.absolutePath,
+                ),
+            )
             // Verify artifact dimensions truthfully
             if (artifact.width != outputWidth || artifact.height != outputHeight) {
                 return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.Rgb8ArtifactFailure, "artifact dimensions mismatch ${artifact.width}x${artifact.height} != $outputWidth x $outputHeight")
@@ -327,6 +357,13 @@ internal object SuperResolutionExportOrchestrator {
             if (!isCurrent()) return@withContext SuperResolutionExportResult.Stale
 
             // MediaStore pending row
+            val beforePublishPreflight = computeSuperResolutionPreflight(context, inputWidth, inputHeight)
+            if (beforePublishPreflight is SuperResolutionPreflightResult.Rejected) {
+                return@withContext SuperResolutionExportResult.Failure(
+                    beforePublishPreflight.failure,
+                    beforePublishPreflight.userMessage,
+                )
+            }
             report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Encoding, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = 0, encodingRowsTotal = outputHeight, encodingFraction = 0f, overallFraction = 0.80f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
             val pendingUriResult = try {
                 rowStore.insertPending(fileName)
@@ -334,7 +371,21 @@ internal object SuperResolutionExportOrchestrator {
                 return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.MediaStoreInsertFailure, "MediaStore insert pending failed: ${e.message}", e)
             }
             pendingUri = pendingUriResult
+            debtObserver?.invoke(
+                SuperResolutionDebtEvent(
+                    phase = SuperResolutionJournalPhase.PENDING_INSERTED,
+                    rgb8Path = artifact.file.absolutePath,
+                    pendingUri = pendingUriResult,
+                ),
+            )
             // Streaming PNG encode
+            debtObserver?.invoke(
+                SuperResolutionDebtEvent(
+                    phase = SuperResolutionJournalPhase.ENCODING,
+                    rgb8Path = artifact.file.absolutePath,
+                    pendingUri = pendingUri,
+                ),
+            )
             var encodeRows = 0
             val out = try {
                 rowStore.openOutputStream(pendingUri)
@@ -386,6 +437,13 @@ internal object SuperResolutionExportOrchestrator {
 
             // Publish
             emitMilestone("before_mediastore_publish")
+            debtObserver?.invoke(
+                SuperResolutionDebtEvent(
+                    phase = SuperResolutionJournalPhase.BEFORE_PUBLICATION,
+                    rgb8Path = artifact.file.absolutePath,
+                    pendingUri = pendingUri,
+                ),
+            )
             report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Publishing, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = outputHeight, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 0.99f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = false))
             val publishedCount = try {
                 rowStore.publish(pendingUri)
@@ -397,6 +455,13 @@ internal object SuperResolutionExportOrchestrator {
             }
             publishedUri = pendingUri
             pendingUri = null // published, don't delete
+            debtObserver?.invoke(
+                SuperResolutionDebtEvent(
+                    phase = SuperResolutionJournalPhase.PUBLISHED,
+                    rgb8Path = artifact.file.absolutePath,
+                    publicPublicationCommitted = true,
+                ),
+            )
             emitMilestone("after_mediastore_publish")
 
             // SavedExport history

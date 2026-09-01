@@ -3,6 +3,8 @@ package com.projectnuke.keplerstudio.editor
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -37,6 +39,11 @@ class SuperResolutionOperationRegistryTest {
             ),
         )
         assertEquals(
+            SuperResolutionStartResult.AlreadyRunning(1L),
+            SuperResolutionOperationRegistry.admitForTest(request(2L)),
+        )
+        SuperResolutionOperationRegistry.releaseOwner(1L)
+        assertEquals(
             SuperResolutionStartResult.Started(2L),
             SuperResolutionOperationRegistry.admitForTest(request(2L)),
         )
@@ -57,6 +64,34 @@ class SuperResolutionOperationRegistryTest {
         assertFalse(SuperResolutionOperationRegistry.beginDebtRecovery())
     }
 
+    @Test
+    fun pendingCancellationIsTerminalAndStaleStartCannotClaimIt() {
+        val pending = request(11L)
+        assertEquals(SuperResolutionStartResult.Started(11L), SuperResolutionOperationRegistry.admitForTest(pending))
+        assertTrue(SuperResolutionOperationRegistry.cancelCurrent())
+        assertEquals(SuperResolutionExportPhase.Cancelled, SuperResolutionOperationRegistry.state.value.status.phase)
+        assertFalse(SuperResolutionOperationRegistry.state.value.status.isBusy)
+        assertFalse(SuperResolutionOperationRegistry.hasActiveOperation())
+        assertNull(SuperResolutionOperationRegistry.claim(11L))
+
+        assertEquals(
+            SuperResolutionStartResult.Started(12L),
+            SuperResolutionOperationRegistry.admitForTest(request(12L)),
+        )
+    }
+
+    @Test
+    fun cancellationBetweenClaimAndOwnerBindingSettlesAndBlocksStaleBinding() {
+        val request = request(13L)
+        assertEquals(SuperResolutionStartResult.Started(13L), SuperResolutionOperationRegistry.admitForTest(request))
+        assertNotNull(SuperResolutionOperationRegistry.claim(13L))
+
+        assertTrue(SuperResolutionOperationRegistry.cancelCurrent())
+        assertEquals(SuperResolutionExportPhase.Cancelled, SuperResolutionOperationRegistry.state.value.status.phase)
+        assertFalse(SuperResolutionOperationRegistry.hasActiveOperation())
+        assertFalse(SuperResolutionOperationRegistry.bindOwner(13L) {})
+    }
+
     private fun request(id: Long): SuperResolutionServiceRequest =
         SuperResolutionServiceRequest(
             operationId = id,
@@ -74,6 +109,6 @@ class SuperResolutionOperationRegistryTest {
                     destinationUsableBytes = 1024,
                     requiresConfirmation = false,
                 ),
-            prepareSource = { error("not executed by registry test") },
+            sourceRequest = FullExportSourceRequest.capture(EditorUiState(), "generation"),
         )
 }

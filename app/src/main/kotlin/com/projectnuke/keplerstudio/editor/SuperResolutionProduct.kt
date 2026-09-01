@@ -1,6 +1,8 @@
 package com.projectnuke.keplerstudio.editor
 
 import android.content.Context
+import android.os.Environment
+import android.os.storage.StorageManager
 import java.io.File
 
 enum class SuperResolutionAvailability {
@@ -227,6 +229,9 @@ data class SuperResolutionPreflight(
     val internalUsableBytes: Long,
     val destinationUsableBytes: Long,
     val requiresConfirmation: Boolean,
+    val sameStorageVolume: Boolean = true,
+    val combinedRequiredBytes: Long = 0L,
+    val storageVolumeIdentityKnown: Boolean = false,
 )
 
 sealed interface SuperResolutionPreflightResult {
@@ -238,12 +243,16 @@ sealed interface SuperResolutionPreflightResult {
 private const val LARGE_EXPORT_CONFIRMATION_BYTES = 512L * 1024L * 1024L
 private const val STORAGE_SAFETY_NUMERATOR = 5L
 private const val STORAGE_SAFETY_DENOMINATOR = 4L
+private const val STORAGE_RUNTIME_RESERVE_BYTES = 64L * 1024L * 1024L
 
 internal fun computeSuperResolutionPreflight(
     inputWidth: Int,
     inputHeight: Int,
     internalUsableBytes: Long,
     destinationUsableBytes: Long,
+    internalVolumeId: String? = null,
+    destinationVolumeId: String? = null,
+    runtimeReserveBytes: Long = STORAGE_RUNTIME_RESERVE_BYTES,
 ): SuperResolutionPreflightResult {
     if (inputWidth <= 0 || inputHeight <= 0) {
         return SuperResolutionPreflightResult.Rejected(
@@ -269,23 +278,39 @@ internal fun computeSuperResolutionPreflight(
         )
     }
     val pngBytes = pngUpperBound(outputWidth, outputHeight)
-    val internalRequired = withSafetyMargin(geometry.requiredBytes)
+    val identityKnown = internalVolumeId != null && destinationVolumeId != null
+    // Unknown identity is conservatively treated as one shared volume.
+    val sameVolume = if (identityKnown) internalVolumeId == destinationVolumeId else true
+    val reserve = runtimeReserveBytes.coerceAtLeast(0L)
+    val combinedRequired =
+        withSafetyMargin(saturatingAddProduct(saturatingAddProduct(geometry.requiredBytes, pngBytes), reserve))
+    val internalRequired = withSafetyMargin(saturatingAddProduct(geometry.requiredBytes, reserve))
     val destinationRequired = withSafetyMargin(pngBytes)
-    if (internalUsableBytes < internalRequired) {
+    if (sameVolume && minOf(internalUsableBytes, destinationUsableBytes) < combinedRequired) {
+        return SuperResolutionPreflightResult.Rejected(
+            SuperResolutionFailureKind.InternalStorageInsufficient,
+            "AI 4諛????怨듦컙??RGB8 ?꾩떆 ?뚯씪怨?????대?吏瑜?媛숈? 怨듦컙???좎??섏? 紐삵뻽?듬땲??",
+        )
+    }
+    if (!sameVolume && internalUsableBytes < internalRequired) {
         return SuperResolutionPreflightResult.Rejected(
             SuperResolutionFailureKind.InternalStorageInsufficient,
             "AI 처리 임시 파일을 위한 저장 공간이 부족합니다. 공간을 확보한 뒤 다시 시도해 주세요.",
         )
     }
-    if (destinationUsableBytes < destinationRequired) {
+    if (!sameVolume && destinationUsableBytes < destinationRequired) {
         return SuperResolutionPreflightResult.Rejected(
             SuperResolutionFailureKind.DestinationStorageInsufficient,
             "사진을 저장할 공간이 부족합니다. 공간을 확보한 뒤 다시 시도해 주세요.",
         )
     }
     val nearPressure =
-        internalUsableBytes < saturatingMultiply(internalRequired, 2L) ||
-            destinationUsableBytes < saturatingMultiply(destinationRequired, 2L)
+        if (sameVolume) {
+            minOf(internalUsableBytes, destinationUsableBytes) < saturatingMultiply(combinedRequired, 2L)
+        } else {
+            internalUsableBytes < saturatingMultiply(internalRequired, 2L) ||
+                destinationUsableBytes < saturatingMultiply(destinationRequired, 2L)
+        }
     return SuperResolutionPreflightResult.Ready(
         SuperResolutionPreflight(
             inputWidth = inputWidth,
@@ -297,6 +322,9 @@ internal fun computeSuperResolutionPreflight(
             internalUsableBytes = internalUsableBytes,
             destinationUsableBytes = destinationUsableBytes,
             requiresConfirmation = geometry.requiredBytes >= LARGE_EXPORT_CONFIRMATION_BYTES || nearPressure,
+            sameStorageVolume = sameVolume,
+            combinedRequiredBytes = combinedRequired,
+            storageVolumeIdentityKnown = identityKnown,
         ),
     )
 }
@@ -306,14 +334,27 @@ internal fun computeSuperResolutionPreflight(
     inputWidth: Int,
     inputHeight: Int,
 ): SuperResolutionPreflightResult {
-    val destinationRoot: File = context.getExternalFilesDir(null) ?: context.filesDir
+    val destinationRoot: File = superResolutionMediaStoreTargetVolume(context)
     return computeSuperResolutionPreflight(
         inputWidth = inputWidth,
         inputHeight = inputHeight,
         internalUsableBytes = runCatching { context.cacheDir.usableSpace }.getOrDefault(0L),
         destinationUsableBytes = runCatching { destinationRoot.usableSpace }.getOrDefault(0L),
+        internalVolumeId = storageVolumeIdentity(context, context.cacheDir),
+        destinationVolumeId = storageVolumeIdentity(context, destinationRoot),
     )
 }
+
+internal fun superResolutionMediaStoreTargetVolume(context: Context): File =
+    // AndroidSuperResolutionRowStore writes to EXTERNAL_CONTENT_URI, whose primary backing
+    // volume is the primary external-storage root, not app external-files space.
+    Environment.getExternalStorageDirectory().takeIf { it.exists() }
+        ?: (context.getExternalFilesDir(null) ?: context.filesDir)
+
+internal fun storageVolumeIdentity(context: Context, file: File): String? =
+    runCatching {
+        context.getSystemService(StorageManager::class.java)?.getStorageVolume(file)?.uuid
+    }.getOrNull()?.takeIf(String::isNotBlank)
 
 private fun withSafetyMargin(bytes: Long): Long =
     saturatingMultiply(bytes, STORAGE_SAFETY_NUMERATOR) / STORAGE_SAFETY_DENOMINATOR
@@ -321,6 +362,11 @@ private fun withSafetyMargin(bytes: Long): Long =
 private fun saturatingMultiply(left: Long, right: Long): Long {
     if (left <= 0L || right <= 0L) return 0L
     return if (left > Long.MAX_VALUE / right) Long.MAX_VALUE else left * right
+}
+
+private fun saturatingAddProduct(left: Long, right: Long): Long {
+    if (left < 0L || right < 0L) return Long.MAX_VALUE
+    return if (left > Long.MAX_VALUE - right) Long.MAX_VALUE else left + right
 }
 
 fun formatProductBytes(bytes: Long): String {

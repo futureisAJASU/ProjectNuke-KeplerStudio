@@ -7462,18 +7462,15 @@ fun exportPreview() {
 
     fun superResolutionPreflightForUi(): SuperResolutionPreflightResult {
         val state = _uiState.value
-        val base = state.originalPreviewBitmap ?: state.previewBitmap
+        val geometry = resolveFullExportSourceGeometry(state)
             ?: return SuperResolutionPreflightResult.Rejected(
                 SuperResolutionFailureKind.NoDocument,
                 "내보낼 사진을 먼저 열어 주세요.",
             )
-        val dimensions =
-            if (state.cropState == CropState()) base.width to base.height
-            else cropTransformedDimensions(base.width, base.height, state.cropState)
         return computeSuperResolutionPreflight(
             getApplication<Application>().applicationContext,
-            dimensions.first,
-            dimensions.second,
+            geometry.width,
+            geometry.height,
         )
     }
 
@@ -7509,6 +7506,14 @@ fun exportPreview() {
         val operationId = SuperResolutionOperationRegistry.nextOperationId()
         val documentGeneration = currentDocumentGeneration()
         val exportState = _uiState.value
+        val sourceRequest =
+            runCatching { FullExportSourceRequest.capture(exportState, documentGeneration) }
+                .getOrElse { failure ->
+                    updateUiStateAndRecycleReplaced {
+                        it.copy(message = failure.message ?: "AI 4배 저장을 준비할 수 없습니다.")
+                    }
+                    return
+                }
         val documentIdentity =
             "${exportState.sourcePath}:${exportState.baseContentToken}:${exportState.revision}:$documentGeneration"
         val result =
@@ -7519,11 +7524,10 @@ fun exportPreview() {
                     documentGeneration = documentGeneration,
                     documentIdentity = documentIdentity,
                     preflight = preflight,
-                    prepareSource = {
-                        prepareFullExportSourceBitmap(exportState, documentGeneration)
-                    },
+                    sourceRequest = sourceRequest,
                 ),
             )
+        if (result !is SuperResolutionStartResult.Started) sourceRequest.close()
         when (result) {
             is SuperResolutionStartResult.Started ->
                 updateUiStateAndRecycleReplaced {
@@ -7808,87 +7812,8 @@ fun exportPreview() {
         documentGeneration: String = currentDocumentGeneration(),
         diagnostics: MemoryTrackerScope? = null,
     ): Bitmap {
-        val ownedLayers = state.selectionLayers.copyBitmapsOwned()
-        var output: Bitmap? = null
-        try {
-            output = if (state.baseBitmapDirty) {
-                val base = state.originalPreviewBitmap ?: state.previewBitmap
-                    ?: error("dirty document has no base bitmap")
-                val required = BitmapMemoryBudget.saturatingAdd(
-                    BitmapMemoryBudget.bytes(base),
-                    BitmapMemoryBudget.bytes(base.width, base.height, Bitmap.Config.ARGB_8888),
-                )
-                if (MemoryRecoveryTestSeam.capture()?.rejectExportPreparation == true ||
-                    !BitmapMemoryBudget.canAllocate(required)
-                ) throw BitmapAllocationRejectedException(required)
-                renderEditedExportFromBitmap(
-                    ownedBaseBitmap = base.copyOrThrow(Bitmap.Config.ARGB_8888, true),
-                    resolution = ExportResolution.Full,
-                    selectionLayers = ownedLayers,
-                    diagnostics = diagnostics,
-                ) { bitmap, layers ->
-                    fullExportRenderRequest(state, documentGeneration, RenderOperation.ExportDirty, bitmap, layers, diagnostics)
-                }
-            } else {
-                val path = state.sourcePath
-                if (path == null) {
-                    state.previewBitmap?.copyOrThrow(Bitmap.Config.ARGB_8888, true)
-                        ?: error("document has no source bitmap")
-                } else {
-                    if (!canPreflightCleanExport(path, ExportResolution.Full)) {
-                        throw BitmapAllocationRejectedException(estimateCleanExportPeakBytes(path, ExportResolution.Full))
-                    }
-                    renderEditedExport(
-                        sourcePath = path,
-                        resolution = ExportResolution.Full,
-                        selectionLayers = ownedLayers,
-                        diagnostics = diagnostics,
-                    ) { bitmap, layers ->
-                        fullExportRenderRequest(state, documentGeneration, RenderOperation.ExportClean, bitmap, layers, diagnostics)
-                    }
-                }
-            }
-
-            if (state.cropState != CropState()) {
-                val cropped = renderCropTransform(checkNotNull(output), state.cropState)
-                if (cropped !== output) output?.takeUnless(Bitmap::isRecycled)?.recycle()
-                output = cropped
-            }
-            return checkNotNull(output).also { output = null }
-        } finally {
-            output?.takeUnless(Bitmap::isRecycled)?.recycle()
-            ownedLayers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
-        }
-    }
-
-    private fun fullExportRenderRequest(
-        state: EditorUiState,
-        documentGeneration: String,
-        operation: RenderOperation,
-        base: Bitmap,
-        layers: List<SelectionLayer>,
-        diagnostics: MemoryTrackerScope?,
-    ): RenderRequest? {
-        val visible = state.correctionEngineState.visiblePreview as? VisiblePreviewState.Rendered
-        val actualRoute = visible?.actualRoute ?: return null
-        return RenderRequest(
-            operation = operation,
-            basePreview = base,
-            params = state.params,
-            engines = state.engineSelection(),
-            assignedDocumentEngine = state.correctionEngineState.documentEngine,
-            identity = RenderIdentity(documentGeneration, state.baseContentToken, state.revision + 1),
-            storedRequestedRoute = visible.requestedRoute ?: actualRoute,
-            exactRoute = actualRoute,
-            storedDecision = visible.decision,
-            storedAlgorithmVersion = visible.algorithmVersion,
-            storedParticipation = visible.participation,
-            fallbackPolicy = FallbackPolicy.NoFallback,
-            look = state.presetLook,
-            quickEffects = state.activeQuickEffects.toList(),
-            selectionLayers = layers,
-            diagnostics = diagnostics,
-        )
+        val request = FullExportSourceRequest.capture(state, documentGeneration)
+        return prepareFullExportSourceBitmapFromRequest(request, diagnostics)
     }
 
     fun clearSavedExports() {
@@ -11924,20 +11849,20 @@ internal suspend fun applyActiveQuickEffectsToBitmap(
     }
 }
 
-private fun canPreflightCleanExport(sourcePath: String, resolution: ExportResolution): Boolean {
+internal fun canPreflightCleanExport(sourcePath: String, resolution: ExportResolution): Boolean {
     val requiredBytes = estimateCleanExportPeakBytes(sourcePath, resolution)
     return requiredBytes != Long.MAX_VALUE && BitmapMemoryBudget.canAllocate(requiredBytes)
 }
 
-private fun estimateCleanExportPeakBytes(sourcePath: String, resolution: ExportResolution): Long {
+internal fun estimateCleanExportPeakBytes(sourcePath: String, resolution: ExportResolution): Long {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeFile(sourcePath, bounds)
     if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return Long.MAX_VALUE
     var sample = 1
     val longest = max(bounds.outWidth, bounds.outHeight)
     while (longest / sample > EXPORT_MAX_SIDE) sample *= 2
-    val decodedWidth = (bounds.outWidth + sample - 1) / sample
-    val decodedHeight = (bounds.outHeight + sample - 1) / sample
+    val decodedWidth = ((bounds.outWidth.toLong() + sample - 1L) / sample).toInt()
+    val decodedHeight = ((bounds.outHeight.toLong() + sample - 1L) / sample).toInt()
     val decodedBytes = BitmapMemoryBudget.bytes(decodedWidth, decodedHeight)
     val scale = resolution.scalePercent / 100f
     val scaledBytes =
@@ -11951,7 +11876,7 @@ private fun estimateCleanExportPeakBytes(sourcePath: String, resolution: ExportR
     )
 }
 
-private suspend fun renderEditedExport(
+internal suspend fun renderEditedExport(
     sourcePath: String,
     resolution: ExportResolution,
     selectionLayers: List<SelectionLayer>,
@@ -11979,7 +11904,7 @@ private suspend fun renderEditedExport(
     }
 }
 
-private suspend fun renderEditedExportFromBitmap(
+internal suspend fun renderEditedExportFromBitmap(
     ownedBaseBitmap: Bitmap,
     resolution: ExportResolution,
     selectionLayers: List<SelectionLayer>,
