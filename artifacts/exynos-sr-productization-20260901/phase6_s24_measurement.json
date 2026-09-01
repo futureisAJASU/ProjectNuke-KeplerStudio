@@ -1,0 +1,69 @@
+{
+  "status": "PASS",
+  "code_under_test": "61b8497fd1ea721e7d7ef596ad11b1905cd9c5df",
+  "device": {
+    "model": "SM-S921N",
+    "bounded_serial": "R3CX40A15GB",
+    "android_version": "16",
+    "page_size": 4096
+  },
+  "n6_edited_full_runs_ms": {
+    "first": 159139,
+    "second": 176149,
+    "interpretation": "No repeatable warm-run speedup; no concurrency or buffer tuning applied."
+  },
+  "clean_full_export": {
+    "input": "4080x3060",
+    "output": "16320x12240",
+    "elapsed_ms": 155595,
+    "stage_durations_ms": {
+      "source_preparation": 105,
+      "model_load": 192,
+      "npu": 145307,
+      "png": 8848,
+      "mediastore": 217,
+      "cleanup_and_close": 319
+    },
+    "resource_truth": {
+      "main_heartbeat_final": 7646,
+      "thermal_status_start_middle_end": [0, 0, 0],
+      "battery_level_start_end": [79, 79],
+      "rgb8_peak_bytes": 599270400
+    },
+    "npu": {
+      "h2d": 0,
+      "execute_reached": true,
+      "execute": 0,
+      "d2h": 0,
+      "compiler_npu": "v2.4.11.l",
+      "proof": "OBSERVED"
+    }
+  },
+  "service_owner_smoke": {
+    "input": "1024x768",
+    "output": "4096x3072",
+    "elapsed_ms": 10145,
+    "reattached_same_operation": true,
+    "document_unchanged": true,
+    "thermal_status": 0,
+    "battery_level": 79
+  },
+  "cancellation": {
+    "npu": {
+      "trigger_tiles": 2,
+      "elapsed_ms": 543,
+      "terminal": "Cancelled",
+      "clean_settlement": true
+    },
+    "png": {
+      "trigger_rows": 32,
+      "elapsed_ms": 140247,
+      "terminal": "Cancelled",
+      "clean_settlement": true
+    }
+  },
+  "frozen_nnc": {
+    "size": 3112960,
+    "sha256": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+  }
+}
