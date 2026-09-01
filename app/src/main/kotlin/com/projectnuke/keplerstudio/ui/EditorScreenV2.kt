@@ -1,8 +1,11 @@
 package com.projectnuke.keplerstudio.ui
 
 import android.Manifest
+import android.content.ClipData
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -445,6 +448,38 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
             onRetry = {
                 viewModel.acknowledgeProductSuperResolution()
                 startProductExport()
+            },
+            onOpenPublished = { uri ->
+                runCatching {
+                    context.startActivity(
+                        Intent(Intent.ACTION_VIEW)
+                            .setDataAndType(uri, "image/png")
+                            .apply {
+                                clipData = ClipData.newRawUri("AI 4x image", uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            },
+                    )
+                }.onFailure {
+                    Toast.makeText(context, "저장한 이미지를 열 수 없습니다.", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onSharePublished = { uri ->
+                runCatching {
+                    context.startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND)
+                                .setType("image/png")
+                                .putExtra(Intent.EXTRA_STREAM, uri)
+                                .apply {
+                                    clipData = ClipData.newRawUri("AI 4x image", uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                },
+                            "AI 4배 이미지 공유",
+                        ),
+                    )
+                }.onFailure {
+                    Toast.makeText(context, "저장한 이미지를 공유할 수 없습니다.", Toast.LENGTH_SHORT).show()
+                }
             },
         )
     }
@@ -1195,6 +1230,8 @@ private fun V2ExportSettingsDialog(
     onSuperResolution: () -> Unit,
     onCancel: () -> Unit,
     onRetry: () -> Unit,
+    onOpenPublished: (Uri) -> Unit,
+    onSharePublished: (Uri) -> Unit,
 ) {
     val status = productOperation.status
     val progress = superResolutionProgressUi(status)
@@ -1241,6 +1278,12 @@ private fun V2ExportSettingsDialog(
                     )
                     if (failure?.retrySafe == true) {
                         OutlinedButton(onClick = onRetry) { Text("다시 시도") }
+                    }
+                    status.publishedUri?.let { uri ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(onClick = { onOpenPublished(uri) }) { Text("열기") }
+                            OutlinedButton(onClick = { onSharePublished(uri) }) { Text("공유") }
+                        }
                     }
                 }
                 if (!status.isBusy && !hasTerminalProductResult) {
