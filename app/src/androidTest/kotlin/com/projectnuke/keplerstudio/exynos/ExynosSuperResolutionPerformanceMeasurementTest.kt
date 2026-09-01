@@ -182,6 +182,7 @@ class ExynosSuperResolutionPerformanceMeasurementTest {
         val vm = EditorViewModel(app)
         val sessionRef = AtomicReference<ExynosUpscaleSession?>()
         val wakeRef = AtomicReference<N5WakeLock?>()
+        val compilerRef = AtomicReference<String?>()
         val marks = ConcurrentHashMap<String, Long>()
         val samples = JSONArray()
         val heartbeat = AtomicInteger()
@@ -219,6 +220,13 @@ class ExynosSuperResolutionPerformanceMeasurementTest {
                 },
                 milestoneObserver = { label ->
                     marks.putIfAbsent(label, elapsed(start))
+                    if (label == "after_model_load") {
+                        compilerRef.set(
+                            runCatching {
+                                sessionRef.get()?.getEnnMetaInfo(EnnMetaIds.MODEL_COMPILER_NPU)
+                            }.getOrNull(),
+                        )
+                    }
                     if (label in setOf(
                             "before_full_source_preparation",
                             "after_full_source_preparation",
@@ -268,7 +276,7 @@ class ExynosSuperResolutionPerformanceMeasurementTest {
             required.forEach { assertNotNull("missing actual timing mark $it", marks[it]) }
             val session = checkNotNull(sessionRef.get())
             val diagnostics = session.lastRunDiagnostics
-            val compiler = session.getEnnMetaInfo(EnnMetaIds.MODEL_COMPILER_NPU)
+            val compiler = compilerRef.get()
             assertEquals(EnnStatus.SUCCESS, diagnostics.h2dStatus)
             assertTrue(diagnostics.executeReached)
             assertEquals(EnnStatus.SUCCESS, diagnostics.executeStatus)
