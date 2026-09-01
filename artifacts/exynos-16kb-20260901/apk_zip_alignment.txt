@@ -1,0 +1,14 @@
+artifact=app/build/outputs/apk/debug/app-debug.apk
+sha256=2e60dc39f4ac48ce99562c019dfbcad6e06134dd54fb4a1940d6808ee4eec176
+command=zipalign -v -c -P 16 4 app-debug.apk
+result=PASS
+native_library_mode=stored_uncompressed
+extractNativeLibs=false
+lib/arm64-v8a/libandroidx.graphics.path.so offset=74153984 OK
+lib/arm64-v8a/libdatastore_shared_counter.so offset=74170368 OK
+lib/arm64-v8a/libenn_kepler_jni.so offset=74186752 OK
+lib/arm64-v8a/libenn_public_api_ndk_v1.so offset=74203136 OK
+lib/arm64-v8a/libkepler_photocore.so offset=74219520 OK
+lib/arm64-v8a/libmediapipe_tasks_jni.so offset=74694656 OK
+lib/arm64-v8a/libtensorflowlite_jni.so offset=85229568 OK
+zipalign_verdict=Verification successful

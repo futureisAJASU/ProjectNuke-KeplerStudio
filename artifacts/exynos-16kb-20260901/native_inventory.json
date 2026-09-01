@@ -1,0 +1,62 @@
+{
+  "apk_sha256": "2e60dc39f4ac48ce99562c019dfbcad6e06134dd54fb4a1940d6808ee4eec176",
+  "abi": "arm64-v8a",
+  "libraries": [
+    {
+      "name": "libandroidx.graphics.path.so",
+      "packaged_size": 10096,
+      "sha256": "41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6",
+      "compression": "stored",
+      "class": "dependency-provided prebuilt",
+      "provenance": "androidx.graphics:graphics-path:1.0.1"
+    },
+    {
+      "name": "libdatastore_shared_counter.so",
+      "packaged_size": 7784,
+      "sha256": "178f89a2c6c9234ddf980dd4cd1f3616186a46b2b932aafa6707abd04c5fd76a",
+      "compression": "stored",
+      "class": "dependency-provided prebuilt",
+      "provenance": "androidx.datastore:datastore-core-android:1.2.1"
+    },
+    {
+      "name": "libenn_kepler_jni.so",
+      "packaged_size": 8936,
+      "sha256": "ca530b6b3bd33126db9d4a6f8b5d41e08184a55100a2d5f5bafbf3b08a8a1914",
+      "compression": "stored",
+      "class": "Kepler-built native",
+      "provenance": "app/src/main/cpp/enn_kepler_jni.cpp; NDK r28c"
+    },
+    {
+      "name": "libenn_public_api_ndk_v1.so",
+      "packaged_size": 13016,
+      "sha256": "e060ba7a67ee2ca35d60ba2739dbc2c55b0abfe5f2e378d6cc96288ede8d0f48",
+      "compression": "stored",
+      "class": "Samsung ENN proprietary prebuilt",
+      "provenance": "app/src/main/jniLibs/arm64-v8a/libenn_public_api_ndk_v1.so"
+    },
+    {
+      "name": "libkepler_photocore.so",
+      "packaged_size": 462144,
+      "sha256": "ccc4f39e495bfca19c4b01165d0e7b010944dd74af10998c6b27c2d5fecd6e56",
+      "compression": "stored",
+      "class": "Kepler-built native",
+      "provenance": "app/src/main/cpp/CMakeLists.txt sources; NDK r28c"
+    },
+    {
+      "name": "libmediapipe_tasks_jni.so",
+      "packaged_size": 10533648,
+      "sha256": "3e24311e736feedbab78b3c6c0122042233919384ac1ff0fe191d3586d319ab3",
+      "compression": "stored",
+      "class": "dependency-provided prebuilt",
+      "provenance": "com.google.mediapipe:tasks-core:0.10.35"
+    },
+    {
+      "name": "libtensorflowlite_jni.so",
+      "packaged_size": 3549376,
+      "sha256": "ee651a768008df0da5fd7db20cba23a3f436d60c96f348dfcadd398003b92880",
+      "compression": "stored",
+      "class": "dependency-provided prebuilt",
+      "provenance": "com.google.ai.edge.litert:litert:1.0.1 (via org.tensorflow:tensorflow-lite:2.17.0)"
+    }
+  ]
+}

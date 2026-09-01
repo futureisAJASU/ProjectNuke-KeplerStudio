@@ -1,0 +1,32 @@
+{
+  "code_under_test_sha": "5ad3efc099259032f8f749fc562795f31b3827e1",
+  "artifact": {
+    "path": "app/build/outputs/apk/debug/app-debug.apk",
+    "variant": "debug",
+    "size_bytes": 92013090,
+    "sha256": "2e60dc39f4ac48ce99562c019dfbcad6e06134dd54fb4a1940d6808ee4eec176"
+  },
+  "agp": "9.2.0",
+  "gradle": "9.4.1",
+  "compile_sdk": 36,
+  "target_sdk": 36,
+  "min_sdk": 29,
+  "ndk": {
+    "revision": "28.2.13676358",
+    "release": "r28c",
+    "selection": "AGP default observed in final CMakeCache.txt"
+  },
+  "cmake": "3.22.1",
+  "android_build_tools": "36.0.0",
+  "bundletool": "1.18.3",
+  "jni_libs": {
+    "abi_filters": ["arm64-v8a"],
+    "use_legacy_packaging": false,
+    "extract_native_libs": false,
+    "apk_native_library_compression": "stored_uncompressed"
+  },
+  "aab": {
+    "produced": false,
+    "native_library_compression": "not_applicable"
+  }
+}

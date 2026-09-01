@@ -1,0 +1,9 @@
+{
+  "device_model": "SM-S921N",
+  "device": "e1s",
+  "bounded_device_identifier": "R3CX40A15GB",
+  "android_version": "16",
+  "page_size": 4096,
+  "is_16kb_environment": false,
+  "conclusion": "The accepted S24 N6 run neither proves nor disproves 16 KB runtime compatibility."
+}

@@ -1,0 +1,9 @@
+{
+  "status": "HOLD",
+  "executed": false,
+  "required_page_size": 16384,
+  "available_physical_page_size": 4096,
+  "blocker": "ELF lane is blocked by the Samsung proprietary libenn_public_api_ndk_v1.so and no 16 KB runtime environment was used.",
+  "compatibility_mode_accepted_as_pass": false,
+  "tests": []
+}

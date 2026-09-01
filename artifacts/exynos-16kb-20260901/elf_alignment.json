@@ -1,0 +1,71 @@
+{
+  "checker": "NDK 28.2.13676358 llvm-readelf -lW and llvm-objdump -p",
+  "required_pt_load_align": "0x4000",
+  "status": "HOLD",
+  "blocker": "VENDOR PREBUILT BLOCKER: libenn_public_api_ndk_v1.so has 0x1000 PT_LOAD alignment",
+  "libraries": [
+    {
+      "name": "libandroidx.graphics.path.so",
+      "compatible_16kb": true,
+      "pt_load": [
+        {"offset":"0x000000","virt_addr":"0x0000000000000000","file_size":"0x001c40","mem_size":"0x001c40","flags":"R E","align":"0x4000"},
+        {"offset":"0x001c40","virt_addr":"0x0000000000005c40","file_size":"0x000390","mem_size":"0x000390","flags":"RW","align":"0x4000"},
+        {"offset":"0x001fd0","virt_addr":"0x0000000000009fd0","file_size":"0x000000","mem_size":"0x000010","flags":"RW","align":"0x4000"}
+      ]
+    },
+    {
+      "name": "libdatastore_shared_counter.so",
+      "compatible_16kb": true,
+      "pt_load": [
+        {"offset":"0x000000","virt_addr":"0x0000000000000000","file_size":"0x000ce8","mem_size":"0x000ce8","flags":"R","align":"0x4000"},
+        {"offset":"0x000ce8","virt_addr":"0x0000000000004ce8","file_size":"0x000758","mem_size":"0x000758","flags":"R E","align":"0x4000"},
+        {"offset":"0x001440","virt_addr":"0x0000000000009440","file_size":"0x000250","mem_size":"0x002bc0","flags":"RW","align":"0x4000"},
+        {"offset":"0x001690","virt_addr":"0x000000000000d690","file_size":"0x000008","mem_size":"0x000008","flags":"RW","align":"0x4000"}
+      ]
+    },
+    {
+      "name": "libenn_kepler_jni.so",
+      "compatible_16kb": true,
+      "pt_load": [
+        {"offset":"0x000000","virt_addr":"0x0000000000000000","file_size":"0x0018c0","mem_size":"0x0018c0","flags":"R E","align":"0x4000"},
+        {"offset":"0x0018c0","virt_addr":"0x00000000000058c0","file_size":"0x000258","mem_size":"0x000740","flags":"RW","align":"0x4000"}
+      ]
+    },
+    {
+      "name": "libenn_public_api_ndk_v1.so",
+      "compatible_16kb": false,
+      "classification": "VENDOR PREBUILT BLOCKER",
+      "pt_load": [
+        {"offset":"0x000000","virt_addr":"0x0000000000000000","file_size":"0x002880","mem_size":"0x002880","flags":"R E","align":"0x1000"},
+        {"offset":"0x002880","virt_addr":"0x0000000000003880","file_size":"0x000330","mem_size":"0x000330","flags":"RW","align":"0x1000"}
+      ]
+    },
+    {
+      "name": "libkepler_photocore.so",
+      "compatible_16kb": true,
+      "pt_load": [
+        {"offset":"0x000000","virt_addr":"0x0000000000000000","file_size":"0x06b8e0","mem_size":"0x06b8e0","flags":"R E","align":"0x4000"},
+        {"offset":"0x06b8e0","virt_addr":"0x000000000006f8e0","file_size":"0x0048e0","mem_size":"0x005720","flags":"RW","align":"0x4000"},
+        {"offset":"0x0701c0","virt_addr":"0x00000000000781c0","file_size":"0x0001f0","mem_size":"0x001290","flags":"RW","align":"0x4000"}
+      ]
+    },
+    {
+      "name": "libmediapipe_tasks_jni.so",
+      "compatible_16kb": true,
+      "pt_load": [
+        {"offset":"0x000000","virt_addr":"0x0000000000000000","file_size":"0x98fb60","mem_size":"0x98fb60","flags":"R E","align":"0x4000"},
+        {"offset":"0x990000","virt_addr":"0x0000000000990000","file_size":"0x066ba0","mem_size":"0x067000","flags":"RW","align":"0x4000"},
+        {"offset":"0x9f6ba0","virt_addr":"0x00000000009faba0","file_size":"0x0142b8","mem_size":"0x0f70e0","flags":"RW","align":"0x4000"}
+      ]
+    },
+    {
+      "name": "libtensorflowlite_jni.so",
+      "compatible_16kb": true,
+      "pt_load": [
+        {"offset":"0x000000","virt_addr":"0x0000000000000000","file_size":"0x357500","mem_size":"0x357500","flags":"R E","align":"0x4000"},
+        {"offset":"0x358000","virt_addr":"0x0000000000358000","file_size":"0x006420","mem_size":"0x006420","flags":"RW","align":"0x4000"},
+        {"offset":"0x35e420","virt_addr":"0x0000000000362420","file_size":"0x003bd8","mem_size":"0x020aa0","flags":"RW","align":"0x4000"}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "libraries": [
+    {
+      "name": "libandroidx.graphics.path.so",
+      "coordinate": "androidx.graphics:graphics-path:1.0.1",
+      "aar_sha256": "8ca4032b6d79b351f0b59ad4b580eddbb9423e1652f7c958830687f1eee2ec03",
+      "aar_arm64_sha256": "41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6",
+      "apk_arm64_sha256": "41e9a793c43a0f4fddb19e33f346bace464f30f888ba7b9eaf96294ea115bfb6",
+      "packaging_transform": "none",
+      "compatible_16kb": true
+    },
+    {
+      "name": "libdatastore_shared_counter.so",
+      "coordinate": "androidx.datastore:datastore-core-android:1.2.1",
+      "aar_sha256": "435edad7bcb1fbb1a2a46de7be4d6daf299479b3328ebf757ebdfe02810cbdd8",
+      "aar_arm64_sha256": "deed4546c8dafad0e68ea2c25e4c0a62ca97343614ae386b7ed2af6abb7fa999",
+      "apk_arm64_sha256": "178f89a2c6c9234ddf980dd4cd1f3616186a46b2b932aafa6707abd04c5fd76a",
+      "packaging_transform": "AGP stripDebugDebugSymbols; provenance verified through merged and stripped intermediates",
+      "compatible_16kb": true
+    },
+    {
+      "name": "libmediapipe_tasks_jni.so",
+      "coordinate": "com.google.mediapipe:tasks-core:0.10.35",
+      "aar_sha256": "4edf2f33c840d682c751b3ca951b1ae0465373734776d7fb37dcef936de28ad0",
+      "aar_arm64_sha256": "c0497affbe5c60ddbb61b969403d053ae61d209dc6c7063f38427640c62b8f90",
+      "apk_arm64_sha256": "3e24311e736feedbab78b3c6c0122042233919384ac1ff0fe191d3586d319ab3",
+      "packaging_transform": "AGP stripDebugDebugSymbols; provenance verified through merged and stripped intermediates",
+      "compatible_16kb": true
+    },
+    {
+      "name": "libtensorflowlite_jni.so",
+      "coordinate": "com.google.ai.edge.litert:litert:1.0.1",
+      "requested_via": "org.tensorflow:tensorflow-lite:2.17.0",
+      "aar_sha256": "467679820f836fe70418f01c9f6689f328f79fbf2cbabe197eab70b209b43e8d",
+      "aar_arm64_sha256": "cfecb1f2da022a555dc916fd890df385221034cc3bd27365706a3f91847a1990",
+      "apk_arm64_sha256": "ee651a768008df0da5fd7db20cba23a3f436d60c96f348dfcadd398003b92880",
+      "packaging_transform": "AGP stripDebugDebugSymbols; provenance verified through merged and stripped intermediates",
+      "compatible_16kb": true
+    },
+    {
+      "name": "libenn_public_api_ndk_v1.so",
+      "coordinate": null,
+      "source": "Samsung ENN SDK vendored prebuilt",
+      "source_sha256": "e060ba7a67ee2ca35d60ba2739dbc2c55b0abfe5f2e378d6cc96288ede8d0f48",
+      "apk_arm64_sha256": "e060ba7a67ee2ca35d60ba2739dbc2c55b0abfe5f2e378d6cc96288ede8d0f48",
+      "official_sample_repository": "https://github.com/exynos-eco/enn-sdk-samples",
+      "official_sample_commit_checked": "7f9ef0f95a2d4dd46f3b04e89b1df145bdcb495c",
+      "official_sample_binary_sha256": "e060ba7a67ee2ca35d60ba2739dbc2c55b0abfe5f2e378d6cc96288ede8d0f48",
+      "compatible_16kb": false,
+      "classification": "VENDOR PREBUILT BLOCKER",
+      "remediation": "No alternate official compatible binary found; do not patch or relink the prebuilt"
+    }
+  ]
+}
