@@ -62,9 +62,19 @@ internal object SuperResolutionForegroundPromotionSeam {
 
 internal object SuperResolutionServiceLaunchSeam {
     @Volatile var beforeJobStart: ((Long) -> Unit)? = null
+    @Volatile var afterOwnerBound: ((Long, Job) -> Unit)? = null
 
     internal fun resetForTest() {
         beforeJobStart = null
+        afterOwnerBound = null
+    }
+}
+
+internal object SuperResolutionServiceExecutionSeam {
+    @Volatile var beforePreparation: (suspend (Long) -> Unit)? = null
+
+    internal fun resetForTest() {
+        beforePreparation = null
     }
 }
 
@@ -466,6 +476,7 @@ class SuperResolutionMediaProcessingService : Service() {
                     ownerOperationId = null
                     return START_NOT_STICKY
                 }
+                SuperResolutionServiceLaunchSeam.afterOwnerBound?.invoke(operationId, job)
                 job.invokeOnCompletion { cause ->
                     if (cause != null && ownsServiceOperation(operationId, serviceGeneration)) {
                         SuperResolutionOperationRegistry.finish(operationId, cancelledStatus())
@@ -530,6 +541,7 @@ class SuperResolutionMediaProcessingService : Service() {
                         updatedAtMillis = now,
                     ),
                 )
+                SuperResolutionServiceExecutionSeam.beforePreparation?.invoke(request.operationId)
                 currentCoroutineContext().ensureActive()
                 source = prepareFullExportSourceBitmapFromRequest(request.sourceRequest)
                 currentCoroutineContext().ensureActive()
@@ -697,16 +709,23 @@ class SuperResolutionMediaProcessingService : Service() {
     }
 
     override fun onDestroy() {
-        ownerJob?.cancel()
+        val operationId = ownerOperationId
+        val serviceGeneration = ownerServiceGeneration
+        val job = ownerJob
+        val jobWasStillRunning = job?.isCompleted == false
+        if (operationId != null && serviceGeneration != null && jobWasStillRunning) {
+            // Service destruction is not physical completion. Keep the exact registry owner in
+            // SETTLING until the operation-local Job completion callback has observed the real
+            // unwind; this also lets process-death recovery remain journal-authoritative.
+            SuperResolutionOperationRegistry.beginPhysicalSettlement(operationId)
+        }
+        job?.cancel()
         serviceScope.cancel()
-        // A destroyed service is no longer the owner. The journal remains authoritative for any
-        // cleanup debt that could not finish before destruction. Use this instance's claimed ID;
+        // A job that never started or has already completed has no physical work left. Otherwise
+        // its exact completion callback performs the guarded release after physical settlement;
         // a stale service instance must never release another service's owner.
-        ownerOperationId?.let { operationId ->
-            val generation = ownerServiceGeneration
-            if (generation != null) SuperResolutionOperationRegistry.releaseOwner(operationId)
-            ownerOperationId = null
-            ownerServiceGeneration = null
+        if (operationId != null && serviceGeneration != null && !jobWasStillRunning) {
+            releaseServiceOwner(operationId, serviceGeneration)
         }
         super.onDestroy()
     }

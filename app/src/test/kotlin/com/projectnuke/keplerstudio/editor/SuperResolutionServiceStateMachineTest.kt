@@ -13,6 +13,12 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -23,6 +29,7 @@ class SuperResolutionServiceStateMachineTest {
     fun tearDown() {
         SuperResolutionForegroundPromotionSeam.resetForTest()
         SuperResolutionServiceLaunchSeam.resetForTest()
+        SuperResolutionServiceExecutionSeam.resetForTest()
         SuperResolutionServiceStartSeam.resetForTest()
         SuperResolutionOperationRegistry.resetForTest()
         context.getSharedPreferences(SuperResolutionMediaProcessingService.JOURNAL_PREFS, 0).edit().clear().commit()
@@ -127,6 +134,45 @@ class SuperResolutionServiceStateMachineTest {
         assertNotNull(journal.read())
         journal.clear(94L)
         service.onDestroy()
+    }
+
+    @Test
+    fun timeoutKeepsCancelledServiceOwnerSettlingUntilTheExactJobCompletes() = runBlocking {
+        val request = request(95L)
+        assertEquals(SuperResolutionStartResult.Started(95L), SuperResolutionOperationRegistry.admitForTest(request))
+        SuperResolutionForegroundPromotionSeam.start = { _, _, _, _ -> }
+        val service = Robolectric.buildService(SuperResolutionMediaProcessingService::class.java).create().get()
+        val executionEntered = CountDownLatch(1)
+        val releasePhysicalWork = CompletableDeferred<Unit>()
+        val capturedJob = CompletableDeferred<kotlinx.coroutines.Job>()
+        SuperResolutionServiceExecutionSeam.beforePreparation = {
+            executionEntered.countDown()
+            withContext(NonCancellable) { releasePhysicalWork.await() }
+        }
+        SuperResolutionServiceLaunchSeam.afterOwnerBound = { _, job -> capturedJob.complete(job) }
+
+        service.onStartCommand(
+            Intent(context, SuperResolutionMediaProcessingService::class.java)
+                .setAction(SuperResolutionMediaProcessingService.ACTION_START)
+                .putExtra(SuperResolutionMediaProcessingService.EXTRA_OPERATION_ID, 95L),
+            0,
+            95,
+        )
+        assertTrue(executionEntered.await(5, TimeUnit.SECONDS))
+        val job = capturedJob.await()
+
+        service.onTimeout(95, 0)
+        assertTrue(SuperResolutionOperationRegistry.hasActiveOperation())
+        assertTrue(
+            SuperResolutionOperationRegistry.admitForTest(request(96L)) is SuperResolutionStartResult.Failed,
+        )
+        service.onDestroy()
+        assertTrue(SuperResolutionOperationRegistry.hasActiveOperation())
+
+        releasePhysicalWork.complete(Unit)
+        job.join()
+        assertFalse(SuperResolutionOperationRegistry.hasActiveOperation())
+        assertEquals(SuperResolutionStartResult.Started(96L), SuperResolutionOperationRegistry.admitForTest(request(96L)))
     }
 
     private fun request(id: Long): SuperResolutionServiceRequest {
