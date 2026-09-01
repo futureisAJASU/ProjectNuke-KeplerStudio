@@ -385,7 +385,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                 if (ready.preflight.requiresConfirmation) {
                     pendingAiConfirmation = ready.preflight
                 } else {
-                    viewModel.exportSuperResolution()
+                    viewModel.exportSuperResolutionProduct()
                 }
             }
         )
@@ -406,7 +406,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                 Button(
                     onClick = {
                         pendingAiConfirmation = null
-                        viewModel.exportSuperResolution()
+                        viewModel.exportSuperResolutionProduct()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark),
                 ) { Text("AI 4배 저장 시작") }

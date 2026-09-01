@@ -64,6 +64,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
@@ -265,6 +266,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     private var superResolutionToken: Long = 0L
     private val _superResolutionStatus = kotlinx.coroutines.flow.MutableStateFlow(SuperResolutionExportStatus())
     val superResolutionStatus: kotlinx.coroutines.flow.StateFlow<SuperResolutionExportStatus> = _superResolutionStatus.asStateFlow()
+    val productSuperResolutionOperation: StateFlow<SuperResolutionProductOperationState> =
+        SuperResolutionOperationRegistry.state
     internal fun superResolutionJobActiveForTest(): Boolean = superResolutionJob?.isActive == true
     internal fun superResolutionTokenForTest(): Long = superResolutionToken
     internal fun superResolutionJobForTest(): Job? = superResolutionJob
@@ -927,6 +930,43 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     releaseGeneration,
                 )
             }
+        }
+        viewModelScope.launch {
+            var lastTerminalOperationId: Long? = null
+            productSuperResolutionOperation.collect { operation ->
+                val operationId = operation.operationId ?: return@collect
+                val status = operation.status
+                val message =
+                    when (status.phase) {
+                        SuperResolutionExportPhase.Preparing -> "AI 4배 저장을 준비하고 있습니다."
+                        SuperResolutionExportPhase.Upscaling -> "AI 업스케일링 중입니다."
+                        SuperResolutionExportPhase.Encoding -> "이미지를 만들고 있습니다."
+                        SuperResolutionExportPhase.Publishing -> "사진을 저장하고 있습니다."
+                        SuperResolutionExportPhase.Succeeded ->
+                            if (status.cleanupDebt || status.failureKind != null) {
+                                "사진은 저장되었지만 마무리 작업에 문제가 있습니다."
+                            } else {
+                                "AI 4배 사진을 저장했습니다."
+                            }
+                        SuperResolutionExportPhase.Failed -> "AI 4배 사진을 저장하지 못했습니다."
+                        SuperResolutionExportPhase.Cancelled -> "AI 4배 저장을 취소했습니다."
+                        SuperResolutionExportPhase.Idle -> null
+                    }
+                updateUiStateAndRecycleReplaced { current ->
+                    current.copy(isBusy = status.isBusy, message = message ?: current.message)
+                }
+                if (!status.isBusy &&
+                    status.phase == SuperResolutionExportPhase.Succeeded &&
+                    lastTerminalOperationId != operationId
+                ) {
+                    lastTerminalOperationId = operationId
+                    val refreshed = withContext(Dispatchers.IO) { savedExportHistoryStore.load() }
+                    updateUiStateAndRecycleReplaced { it.copy(savedExports = refreshed) }
+                }
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            reconcileSuperResolutionProcessDeathDebt(app.applicationContext)
         }
     }
 
@@ -7435,6 +7475,75 @@ fun exportPreview() {
             dimensions.first,
             dimensions.second,
         )
+    }
+
+    fun exportSuperResolutionProduct() {
+        if (SuperResolutionOperationRegistry.hasActiveOperation()) {
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "AI 4배 사진을 이미 처리하고 있습니다.")
+            }
+            return
+        }
+        if (!settleForEditorAction()) return
+        val state = _uiState.value
+        if (state.isBusy || shuttingDown || editorLeaveLocksActions()) {
+            updateUiStateAndRecycleReplaced {
+                it.copy(message = "현재 작업이 끝난 뒤 다시 시도해 주세요.")
+            }
+            return
+        }
+        val availability = superResolutionAvailabilityForUi()
+        if (!availability.canStart) {
+            updateUiStateAndRecycleReplaced { it.copy(message = availability.reason) }
+            return
+        }
+        val preflightResult = superResolutionPreflightForUi()
+        val preflight = (preflightResult as? SuperResolutionPreflightResult.Ready)?.preflight
+        if (preflight == null) {
+            val message =
+                (preflightResult as? SuperResolutionPreflightResult.Rejected)?.userMessage
+                    ?: "AI 4배 저장을 준비할 수 없습니다."
+            updateUiStateAndRecycleReplaced { it.copy(message = message) }
+            return
+        }
+        val operationId = SuperResolutionOperationRegistry.nextOperationId()
+        val documentGeneration = currentDocumentGeneration()
+        val exportState = _uiState.value
+        val documentIdentity =
+            "${exportState.sourcePath}:${exportState.baseContentToken}:${exportState.revision}:$documentGeneration"
+        val result =
+            SuperResolutionOperationRegistry.submit(
+                getApplication<Application>().applicationContext,
+                SuperResolutionServiceRequest(
+                    operationId = operationId,
+                    documentGeneration = documentGeneration,
+                    documentIdentity = documentIdentity,
+                    preflight = preflight,
+                    prepareSource = {
+                        prepareFullExportSourceBitmap(exportState, documentGeneration)
+                    },
+                ),
+            )
+        when (result) {
+            is SuperResolutionStartResult.Started ->
+                updateUiStateAndRecycleReplaced {
+                    it.copy(isBusy = true, message = "AI 4배 저장을 준비하고 있습니다.")
+                }
+            is SuperResolutionStartResult.AlreadyRunning ->
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "AI 4배 사진을 이미 처리하고 있습니다.")
+                }
+            is SuperResolutionStartResult.Failed ->
+                updateUiStateAndRecycleReplaced {
+                    it.copy(message = "AI 처리 서비스를 시작하지 못했습니다. 다시 시도해 주세요.")
+                }
+        }
+    }
+
+    fun cancelProductSuperResolution() {
+        if (!SuperResolutionOperationRegistry.cancelCurrent()) {
+            updateUiStateAndRecycleReplaced { it.copy(message = "취소할 AI 4배 작업이 없습니다.") }
+        }
     }
 
     fun canStartSuperResolution(): Boolean {
