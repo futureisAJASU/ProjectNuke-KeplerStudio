@@ -1,206 +1,119 @@
-N6 CORRECTIVE PASS — HOLD REPORT
-=================================
+# KeplerStudio N6 HOLD Report
 
-BASE HEAD (task): 83d5dcc68853224d550974e1bb0049b837f9a24a
-BASE PARENT:      c5fae1f5fa74699acb682f644b0652fc9d3dabf7
-HEAD (current):   83d5dcc68853224d550974e1bb0049b837f9a24a  (corrective edits verified, ready to commit)
-BRANCH: feature/exynos-ai-runtime
-DATE: 2026-09-01
+Date: 2026-09-01
+Branch: `review/n6-final-20260901`
+Status: **N6 = HOLD / READY FOR REVIEW**
 
-STATUS: N6 CORRECTIVE PASS — VERIFIED (all gates passed; ready for review)
+## Commit identity
 
-================================================================================
-GIT HYGIENE
-================================================================================
-- Verified .gitignore leading-space bug and fixed:
-    before: " /test-output/", " /captures/", " /scratch/", " *.bundle", " *.hprof",
-            " java_pid*.hprof*", " hs_err_pid*.log", " replay_pid*.log"
-    after:  "/test-output/", "/captures/", "/scratch/", "*.bundle", "*.hprof",
-            "java_pid*.hprof*", "hs_err_pid*.log", "replay_pid*.log"
-  Mechanically verified:
-    git check-ignore -v KeplerStudio.bundle -> .gitignore:*.bundle
-    git check-ignore -v java_pid1234.hprof -> .gitignore:java_pid*.hprof*
-    git check-ignore -v java_pid1234.hprof.p0 -> .gitignore:java_pid*.hprof*
-- Untracked KeplerStudio_mini.bundle is now correctly ignored (was visible before fix).
-- Removed raw logcat dumps from tracked tree:
-    artifacts/exynos-n2a-fp16-s24-20260828/enn-logcat.txt (DELETED)
-    artifacts/exynos-n2b-quantized-s24-20260828/enn-logcat.txt (DELETED)
-  .gitattributes entry for enn-logcat.txt removed (no longer needed).
-- Verified tracked tree contains no: *.bundle, *.hprof*, *.rgb8, giant 16K PNG, heap dump,
-  raw memory dump, raw logcat dump. Untracked build artifacts under app/build/ and
-  .gradle/ are correctly ignored and will not be committed.
-- N6_FINAL_REPORT.md: not present (already absent; no empty file to delete).
-- Frozen assets preserved: production NNC (3,112,960 bytes, SHA 9cff7af...), N3/N4 fixtures,
-  model weights — not removed.
+- BASE / accepted code: `f228ebcdd6d448e13e46bdf9583e14880d11861d`
+- Previous reviewed code-under-test SHA: `e34421cbf1839f5f143ac75afad1d3cba8ec1518`
+- CODE UNDER TEST SHA: `0880c4bc5edd45ba01c3ab66a24101f6895a3683`
+- EVIDENCE/REPORT COMMIT: created after verification; its own SHA is intentionally not embedded here
 
-================================================================================
-DEBUG SIGNING
-================================================================================
-Stable keystore path: %USERPROFILE%\.projectnuke\keplerstudio\keplerstudio-stable-debug.jks
-Gradle credentials (hardcoded): storePassword=android keyAlias=androiddebugkey keyPassword=android
+The code commit contains only the androidTest cancellation correction. The later evidence/report commit contains no production or test-code changes.
 
-Pre-install probe (S24 R3CX40A15GB, SM-S921N):
-  Installed cert SHA-256: ac62525138841d7388237d190b37d9e119d854d97053655d063d28f9ba552c8f
-  Stable keystore SHA-256: ac62525138841d7388237d190b37d9e119d854d97053655d063d28f9ba552c8f
-  Default debug.keystore SHA-256: ac62525138841d7388237d190b37d9e119d854d97053655d063d28f9ba552c8f
-  -> All three equal before build (lineage intact).
+No N7 work, 16 KB gate, frozen-NNC change, or `N6_FINAL_REPORT.md` was made.
 
-Bootstrap script tools/pin_debug_keystore.ps1 rewritten fail-closed:
-  - Distinguishes: no device / device+package absent / device+package present+cert OK
-    / device+package present+cert read FAILED -> STOP without touching keystore
-  - apksigner missing while adb proves package installed -> STOP (was previously fail-open)
-  - Import credential policy: only exact Gradle debug credentials accepted
-    (storepass=android, alias=androiddebugkey, keypass=android); arbitrary credentials rejected
-  - Native stderr handling fixed (adb/apksigner warnings no longer trip ErrorActionPreference=Stop)
-  - SDK fallback reads local.properties with Java-properties unescaping; [char]1 sentinel used
-    (PowerShell 5.1 has no `u{} escape).
+## Cancellation correction
 
-Post-build verification pending: build debug APK, read built APK cert, require three-way
-equality, then adb install -r without uninstall, re-read installed cert.
+Both cancellation tests wait after `openImage()` until `isBusy=false`, `maintenanceBusy=false`, `historyBusy=false`, history activity is idle, no Draft save job is active, and the Draft generation/pointer are non-null and equal. Only then is the baseline captured.
 
-Release signing: untouched.
+Both cancellation tests now use the full `documentUnchanged(...)` predicate. The JSON before/after identity structures are byte-identical for both fresh cancellation runs, and `document_unchanged` is derived from that full predicate before PASS evidence is written.
 
-================================================================================
-HOST FIXES APPLIED (code)
-================================================================================
-app/src/main/kotlin/com/projectnuke/keplerstudio/editor/EditorViewModel.kt:
-  - Fixed ModelOperationContext.isCurrent stale bug: was only checking callback token/generation
-    == captured values. Now also requires:
-      captured generation == currentDocumentGeneration()
-      + exact current SR token, exact owning Job, Job active, sourcePath/baseToken/revision
-        unchanged, !shuttingDown. Full 10-predicate N5/native-boundary predicate.
+## Host verification
 
-app/src/androidTest/kotlin/com/projectnuke/keplerstudio/exynos/ExynosN6ProductE2ETest.kt:
-  - Rewrote with real SuperResolutionTestSeam (sessionProvider, progressObserver, milestoneObserver,
-    rgb8ArtifactObserver, wakeLockFactory)
-  - Stage-aware 360s watchdog with diagnostic snapshots
-  - 14-point milestone sampling with observed sizes
-  - NPU proof via decideNpuProof -> OBSERVED (not hardcoded)
-  - NNC size/SHA from preparedModelFileForDiagnostics()
-  - Region parity hashes for 4 regions written to n6_region_hashes.json
-  - Progress-triggered cancellation (PNG rows>0, NPU tiles>=2)
+- Focused accepted N4/N5/N6 set: **137 tests, 0 failures, 0 errors, 0 skipped**
+- Complete `testDebugUnitTest`: **1178 tests, 0 failures, 0 errors, 0 skipped** across 115 JUnit XML files
+- Complete `testDebugUnitTest --rerun-tasks`: **1178 tests, 0 failures, 0 errors, 0 skipped** across 115 JUnit XML files
+- Counts were parsed from actual `testDebugUnitTest` JUnit XML and matched.
+- `compileDebugKotlin`, `compileDebugUnitTestKotlin`, `compileDebugAndroidTestKotlin`: PASS
+- `lintDebug`, `assembleDebug`, `assembleDebugAndroidTest`: PASS
 
-tools/pin_debug_keystore.ps1:
-  - Fail-closed rewrite as above.
+One transient unrelated DraftRestore test failure was isolated and passed; the final required suite pair was clean.
 
-.gitignore / .gitattributes / artifacts:
-  - Hygiene fixes as above.
+## Physical S24 verification
 
-Host regression tests added:
-  - srDocumentGenerationStaleBeforeTileWork: proves stale detection before tile work
-  - arbitrationNewerSrSupersedesOlderSr: strengthened with gates and non-overwrite proof
+Device: Samsung `SM-S921N`, codename `e1s`, bounded identifier `R3CX40A15GB`, Exynos 2400
+Android: `16`, API `36`
+PAGE_SIZE: `4096`
 
-================================================================================
-N4/N5 REGRESSION
-================================================================================
-Status: PENDING RE-RUN (host gates only previously; physical not re-run in this pass)
-Do not redesign N4/N5.
+All three physical tests passed sequentially on CODE UNDER TEST SHA `0880c4bc5edd45ba01c3ab66a24101f6895a3683`:
 
-================================================================================
-N6 HOST
-================================================================================
-Compile: PASSED (compileDebugKotlin, compileDebugUnitTestKotlin, compileDebugAndroidTestKotlin)
-JUnit XML: PASSED — 1178 tests, 0 failures, 0 errors (both runs consistent; discrepancy resolved)
-Focused tests: PASSED
-  - SuperResolutionExportHostTest.srDocumentGenerationStaleBeforeTileWork: PASS
-  - SuperResolutionExportHostTest.arbitrationNewerSrSupersedesOlderSr: PASS
+| Test | Evidence elapsed |
+|---|---:|
+| `n6ProductE2EWithEditedDocument` | 210641 ms |
+| `n6CancellationDuringPngEncodingUsesViewModelActionAfterEncodingStarted` | 145126 ms |
+| `n6CancellationDuringNpuUpscalingUsesViewModelActionAfterTilesStarted` | 517 ms |
 
-lintDebug: BUILD SUCCESSFUL
-assembleDebug: BUILD SUCCESSFUL
-assembleDebugAndroidTest: BUILD SUCCESSFUL
+### Product success
 
-================================================================================
-N6 PHYSICAL (S24 Exynos)
-================================================================================
-Device: SM-S921N (erd9945 / Exynos 2400), R3CX40A15GB — connected
-PAGE_SIZE: 4096 (measured via adb shell getconf PAGE_SIZE) — not 16384.
-  -> 16 KB page-size hypothesis does NOT apply to this device.
-Cert 3-way equality: ac62525138841d7388237d190b37d9e119d854d97053655d063d28f9ba552c8f
-  -> installed/stable/default debug.keystore all equal; adb install -r succeeds.
+- Representative edits: exposure `0.35`, contrast `0.20`, active `VignetteCorrection`
+- Edited N6 input / full-export source: **4080 x 3060**
+- Published x4 output: **16320 x 12240**
+- Observed tiles: **3350**
+- Observed PNG rows: **12240**
+- NPU proof: `OBSERVED`
+- `document_unchanged`: **true**
+- SavedExport history: `6 -> 7`, including the new published result
+- Product elapsed: **210641 ms**
 
-Status: PASSED — all 3 E2E tests pass:
-  - n6ProductE2EWithEditedDocument: ~137s (within 360s watchdog)
-  - n6CancellationDuringPngEncodingUsesViewModelActionAfterEncodingStarted: ~140s
-  - n6CancellationDuringNpuUpscalingUsesViewModelActionAfterTilesStarted: ~1.4s
+NNC observed size/SHA:
 
-Harness features verified:
-  - SuperResolutionTestSeam with real ExynosUpscaleSession provider
-  - Stage-aware 360s watchdog with diagnostic snapshots
-  - 14-point milestone sampling with observed sizes
-  - NPU proof: decideNpuProof -> OBSERVED
-  - NNC size: 3,112,960 bytes, SHA: 9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12
-  - Region parity hashes written to n6_region_hashes.json
-  - Progress-triggered cancellation (PNG rows>0, NPU tiles>=2)
+```text
+3,112,960 bytes
+9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12
+```
 
-Frozen NNC proof (production hard assert):
-  size = 3,112,960 bytes
-  SHA-256 = 9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12
+Actual NPU diagnostics: H2D `SUCCESS`, executeReached `true`, Execute `SUCCESS`, D2H `SUCCESS`, compiler_npu `v2.4.11.l`.
 
-================================================================================
-N6 FINAL
-================================================================================
-Status: HOLD — not FINAL. Host and physical gates must genuinely pass before any
-        N6_FINAL_REPORT.md is created.
+Exactly 14 physical samples were produced by real callback/progress paths: `before_full_source_preparation`, `after_full_source_preparation`, `after_model_load`, `npu_early` tile 1/3350, `npu_midpoint` tile 1675/3350, `npu_late` tile 3350/3350, `after_rgb8_complete`, `png_early` row 32/12240, `png_midpoint` row 6144/12240, `png_late` row 12240/12240, `before_mediastore_publish`, `after_mediastore_publish`, `after_rgb8_cleanup`, and `after_session_close`.
 
-Do NOT start N7.
-Do NOT start full 16 KB compatibility remediation until N6 result is reviewed.
+There are no synthetic milestones. Cleanup reports the RGB8 file absent after the real cleanup attempt; session close follows the real close call.
 
-================================================================================
-CHANGED FILES (this corrective pass, working tree)
-================================================================================
-.gitignore
-  - Fixed leading-space patterns
+### Cancellation evidence
 
-.gitattributes
-  - Removed enn-logcat.txt line after deleting logcat dumps
+PNG: trigger `Encoding`, exact row **32/12240**, terminal `Cancelled`, `isBusy=false`, published URI null, pending rows `0 -> 0`, RGB8 absent, session `Unloaded`, registry inactive, wake lock released, full document identity unchanged, elapsed **145126 ms**.
 
-artifacts/exynos-n2a-fp16-s24-20260828/enn-logcat.txt  (deleted)
-artifacts/exynos-n2b-quantized-s24-20260828/enn-logcat.txt  (deleted)
+NPU: trigger `Upscaling`, exact tile **2/3350**, terminal `Cancelled`, `isBusy=false`, published URI null, pending rows `0 -> 0`, RGB8 absent, session `Unloaded`, registry inactive, wake lock released, full document identity unchanged, elapsed **517 ms**.
 
-app/src/main/kotlin/com/projectnuke/keplerstudio/editor/EditorViewModel.kt
-  - Fixed ModelOperationContext.isCurrent to include captured generation == currentDocumentGeneration()
-    as the 3rd predicate in the 10-predicate N5/native-boundary order
+The cancellation JSONs contain byte-identical `document_identity_before` and `document_identity_after`, including Draft generation/pointer/source identity.
 
-app/src/main/kotlin/com/projectnuke/keplerstudio/bridge/NativePhotoCore.kt
-  - Changed `internal external fun` to `external fun` (JNI name mangling requires public visibility)
+### Region parity
 
-app/src/test/kotlin/com/projectnuke/keplerstudio/editor/SuperResolutionExportHostTest.kt
-  - Added srDocumentGenerationStaleBeforeTileWork regression test
-  - Strengthened arbitrationNewerSrSupersedesOlderSr with deterministic gates
+Expected RGB8 raw hashes equal decoded published-PNG hashes for all four regions; the full 16K PNG was not decoded.
 
-app/src/androidTest/kotlin/com/projectnuke/keplerstudio/exynos/ExynosN6ProductE2ETest.kt
-  - Full rewrite with SuperResolutionTestSeam (real session provider, observers, wake-lock)
-  - Stage-aware 360s watchdog with diagnostic snapshots
-  - 14-point milestone sampling with observed sizes
-  - NPU proof via decideNpuProof -> OBSERVED
-  - NNC size/SHA from preparedModelFileForDiagnostics()
-  - Region parity hashes written to n6_region_hashes.json
-  - Progress-triggered cancellation (PNG rows>0, NPU tiles>=2)
+| Region | Expected = actual |
+|---|---|
+| top-left | `d172d977a41d19ad3dac316c43fd5bbc4711c03fbe715b3ccc299fac16984319` |
+| center | `ffc57ffd72c78f28ea5d27a8087f028094a970c131cd3d8bff727776383c9683` |
+| bottom-right | `9b0d55cafee191a7a8f2979e2bb288c50cd3e02ffc6f82dba82954dcacf9f447` |
+| planner-derived N4 seam crossing | `20bb9d7d74136a0782c12a80eeed0f1e541de4009e6a15c3a62bacef87e768d1` |
 
-tools/pin_debug_keystore.ps1
-  - Fail-closed rewrite (cert-read failure distinction, apksigner-missing handling, exact credential policy,
-    stderr handling, SDK fallback unescaping with [char]1 sentinel)
+## Signing
 
-================================================================================
-REMAINING GAPS
-================================================================================
-NONE — all gates passed:
-1. Host regression tests: PASSED (srDocumentGenerationStaleBeforeTileWork, arbitrationNewerSrSupersedesOlderSr)
-2. Physical E2E seam/watchdog/evidence: PASSED (3/3 tests pass on S24)
-3. Full verification: PASSED
-   - compileDebugKotlin / compileDebugUnitTestKotlin / compileDebugAndroidTestKotlin: OK
-   - focused N4/N5/N6 tests: PASS
-   - full suite x2: 1178 tests, 0 failures, 0 errors
-   - lintDebug: BUILD SUCCESSFUL
-   - assembleDebug: BUILD SUCCESSFUL
-   - assembleDebugAndroidTest: BUILD SUCCESSFUL
-   - physical E2E on S24: PASS
-4. HOLD report updated with actual evidence
+Stable keystore, built APK, and installed APK certificate SHA-256 are equal:
 
-================================================================================
-NEXT STEPS
-================================================================================
-1. Commit all changes (this working tree)
-2. Pull device artifact JSONs from S24 (n6_product_e2e.json, n6_memory_samples.json,
-   n6_memory_summary.json, n6_region_hashes.json) and attach as evidence
-3. Ready for review — do NOT start N7 until N6 review complete
+```text
+ac62525138841d7388237d190b37d9e119d854d97053655d063d28f9ba552c8f
+```
+
+Both APKs installed successfully with `adb install -r`. No uninstall, `pm uninstall`, or data clear was used.
+
+## Tracked compact evidence
+
+Directory: `artifacts/exynos-n6-s24-20260901/`
+
+- `n6_product_e2e.json`
+- `n6_memory_samples.json`
+- `n6_memory_summary.json`
+- `n6_region_hashes.json`
+- `n6_cancel_png_e2e.json`
+- `n6_cancel_npu_e2e.json`
+- `n6_run_manifest.json`
+
+The manifest binds the seven files to CODE UNDER TEST SHA `0880c4bc5edd45ba01c3ab66a24101f6895a3683`. No APK/AAB, bundle, RGB8, 16K PNG, raw logcat, HPROF, memory dump, fixture image, or private keystore is tracked.
+
+## Final disposition
+
+N6 remains **HOLD / READY FOR REVIEW**. Do not create `N6_FINAL_REPORT.md`, start N7, or start the separate 16 KB compatibility gate before N6 review closes.

@@ -1,0 +1,28 @@
+{
+  "date": "2026-09-01",
+  "device_model": "SM-S921N",
+  "device": "e1s",
+  "device_serial": "R3CX40A15GB",
+  "android_version": "16",
+  "api_level": 36,
+  "page_size": 4096,
+  "code_under_test_sha": "0880c4bc5edd45ba01c3ab66a24101f6895a3683",
+  "physical_result": "3/3 PASS",
+  "tests": [
+    {
+      "name": "n6ProductE2EWithEditedDocument",
+      "result": "PASS",
+      "elapsed_ms": 210641
+    },
+    {
+      "name": "n6CancellationDuringPngEncodingUsesViewModelActionAfterEncodingStarted",
+      "result": "PASS",
+      "elapsed_ms": 145126
+    },
+    {
+      "name": "n6CancellationDuringNpuUpscalingUsesViewModelActionAfterTilesStarted",
+      "result": "PASS",
+      "elapsed_ms": 517
+    }
+  ]
+}

@@ -1,0 +1,283 @@
+{
+  "status": "PASS",
+  "product_action": "EditorViewModel.exportSuperResolution",
+  "input_observed": "4080x3060",
+  "input_expected": "4080x3060",
+  "output_observed": "16320x12240",
+  "output_expected": "16320x12240",
+  "tiles_observed": 3350,
+  "tiles_expected": 3350,
+  "png_rows_observed": 12240,
+  "png_rows_expected": 12240,
+  "model_size_observed": 3112960,
+  "model_size_expected": 3112960,
+  "model_sha256_observed": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
+  "model_sha256_expected": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12",
+  "h2d_status": 0,
+  "execute_reached": true,
+  "execute_status": 0,
+  "d2h_status": 0,
+  "compiler_npu": "v2.4.11.l",
+  "npu_proof": "OBSERVED",
+  "session_lifecycle": "Unloaded",
+  "session_active": false,
+  "elapsed_ms": 210641,
+  "published_uri": "content:\/\/media\/external\/images\/media\/1000060170",
+  "source_hash": "f0a96fd703d42847439434a1df35d3c942dbae047510cb625c6041f4283949a7",
+  "representative_edits": {
+    "exposure": 0.35,
+    "contrast": 0.2,
+    "quick_effect": "VignetteCorrection",
+    "quick_effect_active": true
+  },
+  "document_identity_before": {
+    "source_path": "\/data\/user\/0\/com.projectnuke.keplerstudio\/cache\/source_9110894b-9573-44ac-811f-6456f67cfcea.img",
+    "base_content_token": "e6bcfa54-1df2-49c0-a316-49b12478f6bc",
+    "revision": 5,
+    "current_document_generation": "9bdae82e-0276-4a80-bd5c-c1e12d06de2c",
+    "preview_bitmap": {
+      "present": true,
+      "identity": 227506776,
+      "width": 2040,
+      "height": 1530,
+      "is_recycled": false
+    },
+    "original_preview_bitmap": {
+      "present": true,
+      "identity": 30968426,
+      "width": 2040,
+      "height": 1530,
+      "is_recycled": false
+    },
+    "params": {
+      "exposure": 0.35,
+      "contrast": 0.2,
+      "shadows": 0,
+      "highlights": 0,
+      "whites": 0,
+      "blacks": 0,
+      "temperature": 0,
+      "tint": 0,
+      "saturation": 0,
+      "vibrance": 0,
+      "clarity": 0,
+      "dehaze": 0,
+      "sharpness": 0,
+      "noiseReduction": 0,
+      "luminanceNoiseReduction": 0,
+      "colorNoiseReduction": 0,
+      "noiseDetailProtection": 0.5
+    },
+    "crop_state": "CropState(aspectRatio=Original, cropLeft=0.0, cropTop=0.0, cropRight=1.0, cropBottom=1.0, rotationDegrees=0, straightenDegrees=0.0, flipHorizontal=false)",
+    "selection_layers": [],
+    "active_quick_effects": [
+      {
+        "kind": "VignetteCorrection",
+        "strength": "Medium"
+      }
+    ],
+    "can_undo": true,
+    "can_redo": false,
+    "draft_generation_id": "gen_71e90788-5182-422e-88cc-71613f3a9c59",
+    "draft_pointer_baseline": "gen_71e90788-5182-422e-88cc-71613f3a9c59",
+    "draft_source_path": "\/data\/data\/com.projectnuke.keplerstudio\/files\/drafts\/generations\/gen_71e90788-5182-422e-88cc-71613f3a9c59\/source.img",
+    "draft_base_content_token": "e6bcfa54-1df2-49c0-a316-49b12478f6bc",
+    "draft_generation_source_path": "\/data\/data\/com.projectnuke.keplerstudio\/files\/drafts\/generations\/gen_71e90788-5182-422e-88cc-71613f3a9c59\/source.img",
+    "draft_generation_thumbnail_path": "\/data\/data\/com.projectnuke.keplerstudio\/files\/drafts\/generations\/gen_71e90788-5182-422e-88cc-71613f3a9c59\/thumbnail.jpg"
+  },
+  "document_identity_after": {
+    "source_path": "\/data\/user\/0\/com.projectnuke.keplerstudio\/cache\/source_9110894b-9573-44ac-811f-6456f67cfcea.img",
+    "base_content_token": "e6bcfa54-1df2-49c0-a316-49b12478f6bc",
+    "revision": 5,
+    "current_document_generation": "9bdae82e-0276-4a80-bd5c-c1e12d06de2c",
+    "preview_bitmap": {
+      "present": true,
+      "identity": 227506776,
+      "width": 2040,
+      "height": 1530,
+      "is_recycled": false
+    },
+    "original_preview_bitmap": {
+      "present": true,
+      "identity": 30968426,
+      "width": 2040,
+      "height": 1530,
+      "is_recycled": false
+    },
+    "params": {
+      "exposure": 0.35,
+      "contrast": 0.2,
+      "shadows": 0,
+      "highlights": 0,
+      "whites": 0,
+      "blacks": 0,
+      "temperature": 0,
+      "tint": 0,
+      "saturation": 0,
+      "vibrance": 0,
+      "clarity": 0,
+      "dehaze": 0,
+      "sharpness": 0,
+      "noiseReduction": 0,
+      "luminanceNoiseReduction": 0,
+      "colorNoiseReduction": 0,
+      "noiseDetailProtection": 0.5
+    },
+    "crop_state": "CropState(aspectRatio=Original, cropLeft=0.0, cropTop=0.0, cropRight=1.0, cropBottom=1.0, rotationDegrees=0, straightenDegrees=0.0, flipHorizontal=false)",
+    "selection_layers": [],
+    "active_quick_effects": [
+      {
+        "kind": "VignetteCorrection",
+        "strength": "Medium"
+      }
+    ],
+    "can_undo": true,
+    "can_redo": false,
+    "draft_generation_id": "gen_71e90788-5182-422e-88cc-71613f3a9c59",
+    "draft_pointer_baseline": "gen_71e90788-5182-422e-88cc-71613f3a9c59",
+    "draft_source_path": "\/data\/data\/com.projectnuke.keplerstudio\/files\/drafts\/generations\/gen_71e90788-5182-422e-88cc-71613f3a9c59\/source.img",
+    "draft_base_content_token": "e6bcfa54-1df2-49c0-a316-49b12478f6bc",
+    "draft_generation_source_path": "\/data\/data\/com.projectnuke.keplerstudio\/files\/drafts\/generations\/gen_71e90788-5182-422e-88cc-71613f3a9c59\/source.img",
+    "draft_generation_thumbnail_path": "\/data\/data\/com.projectnuke.keplerstudio\/files\/drafts\/generations\/gen_71e90788-5182-422e-88cc-71613f3a9c59\/thumbnail.jpg"
+  },
+  "document_unchanged": true,
+  "saved_export_history_before": {
+    "count": 6,
+    "entries": [
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060162",
+        "display_name": "KeplerStudio_SR4x_20260901_154353.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060158",
+        "display_name": "KeplerStudio_SR4x_20260901_151606.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060152",
+        "display_name": "KeplerStudio_SR4x_20260901_114359.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060150",
+        "display_name": "KeplerStudio_SR4x_20260901_112010.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060144",
+        "display_name": "KeplerStudio_SR4x_20260901_051012.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060143",
+        "display_name": "KeplerStudio_N6_fixture_202169681594059.png",
+        "format": "PNG",
+        "resolution": "4080x3060",
+        "provenance_feature": null,
+        "provenance_scale": null,
+        "provenance_model_sha": null
+      }
+    ]
+  },
+  "saved_export_history_after": {
+    "count": 7,
+    "entries": [
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060170",
+        "display_name": "KeplerStudio_SR4x_20260901_165943.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060162",
+        "display_name": "KeplerStudio_SR4x_20260901_154353.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060158",
+        "display_name": "KeplerStudio_SR4x_20260901_151606.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060152",
+        "display_name": "KeplerStudio_SR4x_20260901_114359.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060150",
+        "display_name": "KeplerStudio_SR4x_20260901_112010.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060144",
+        "display_name": "KeplerStudio_SR4x_20260901_051012.png",
+        "format": "PNG",
+        "resolution": "16320x12240",
+        "provenance_feature": "ExynosUpscale",
+        "provenance_scale": 4,
+        "provenance_model_sha": "9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12"
+      },
+      {
+        "uri": "content:\/\/media\/external\/images\/media\/1000060143",
+        "display_name": "KeplerStudio_N6_fixture_202169681594059.png",
+        "format": "PNG",
+        "resolution": "4080x3060",
+        "provenance_feature": null,
+        "provenance_scale": null,
+        "provenance_model_sha": null
+      }
+    ]
+  },
+  "region_hashes_expected": {
+    "top_left": "d172d977a41d19ad3dac316c43fd5bbc4711c03fbe715b3ccc299fac16984319",
+    "center": "ffc57ffd72c78f28ea5d27a8087f028094a970c131cd3d8bff727776383c9683",
+    "bottom_right": "9b0d55cafee191a7a8f2979e2bb288c50cd3e02ffc6f82dba82954dcacf9f447",
+    "n4_seam_crossing": "20bb9d7d74136a0782c12a80eeed0f1e541de4009e6a15c3a62bacef87e768d1"
+  },
+  "region_hashes_actual": {
+    "top_left": "d172d977a41d19ad3dac316c43fd5bbc4711c03fbe715b3ccc299fac16984319",
+    "center": "ffc57ffd72c78f28ea5d27a8087f028094a970c131cd3d8bff727776383c9683",
+    "bottom_right": "9b0d55cafee191a7a8f2979e2bb288c50cd3e02ffc6f82dba82954dcacf9f447",
+    "n4_seam_crossing": "20bb9d7d74136a0782c12a80eeed0f1e541de4009e6a15c3a62bacef87e768d1"
+  }
+}

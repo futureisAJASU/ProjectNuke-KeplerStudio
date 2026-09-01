@@ -1,0 +1,14 @@
+{
+  "expected_region_hashes": {
+    "top_left": "d172d977a41d19ad3dac316c43fd5bbc4711c03fbe715b3ccc299fac16984319",
+    "center": "ffc57ffd72c78f28ea5d27a8087f028094a970c131cd3d8bff727776383c9683",
+    "bottom_right": "9b0d55cafee191a7a8f2979e2bb288c50cd3e02ffc6f82dba82954dcacf9f447",
+    "n4_seam_crossing": "20bb9d7d74136a0782c12a80eeed0f1e541de4009e6a15c3a62bacef87e768d1"
+  },
+  "actual_region_hashes": {
+    "top_left": "d172d977a41d19ad3dac316c43fd5bbc4711c03fbe715b3ccc299fac16984319",
+    "center": "ffc57ffd72c78f28ea5d27a8087f028094a970c131cd3d8bff727776383c9683",
+    "bottom_right": "9b0d55cafee191a7a8f2979e2bb288c50cd3e02ffc6f82dba82954dcacf9f447",
+    "n4_seam_crossing": "20bb9d7d74136a0782c12a80eeed0f1e541de4009e6a15c3a62bacef87e768d1"
+  }
+}
