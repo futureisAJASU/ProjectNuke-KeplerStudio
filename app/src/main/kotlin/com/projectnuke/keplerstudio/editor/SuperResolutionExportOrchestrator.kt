@@ -223,6 +223,9 @@ internal object SuperResolutionExportOrchestrator {
 
         // Progress initial
         val testSeam = SuperResolutionTestSeam.capture()
+        fun emitMilestone(label: String) {
+            (milestoneObserver ?: testSeam?.milestoneObserver)?.invoke(label)
+        }
         fun report(progress: SuperResolutionExportProgress) {
             onProgress(progress)
             (progressObserver ?: testSeam?.progressObserver)?.invoke(progress)
@@ -276,7 +279,7 @@ internal object SuperResolutionExportOrchestrator {
             // Progress: upscaling phase
             val totalTiles = (TilePlanner.plan(inputWidth, inputHeight) as? TilePlanResult.Planned)?.plan?.tiles?.size ?: 0
             report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Upscaling, completedTiles = 0, totalTiles = totalTiles, tileFraction = 0f, overallFraction = 0.10f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
-            (milestoneObserver ?: testSeam?.milestoneObserver)?.invoke("after_model_load")
+            emitMilestone("after_model_load")
 
             val rgb8File = File(context.cacheDir, "sr6_${System.nanoTime()}_${(0..Int.MAX_VALUE).random()}.rgb8")
             if (rgb8File.exists()) rgb8File.delete()
@@ -382,7 +385,7 @@ internal object SuperResolutionExportOrchestrator {
             if (!isCurrent()) return@withContext SuperResolutionExportResult.Stale
 
             // Publish
-            (milestoneObserver ?: testSeam?.milestoneObserver)?.invoke("before_mediastore_publish")
+            emitMilestone("before_mediastore_publish")
             report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Publishing, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = outputHeight, encodingRowsTotal = outputHeight, encodingFraction = 1f, overallFraction = 0.99f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = false))
             val publishedCount = try {
                 rowStore.publish(pendingUri)
@@ -394,7 +397,7 @@ internal object SuperResolutionExportOrchestrator {
             }
             publishedUri = pendingUri
             pendingUri = null // published, don't delete
-            (milestoneObserver ?: testSeam?.milestoneObserver)?.invoke("after_mediastore_publish")
+            emitMilestone("after_mediastore_publish")
 
             // SavedExport history
             val committedUri = checkNotNull(publishedUri)
@@ -445,12 +448,21 @@ internal object SuperResolutionExportOrchestrator {
         } finally {
             val cleanupFailures = mutableListOf<Throwable>()
             val cleanupFailure: Throwable? = withContext(NonCancellable) {
-                rgb8Artifact?.let { deleteRgb8ArtifactBounded(it.file) }?.also { cleanupFailures.add(it) }
+                if (rgb8Artifact != null) {
+                    deleteRgb8ArtifactBounded(rgb8Artifact!!.file)?.also { cleanupFailures.add(it) }
+                    // This is emitted only after the bounded deletion attempt has returned;
+                    // observers can inspect the artifact path to distinguish absence from debt.
+                    runCatching { emitMilestone("after_rgb8_cleanup") }
+                }
                 // Pending-row transaction: distinguish delete truth and retry once.
                 pendingUri?.let { uri ->
                     deletePendingRowBounded(rowStore, uri)?.also { cleanupFailures.add(it) }
                 }
                 runCatching { session?.close() }
+                if (session != null) {
+                    // This is emitted only after the real session close call has returned.
+                    runCatching { emitMilestone("after_session_close") }
+                }
                 wakeLock.release()
                 when (cleanupFailures.size) {
                     0 -> null

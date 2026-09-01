@@ -149,6 +149,39 @@ function Get-CertSha256FromKeystore([string]$keystorePath, [string]$storePass, [
     return ($sha -replace ":", "" -replace "\s", "").ToLower()
 }
 
+function Verify-ImportedPrivateKey([string]$keystorePath, [string]$storePass, [string]$alias, [string]$keyPass) {
+    $keytool = Find-Executable @("keytool", "keytool.exe")
+    if (-not $keytool) { throw "keytool not found on PATH (JDK required)" }
+    $verificationPath = Join-Path ([System.IO.Path]::GetTempPath()) ("kepler_import_verify_{0}.jks" -f ([guid]::NewGuid().ToString("N")))
+    try {
+        # Importing the selected PrivateKeyEntry into a disposable JKS forces keytool
+        # to decrypt/use the source private key with -srckeypass. A list-only check
+        # cannot prove that credential, so this is the actual safe-use validation.
+        $import = Invoke-Native $keytool @(
+            "-importkeystore", "-noprompt",
+            "-srckeystore", $keystorePath, "-srcstorepass", $storePass,
+            "-srcalias", $alias, "-srckeypass", $keyPass,
+            "-destkeystore", $verificationPath, "-deststoretype", "JKS",
+            "-deststorepass", "verification-only", "-destkeypass", "verification-only",
+            "-destalias", $alias
+        )
+        if ($import.ExitCode -ne 0 -or -not (Test-Path $verificationPath)) {
+            throw "temporary private-key use verification failed (keytool exit=$($import.ExitCode))"
+        }
+        $listed = Invoke-Native $keytool @(
+            "-list", "-v", "-keystore", $verificationPath,
+            "-storepass", "verification-only", "-alias", $alias
+        )
+        if ($listed.ExitCode -ne 0 -or $listed.Output -notmatch "PrivateKeyEntry") {
+            throw "temporary verification did not produce a usable private-key entry"
+        }
+    } finally {
+        if (Test-Path $verificationPath) {
+            Remove-Item -LiteralPath $verificationPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-InstalledApkDevicePath([string]$adbPath, [string]$packageName) {
     # $null => package absent, "" => probe failed. Only a "package:" line proves presence.
     $res = Invoke-Native $adbPath @("shell", "pm path $packageName")
@@ -277,12 +310,7 @@ if ($ImportKeystorePath -ne "") {
     try {
         $importSha = Get-CertSha256FromKeystore $ImportKeystorePath $ImportStorePass $ImportKeyAlias
         if (-not $importSha) { throw "imported keystore has no certificate for alias $ImportKeyAlias" }
-        # Verify the private key is present and readable under the declared keypass.
-        $keytool = Find-Executable @("keytool", "keytool.exe")
-        $privOut = & $keytool -list -v -keystore $ImportKeystorePath -storepass $ImportStorePass -alias $ImportKeyAlias 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0 -or $privOut -notmatch "PrivateKeyEntry|PrivateKeyEntry:|Private key algorithm") {
-            throw "imported keystore alias $ImportKeyAlias does not hold a private key entry"
-        }
+        Verify-ImportedPrivateKey $ImportKeystorePath $ImportStorePass $ImportKeyAlias $ImportKeyPass
     } catch {
         Write-Error "Import validation failed: $_"
         exit 1

@@ -152,11 +152,11 @@ class ExynosN6ProductE2ETest {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    private fun sample(label: String, p: SuperResolutionExportProgress, wake: N5WakeLock?, heartbeat: Int, rgb8Bytes: Long) = JSONObject().apply {
+    private fun sample(label: String, p: SuperResolutionExportProgress, wake: N5WakeLock?, heartbeat: Int, rgb8Bytes: Long, rgb8Exists: Boolean = rgb8Bytes > 0L) = JSONObject().apply {
         val memory = android.os.Debug.MemoryInfo().also(android.os.Debug::getMemoryInfo)
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         put("label", label); put("java_heap", Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory()); put("native_heap", android.os.Debug.getNativeHeapAllocatedSize()); put("pss", memory.totalPss * 1024L)
-        put("tile_completed", p.completedTiles); put("tile_total", p.totalTiles); put("png_rows_completed", p.encodingRowsCompleted); put("png_rows_total", p.encodingRowsTotal); put("rgb8_file_bytes", rgb8Bytes)
+        put("tile_completed", p.completedTiles); put("tile_total", p.totalTiles); put("png_rows_completed", p.encodingRowsCompleted); put("png_rows_total", p.encodingRowsTotal); put("rgb8_file_bytes", rgb8Bytes); put("rgb8_file_exists", rgb8Exists)
         put("overall_fraction", p.overallFraction); put("phase", p.phase.name)
         put("input_width", p.inputWidth); put("input_height", p.inputHeight); put("output_width", p.outputWidth); put("output_height", p.outputHeight)
         put("wake_lock_held", wake?.isHeld == true); put("display_interactive", pm.isInteractive); put("main_heartbeat", heartbeat)
@@ -209,12 +209,70 @@ class ExynosN6ProductE2ETest {
         }
     }
 
+    private fun cancellationReportDir(): File =
+        File(context.getExternalFilesDir(null), "artifacts/exynos-n6-s24-20260901").apply { mkdirs() }
+
+    private fun documentIdentity(state: EditorUiState) = JSONObject().apply {
+        put("source_path", state.sourcePath ?: JSONObject.NULL)
+        put("base_content_token", state.baseContentToken ?: JSONObject.NULL)
+        put("revision", state.revision)
+        put("params", state.params.toString())
+        put("crop_state", state.cropState.toString())
+        put("selection_layer_count", state.selectionLayers.size)
+    }
+
+    private fun writeCancellationEvidence(
+        fileName: String,
+        triggerPhase: SuperResolutionExportPhase,
+        triggerProgress: SuperResolutionExportProgress,
+        terminal: SuperResolutionExportStatus,
+        before: EditorUiState,
+        after: EditorUiState,
+        pendingBefore: Int,
+        pendingAfter: Int,
+        rgb8ExistsAfterSettlement: Boolean,
+        session: ExynosUpscaleSession,
+        wake: N5WakeLock,
+        elapsedMs: Long,
+    ) {
+        val registryActive = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive == true
+        val documentUnchanged = before.sourcePath == after.sourcePath &&
+            before.baseContentToken == after.baseContentToken &&
+            before.revision == after.revision &&
+            before.params == after.params &&
+            before.cropState == after.cropState &&
+            before.selectionLayers == after.selectionLayers &&
+            before.previewBitmap === after.previewBitmap &&
+            before.originalPreviewBitmap === after.originalPreviewBitmap
+        File(cancellationReportDir(), fileName).writeText(JSONObject().apply {
+            put("status", "PASS")
+            put("trigger_phase", triggerPhase.name)
+            put("rows_completed_at_cancellation", if (triggerPhase == SuperResolutionExportPhase.Encoding) triggerProgress.encodingRowsCompleted else JSONObject.NULL)
+            put("rows_total", if (triggerPhase == SuperResolutionExportPhase.Encoding) triggerProgress.encodingRowsTotal else JSONObject.NULL)
+            put("completed_tiles_at_cancellation", if (triggerPhase == SuperResolutionExportPhase.Upscaling) triggerProgress.completedTiles else JSONObject.NULL)
+            put("total_tiles", if (triggerPhase == SuperResolutionExportPhase.Upscaling) triggerProgress.totalTiles else JSONObject.NULL)
+            put("terminal_phase", terminal.phase.name)
+            put("is_busy", terminal.isBusy)
+            put("published_uri", terminal.publishedUri?.toString() ?: JSONObject.NULL)
+            put("pending_rows_before", pendingBefore)
+            put("pending_rows_after", pendingAfter)
+            put("rgb8_exists_after_settlement", rgb8ExistsAfterSettlement)
+            put("session_lifecycle", session.lifecycle.name)
+            put("registry_session_active", registryActive)
+            put("wake_lock_held", wake.isHeld)
+            put("document_identity_before", documentIdentity(before))
+            put("document_identity_after", documentIdentity(after))
+            put("document_unchanged", documentUnchanged)
+            put("elapsed_ms", elapsedMs)
+        }.toString(2))
+    }
+
     @Test
     fun n6ProductE2EWithEditedDocument() = runBlocking {
         assumeTrue("physical N6 probe is opt-in", enabled()); assumeTrue("target must be Exynos 2400 S24", isS24Exynos())
         ModelAvailabilityRegistry.resetForTest()
         val sourceUri = insertFixture()
-        val reportDir = File(context.getExternalFilesDir(null), "artifacts/exynos-n6-s24-2026-08-30").apply { mkdirs() }
+        val reportDir = File(context.getExternalFilesDir(null), "artifacts/exynos-n6-s24-20260901").apply { mkdirs() }
         val rawSamples = JSONArray(); val milestoneLabels = HashSet<String>(); val heartbeat = AtomicInteger(); val handler = Handler(Looper.getMainLooper())
         val ticker = object : Runnable { override fun run() { heartbeat.incrementAndGet(); handler.postDelayed(this, 20) } }
         var latestProgress = SuperResolutionExportProgress(SuperResolutionExportPhase.Preparing, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight)
@@ -228,7 +286,6 @@ class ExynosN6ProductE2ETest {
         val preparedFileCaptured = AtomicReference<File?>(null)
         val preparedFileShaCaptured = AtomicReference<String?>(null)
         val preparedFileSizeCaptured = AtomicReference<Long?>(null)
-        val compilerNpuCaptured = AtomicReference<String?>(null)
         val vm = EditorViewModel(app)
         var seamHandle: AutoCloseable? = null
         try {
@@ -240,9 +297,10 @@ class ExynosN6ProductE2ETest {
             Log.i("KeplerN6Diag", "updateParams done")
             handler.post(ticker)
             val tilePlan = TilePlanner.plan(inputWidth, inputHeight)
-            val outputEdge = if (tilePlan is TilePlanResult.Planned) {
-                (tilePlan.plan.tiles.firstOrNull { it.dest.left > 0 }?.dest?.left ?: 544)
-            } else { 544 }
+            assertTrue("N4 seam requires the real planner-derived tiled plan", tilePlan is TilePlanResult.Planned)
+            val outputEdge = checkNotNull((tilePlan as TilePlanResult.Planned).plan.tiles.firstOrNull { it.dest.left > 0 }?.dest?.left) {
+                "N4 seam requires an interior planner tile"
+            }
             val seamLeft = outputEdge - 16
             val seamTop = (outputHeight / 2 - 16).coerceAtLeast(0)
             val seamRect = Rect(seamLeft, seamTop, seamLeft + 32, seamTop + 32)
@@ -250,7 +308,6 @@ class ExynosN6ProductE2ETest {
             assertTrue("seam rect must have positive height", seamRect.height() > 0)
             assertTrue("seam must cross interior edge", seamRect.left < outputEdge && seamRect.right > outputEdge)
             val progressRef = AtomicReference<SuperResolutionExportProgress>(latestProgress)
-            val milestoneLatch = CountDownLatch(1)
             val seam = SuperResolutionTestSeam(
                 sourceBitmapObserver = { bmp ->
                     val h = sourceBitmapHashBounded(bmp)
@@ -261,14 +318,14 @@ class ExynosN6ProductE2ETest {
                     lastMilestone.set(p.phase.name)
                     val wake = observedWake.get(); val rgb8Bytes = if (rgb8FileRef.get()?.exists() == true) rgb8FileRef.get()!!.length() else 0L
                     if (p.phase == SuperResolutionExportPhase.Upscaling) {
-                        if (p.completedTiles == 1 && milestoneLabels.add("npu_early")) rawSamples.put(sample("npu_early", p, wake, heartbeat.get(), rgb8Bytes))
+                        if (p.completedTiles > 0 && milestoneLabels.add("npu_early")) rawSamples.put(sample("npu_early", p, wake, heartbeat.get(), rgb8Bytes))
                         if (p.completedTiles >= expectedTiles / 2 && milestoneLabels.add("npu_midpoint")) rawSamples.put(sample("npu_midpoint", p, wake, heartbeat.get(), rgb8Bytes))
-                        if (p.completedTiles == expectedTiles && milestoneLabels.add("npu_late")) rawSamples.put(sample("npu_late", p, wake, heartbeat.get(), rgb8Bytes))
+                        if (p.completedTiles == p.totalTiles && milestoneLabels.add("npu_late")) rawSamples.put(sample("npu_late", p, wake, heartbeat.get(), rgb8Bytes))
                     }
                     if (p.phase == SuperResolutionExportPhase.Encoding) {
-                        if (p.encodingRowsCompleted == 1 && milestoneLabels.add("png_early")) rawSamples.put(sample("png_early", p, wake, heartbeat.get(), rgb8Bytes))
+                        if (p.encodingRowsCompleted > 0 && milestoneLabels.add("png_early")) rawSamples.put(sample("png_early", p, wake, heartbeat.get(), rgb8Bytes))
                         if (p.encodingRowsCompleted >= outputHeight / 2 && milestoneLabels.add("png_midpoint")) rawSamples.put(sample("png_midpoint", p, wake, heartbeat.get(), rgb8Bytes))
-                        if (p.encodingRowsCompleted == outputHeight && milestoneLabels.add("png_late")) rawSamples.put(sample("png_late", p, wake, heartbeat.get(), rgb8Bytes))
+                        if (p.encodingRowsCompleted == p.encodingRowsTotal && p.encodingRowsTotal > 0 && milestoneLabels.add("png_late")) rawSamples.put(sample("png_late", p, wake, heartbeat.get(), rgb8Bytes))
                     }
                 },
                 rgb8ArtifactObserver = { artifact ->
@@ -289,24 +346,25 @@ class ExynosN6ProductE2ETest {
                     val rgb8Bytes = if (rgb8File?.exists() == true) rgb8File.length() else 0L
                     when (label) {
                         "before_full_source_preparation", "after_full_source_preparation", "after_model_load",
-                        "before_mediastore_publish", "after_mediastore_publish", "after_rgb8_cleanup", "after_session_close" ->
-                            if (milestoneLabels.add(label)) rawSamples.put(sample(label, p, wake, heartbeat.get(), rgb8Bytes))
+                        "before_mediastore_publish", "after_mediastore_publish", "after_rgb8_cleanup", "after_session_close" -> {
+                            if (milestoneLabels.add(label)) {
+                                val observed = sample(label, p, wake, heartbeat.get(), rgb8Bytes, rgb8File?.exists() == true)
+                                if (label == "after_rgb8_cleanup") {
+                                    observed.put("rgb8_cleanup_status", if (rgb8File?.exists() == true) "file_present_cleanup_debt" else "file_absent_cleanup_success")
+                                }
+                                rawSamples.put(observed)
+                            }
+                        }
                     }
                     if (label == "after_model_load") {
                         val s = sessionRef.get(); val f = s?.preparedModelFileForDiagnostics()
                         if (f != null && f.exists()) { preparedFileCaptured.set(File(f.absolutePath)); try { preparedFileShaCaptured.set(sha256(f)) } catch (_: Throwable) {}; preparedFileSizeCaptured.set(f.length()) }
-                        try { val c = s?.getEnnMetaInfo(EnnMetaIds.MODEL_COMPILER_NPU); if (!c.isNullOrBlank()) compilerNpuCaptured.set(c) } catch (_: Throwable) {}
-                        milestoneLatch.countDown()
-                    }
-                    if (label == "after_rgb8_cleanup" || label == "after_session_close") {
-                        if (milestoneLabels.add(label)) rawSamples.put(sample(label, p, wake, heartbeat.get(), 0L))
                     }
                 },
                 sessionProvider = { ExynosUpscaleSession(context).also { s -> sessionRef.set(s) } },
                 wakeLockFactory = { c, t -> RealN5WakeLock(c, t).also { w -> observedWake.set(w) } }
             )
             seamHandle = SuperResolutionTestSeam.install(seam)
-            rawSamples.put(sample("before_full_source_preparation", latestProgress, observedWake.get(), heartbeat.get(), 0L))
             val startTime = System.nanoTime()
             vm.exportSuperResolution()
             Log.i("KeplerN6Diag", "BEFORE export canStart=${vm.canStartSuperResolution()} phase=${vm.superResolutionStatus.value.phase}")
@@ -326,12 +384,21 @@ class ExynosN6ProductE2ETest {
             assertEquals(outputWidth, observedOutputW); assertEquals(outputHeight, observedOutputH)
             assertEquals(expectedTiles, finalTiles); assertEquals(outputHeight, finalRows)
             assertTrue("rawSamples must be non-empty after successful export", rawSamples.length() > 0)
-            if (!milestoneLabels.contains("after_rgb8_cleanup")) rawSamples.put(sample("after_rgb8_cleanup", observedProgress, observedWake.get(), heartbeat.get(), 0L)); milestoneLabels.add("after_rgb8_cleanup")
-            if (!milestoneLabels.contains("after_session_close")) rawSamples.put(sample("after_session_close", observedProgress, observedWake.get(), heartbeat.get(), 0L)); milestoneLabels.add("after_session_close")
-            val requiredLabels = setOf("before_full_source_preparation", "after_full_source_preparation", "after_model_load", "after_rgb8_complete", "before_mediastore_publish", "after_mediastore_publish", "after_rgb8_cleanup", "after_session_close")
+            val requiredLabels = setOf(
+                "before_full_source_preparation", "after_full_source_preparation", "after_model_load",
+                "npu_early", "npu_midpoint", "npu_late", "after_rgb8_complete",
+                "png_early", "png_midpoint", "png_late", "before_mediastore_publish",
+                "after_mediastore_publish", "after_rgb8_cleanup", "after_session_close",
+            )
             for (lbl in requiredLabels) assertTrue("sample $lbl must be present", (0 until rawSamples.length()).any { rawSamples.getJSONObject(it).getString("label") == lbl })
+            assertEquals("N6 product evidence must contain exactly the 14 intended samples", 14, rawSamples.length())
+            assertEquals(requiredLabels, (0 until rawSamples.length()).map { rawSamples.getJSONObject(it).getString("label") }.toSet())
             val rgb8CompleteSample = (0 until rawSamples.length()).map { rawSamples.getJSONObject(it) }.firstOrNull { it.getString("label") == "after_rgb8_complete" }
-            if (rgb8CompleteSample != null) assertTrue("after_rgb8_complete must have non-zero rgb8_file_bytes", rgb8CompleteSample.getLong("rgb8_file_bytes") > 0L)
+            assertNotNull("after_rgb8_complete must be an actual artifact callback", rgb8CompleteSample)
+            assertTrue("after_rgb8_complete must have non-zero rgb8_file_bytes", checkNotNull(rgb8CompleteSample).getLong("rgb8_file_bytes") > 0L)
+            val rgb8CleanupSample = (0 until rawSamples.length()).map { rawSamples.getJSONObject(it) }.first { it.getString("label") == "after_rgb8_cleanup" }
+            assertFalse("cleanup sample must observe the RGB8 file absent", rgb8CleanupSample.getBoolean("rgb8_file_exists"))
+            assertEquals("file_absent_cleanup_success", rgb8CleanupSample.getString("rgb8_cleanup_status"))
             assertTrue(rawSamples.length() > 0)
             val javaValues = (0 until rawSamples.length()).map { rawSamples.getJSONObject(it).getLong("java_heap") }
             val nativeValues = (0 until rawSamples.length()).map { rawSamples.getJSONObject(it).getLong("native_heap") }
@@ -346,20 +413,21 @@ class ExynosN6ProductE2ETest {
             assertNotNull("captured NNC size must exist", capturedSize)
             assertEquals(expectedModelBytes, capturedSize)
             assertEquals(expectedModelSha, capturedSha)
-            val compilerNpu = compilerNpuCaptured.get() ?: session.getEnnMetaInfo(EnnMetaIds.MODEL_COMPILER_NPU)
+            val diag = session.lastRunDiagnostics
+            val compilerNpu = runCatching { session.getEnnMetaInfo(EnnMetaIds.MODEL_COMPILER_NPU) }.getOrNull()
             Log.i("KeplerN6Diag", "NPU proof compiler_npu=$compilerNpu")
-            val decision = decideNpuProof(true, EnnStatus.SUCCESS, compilerNpu)
+            val decision = decideNpuProof(diag.executeReached, diag.executeStatus, compilerNpu)
             assertEquals("NPU proof must be OBSERVED (compiler=$compilerNpu)", NpuProofStatus.OBSERVED, decision.status)
-            assertEquals(EnnStatus.SUCCESS, session.lastRunDiagnostics.h2dStatus)
-            assertTrue(session.lastRunDiagnostics.executeReached)
-            assertEquals(EnnStatus.SUCCESS, session.lastRunDiagnostics.executeStatus)
-            assertEquals(EnnStatus.SUCCESS, session.lastRunDiagnostics.d2hStatus)
+            assertEquals(EnnStatus.SUCCESS, diag.h2dStatus)
+            assertTrue(diag.executeReached)
+            assertEquals(EnnStatus.SUCCESS, diag.executeStatus)
+            assertEquals(EnnStatus.SUCCESS, diag.d2hStatus)
             assertTrue(compilerNpu!!.isNotBlank() && !compilerNpu.equals("unavailable", ignoreCase = true))
             assertTrue("registry session must be inactive", ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive != true)
             assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
             assertEquals(false, observedWake.get()?.isHeld)
             val rgb8File = rgb8ArtifactForHash?.file ?: rgb8FileRef.get()
-            if (rgb8File != null) { Thread.sleep(300); assertFalse("internal RGB8 artifact must be cleaned after success", rgb8File.exists()) }
+            if (rgb8File != null) assertFalse("internal RGB8 artifact must be cleaned after success", rgb8File.exists())
             assertTrue("sourceBitmapObserver must have been invoked", sourceHashRef.get() != null)
             val actualRegionHashes = mutableMapOf<String, String>()
             context.contentResolver.openInputStream(uri).use { input ->
@@ -387,8 +455,7 @@ class ExynosN6ProductE2ETest {
                 "compiler_npu" to (compilerNpu ?: "unavailable"), "npu_proof" to decision.status.name,
                 "session_lifecycle" to session.lifecycle.name, "session_active" to (ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive ?: false),
                 "elapsed_ms" to elapsedMs, "published_uri" to uri.toString(), "source_hash" to (sourceHashRef.get() ?: ""),
-                "region_hashes_expected" to JSONObject(expectedRegionHashes), "region_hashes_actual" to JSONObject(actualRegionHashes),
-                "samples" to rawSamples, "memory_summary" to memorySummary
+                "region_hashes_expected" to JSONObject(expectedRegionHashes), "region_hashes_actual" to JSONObject(actualRegionHashes)
             )).toString(2))
             File(reportDir, "n6_region_hashes.json").writeText(JSONObject(mapOf("expected_region_hashes" to JSONObject(expectedRegionHashes), "actual_region_hashes" to JSONObject(actualRegionHashes))).toString(2))
         } finally {
@@ -414,10 +481,11 @@ class ExynosN6ProductE2ETest {
             val generation = ModelAvailabilityRegistry.beginProbe(); ModelAvailabilityRegistry.probePackagedCapabilities(context, generation)
             vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 90) { !vm.uiState.value.isBusy && vm.uiState.value.sourcePath != null }
             val before = vm.uiState.value; val pendingBefore = pendingRows(); handler.post(ticker)
-            val encodingStarted = CountDownLatch(1); val observedRows = AtomicInteger(-1)
+            val startTime = System.nanoTime()
+            val encodingStarted = CountDownLatch(1); val triggerProgress = AtomicReference<SuperResolutionExportProgress?>()
             val seam = SuperResolutionTestSeam(
                 progressObserver = { p ->
-                    if (p.phase == SuperResolutionExportPhase.Encoding && p.encodingRowsCompleted > 0) { observedRows.compareAndSet(-1, p.encodingRowsCompleted); encodingStarted.countDown() }
+                    if (p.phase == SuperResolutionExportPhase.Encoding && p.encodingRowsCompleted > 0 && triggerProgress.compareAndSet(null, p)) encodingStarted.countDown()
                 },
                 rgb8ArtifactObserver = { artifact -> rgb8Ref.set(artifact.file) },
                 milestoneObserver = { label -> lastMilestone.set(label) },
@@ -430,25 +498,34 @@ class ExynosN6ProductE2ETest {
                 vm.superResolutionStatus.value.phase == SuperResolutionExportPhase.Encoding && vm.superResolutionStatus.value.progress.encodingRowsCompleted > 0 || encodingStarted.count == 0L
             }
             assertTrue("PNG encoding must have started before cancellation", encodingStarted.await(0, TimeUnit.SECONDS))
-            val rowsAtCancel = if (observedRows.get() >= 0) observedRows.get() else vm.superResolutionStatus.value.progress.encodingRowsCompleted
-            assertTrue("must record exact observed row count >0, got $rowsAtCancel", rowsAtCancel > 0)
+            val trigger = checkNotNull(triggerProgress.get())
+            assertTrue("must record exact observed row count >0, got ${trigger.encodingRowsCompleted}", trigger.encodingRowsCompleted > 0)
+            val rowsAtCancel = trigger.encodingRowsCompleted
             Log.i("KeplerN6Diag", "Cancelling during PNG encoding at rows=$rowsAtCancel")
             vm.cancelSuperResolution()
             awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 60) { !vm.superResolutionStatus.value.isBusy && vm.superResolutionStatus.value.phase in setOf(SuperResolutionExportPhase.Succeeded, SuperResolutionExportPhase.Failed, SuperResolutionExportPhase.Cancelled) }
+            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime)
             val pendingAfter = pendingRows()
-            assertEquals(SuperResolutionExportPhase.Cancelled, vm.superResolutionStatus.value.phase)
-            assertEquals(false, vm.superResolutionStatus.value.isBusy)
-            assertNull(vm.superResolutionStatus.value.publishedUri)
-            assertEquals(before.sourcePath, vm.uiState.value.sourcePath); assertEquals(before.baseContentToken, vm.uiState.value.baseContentToken); assertEquals(before.revision, vm.uiState.value.revision)
-            assertSame(before.previewBitmap, vm.uiState.value.previewBitmap)
-            assertTrue("registry inactive", ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive != true)
+            val terminal = vm.superResolutionStatus.value
+            val after = vm.uiState.value
+            assertEquals(SuperResolutionExportPhase.Cancelled, terminal.phase)
+            assertEquals(false, terminal.isBusy)
+            assertNull(terminal.publishedUri)
+            assertEquals(before.sourcePath, after.sourcePath); assertEquals(before.baseContentToken, after.baseContentToken); assertEquals(before.revision, after.revision)
+            assertSame(before.previewBitmap, after.previewBitmap)
             assertEquals(pendingBefore, pendingAfter)
             val rgb8File = rgb8Ref.get()
-            if (rgb8File != null) { Thread.sleep(300); assertFalse("RGB8 artifact must be settled after cancellation", rgb8File.exists()) }
-                else { val leftover = context.cacheDir.listFiles()?.filter { it.name.startsWith("sr6_") && it.name.endsWith(".rgb8") } ?: emptyList(); assertTrue("no RGB8 leftover after cancellation", leftover.isEmpty()) }
-            assertEquals(ModelRunnerLifecycle.Unloaded, sessionRef.get()?.lifecycle)
-            assertEquals(false, wakeRef.get()?.isHeld)
+            val rgb8ExistsAfter = rgb8File?.exists() == true
+            val leftovers = context.cacheDir.listFiles()?.filter { it.name.startsWith("sr6_") && it.name.endsWith(".rgb8") } ?: emptyList()
+            assertFalse("RGB8 artifact must be settled after cancellation", rgb8ExistsAfter)
+            assertTrue("no RGB8 leftover after cancellation", leftovers.isEmpty())
+            val session = checkNotNull(sessionRef.get())
+            val wake = checkNotNull(wakeRef.get())
+            assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
+            assertFalse(wake.isHeld)
             assertTrue("registry inactive after cancellation", ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive != true)
+            assertTrue("document identity must remain unchanged", before.sourcePath == after.sourcePath && before.baseContentToken == after.baseContentToken && before.revision == after.revision && before.params == after.params && before.cropState == after.cropState && before.selectionLayers == after.selectionLayers && before.previewBitmap === after.previewBitmap && before.originalPreviewBitmap === after.originalPreviewBitmap)
+            writeCancellationEvidence("n6_cancel_png_e2e.json", SuperResolutionExportPhase.Encoding, trigger, terminal, before, after, pendingBefore, pendingAfter, rgb8ExistsAfter, session, wake, elapsedMs)
         } finally {
             try { seamHandle?.close() } catch (_: Throwable) {}
             runCatching { vm.shutdownForTest() }
@@ -472,10 +549,11 @@ class ExynosN6ProductE2ETest {
             val generation = ModelAvailabilityRegistry.beginProbe(); ModelAvailabilityRegistry.probePackagedCapabilities(context, generation)
             vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 90) { !vm.uiState.value.isBusy && vm.uiState.value.sourcePath != null }
             val before = vm.uiState.value; val pendingBefore = pendingRows(); handler.post(ticker)
-            val tilesStarted = CountDownLatch(1); val observedTiles = AtomicInteger(-1)
+            val startTime = System.nanoTime()
+            val tilesStarted = CountDownLatch(1); val triggerProgress = AtomicReference<SuperResolutionExportProgress?>()
             val seam = SuperResolutionTestSeam(
                 progressObserver = { p ->
-                    if (p.phase == SuperResolutionExportPhase.Upscaling && p.completedTiles >= 2) { observedTiles.compareAndSet(-1, p.completedTiles); tilesStarted.countDown() }
+                    if (p.phase == SuperResolutionExportPhase.Upscaling && p.completedTiles >= 2 && triggerProgress.compareAndSet(null, p)) tilesStarted.countDown()
                 },
                 rgb8ArtifactObserver = { artifact -> rgb8Ref.set(artifact.file) },
                 milestoneObserver = { label -> lastMilestone.set(label) },
@@ -488,24 +566,34 @@ class ExynosN6ProductE2ETest {
                 vm.superResolutionStatus.value.phase == SuperResolutionExportPhase.Upscaling && vm.superResolutionStatus.value.progress.completedTiles >= 2 || tilesStarted.count == 0L
             }
             assertTrue("NPU upscaling must have reached >=2 tiles before cancellation", tilesStarted.await(0, TimeUnit.SECONDS))
-            val tilesAtCancel = if (observedTiles.get() >= 0) observedTiles.get() else vm.superResolutionStatus.value.progress.completedTiles
+            val trigger = checkNotNull(triggerProgress.get())
+            val tilesAtCancel = trigger.completedTiles
             assertTrue("must record exact tile count >=2, got $tilesAtCancel", tilesAtCancel >= 2)
             Log.i("KeplerN6Diag", "Cancelling during NPU upscaling at tiles=$tilesAtCancel")
             vm.cancelSuperResolution()
             awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 60) { !vm.superResolutionStatus.value.isBusy && vm.superResolutionStatus.value.phase in setOf(SuperResolutionExportPhase.Succeeded, SuperResolutionExportPhase.Failed, SuperResolutionExportPhase.Cancelled) }
+            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime)
             val pendingAfter = pendingRows()
-            assertEquals(SuperResolutionExportPhase.Cancelled, vm.superResolutionStatus.value.phase)
-            assertEquals(false, vm.superResolutionStatus.value.isBusy)
-            assertNull(vm.superResolutionStatus.value.publishedUri)
-            assertEquals(before.sourcePath, vm.uiState.value.sourcePath); assertEquals(before.baseContentToken, vm.uiState.value.baseContentToken); assertEquals(before.revision, vm.uiState.value.revision)
-            assertSame(before.previewBitmap, vm.uiState.value.previewBitmap)
+            val terminal = vm.superResolutionStatus.value
+            val after = vm.uiState.value
+            assertEquals(SuperResolutionExportPhase.Cancelled, terminal.phase)
+            assertEquals(false, terminal.isBusy)
+            assertNull(terminal.publishedUri)
+            assertEquals(before.sourcePath, after.sourcePath); assertEquals(before.baseContentToken, after.baseContentToken); assertEquals(before.revision, after.revision)
+            assertSame(before.previewBitmap, after.previewBitmap)
             assertEquals(pendingBefore, pendingAfter)
             val rgb8File = rgb8Ref.get()
-            if (rgb8File != null) { Thread.sleep(300); assertFalse("RGB8 artifact must be settled after NPU cancellation", rgb8File.exists()) }
-                else { val leftover = context.cacheDir.listFiles()?.filter { it.name.startsWith("sr6_") && it.name.endsWith(".rgb8") } ?: emptyList(); assertTrue("no RGB8 leftover after NPU cancellation", leftover.isEmpty()) }
-            assertEquals(ModelRunnerLifecycle.Unloaded, sessionRef.get()?.lifecycle)
-            assertEquals(false, wakeRef.get()?.isHeld)
+            val rgb8ExistsAfter = rgb8File?.exists() == true
+            val leftovers = context.cacheDir.listFiles()?.filter { it.name.startsWith("sr6_") && it.name.endsWith(".rgb8") } ?: emptyList()
+            assertFalse("RGB8 artifact must be settled after NPU cancellation", rgb8ExistsAfter)
+            assertTrue("no RGB8 leftover after NPU cancellation", leftovers.isEmpty())
+            val session = checkNotNull(sessionRef.get())
+            val wake = checkNotNull(wakeRef.get())
+            assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
+            assertFalse(wake.isHeld)
             assertTrue("registry inactive after NPU cancellation", ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive != true)
+            assertTrue("document identity must remain unchanged", before.sourcePath == after.sourcePath && before.baseContentToken == after.baseContentToken && before.revision == after.revision && before.params == after.params && before.cropState == after.cropState && before.selectionLayers == after.selectionLayers && before.previewBitmap === after.previewBitmap && before.originalPreviewBitmap === after.originalPreviewBitmap)
+            writeCancellationEvidence("n6_cancel_npu_e2e.json", SuperResolutionExportPhase.Upscaling, trigger, terminal, before, after, pendingBefore, pendingAfter, rgb8ExistsAfter, session, wake, elapsedMs)
         } finally {
             try { seamHandle?.close() } catch (_: Throwable) {}
             runCatching { vm.shutdownForTest() }
