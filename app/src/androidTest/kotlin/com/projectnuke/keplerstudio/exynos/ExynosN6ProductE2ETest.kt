@@ -286,6 +286,7 @@ class ExynosN6ProductE2ETest {
         val preparedFileCaptured = AtomicReference<File?>(null)
         val preparedFileShaCaptured = AtomicReference<String?>(null)
         val preparedFileSizeCaptured = AtomicReference<Long?>(null)
+        val compilerNpuCaptured = AtomicReference<String?>(null)
         val vm = EditorViewModel(app)
         var seamHandle: AutoCloseable? = null
         try {
@@ -359,6 +360,7 @@ class ExynosN6ProductE2ETest {
                     if (label == "after_model_load") {
                         val s = sessionRef.get(); val f = s?.preparedModelFileForDiagnostics()
                         if (f != null && f.exists()) { preparedFileCaptured.set(File(f.absolutePath)); try { preparedFileShaCaptured.set(sha256(f)) } catch (_: Throwable) {}; preparedFileSizeCaptured.set(f.length()) }
+                        compilerNpuCaptured.set(runCatching { s?.getEnnMetaInfo(EnnMetaIds.MODEL_COMPILER_NPU) }.getOrNull())
                     }
                 },
                 sessionProvider = { ExynosUpscaleSession(context).also { s -> sessionRef.set(s) } },
@@ -414,7 +416,7 @@ class ExynosN6ProductE2ETest {
             assertEquals(expectedModelBytes, capturedSize)
             assertEquals(expectedModelSha, capturedSha)
             val diag = session.lastRunDiagnostics
-            val compilerNpu = runCatching { session.getEnnMetaInfo(EnnMetaIds.MODEL_COMPILER_NPU) }.getOrNull()
+            val compilerNpu = compilerNpuCaptured.get()
             Log.i("KeplerN6Diag", "NPU proof compiler_npu=$compilerNpu")
             val decision = decideNpuProof(diag.executeReached, diag.executeStatus, compilerNpu)
             assertEquals("NPU proof must be OBSERVED (compiler=$compilerNpu)", NpuProofStatus.OBSERVED, decision.status)
