@@ -212,13 +212,136 @@ class ExynosN6ProductE2ETest {
     private fun cancellationReportDir(): File =
         File(context.getExternalFilesDir(null), "artifacts/exynos-n6-s24-20260901").apply { mkdirs() }
 
-    private fun documentIdentity(state: EditorUiState) = JSONObject().apply {
-        put("source_path", state.sourcePath ?: JSONObject.NULL)
-        put("base_content_token", state.baseContentToken ?: JSONObject.NULL)
-        put("revision", state.revision)
-        put("params", state.params.toString())
-        put("crop_state", state.cropState.toString())
-        put("selection_layer_count", state.selectionLayers.size)
+    private data class DocumentSnapshot(
+        val state: EditorUiState,
+        val documentGeneration: String,
+        val draftPointer: String?,
+    )
+
+    private fun captureDocument(vm: EditorViewModel): DocumentSnapshot =
+        DocumentSnapshot(vm.uiState.value, vm.currentDocumentGeneration(), vm.draftPointerBaseline)
+
+    private fun bitmapIdentity(bitmap: Bitmap?) = JSONObject().apply {
+        put("present", bitmap != null)
+        put("identity", bitmap?.let(System::identityHashCode) ?: JSONObject.NULL)
+        put("width", bitmap?.width ?: JSONObject.NULL)
+        put("height", bitmap?.height ?: JSONObject.NULL)
+        put("is_recycled", bitmap?.isRecycled ?: JSONObject.NULL)
+    }
+
+    private fun selectionLayerIdentity(layers: List<SelectionLayer>) = JSONArray().apply {
+        layers.forEach { layer ->
+            put(JSONObject().apply {
+                put("id", layer.id)
+                put("name", layer.name)
+                put("kind", layer.kind.name)
+                put("enabled", layer.enabled)
+                put("inverted", layer.inverted)
+                put("opacity", layer.opacity)
+                put("local_params", layer.localParams.toJsonObject())
+                put("bitmap", bitmapIdentity(layer.bitmap))
+            })
+        }
+    }
+
+    private fun quickEffectIdentity(effects: List<ActiveQuickEffect>) = JSONArray().apply {
+        effects.forEach { effect ->
+            put(JSONObject().apply {
+                put("kind", effect.kind.name)
+                put("strength", effect.strength.name)
+            })
+        }
+    }
+
+    private fun documentIdentity(snapshot: DocumentSnapshot) = snapshot.state.let { state ->
+        JSONObject().apply {
+            put("source_path", state.sourcePath ?: JSONObject.NULL)
+            put("base_content_token", state.baseContentToken)
+            put("revision", state.revision)
+            put("current_document_generation", snapshot.documentGeneration)
+            put("preview_bitmap", bitmapIdentity(state.previewBitmap))
+            put("original_preview_bitmap", bitmapIdentity(state.originalPreviewBitmap))
+            put("params", state.params.toJsonObject())
+            put("crop_state", state.cropState.toString())
+            put("selection_layers", selectionLayerIdentity(state.selectionLayers))
+            put("active_quick_effects", quickEffectIdentity(state.activeQuickEffects))
+            put("can_undo", state.canUndo)
+            put("can_redo", state.canRedo)
+            put("draft_generation_id", state.draftGenerationId ?: JSONObject.NULL)
+            put("draft_pointer_baseline", snapshot.draftPointer ?: JSONObject.NULL)
+            put("draft_source_path", state.draftSourcePath ?: JSONObject.NULL)
+            put("draft_base_content_token", state.draftBaseContentToken ?: JSONObject.NULL)
+            put("draft_generation_source_path", state.draftGenerationSourcePath ?: JSONObject.NULL)
+            put("draft_generation_thumbnail_path", state.draftGenerationThumbnailPath ?: JSONObject.NULL)
+        }
+    }
+
+    private fun savedExportHistoryIdentity(state: EditorUiState) = JSONObject().apply {
+        put("count", state.savedExports.size)
+        put("entries", JSONArray().apply {
+            state.savedExports.forEach { export ->
+                put(JSONObject().apply {
+                    put("uri", export.uriString)
+                    put("display_name", export.displayName)
+                    put("format", export.formatLabel)
+                    put("resolution", export.resolutionLabel)
+                    put("provenance_feature", export.provenanceFeature ?: JSONObject.NULL)
+                    put("provenance_scale", export.provenanceScale ?: JSONObject.NULL)
+                    put("provenance_model_sha", export.provenanceModelSha ?: JSONObject.NULL)
+                })
+            }
+        })
+    }
+
+    private fun sameBitmap(a: Bitmap?, b: Bitmap?): Boolean =
+        a === b && a?.isRecycled == b?.isRecycled
+
+    private fun sameSelectionLayers(a: List<SelectionLayer>, b: List<SelectionLayer>): Boolean =
+        a.size == b.size && a.zip(b).all { (left, right) ->
+            left.id == right.id &&
+                left.name == right.name &&
+                left.kind == right.kind &&
+                left.enabled == right.enabled &&
+                left.inverted == right.inverted &&
+                left.opacity == right.opacity &&
+                left.localParams == right.localParams &&
+                sameBitmap(left.bitmap, right.bitmap)
+        }
+
+    private fun documentUnchanged(before: DocumentSnapshot, after: DocumentSnapshot): Boolean {
+        val a = before.state
+        val b = after.state
+        return a.sourcePath == b.sourcePath &&
+            a.baseContentToken == b.baseContentToken &&
+            a.revision == b.revision &&
+            before.documentGeneration == after.documentGeneration &&
+            sameBitmap(a.previewBitmap, b.previewBitmap) &&
+            sameBitmap(a.originalPreviewBitmap, b.originalPreviewBitmap) &&
+            a.params == b.params &&
+            a.cropState == b.cropState &&
+            sameSelectionLayers(a.selectionLayers, b.selectionLayers) &&
+            a.activeQuickEffects == b.activeQuickEffects &&
+            a.canUndo == b.canUndo &&
+            a.canRedo == b.canRedo &&
+            a.draftGenerationId == b.draftGenerationId &&
+            before.draftPointer == after.draftPointer &&
+            a.draftSourcePath == b.draftSourcePath &&
+            a.draftBaseContentToken == b.draftBaseContentToken &&
+            a.draftGenerationSourcePath == b.draftGenerationSourcePath &&
+            a.draftGenerationThumbnailPath == b.draftGenerationThumbnailPath
+    }
+
+    private fun cancellationDocumentUnchanged(before: DocumentSnapshot, after: DocumentSnapshot): Boolean {
+        val a = before.state
+        val b = after.state
+        return a.sourcePath == b.sourcePath &&
+            a.baseContentToken == b.baseContentToken &&
+            a.revision == b.revision &&
+            a.params == b.params &&
+            a.cropState == b.cropState &&
+            a.selectionLayers == b.selectionLayers &&
+            a.previewBitmap === b.previewBitmap &&
+            a.originalPreviewBitmap === b.originalPreviewBitmap
     }
 
     private fun writeCancellationEvidence(
@@ -226,8 +349,8 @@ class ExynosN6ProductE2ETest {
         triggerPhase: SuperResolutionExportPhase,
         triggerProgress: SuperResolutionExportProgress,
         terminal: SuperResolutionExportStatus,
-        before: EditorUiState,
-        after: EditorUiState,
+        before: DocumentSnapshot,
+        after: DocumentSnapshot,
         pendingBefore: Int,
         pendingAfter: Int,
         rgb8ExistsAfterSettlement: Boolean,
@@ -236,14 +359,7 @@ class ExynosN6ProductE2ETest {
         elapsedMs: Long,
     ) {
         val registryActive = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive == true
-        val documentUnchanged = before.sourcePath == after.sourcePath &&
-            before.baseContentToken == after.baseContentToken &&
-            before.revision == after.revision &&
-            before.params == after.params &&
-            before.cropState == after.cropState &&
-            before.selectionLayers == after.selectionLayers &&
-            before.previewBitmap === after.previewBitmap &&
-            before.originalPreviewBitmap === after.originalPreviewBitmap
+        val documentUnchanged = cancellationDocumentUnchanged(before, after)
         File(cancellationReportDir(), fileName).writeText(JSONObject().apply {
             put("status", "PASS")
             put("trigger_phase", triggerPhase.name)
@@ -292,10 +408,57 @@ class ExynosN6ProductE2ETest {
         try {
             val generation = ModelAvailabilityRegistry.beginProbe(); ModelAvailabilityRegistry.probePackagedCapabilities(context, generation)
             assertTrue(ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.canAttemptModelUse == true)
-            vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8FileRef, 180) { !vm.uiState.value.isBusy && vm.uiState.value.sourcePath != null }
+            vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8FileRef, 180) {
+                !vm.uiState.value.isBusy &&
+                    !vm.uiState.value.maintenanceBusy &&
+                    !vm.uiState.value.historyBusy &&
+                    !vm.historyActivityBusyForTest() &&
+                    vm.uiState.value.sourcePath != null
+            }
             Log.i("KeplerN6Diag", "openImage done sourcePath=${vm.uiState.value.sourcePath} isBusy=${vm.uiState.value.isBusy}")
-            vm.updateParams { it.copy(exposure = 0.35f) }; awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8FileRef, 90) { !vm.uiState.value.isBusy && vm.uiState.value.params.exposure == 0.35f }
-            Log.i("KeplerN6Diag", "updateParams done")
+            val openedRevision = vm.uiState.value.revision
+            assertFalse("fixture must start without VignetteCorrection", vm.uiState.value.activeQuickEffects.any { it.kind == QuickEffectKind.VignetteCorrection })
+            vm.updateParams { it.copy(exposure = 0.35f, contrast = 0.20f) }
+            awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8FileRef, 90) {
+                !vm.uiState.value.isBusy &&
+                    vm.uiState.value.params.exposure == 0.35f &&
+                    vm.uiState.value.params.contrast == 0.20f
+            }
+            vm.finishSelectionParamGesture()
+            vm.awaitSelectionParamGestureFinishedForTest()
+            awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8FileRef, 90) {
+                !vm.uiState.value.isBusy && !vm.uiState.value.historyBusy &&
+                    !vm.historyActivityBusyForTest() &&
+                    vm.uiState.value.params.exposure == 0.35f &&
+                    vm.uiState.value.params.contrast == 0.20f
+            }
+            Log.i("KeplerN6Diag", "representative params settled")
+            val quickEffectDraftEpoch = vm.draftEpochForTest()
+            vm.applyVignetteCorrection()
+            awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8FileRef, 120) {
+                !vm.uiState.value.isBusy &&
+                    vm.uiState.value.activeQuickEffects.any { it.kind == QuickEffectKind.VignetteCorrection } &&
+                    vm.uiState.value.params.exposure == 0.35f &&
+                    vm.uiState.value.params.contrast == 0.20f
+            }
+            awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8FileRef, 120) {
+                !vm.uiState.value.isBusy && !vm.uiState.value.historyBusy &&
+                    !vm.historyActivityBusyForTest() &&
+                    !vm.hasActiveDraftSaveJobForTest() &&
+                    vm.draftEpochForTest() > quickEffectDraftEpoch &&
+                    vm.uiState.value.draftGenerationId != null &&
+                    vm.uiState.value.draftGenerationId == vm.draftPointerBaseline
+            }
+            val representativeState = vm.uiState.value
+            assertEquals(0.35f, representativeState.params.exposure)
+            assertEquals(0.20f, representativeState.params.contrast)
+            assertTrue(representativeState.activeQuickEffects.any { it.kind == QuickEffectKind.VignetteCorrection })
+            assertFalse(representativeState.isBusy)
+            assertTrue("settled representative edits must advance the document revision", representativeState.revision > openedRevision)
+            assertNotNull("settled representative edits must have a Draft generation", representativeState.draftGenerationId)
+            assertEquals(representativeState.draftGenerationId, vm.draftPointerBaseline)
+            val beforeExport = captureDocument(vm)
+            val savedExportHistoryBefore = savedExportHistoryIdentity(beforeExport.state)
             handler.post(ticker)
             val tilePlan = TilePlanner.plan(inputWidth, inputHeight)
             assertTrue("N4 seam requires the real planner-derived tiled plan", tilePlan is TilePlanResult.Planned)
@@ -376,6 +539,14 @@ class ExynosN6ProductE2ETest {
             if (elapsedMs > 300_000) Log.w("KeplerN6Diag", "N6 elapsed >300s; measured=${elapsedMs}ms (justified margin)")
             assertEquals(SuperResolutionExportPhase.Succeeded, vm.superResolutionStatus.value.phase)
             val uri = checkNotNull(vm.superResolutionStatus.value.publishedUri)
+            awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8FileRef, 60) {
+                !vm.uiState.value.isBusy &&
+                    vm.uiState.value.savedExports.any { it.uriString == uri.toString() }
+            }
+            val afterExport = captureDocument(vm)
+            val savedExportHistoryAfter = savedExportHistoryIdentity(afterExport.state)
+            assertTrue("successful N6 must not mutate the edited document", documentUnchanged(beforeExport, afterExport))
+            assertTrue("successful N6 must add its published URI to SavedExport history", afterExport.state.savedExports.any { it.uriString == uri.toString() })
             val observedProgress = vm.superResolutionStatus.value.progress
             val observedInputW = observedProgress.inputWidth; val observedInputH = observedProgress.inputHeight
             val observedOutputW = observedProgress.outputWidth; val observedOutputH = observedProgress.outputHeight
@@ -457,6 +628,17 @@ class ExynosN6ProductE2ETest {
                 "compiler_npu" to (compilerNpu ?: "unavailable"), "npu_proof" to decision.status.name,
                 "session_lifecycle" to session.lifecycle.name, "session_active" to (ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive ?: false),
                 "elapsed_ms" to elapsedMs, "published_uri" to uri.toString(), "source_hash" to (sourceHashRef.get() ?: ""),
+                "representative_edits" to JSONObject().apply {
+                    put("exposure", representativeState.params.exposure)
+                    put("contrast", representativeState.params.contrast)
+                    put("quick_effect", QuickEffectKind.VignetteCorrection.name)
+                    put("quick_effect_active", representativeState.activeQuickEffects.any { it.kind == QuickEffectKind.VignetteCorrection })
+                },
+                "document_identity_before" to documentIdentity(beforeExport),
+                "document_identity_after" to documentIdentity(afterExport),
+                "document_unchanged" to documentUnchanged(beforeExport, afterExport),
+                "saved_export_history_before" to savedExportHistoryBefore,
+                "saved_export_history_after" to savedExportHistoryAfter,
                 "region_hashes_expected" to JSONObject(expectedRegionHashes), "region_hashes_actual" to JSONObject(actualRegionHashes)
             )).toString(2))
             File(reportDir, "n6_region_hashes.json").writeText(JSONObject(mapOf("expected_region_hashes" to JSONObject(expectedRegionHashes), "actual_region_hashes" to JSONObject(actualRegionHashes))).toString(2))
@@ -482,7 +664,7 @@ class ExynosN6ProductE2ETest {
         try {
             val generation = ModelAvailabilityRegistry.beginProbe(); ModelAvailabilityRegistry.probePackagedCapabilities(context, generation)
             vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 90) { !vm.uiState.value.isBusy && vm.uiState.value.sourcePath != null }
-            val before = vm.uiState.value; val pendingBefore = pendingRows(); handler.post(ticker)
+            val before = captureDocument(vm); val pendingBefore = pendingRows(); handler.post(ticker)
             val startTime = System.nanoTime()
             val encodingStarted = CountDownLatch(1); val triggerProgress = AtomicReference<SuperResolutionExportProgress?>()
             val seam = SuperResolutionTestSeam(
@@ -509,12 +691,12 @@ class ExynosN6ProductE2ETest {
             val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime)
             val pendingAfter = pendingRows()
             val terminal = vm.superResolutionStatus.value
-            val after = vm.uiState.value
+            val after = captureDocument(vm)
             assertEquals(SuperResolutionExportPhase.Cancelled, terminal.phase)
             assertEquals(false, terminal.isBusy)
             assertNull(terminal.publishedUri)
-            assertEquals(before.sourcePath, after.sourcePath); assertEquals(before.baseContentToken, after.baseContentToken); assertEquals(before.revision, after.revision)
-            assertSame(before.previewBitmap, after.previewBitmap)
+            assertEquals(before.state.sourcePath, after.state.sourcePath); assertEquals(before.state.baseContentToken, after.state.baseContentToken); assertEquals(before.state.revision, after.state.revision)
+            assertSame(before.state.previewBitmap, after.state.previewBitmap)
             assertEquals(pendingBefore, pendingAfter)
             val rgb8File = rgb8Ref.get()
             val rgb8ExistsAfter = rgb8File?.exists() == true
@@ -526,7 +708,7 @@ class ExynosN6ProductE2ETest {
             assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
             assertFalse(wake.isHeld)
             assertTrue("registry inactive after cancellation", ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive != true)
-            assertTrue("document identity must remain unchanged", before.sourcePath == after.sourcePath && before.baseContentToken == after.baseContentToken && before.revision == after.revision && before.params == after.params && before.cropState == after.cropState && before.selectionLayers == after.selectionLayers && before.previewBitmap === after.previewBitmap && before.originalPreviewBitmap === after.originalPreviewBitmap)
+            assertTrue("document identity must remain unchanged", cancellationDocumentUnchanged(before, after))
             writeCancellationEvidence("n6_cancel_png_e2e.json", SuperResolutionExportPhase.Encoding, trigger, terminal, before, after, pendingBefore, pendingAfter, rgb8ExistsAfter, session, wake, elapsedMs)
         } finally {
             try { seamHandle?.close() } catch (_: Throwable) {}
@@ -550,7 +732,7 @@ class ExynosN6ProductE2ETest {
         try {
             val generation = ModelAvailabilityRegistry.beginProbe(); ModelAvailabilityRegistry.probePackagedCapabilities(context, generation)
             vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 90) { !vm.uiState.value.isBusy && vm.uiState.value.sourcePath != null }
-            val before = vm.uiState.value; val pendingBefore = pendingRows(); handler.post(ticker)
+            val before = captureDocument(vm); val pendingBefore = pendingRows(); handler.post(ticker)
             val startTime = System.nanoTime()
             val tilesStarted = CountDownLatch(1); val triggerProgress = AtomicReference<SuperResolutionExportProgress?>()
             val seam = SuperResolutionTestSeam(
@@ -577,12 +759,12 @@ class ExynosN6ProductE2ETest {
             val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTime)
             val pendingAfter = pendingRows()
             val terminal = vm.superResolutionStatus.value
-            val after = vm.uiState.value
+            val after = captureDocument(vm)
             assertEquals(SuperResolutionExportPhase.Cancelled, terminal.phase)
             assertEquals(false, terminal.isBusy)
             assertNull(terminal.publishedUri)
-            assertEquals(before.sourcePath, after.sourcePath); assertEquals(before.baseContentToken, after.baseContentToken); assertEquals(before.revision, after.revision)
-            assertSame(before.previewBitmap, after.previewBitmap)
+            assertEquals(before.state.sourcePath, after.state.sourcePath); assertEquals(before.state.baseContentToken, after.state.baseContentToken); assertEquals(before.state.revision, after.state.revision)
+            assertSame(before.state.previewBitmap, after.state.previewBitmap)
             assertEquals(pendingBefore, pendingAfter)
             val rgb8File = rgb8Ref.get()
             val rgb8ExistsAfter = rgb8File?.exists() == true
@@ -594,7 +776,7 @@ class ExynosN6ProductE2ETest {
             assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
             assertFalse(wake.isHeld)
             assertTrue("registry inactive after NPU cancellation", ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive != true)
-            assertTrue("document identity must remain unchanged", before.sourcePath == after.sourcePath && before.baseContentToken == after.baseContentToken && before.revision == after.revision && before.params == after.params && before.cropState == after.cropState && before.selectionLayers == after.selectionLayers && before.previewBitmap === after.previewBitmap && before.originalPreviewBitmap === after.originalPreviewBitmap)
+            assertTrue("document identity must remain unchanged", cancellationDocumentUnchanged(before, after))
             writeCancellationEvidence("n6_cancel_npu_e2e.json", SuperResolutionExportPhase.Upscaling, trigger, terminal, before, after, pendingBefore, pendingAfter, rgb8ExistsAfter, session, wake, elapsedMs)
         } finally {
             try { seamHandle?.close() } catch (_: Throwable) {}
