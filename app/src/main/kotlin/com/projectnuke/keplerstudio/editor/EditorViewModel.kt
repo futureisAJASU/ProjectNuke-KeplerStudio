@@ -7415,6 +7415,28 @@ fun exportPreview() {
     }
 
     // ——— N6: AI 4x Super Resolution export — terminal, non-destructive ———
+    fun superResolutionAvailabilityForUi(): SuperResolutionAvailabilityUi =
+        superResolutionAvailability(
+            ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale],
+        )
+
+    fun superResolutionPreflightForUi(): SuperResolutionPreflightResult {
+        val state = _uiState.value
+        val base = state.originalPreviewBitmap ?: state.previewBitmap
+            ?: return SuperResolutionPreflightResult.Rejected(
+                SuperResolutionFailureKind.NoDocument,
+                "내보낼 사진을 먼저 열어 주세요.",
+            )
+        val dimensions =
+            if (state.cropState == CropState()) base.width to base.height
+            else cropTransformedDimensions(base.width, base.height, state.cropState)
+        return computeSuperResolutionPreflight(
+            getApplication<Application>().applicationContext,
+            dimensions.first,
+            dimensions.second,
+        )
+    }
+
     fun canStartSuperResolution(): Boolean {
         val state = _uiState.value
         if (state.sourcePath == null && state.previewBitmap == null && state.originalPreviewBitmap == null) return false

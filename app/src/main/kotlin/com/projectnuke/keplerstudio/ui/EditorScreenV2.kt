@@ -129,8 +129,12 @@ import com.projectnuke.keplerstudio.editor.RouteResolver
 import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
+import com.projectnuke.keplerstudio.editor.SuperResolutionAvailabilityUi
+import com.projectnuke.keplerstudio.editor.SuperResolutionPreflight
+import com.projectnuke.keplerstudio.editor.SuperResolutionPreflightResult
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
+import com.projectnuke.keplerstudio.editor.formatProductBytes
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -189,6 +193,7 @@ private enum class V2EditorTool(val label: String, val description: String) {
 @Composable
 fun EditorScreenV2(viewModel: EditorViewModel) {
     val state by viewModel.uiState.collectAsState()
+    val modelCapabilities by ModelAvailabilityRegistry.state.collectAsState()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             viewModel.openImage(uri)
@@ -197,6 +202,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     var selectedTab by rememberSaveable { mutableStateOf(EditorDestination.Editor) }
     var selectedTool by rememberSaveable { mutableStateOf(V2EditorTool.Light) }
     var showExportDialog by remember { mutableStateOf(false) }
+    var pendingAiConfirmation by remember { mutableStateOf<SuperResolutionPreflight?>(null) }
     var showResetDialog by remember { mutableStateOf(false) }
     var panelCollapsed by remember { mutableStateOf(false) }
     var chromeHidden by remember { mutableStateOf(false) }
@@ -355,16 +361,59 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
     }
 
     if (showExportDialog) {
+        val availability =
+            com.projectnuke.keplerstudio.editor.superResolutionAvailability(
+                modelCapabilities[ModelFeature.ExynosUpscale],
+            )
+        val preflight = viewModel.superResolutionPreflightForUi()
         V2ExportSettingsDialog(
             exportFormat = state.exportFormat,
             exportResolution = state.exportResolution,
+            superResolutionAvailability = availability,
+            superResolutionPreflight = preflight,
             onFormatSelected = viewModel::setExportFormat,
             onResolutionSelected = viewModel::setExportResolution,
             onDismiss = { showExportDialog = false },
             onSave = {
                 showExportDialog = false
                 viewModel.exportPreview()
+            },
+            onSuperResolution = {
+                val ready = preflight as? SuperResolutionPreflightResult.Ready
+                    ?: return@V2ExportSettingsDialog
+                showExportDialog = false
+                if (ready.preflight.requiresConfirmation) {
+                    pendingAiConfirmation = ready.preflight
+                } else {
+                    viewModel.exportSuperResolution()
+                }
             }
+        )
+    }
+
+    pendingAiConfirmation?.let { preflight ->
+        AlertDialog(
+            onDismissRequest = { pendingAiConfirmation = null },
+            title = { Text("AI 4배 초해상도로 저장할까요?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("${preflight.inputWidth}×${preflight.inputHeight} → ${preflight.outputWidth}×${preflight.outputHeight}")
+                    Text("처리에 몇 분이 걸리고 기기가 따뜻해질 수 있습니다. 결과는 새 PNG로 저장되며 현재 편집은 그대로 유지됩니다.")
+                    Text("임시 작업 공간 약 ${formatProductBytes(preflight.rgb8ScratchBytes)}")
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        pendingAiConfirmation = null
+                        viewModel.exportSuperResolution()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark),
+                ) { Text("AI 4배 저장 시작") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingAiConfirmation = null }) { Text("취소") }
+            },
         )
     }
 
@@ -1078,10 +1127,13 @@ private fun V2AdjustmentSlider(
 private fun V2ExportSettingsDialog(
     exportFormat: ExportFormat,
     exportResolution: ExportResolution,
+    superResolutionAvailability: SuperResolutionAvailabilityUi,
+    superResolutionPreflight: SuperResolutionPreflightResult,
     onFormatSelected: (ExportFormat) -> Unit,
     onResolutionSelected: (ExportResolution) -> Unit,
     onDismiss: () -> Unit,
-    onSave: () -> Unit
+    onSave: () -> Unit,
+    onSuperResolution: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1090,6 +1142,41 @@ private fun V2ExportSettingsDialog(
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 V2OptionRow("파일 형식", ExportFormat.values().toList(), exportFormat, { it.label }, onFormatSelected)
                 V2OptionRow("해상도", ExportResolution.values().toList(), exportResolution, { it.label }, onResolutionSelected)
+                Surface(color = V2CardBackground, shape = MaterialTheme.shapes.medium) {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("AI 4× Super Resolution", color = V2TextPrimary, fontWeight = FontWeight.SemiBold)
+                        Text(superResolutionAvailability.reason, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+                        when (superResolutionPreflight) {
+                            is SuperResolutionPreflightResult.Ready -> {
+                                val p = superResolutionPreflight.preflight
+                                Text(
+                                    "${p.inputWidth}×${p.inputHeight} → ${p.outputWidth}×${p.outputHeight} · PNG",
+                                    color = V2TextMuted,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                Text(
+                                    "현재 편집을 바꾸지 않고 별도 파일로 저장합니다.",
+                                    color = V2TextMuted,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            is SuperResolutionPreflightResult.Rejected ->
+                                Text(
+                                    superResolutionPreflight.userMessage,
+                                    color = V2TextMuted,
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                        }
+                        OutlinedButton(
+                            onClick = onSuperResolution,
+                            enabled = superResolutionAvailability.canStart &&
+                                superResolutionPreflight is SuperResolutionPreflightResult.Ready,
+                        ) { Text("AI 4배 초해상도") }
+                    }
+                }
             }
         },
         confirmButton = {
