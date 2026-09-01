@@ -293,13 +293,27 @@ class SuperResolutionProductTest {
         val crop = CropState(cropLeft = 0.1f, cropTop = 0.1f, cropRight = 0.9f, cropBottom = 0.9f)
         val state = EditorUiState(sourcePath = null, baseBitmapDirty = false, previewBitmap = preview, cropState = crop)
         val request = FullExportSourceRequest.capture(state, "frozen-generation")
-        val prepared = prepareFullExportSourceBitmapFromRequest(request)
-        val expected = cropTransformedDimensions(10, 8, crop)
-        assertEquals(expected.first, prepared.width)
-        assertEquals(expected.second, prepared.height)
-        assertEquals(0xff234567.toInt(), prepared.getPixel(prepared.width / 2, prepared.height / 2))
-        prepared.recycle()
-        preview.recycle()
+        val cropSeam = installCropTransformForTest { input, cropState ->
+            val dimensions = cropTransformedDimensions(input.width, input.height, cropState)
+            Bitmap.createBitmap(
+                input,
+                0,
+                0,
+                dimensions.first.coerceAtMost(input.width),
+                dimensions.second.coerceAtMost(input.height),
+            )
+        }
+        try {
+            val prepared = prepareFullExportSourceBitmapFromRequest(request)
+            val expected = cropTransformedDimensions(10, 8, crop)
+            assertEquals(expected.first, prepared.width)
+            assertEquals(expected.second, prepared.height)
+            assertEquals(0xff234567.toInt(), prepared.getPixel(prepared.width / 2, prepared.height / 2))
+            prepared.recycle()
+        } finally {
+            cropSeam.close()
+            preview.recycle()
+        }
     }
 
     @Test

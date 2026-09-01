@@ -175,13 +175,13 @@ class SuperResolutionOperationRegistryTest {
         assertTrue(SuperResolutionOperationRegistry.beginPhysicalSettlement(31L))
         SuperResolutionOperationRegistry.finish(31L, cancelledStatusForTest())
 
-        assertEquals(
-            SuperResolutionStartResult.AlreadyRunning(31L),
-            SuperResolutionOperationRegistry.admitForTest(request(32L)),
+        assertTrue(
+            SuperResolutionOperationRegistry.admitForTest(request(32L)) is SuperResolutionStartResult.Failed,
         )
         assertNull(SuperResolutionOperationRegistry.claim(32L))
         SuperResolutionOperationRegistry.releaseOwner(31L)
         assertEquals(SuperResolutionStartResult.Started(32L), SuperResolutionOperationRegistry.admitForTest(request(32L)))
+        assertNotNull(SuperResolutionOperationRegistry.claim(32L))
 
         // A stale A completion is harmless once B owns the registry.
         SuperResolutionOperationRegistry.releaseOwner(31L)

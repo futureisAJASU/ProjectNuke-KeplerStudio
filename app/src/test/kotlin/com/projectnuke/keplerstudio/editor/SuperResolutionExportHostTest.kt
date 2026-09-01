@@ -116,7 +116,7 @@ class SuperResolutionExportHostTest {
     @Test
     fun sessionCloseFailureIsPublishedAsCleanupDebtWithoutDeletingPublishedRow() = runBlocking {
         makeAvailable()
-        val input = bitmap(32, 32)
+        val input = bitmap(128, 128)
         val rowStore = FakeRowStore()
         val history = SavedExportHistoryStore(context, persistence = object : SavedExportHistoryPersistence {
             var state = SavedExportPersistedState(null, false, ExportHistoryRetention.Never)
@@ -137,7 +137,7 @@ class SuperResolutionExportHostTest {
                 historyStore = history,
                 sessionProvider = { session },
             )
-            assertTrue(result is SuperResolutionExportResult.PublishedWithMetadataFailure)
+            assertTrue("result=$result", result is SuperResolutionExportResult.PublishedWithMetadataFailure)
             val published = result as SuperResolutionExportResult.PublishedWithMetadataFailure
             assertNotNull(published.uri)
             assertTrue(published.cleanupDebt)
@@ -562,7 +562,16 @@ class SuperResolutionExportHostTest {
                 knownTransientBytes = 0L,
             )
         }
-        val crop = installCropTransformForTest { input, _ -> input.copy(Bitmap.Config.ARGB_8888, true) }
+        val crop = installCropTransformForTest { input, cropState ->
+            val dimensions = cropTransformedDimensions(input.width, input.height, cropState)
+            Bitmap.createBitmap(
+                input,
+                0,
+                0,
+                dimensions.first.coerceAtMost(input.width),
+                dimensions.second.coerceAtMost(input.height),
+            )
+        }
         try {
             val normal = vm.prepareNormalFullExportSourceBitmapForTest()
             val n6 = vm.prepareFullExportSourceBitmapForTest()

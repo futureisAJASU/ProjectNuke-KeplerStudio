@@ -49,6 +49,7 @@ class SuperResolutionOperationJournalTest {
         assertTrue(unrelated.exists())
         assertTrue(journal.read() == null)
         unrelated.delete()
+        Unit
     }
 
     @Test
