@@ -12,6 +12,170 @@ enum class SuperResolutionAvailability {
     RUNTIME_UNAVAILABLE,
 }
 
+enum class SuperResolutionUserStage(val label: String) {
+    PREPARING("준비 중"),
+    AI_UPSCALING("AI 업스케일링"),
+    CREATING_IMAGE("이미지 생성"),
+    SAVING("저장 중"),
+}
+
+data class SuperResolutionProgressUi(
+    val stage: SuperResolutionUserStage,
+    val overallFraction: Float,
+    val detail: String,
+    val canCancel: Boolean,
+)
+
+fun superResolutionProgressUi(status: SuperResolutionExportStatus): SuperResolutionProgressUi {
+    val progress = status.progress
+    val stage =
+        when (status.phase) {
+            SuperResolutionExportPhase.Preparing,
+            SuperResolutionExportPhase.Idle -> SuperResolutionUserStage.PREPARING
+            SuperResolutionExportPhase.Upscaling -> SuperResolutionUserStage.AI_UPSCALING
+            SuperResolutionExportPhase.Encoding -> SuperResolutionUserStage.CREATING_IMAGE
+            SuperResolutionExportPhase.Publishing,
+            SuperResolutionExportPhase.Succeeded,
+            SuperResolutionExportPhase.Failed,
+            SuperResolutionExportPhase.Cancelled -> SuperResolutionUserStage.SAVING
+        }
+    val detail =
+        when (status.phase) {
+            SuperResolutionExportPhase.Upscaling ->
+                if (progress.totalTiles > 0) "${progress.completedTiles} / ${progress.totalTiles} 타일" else "처리 중"
+            SuperResolutionExportPhase.Encoding ->
+                if (progress.encodingRowsTotal > 0) {
+                    "${progress.encodingRowsCompleted} / ${progress.encodingRowsTotal} 행"
+                } else {
+                    "이미지를 만드는 중"
+                }
+            SuperResolutionExportPhase.Publishing -> "갤러리에 저장하는 중"
+            else -> "약간의 시간이 걸릴 수 있습니다"
+        }
+    return SuperResolutionProgressUi(
+        stage = stage,
+        overallFraction = progress.overallFraction.coerceIn(0f, 1f),
+        detail = detail,
+        canCancel = status.isBusy && progress.canCancel,
+    )
+}
+
+enum class SuperResolutionUserFailure {
+    UNSUPPORTED,
+    PREPARATION_FAILED,
+    INSUFFICIENT_STORAGE,
+    NPU_FAILED,
+    ENCODING_FAILED,
+    PUBLISH_FAILED,
+    CLEANUP_DEBT,
+    CANCELLED,
+}
+
+data class SuperResolutionFailureUi(
+    val failure: SuperResolutionUserFailure,
+    val message: String,
+    val retrySafe: Boolean,
+    val publishedUri: android.net.Uri? = null,
+)
+
+fun superResolutionFailureUi(status: SuperResolutionExportStatus): SuperResolutionFailureUi? {
+    if (status.phase == SuperResolutionExportPhase.Succeeded &&
+        (status.cleanupDebt || status.failureKind != null)
+    ) {
+        return SuperResolutionFailureUi(
+            failure = SuperResolutionUserFailure.CLEANUP_DEBT,
+            message = "사진은 저장되었습니다. 마무리 작업 중 일부를 완료하지 못했습니다.",
+            retrySafe = false,
+            publishedUri = status.publishedUri,
+        )
+    }
+    val kind = status.failureKind ?: return null
+    return when (kind) {
+        SuperResolutionFailureKind.NoDocument,
+        SuperResolutionFailureKind.ActionBusy,
+        SuperResolutionFailureKind.SourceRenderMemoryRejected,
+        SuperResolutionFailureKind.SourceRenderFailed,
+        SuperResolutionFailureKind.InvalidDimensions,
+        SuperResolutionFailureKind.AlphaUnsupported ->
+            SuperResolutionFailureUi(
+                SuperResolutionUserFailure.PREPARATION_FAILED,
+                "현재 편집 결과를 준비하지 못했습니다.",
+                retrySafe = kind !in setOf(
+                    SuperResolutionFailureKind.InvalidDimensions,
+                    SuperResolutionFailureKind.AlphaUnsupported,
+                ),
+            )
+        SuperResolutionFailureKind.InternalStorageInsufficient,
+        SuperResolutionFailureKind.DestinationStorageInsufficient ->
+            SuperResolutionFailureUi(
+                SuperResolutionUserFailure.INSUFFICIENT_STORAGE,
+                "저장 공간이 부족합니다. 공간을 확보한 뒤 다시 시도해 주세요.",
+                retrySafe = true,
+            )
+        SuperResolutionFailureKind.ModelUnavailable,
+        SuperResolutionFailureKind.ModelValidationFailed ->
+            SuperResolutionFailureUi(
+                SuperResolutionUserFailure.UNSUPPORTED,
+                "이 기기에서는 AI 4배 저장을 사용할 수 없습니다.",
+                retrySafe = false,
+            )
+        SuperResolutionFailureKind.NpuLoadFailed,
+        SuperResolutionFailureKind.NpuH2dFailed,
+        SuperResolutionFailureKind.NpuExecuteFailed,
+        SuperResolutionFailureKind.NpuD2hFailed,
+        SuperResolutionFailureKind.NpuNativeThrow,
+        SuperResolutionFailureKind.Rgb8ArtifactFailure ->
+            SuperResolutionFailureUi(
+                SuperResolutionUserFailure.NPU_FAILED,
+                "AI 처리 중 문제가 발생했습니다. 다시 시도해 주세요.",
+                retrySafe = true,
+            )
+        SuperResolutionFailureKind.PngEncodeFailure ->
+            SuperResolutionFailureUi(
+                SuperResolutionUserFailure.ENCODING_FAILED,
+                "이미지를 만드는 중 문제가 발생했습니다.",
+                retrySafe = true,
+            )
+        SuperResolutionFailureKind.MediaStoreInsertFailure,
+        SuperResolutionFailureKind.MediaStoreWriteFailure,
+        SuperResolutionFailureKind.MediaStorePublishFailure ->
+            SuperResolutionFailureUi(
+                SuperResolutionUserFailure.PUBLISH_FAILED,
+                "갤러리에 저장하지 못했습니다.",
+                retrySafe = true,
+            )
+        SuperResolutionFailureKind.MetadataPersistFailure,
+        SuperResolutionFailureKind.InternalCleanupFailure ->
+            SuperResolutionFailureUi(
+                SuperResolutionUserFailure.CLEANUP_DEBT,
+                if (status.publishedUri != null) {
+                    "사진은 저장되었습니다. 마무리 작업 중 일부를 완료하지 못했습니다."
+                } else {
+                    "임시 파일 정리를 완료하지 못했습니다."
+                },
+                retrySafe = status.publishedUri == null,
+                publishedUri = status.publishedUri,
+            )
+        SuperResolutionFailureKind.Cancelled,
+        SuperResolutionFailureKind.Stale ->
+            SuperResolutionFailureUi(
+                SuperResolutionUserFailure.CANCELLED,
+                "AI 4배 저장을 취소했습니다.",
+                retrySafe = true,
+            )
+    }
+}
+
+internal fun monotonicSuperResolutionStatus(
+    previous: SuperResolutionExportStatus,
+    next: SuperResolutionExportStatus,
+): SuperResolutionExportStatus {
+    if (!previous.isBusy || !next.isBusy) return next
+    val floor = previous.progress.overallFraction.coerceIn(0f, 1f)
+    val value = next.progress.overallFraction.coerceIn(floor, 1f)
+    return next.copy(progress = next.progress.copy(overallFraction = value))
+}
+
 data class SuperResolutionAvailabilityUi(
     val availability: SuperResolutionAvailability,
     val reason: String,

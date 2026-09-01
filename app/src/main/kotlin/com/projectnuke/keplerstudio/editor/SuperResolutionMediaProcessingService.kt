@@ -146,7 +146,10 @@ object SuperResolutionOperationRegistry {
     internal fun publish(operationId: Long, status: SuperResolutionExportStatus) {
         synchronized(lock) {
             if (activeOperationId == operationId || pending?.operationId == operationId) {
-                mutableState.value = mutableState.value.copy(status = status)
+                mutableState.value =
+                    mutableState.value.copy(
+                        status = monotonicSuperResolutionStatus(mutableState.value.status, status),
+                    )
             }
         }
     }
@@ -180,6 +183,14 @@ object SuperResolutionOperationRegistry {
 
     internal fun hasActiveOperation(): Boolean = synchronized(lock) {
         pending != null || activeOperationId != null || mutableState.value.status.isBusy
+    }
+
+    fun acknowledgeTerminal() {
+        synchronized(lock) {
+            if (pending == null && activeOperationId == null && !mutableState.value.status.isBusy) {
+                mutableState.value = SuperResolutionProductOperationState()
+            }
+        }
     }
 
     internal fun beginDebtRecovery(): Boolean = synchronized(lock) {

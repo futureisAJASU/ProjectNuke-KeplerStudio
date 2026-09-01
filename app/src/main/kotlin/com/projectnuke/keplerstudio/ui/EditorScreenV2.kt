@@ -1,6 +1,10 @@
 package com.projectnuke.keplerstudio.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -52,6 +56,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
@@ -75,6 +80,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -96,6 +102,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import com.projectnuke.keplerstudio.BuildConfig
 import com.projectnuke.keplerstudio.editor.DehazeEngine
 import com.projectnuke.keplerstudio.editor.DetailEngine
@@ -130,11 +137,14 @@ import com.projectnuke.keplerstudio.editor.SavedExport
 import com.projectnuke.keplerstudio.editor.SelectionLayer
 import com.projectnuke.keplerstudio.editor.SelectionPaintSettings
 import com.projectnuke.keplerstudio.editor.SuperResolutionAvailabilityUi
+import com.projectnuke.keplerstudio.editor.SuperResolutionProductOperationState
 import com.projectnuke.keplerstudio.editor.SuperResolutionPreflight
 import com.projectnuke.keplerstudio.editor.SuperResolutionPreflightResult
 import com.projectnuke.keplerstudio.editor.ToneEngine
 import com.projectnuke.keplerstudio.editor.SubjectSelectionRoute
 import com.projectnuke.keplerstudio.editor.formatProductBytes
+import com.projectnuke.keplerstudio.editor.superResolutionFailureUi
+import com.projectnuke.keplerstudio.editor.superResolutionProgressUi
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -194,6 +204,8 @@ private enum class V2EditorTool(val label: String, val description: String) {
 fun EditorScreenV2(viewModel: EditorViewModel) {
     val state by viewModel.uiState.collectAsState()
     val modelCapabilities by ModelAvailabilityRegistry.state.collectAsState()
+    val productOperation by viewModel.productSuperResolutionOperation.collectAsState()
+    val context = LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             viewModel.openImage(uri)
@@ -211,6 +223,34 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
         mutableStateOf(PreviewHistogramMode.Luminance.name)
     }
     var gridVisible by rememberSaveable { mutableStateOf(false) }
+    var pendingNotificationStart by remember { mutableStateOf(false) }
+    val notificationPermissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            val shouldStart = pendingNotificationStart
+            pendingNotificationStart = false
+            if (shouldStart && granted) {
+                viewModel.exportSuperResolutionProduct()
+                showExportDialog = true
+            } else if (shouldStart) {
+                Toast.makeText(
+                    context,
+                    "\uBC31\uADF8\uB77C\uC6B4\uB4DC \uC9C4\uD589 \uC0C1\uD0DC\uB97C \uC54C\uB9AC\uB824\uBA74 \uC54C\uB9BC \uAD8C\uD55C\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+    val startProductExport: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingNotificationStart = true
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            viewModel.exportSuperResolutionProduct()
+            showExportDialog = true
+        }
+    }
     val histogramMode =
         PreviewHistogramMode.entries.firstOrNull { it.name == histogramModeName }
             ?: PreviewHistogramMode.Luminance
@@ -253,6 +293,13 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                         onRotate = viewModel::rotatePreview90,
                         onReset = { showResetDialog = true },
                         onSave = { showExportDialog = true }
+                    )
+                }
+
+                if (productOperation.status.isBusy) {
+                    V2SuperResolutionProgressBanner(
+                        operation = productOperation,
+                        onCancel = viewModel::cancelProductSuperResolution,
                     )
                 }
 
@@ -371,9 +418,15 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
             exportResolution = state.exportResolution,
             superResolutionAvailability = availability,
             superResolutionPreflight = preflight,
+            productOperation = productOperation,
             onFormatSelected = viewModel::setExportFormat,
             onResolutionSelected = viewModel::setExportResolution,
-            onDismiss = { showExportDialog = false },
+            onDismiss = {
+                showExportDialog = false
+                if (!productOperation.status.isBusy) {
+                    viewModel.acknowledgeProductSuperResolution()
+                }
+            },
             onSave = {
                 showExportDialog = false
                 viewModel.exportPreview()
@@ -385,9 +438,14 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                 if (ready.preflight.requiresConfirmation) {
                     pendingAiConfirmation = ready.preflight
                 } else {
-                    viewModel.exportSuperResolutionProduct()
+                    startProductExport()
                 }
-            }
+            },
+            onCancel = viewModel::cancelProductSuperResolution,
+            onRetry = {
+                viewModel.acknowledgeProductSuperResolution()
+                startProductExport()
+            },
         )
     }
 
@@ -406,7 +464,7 @@ fun EditorScreenV2(viewModel: EditorViewModel) {
                 Button(
                     onClick = {
                         pendingAiConfirmation = null
-                        viewModel.exportSuperResolutionProduct()
+                        startProductExport()
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark),
                 ) { Text("AI 4배 저장 시작") }
@@ -1129,63 +1187,156 @@ private fun V2ExportSettingsDialog(
     exportResolution: ExportResolution,
     superResolutionAvailability: SuperResolutionAvailabilityUi,
     superResolutionPreflight: SuperResolutionPreflightResult,
+    productOperation: SuperResolutionProductOperationState,
     onFormatSelected: (ExportFormat) -> Unit,
     onResolutionSelected: (ExportResolution) -> Unit,
     onDismiss: () -> Unit,
     onSave: () -> Unit,
     onSuperResolution: () -> Unit,
+    onCancel: () -> Unit,
+    onRetry: () -> Unit,
 ) {
+    val status = productOperation.status
+    val progress = superResolutionProgressUi(status)
+    val failure = superResolutionFailureUi(status)
+    val hasTerminalProductResult = productOperation.operationId != null && !status.isBusy
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("내보내기 설정") },
+        title = {
+            Text(
+                if (status.isBusy || hasTerminalProductResult) "AI 4배 초해상도"
+                else "내보내기 설정",
+            )
+        },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                V2OptionRow("파일 형식", ExportFormat.values().toList(), exportFormat, { it.label }, onFormatSelected)
-                V2OptionRow("해상도", ExportResolution.values().toList(), exportResolution, { it.label }, onResolutionSelected)
-                Surface(color = V2CardBackground, shape = MaterialTheme.shapes.medium) {
-                    Column(
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Text("AI 4× Super Resolution", color = V2TextPrimary, fontWeight = FontWeight.SemiBold)
-                        Text(superResolutionAvailability.reason, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
-                        when (superResolutionPreflight) {
-                            is SuperResolutionPreflightResult.Ready -> {
-                                val p = superResolutionPreflight.preflight
-                                Text(
-                                    "${p.inputWidth}×${p.inputHeight} → ${p.outputWidth}×${p.outputHeight} · PNG",
-                                    color = V2TextMuted,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                                Text(
-                                    "현재 편집을 바꾸지 않고 별도 파일로 저장합니다.",
-                                    color = V2TextMuted,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
+                if (status.isBusy) {
+                    Text(progress.stage.label, color = V2TextPrimary, fontWeight = FontWeight.SemiBold)
+                    LinearProgressIndicator(
+                        progress = { progress.overallFraction },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "${(progress.overallFraction * 100f).toInt()}% · ${progress.detail}",
+                        color = V2TextSecondary,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "앱을 나가도 처리는 계속됩니다.",
+                        color = V2TextMuted,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedButton(onClick = onCancel, enabled = progress.canCancel) {
+                        Text("취소")
+                    }
+                } else if (hasTerminalProductResult) {
+                    Text(
+                        failure?.message
+                            ?: if (status.publishedUri != null) {
+                                "AI 4배 이미지를 갤러리에 저장했습니다."
+                            } else {
+                                "AI 4배 저장이 종료되었습니다."
+                            },
+                        color = V2TextPrimary,
+                    )
+                    if (failure?.retrySafe == true) {
+                        OutlinedButton(onClick = onRetry) { Text("다시 시도") }
+                    }
+                }
+                if (!status.isBusy && !hasTerminalProductResult) {
+                    V2OptionRow("파일 형식", ExportFormat.values().toList(), exportFormat, { it.label }, onFormatSelected)
+                    V2OptionRow("해상도", ExportResolution.values().toList(), exportResolution, { it.label }, onResolutionSelected)
+                    Surface(color = V2CardBackground, shape = MaterialTheme.shapes.medium) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Text("AI 4× Super Resolution", color = V2TextPrimary, fontWeight = FontWeight.SemiBold)
+                            Text(superResolutionAvailability.reason, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+                            when (superResolutionPreflight) {
+                                is SuperResolutionPreflightResult.Ready -> {
+                                    val p = superResolutionPreflight.preflight
+                                    Text(
+                                        "${p.inputWidth}×${p.inputHeight} → ${p.outputWidth}×${p.outputHeight} · PNG",
+                                        color = V2TextMuted,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                    Text(
+                                        "현재 편집을 바꾸지 않고 별도 파일로 저장합니다.",
+                                        color = V2TextMuted,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                is SuperResolutionPreflightResult.Rejected ->
+                                    Text(
+                                        superResolutionPreflight.userMessage,
+                                        color = V2TextMuted,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
                             }
-                            is SuperResolutionPreflightResult.Rejected ->
-                                Text(
-                                    superResolutionPreflight.userMessage,
-                                    color = V2TextMuted,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
+                            OutlinedButton(
+                                onClick = onSuperResolution,
+                                enabled = superResolutionAvailability.canStart &&
+                                    superResolutionPreflight is SuperResolutionPreflightResult.Ready,
+                            ) { Text("AI 4배 초해상도") }
                         }
-                        OutlinedButton(
-                            onClick = onSuperResolution,
-                            enabled = superResolutionAvailability.canStart &&
-                                superResolutionPreflight is SuperResolutionPreflightResult.Ready,
-                        ) { Text("AI 4배 초해상도") }
                     }
                 }
             }
         },
         confirmButton = {
-            Button(onClick = onSave, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
-                Text("저장")
+            if (!status.isBusy && !hasTerminalProductResult) {
+                Button(onClick = onSave, colors = ButtonDefaults.buttonColors(containerColor = V2Accent, contentColor = V2ButtonTextDark)) {
+                    Text("저장")
+                }
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } }
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(
+                    when {
+                        status.isBusy -> "백그라운드에서 계속"
+                        hasTerminalProductResult -> "완료"
+                        else -> "취소"
+                    },
+                )
+            }
+        },
     )
+}
+
+@Composable
+private fun V2SuperResolutionProgressBanner(
+    operation: SuperResolutionProductOperationState,
+    onCancel: () -> Unit,
+) {
+    val progress = superResolutionProgressUi(operation.status)
+    Surface(color = V2CardBackground) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "AI 4배 · ${progress.stage.label}",
+                        color = V2TextPrimary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(progress.detail, color = V2TextSecondary, style = MaterialTheme.typography.bodySmall)
+                }
+                TextButton(onClick = onCancel, enabled = progress.canCancel) { Text("취소") }
+            }
+            LinearProgressIndicator(
+                progress = { progress.overallFraction },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
 }
 
 @Composable

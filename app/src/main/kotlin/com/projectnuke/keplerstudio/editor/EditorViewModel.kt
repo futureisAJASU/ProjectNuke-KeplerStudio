@@ -7546,6 +7546,10 @@ fun exportPreview() {
         }
     }
 
+    fun acknowledgeProductSuperResolution() {
+        SuperResolutionOperationRegistry.acknowledgeTerminal()
+    }
+
     fun canStartSuperResolution(): Boolean {
         val state = _uiState.value
         if (state.sourcePath == null && state.previewBitmap == null && state.originalPreviewBitmap == null) return false

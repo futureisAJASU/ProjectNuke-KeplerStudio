@@ -62,4 +62,50 @@ class SuperResolutionProductTest {
         assertFalse(runtime.reason.contains("ENN"))
         assertFalse(runtime.reason.contains("NNC"))
     }
+
+    @Test
+    fun progressPresentationUsesFourStagesAndNeverRegresses() {
+        val previous =
+            SuperResolutionExportStatus(
+                phase = SuperResolutionExportPhase.Upscaling,
+                isBusy = true,
+                progress = SuperResolutionExportProgress(
+                    phase = SuperResolutionExportPhase.Upscaling,
+                    overallFraction = 0.42f,
+                    completedTiles = 12,
+                    totalTiles = 100,
+                    canCancel = true,
+                ),
+            )
+        val regressing =
+            previous.copy(
+                phase = SuperResolutionExportPhase.Encoding,
+                progress = previous.progress.copy(
+                    phase = SuperResolutionExportPhase.Encoding,
+                    overallFraction = 0.30f,
+                    encodingRowsCompleted = 32,
+                    encodingRowsTotal = 1000,
+                ),
+            )
+        val settled = monotonicSuperResolutionStatus(previous, regressing)
+        assertEquals(0.42f, settled.progress.overallFraction)
+        assertEquals(SuperResolutionUserStage.CREATING_IMAGE, superResolutionProgressUi(settled).stage)
+    }
+
+    @Test
+    fun publishedCleanupDebtNeverTellsUserPhotoWasLostOrOffersRetry() {
+        val uri = android.net.Uri.EMPTY
+        val status =
+            SuperResolutionExportStatus(
+                phase = SuperResolutionExportPhase.Succeeded,
+                publishedUri = uri,
+                cleanupDebt = true,
+                failureKind = SuperResolutionFailureKind.InternalCleanupFailure,
+            )
+        val failure = checkNotNull(superResolutionFailureUi(status))
+        assertEquals(SuperResolutionUserFailure.CLEANUP_DEBT, failure.failure)
+        assertEquals(uri, failure.publishedUri)
+        assertFalse(failure.retrySafe)
+        assertTrue(failure.message.contains("저장"))
+    }
 }
