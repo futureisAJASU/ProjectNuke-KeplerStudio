@@ -1,9 +1,11 @@
 package com.projectnuke.keplerstudio.editor
 
 import java.io.File
+import android.net.Uri
 import org.junit.After
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -145,6 +147,97 @@ class SuperResolutionOperationJournalTest {
             ),
         )
         assertTrue(recoverExactSuperResolutionDebt(context, journal))
+        assertTrue(journal.read() == null)
+    }
+
+    @Test
+    fun intendedRgb8PathsConvergeEvenWhenProcessDiesBeforeOrAfterCreate() = runBlocking {
+        val finalPath = File(context.cacheDir, "sr6_intended_${System.nanoTime()}.rgb8")
+        val stagingPath = File(context.cacheDir, "${finalPath.name}.token.tmp")
+        val journal = SuperResolutionOperationJournal(context)
+        journal.write(
+            SuperResolutionDebtRecord(
+                operationId = 86L,
+                phase = SuperResolutionJournalPhase.RGB8_INTENDED,
+                startedAtMillis = 1L,
+                updatedAtMillis = 1L,
+                rgb8Path = finalPath.absolutePath,
+                rgb8StagingPath = stagingPath.absolutePath,
+            ),
+        )
+        assertTrue(recoverExactSuperResolutionDebt(context, journal))
+        assertTrue(journal.read() == null)
+
+        finalPath.writeBytes(byteArrayOf(1))
+        stagingPath.writeBytes(byteArrayOf(2))
+        journal.write(
+            SuperResolutionDebtRecord(
+                operationId = 87L,
+                phase = SuperResolutionJournalPhase.RGB8_CREATED,
+                startedAtMillis = 1L,
+                updatedAtMillis = 1L,
+                rgb8Path = finalPath.absolutePath,
+                rgb8StagingPath = stagingPath.absolutePath,
+            ),
+        )
+        assertTrue(recoverExactSuperResolutionDebt(context, journal))
+        assertFalse(finalPath.exists())
+        assertFalse(stagingPath.exists())
+    }
+
+    @Test
+    fun intendedMediaStoreIdentityFindsOnlyItsPendingRowBeforeUriWasJournaled() = runBlocking {
+        val journal = SuperResolutionOperationJournal(context)
+        val expected = Uri.parse("content://media/exact-token-row")
+        journal.write(
+            SuperResolutionDebtRecord(
+                operationId = 88L,
+                phase = SuperResolutionJournalPhase.PENDING_INTENDED,
+                startedAtMillis = 1L,
+                updatedAtMillis = 1L,
+                mediaOwnershipToken = "token-88",
+                mediaDisplayName = "exact-token-88.png",
+                mediaRelativePath = "Pictures/KeplerStudio/",
+                mediaCollectionUri = "content://media/external/images/media",
+            ),
+        )
+        var deleted: Uri? = null
+        assertTrue(
+            recoverExactSuperResolutionDebt(
+                context,
+                journal,
+                pendingState = { true },
+                deletePending = { uri -> deleted = uri; 1 },
+                rowExists = { false },
+                findPendingOwnedRow = { SuperResolutionPendingRowLookup.Found(expected) },
+            ),
+        )
+        assertEquals(expected, deleted)
+        assertTrue(journal.read() == null)
+    }
+
+    @Test
+    fun intendedMediaStoreIdentityWithoutAInsertedRowClearsSafely() = runBlocking {
+        val journal = SuperResolutionOperationJournal(context)
+        journal.write(
+            SuperResolutionDebtRecord(
+                operationId = 89L,
+                phase = SuperResolutionJournalPhase.PENDING_INTENDED,
+                startedAtMillis = 1L,
+                updatedAtMillis = 1L,
+                mediaOwnershipToken = "token-89",
+                mediaDisplayName = "exact-token-89.png",
+                mediaRelativePath = "Pictures/KeplerStudio/",
+                mediaCollectionUri = "content://media/external/images/media",
+            ),
+        )
+        assertTrue(
+            recoverExactSuperResolutionDebt(
+                context,
+                journal,
+                findPendingOwnedRow = { SuperResolutionPendingRowLookup.Absent },
+            ),
+        )
         assertTrue(journal.read() == null)
     }
 }

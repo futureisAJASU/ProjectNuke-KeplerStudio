@@ -16,6 +16,7 @@ internal object RestoredWorkingSourceOwnership {
     private val lock = Any()
     private val restorePaths = mutableSetOf<String>()
     private val documentPaths = mutableSetOf<String>()
+    private val operationRefs = mutableMapOf<String, Int>()
 
     internal enum class DeleteResult {
         PRESERVED_LIVE_RESTORE,
@@ -64,12 +65,29 @@ internal object RestoredWorkingSourceOwnership {
         documentPaths -= canonical(path)
     }
 
+    /** Claims one exact app-owned source for a long-running export operation. */
+    fun acquireOperation(path: File): AutoCloseable = synchronized(lock) {
+        require(isOwnedName(path.name)) { "invalid restored working source name: ${path.name}" }
+        val key = canonical(path)
+        operationRefs[key] = (operationRefs[key] ?: 0) + 1
+        var released = false
+        AutoCloseable {
+            synchronized(lock) {
+                if (released) return@AutoCloseable
+                released = true
+                val remaining = (operationRefs[key] ?: 1) - 1
+                if (remaining <= 0) operationRefs.remove(key) else operationRefs[key] = remaining
+            }
+        }
+    }
+
     /** Ownership check and physical deletion share one linearization boundary. */
     fun deleteIfUnowned(path: File): DeleteResult = synchronized(lock) {
         val canonicalPath = canonical(path)
         when {
             canonicalPath in restorePaths -> DeleteResult.PRESERVED_LIVE_RESTORE
             canonicalPath in documentPaths -> DeleteResult.PRESERVED_DOCUMENT
+            (operationRefs[canonicalPath] ?: 0) > 0 -> DeleteResult.PRESERVED_LIVE_RESTORE
             !path.exists() -> DeleteResult.ALREADY_ABSENT
             path.delete() -> DeleteResult.DELETED
             else -> DeleteResult.FAILED
@@ -82,7 +100,8 @@ internal object RestoredWorkingSourceOwnership {
      */
     fun isOwned(path: File): Boolean = synchronized(lock) {
         val canonicalPath = canonical(path)
-        canonicalPath in restorePaths || canonicalPath in documentPaths
+        canonicalPath in restorePaths || canonicalPath in documentPaths ||
+            (operationRefs[canonicalPath] ?: 0) > 0
     }
 
     internal fun isRestoreOwnedForTest(path: File): Boolean = synchronized(lock) {
@@ -104,6 +123,7 @@ internal object RestoredWorkingSourceOwnership {
     internal fun clearForTest() = synchronized(lock) {
         restorePaths.clear()
         documentPaths.clear()
+        operationRefs.clear()
     }
 
     private fun canonical(path: File): String =

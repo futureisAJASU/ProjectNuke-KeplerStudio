@@ -7527,7 +7527,6 @@ fun exportPreview() {
                     sourceRequest = sourceRequest,
                 ),
             )
-        if (result !is SuperResolutionStartResult.Started) sourceRequest.close()
         when (result) {
             is SuperResolutionStartResult.Started ->
                 updateUiStateAndRecycleReplaced {

@@ -2,12 +2,21 @@ package com.projectnuke.keplerstudio.editor
 
 import android.graphics.Bitmap
 import android.content.pm.ServiceInfo
+import java.io.File
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [29])
 class SuperResolutionProductTest {
+    private val context get() = RuntimeEnvironment.getApplication()
     @Test
     fun foregroundServiceUsesDataSyncOnApi34() {
         assertEquals(ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC, superResolutionForegroundServiceType(34))
@@ -130,6 +139,60 @@ class SuperResolutionProductTest {
     }
 
     @Test
+    fun postRgb8AdmissionCountsOnlyRemainingPngAndReserve() {
+        val initial =
+            computeSuperResolutionPreflight(
+                100,
+                80,
+                Long.MAX_VALUE,
+                Long.MAX_VALUE,
+                internalVolumeId = "volume",
+                destinationVolumeId = "volume",
+                runtimeReserveBytes = 0L,
+            ) as SuperResolutionPreflightResult.Ready
+        val p = initial.preflight
+        val initialFree = p.combinedRequiredBytes + 1L
+        val currentFreeAfterRgb8 = initialFree - p.rgb8ScratchBytes
+
+        assertTrue(
+            computeSuperResolutionPostRgb8Preflight(
+                pngRequiredBytes = p.pngRequiredBytes,
+                internalUsableBytes = currentFreeAfterRgb8,
+                destinationUsableBytes = currentFreeAfterRgb8,
+                internalVolumeId = "volume",
+                destinationVolumeId = "volume",
+                runtimeReserveBytes = 0L,
+            ) is SuperResolutionPostRgb8StorageResult.Ready,
+        )
+        // The old full-peak check would count the already-consumed RGB8 again and reject here.
+        assertTrue(
+            computeSuperResolutionPreflight(
+                100,
+                80,
+                currentFreeAfterRgb8,
+                currentFreeAfterRgb8,
+                internalVolumeId = "volume",
+                destinationVolumeId = "volume",
+                runtimeReserveBytes = 0L,
+            ) is SuperResolutionPreflightResult.Rejected,
+        )
+    }
+
+    @Test
+    fun postRgb8AdmissionRejectsWhenRemainingPngDoesNotFit() {
+        val rejected =
+            computeSuperResolutionPostRgb8Preflight(
+                pngRequiredBytes = 10_000L,
+                internalUsableBytes = 1_000L,
+                destinationUsableBytes = 1_000L,
+                internalVolumeId = "volume",
+                destinationVolumeId = "volume",
+                runtimeReserveBytes = 0L,
+            )
+        assertTrue(rejected is SuperResolutionPostRgb8StorageResult.Rejected)
+    }
+
+    @Test
     fun distinctVolumesCheckEachCapacityIndependently() {
         val ready =
             computeSuperResolutionPreflight(
@@ -192,6 +255,76 @@ class SuperResolutionProductTest {
             prepared.recycle()
             request.close()
         }
+
+    @Test
+    fun sourcePathNullCleanRenderedFullExportCopiesPreviewBeforeCrop() = kotlinx.coroutines.runBlocking {
+        val preview = Bitmap.createBitmap(7, 5, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(preview.width * preview.height) { index -> 0xff000000.toInt() or index }
+        preview.setPixels(pixels, 0, preview.width, 0, 0, preview.width, preview.height)
+        val state =
+            EditorUiState(
+                sourcePath = null,
+                baseBitmapDirty = false,
+                previewBitmap = preview,
+                correctionEngineState =
+                    CorrectionEngineState(
+                        visiblePreview =
+                            VisiblePreviewState.Rendered(
+                                requestedRoute = NativeRenderRoute.V1,
+                                actualRoute = NativeRenderRoute.V1,
+                                decision = RenderRouteDecision.StoredVisibleTruth,
+                                algorithmVersion = "frozen-test",
+                            ),
+                    ),
+            )
+        val request = FullExportSourceRequest.capture(state, "frozen-generation")
+        val prepared = prepareFullExportSourceBitmapFromRequest(request)
+        assertEquals(7, prepared.width)
+        assertEquals(5, prepared.height)
+        assertArrayEquals(pixels, IntArray(pixels.size).also { prepared.getPixels(it, 0, prepared.width, 0, 0, prepared.width, prepared.height) })
+        prepared.recycle()
+        preview.recycle()
+    }
+
+    @Test
+    fun sourcePathNullCleanRenderedFullExportAppliesOnlyTheExistingCropTransform() = kotlinx.coroutines.runBlocking {
+        val preview = Bitmap.createBitmap(10, 8, Bitmap.Config.ARGB_8888)
+        preview.eraseColor(0xff234567.toInt())
+        val crop = CropState(cropLeft = 0.1f, cropTop = 0.1f, cropRight = 0.9f, cropBottom = 0.9f)
+        val state = EditorUiState(sourcePath = null, baseBitmapDirty = false, previewBitmap = preview, cropState = crop)
+        val request = FullExportSourceRequest.capture(state, "frozen-generation")
+        val prepared = prepareFullExportSourceBitmapFromRequest(request)
+        val expected = cropTransformedDimensions(10, 8, crop)
+        assertEquals(expected.first, prepared.width)
+        assertEquals(expected.second, prepared.height)
+        assertEquals(0xff234567.toInt(), prepared.getPixel(prepared.width / 2, prepared.height / 2))
+        prepared.recycle()
+        preview.recycle()
+    }
+
+    @Test
+    fun appOwnedCleanSourceLeaseSurvivesDocumentOwnerTeardown() {
+        val source = File(context.filesDir, "editor_sources/restored_sr_lease_${System.nanoTime()}.img")
+        source.parentFile?.mkdirs()
+        Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).also { bitmap ->
+            source.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            bitmap.recycle()
+        }
+        try {
+            RestoredWorkingSourceOwnership.registerDocument(source)
+            val request = FullExportSourceRequest.capture(EditorUiState(sourcePath = source.absolutePath), "generation")
+            RestoredWorkingSourceOwnership.releaseDocument(source)
+            assertEquals(
+                RestoredWorkingSourceOwnership.DeleteResult.PRESERVED_LIVE_RESTORE,
+                RestoredWorkingSourceOwnership.deleteIfUnowned(source),
+            )
+            request.close()
+            assertEquals(RestoredWorkingSourceOwnership.DeleteResult.DELETED, RestoredWorkingSourceOwnership.deleteIfUnowned(source))
+        } finally {
+            source.delete()
+            RestoredWorkingSourceOwnership.clearForTest()
+        }
+    }
 
     @Test
     fun acceptedFixturePreflightUsesOverflowSafeActualGeometry() {

@@ -160,6 +160,7 @@ internal class FileBackedRgb8TileSink(
     override val outputHeight: Int,
     private val operationToken: String,
     private val io: FileBackedSinkIo = RealFileBackedSinkIo(),
+    private val stagingFileOverride: File? = null,
 ) : Rgb8TileSink {
 
     private enum class State { Open, Invalidated, HandedOff }
@@ -180,10 +181,11 @@ internal class FileBackedRgb8TileSink(
     }
 
     internal val stagingFile: File =
-        File(
-            destinationFile.absoluteFile.parentFile ?: File("."),
-            "${destinationFile.name}.$operationToken.tmp",
-        )
+        stagingFileOverride
+            ?: File(
+                destinationFile.absoluteFile.parentFile ?: File("."),
+                "${destinationFile.name}.$operationToken.tmp",
+            )
 
     @Volatile
     private var state = State.Open

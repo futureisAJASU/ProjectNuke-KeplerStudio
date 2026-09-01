@@ -42,6 +42,7 @@ internal class TileFileBackedUpscaler(
         attemptLabel: String? = null,
         observer: TileRunObserver? = null,
         artifactPathObserver: ((FileBackedRgb8TileSink) -> Unit)? = null,
+        plannedStagingFile: File? = null,
     ): FileBackedUpscaleResult {
         val sourceWidth = source.sourceWidth
         val sourceHeight = source.sourceHeight
@@ -72,6 +73,7 @@ internal class TileFileBackedUpscaler(
         try {
             return upscaleToFileInternal(
                 source, destinationFile, operationContext, attemptLabel, observer, artifactPathObserver,
+                plannedStagingFile,
                 sourceWidth, sourceHeight,
             )
         } finally {
@@ -88,6 +90,7 @@ internal class TileFileBackedUpscaler(
         attemptLabel: String?,
         observer: TileRunObserver?,
         artifactPathObserver: ((FileBackedRgb8TileSink) -> Unit)?,
+        plannedStagingFile: File?,
         sourceWidth: Int,
         sourceHeight: Int,
     ): FileBackedUpscaleResult {
@@ -132,6 +135,7 @@ internal class TileFileBackedUpscaler(
                     outputHeight = plan.outputHeight,
                     operationToken = operationTokenFactory(),
                     io = sinkIoFactory(),
+                    stagingFileOverride = plannedStagingFile,
                 )
             } catch (t: Throwable) {
                 return FileBackedUpscaleResult.Failure(

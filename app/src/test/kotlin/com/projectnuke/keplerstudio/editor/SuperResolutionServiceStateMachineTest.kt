@@ -23,6 +23,7 @@ class SuperResolutionServiceStateMachineTest {
     fun tearDown() {
         SuperResolutionForegroundPromotionSeam.resetForTest()
         SuperResolutionServiceLaunchSeam.resetForTest()
+        SuperResolutionServiceStartSeam.resetForTest()
         SuperResolutionOperationRegistry.resetForTest()
         context.getSharedPreferences(SuperResolutionMediaProcessingService.JOURNAL_PREFS, 0).edit().clear().commit()
     }

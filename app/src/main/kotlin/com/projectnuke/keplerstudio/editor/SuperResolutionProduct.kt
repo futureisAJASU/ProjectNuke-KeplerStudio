@@ -289,7 +289,7 @@ internal fun computeSuperResolutionPreflight(
     if (sameVolume && minOf(internalUsableBytes, destinationUsableBytes) < combinedRequired) {
         return SuperResolutionPreflightResult.Rejected(
             SuperResolutionFailureKind.InternalStorageInsufficient,
-            "AI 4諛????怨듦컙??RGB8 ?꾩떆 ?뚯씪怨?????대?吏瑜?媛숈? 怨듦컙???좎??섏? 紐삵뻽?듬땲??",
+            "저장 공간이 부족합니다. 공간을 확보한 후 다시 시도해 주세요.",
         )
     }
     if (!sameVolume && internalUsableBytes < internalRequired) {
@@ -326,6 +326,63 @@ internal fun computeSuperResolutionPreflight(
             combinedRequiredBytes = combinedRequired,
             storageVolumeIdentityKnown = identityKnown,
         ),
+    )
+}
+
+internal sealed interface SuperResolutionPostRgb8StorageResult {
+    object Ready : SuperResolutionPostRgb8StorageResult
+    data class Rejected(
+        val failure: SuperResolutionFailureKind,
+        val userMessage: String,
+    ) : SuperResolutionPostRgb8StorageResult
+}
+
+/** Second-stage admission: RGB8 already exists, so it is not counted again. */
+internal fun computeSuperResolutionPostRgb8Preflight(
+    pngRequiredBytes: Long,
+    internalUsableBytes: Long,
+    destinationUsableBytes: Long,
+    internalVolumeId: String? = null,
+    destinationVolumeId: String? = null,
+    runtimeReserveBytes: Long = STORAGE_RUNTIME_RESERVE_BYTES,
+): SuperResolutionPostRgb8StorageResult {
+    if (pngRequiredBytes < 0L || runtimeReserveBytes < 0L) {
+        return SuperResolutionPostRgb8StorageResult.Rejected(
+            SuperResolutionFailureKind.InternalStorageInsufficient,
+            "Not enough storage is available for the AI image.",
+        )
+    }
+    val identityKnown = internalVolumeId != null && destinationVolumeId != null
+    val sameVolume = if (identityKnown) internalVolumeId == destinationVolumeId else true
+    val required = withSafetyMargin(saturatingAddProduct(pngRequiredBytes, runtimeReserveBytes))
+    val fits = if (sameVolume) {
+        minOf(internalUsableBytes, destinationUsableBytes) >= required
+    } else {
+        destinationUsableBytes >= required
+    }
+    return if (fits) {
+        SuperResolutionPostRgb8StorageResult.Ready
+    } else {
+        SuperResolutionPostRgb8StorageResult.Rejected(
+            if (sameVolume) SuperResolutionFailureKind.InternalStorageInsufficient
+            else SuperResolutionFailureKind.DestinationStorageInsufficient,
+            "Not enough storage is available for the AI image. Free space and try again.",
+        )
+    }
+}
+
+internal fun computeSuperResolutionPostRgb8Preflight(
+    context: Context,
+    outputWidth: Int,
+    outputHeight: Int,
+): SuperResolutionPostRgb8StorageResult {
+    val destinationRoot = superResolutionMediaStoreTargetVolume(context)
+    return computeSuperResolutionPostRgb8Preflight(
+        pngRequiredBytes = pngUpperBound(outputWidth, outputHeight),
+        internalUsableBytes = runCatching { context.cacheDir.usableSpace }.getOrDefault(0L),
+        destinationUsableBytes = runCatching { destinationRoot.usableSpace }.getOrDefault(0L),
+        internalVolumeId = storageVolumeIdentity(context, context.cacheDir),
+        destinationVolumeId = storageVolumeIdentity(context, destinationRoot),
     )
 }
 

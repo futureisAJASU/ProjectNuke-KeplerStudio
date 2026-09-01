@@ -11,6 +11,7 @@ import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import java.security.MessageDigest
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -20,16 +21,28 @@ import kotlin.coroutines.coroutineContext
 
 internal interface SuperResolutionRowStore {
     suspend fun insertPending(fileName: String): Uri
+    suspend fun findPendingOwnedRow(identity: SuperResolutionPendingRowIdentity): Uri? = null
     suspend fun openOutputStream(uri: Uri): OutputStream
     suspend fun publish(uri: Uri): Int // returns updated row count; must be 1 for success
     suspend fun delete(uri: Uri): SuperResolutionRowDeleteResult
 }
+
+internal data class SuperResolutionPendingRowIdentity(
+    val ownershipToken: String,
+    val displayName: String,
+    val relativePath: String,
+    val collectionUri: Uri,
+)
 
 internal data class SuperResolutionDebtEvent(
     val phase: SuperResolutionJournalPhase,
     val rgb8Path: String? = null,
     val rgb8StagingPath: String? = null,
     val pendingUri: Uri? = null,
+    val mediaOwnershipToken: String? = null,
+    val mediaDisplayName: String? = null,
+    val mediaRelativePath: String? = null,
+    val mediaCollectionUri: Uri? = null,
     val publicPublicationCommitted: Boolean = false,
 )
 
@@ -75,6 +88,22 @@ internal class AndroidSuperResolutionRowStore(private val context: Context) : Su
         context.contentResolver.query(uri, arrayOf(MediaStore.Images.Media._ID), null, null, null)
             ?.use { it.moveToFirst() }
             ?: false
+
+    override suspend fun findPendingOwnedRow(identity: SuperResolutionPendingRowIdentity): Uri? {
+        check(identity.displayName.contains(identity.ownershipToken))
+        return context.contentResolver.query(
+            identity.collectionUri,
+            arrayOf(MediaStore.Images.Media._ID),
+            "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND " +
+                "${MediaStore.Images.Media.RELATIVE_PATH} = ? AND " +
+                "${MediaStore.Images.Media.IS_PENDING} = 1",
+            arrayOf(identity.displayName, identity.relativePath),
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) Uri.withAppendedPath(identity.collectionUri, cursor.getLong(0).toString())
+            else null
+        }
+    }
 }
 
 internal fun deleteRgb8ArtifactBounded(
@@ -290,10 +319,23 @@ internal object SuperResolutionExportOrchestrator {
             report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Upscaling, completedTiles = 0, totalTiles = totalTiles, tileFraction = 0f, overallFraction = 0.10f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
             emitMilestone("after_model_load")
 
-            val rgb8File = File(context.cacheDir, "sr6_${System.nanoTime()}_${(0..Int.MAX_VALUE).random()}.rgb8")
-            if (rgb8File.exists()) rgb8File.delete()
+            val rgb8OperationToken = "${operationContext.operationToken}_${UUID.randomUUID()}"
+            val rgb8File = File(context.cacheDir, "sr6_${rgb8OperationToken}.rgb8")
+            val rgb8StagingFile = File(context.cacheDir, "${rgb8File.name}.${rgb8OperationToken}.tmp")
+            // Journal both exact paths before FileBackedRgb8TileSink can create/truncate either.
+            debtObserver?.invoke(
+                SuperResolutionDebtEvent(
+                    phase = SuperResolutionJournalPhase.RGB8_INTENDED,
+                    rgb8Path = rgb8File.absolutePath,
+                    rgb8StagingPath = rgb8StagingFile.absolutePath,
+                ),
+            )
             val source = BitmapTileInputSource(inputBitmap)
-            val upscaler = TileFileBackedUpscaler(session, context)
+            val upscaler = TileFileBackedUpscaler(
+                session,
+                context,
+                operationTokenFactory = { rgb8OperationToken },
+            )
             // Tile progress observer
             val tileProgressObserver = TileRunObserver { record ->
                 val completed = record.index + 1
@@ -308,6 +350,7 @@ internal object SuperResolutionExportOrchestrator {
                 operationContext,
                 "sr6",
                 tileProgressObserver,
+                plannedStagingFile = rgb8StagingFile,
                 artifactPathObserver = { sink ->
                     debtObserver?.invoke(
                         SuperResolutionDebtEvent(
@@ -356,17 +399,34 @@ internal object SuperResolutionExportOrchestrator {
             if (isCancelled()) return@withContext SuperResolutionExportResult.Cancelled
             if (!isCurrent()) return@withContext SuperResolutionExportResult.Stale
 
-            // MediaStore pending row
-            val beforePublishPreflight = computeSuperResolutionPreflight(context, inputWidth, inputHeight)
-            if (beforePublishPreflight is SuperResolutionPreflightResult.Rejected) {
+            // MediaStore pending row. RGB8 is already allocated here, so the second-stage
+            // contract checks only the remaining PNG plus reserve against current free space.
+            val beforePublishPreflight =
+                computeSuperResolutionPostRgb8Preflight(context, outputWidth, outputHeight)
+            if (beforePublishPreflight is SuperResolutionPostRgb8StorageResult.Rejected) {
                 return@withContext SuperResolutionExportResult.Failure(
                     beforePublishPreflight.failure,
                     beforePublishPreflight.userMessage,
                 )
             }
             report(SuperResolutionExportProgress(phase = SuperResolutionExportPhase.Encoding, completedTiles = totalTiles, totalTiles = totalTiles, tileFraction = 1f, encodingRowsCompleted = 0, encodingRowsTotal = outputHeight, encodingFraction = 0f, overallFraction = 0.80f, inputWidth = inputWidth, inputHeight = inputHeight, outputWidth = outputWidth, outputHeight = outputHeight, canCancel = true))
+            val mediaOwnershipToken = "${operationContext.operationToken}_${UUID.randomUUID()}"
+            val mediaDisplayName =
+                fileName.removeSuffix(".png") + "_${mediaOwnershipToken}.png"
+            val mediaRelativePath = SavedExportHistoryStore.EXPORT_RELATIVE_PATH
+            val mediaCollectionUri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            debtObserver?.invoke(
+                SuperResolutionDebtEvent(
+                    phase = SuperResolutionJournalPhase.PENDING_INTENDED,
+                    rgb8Path = artifact.file.absolutePath,
+                    mediaOwnershipToken = mediaOwnershipToken,
+                    mediaDisplayName = mediaDisplayName,
+                    mediaRelativePath = mediaRelativePath,
+                    mediaCollectionUri = mediaCollectionUri,
+                ),
+            )
             val pendingUriResult = try {
-                rowStore.insertPending(fileName)
+                rowStore.insertPending(mediaDisplayName)
             } catch (e: Throwable) {
                 return@withContext SuperResolutionExportResult.Failure(SuperResolutionFailureKind.MediaStoreInsertFailure, "MediaStore insert pending failed: ${e.message}", e)
             }
@@ -376,6 +436,10 @@ internal object SuperResolutionExportOrchestrator {
                     phase = SuperResolutionJournalPhase.PENDING_INSERTED,
                     rgb8Path = artifact.file.absolutePath,
                     pendingUri = pendingUriResult,
+                    mediaOwnershipToken = mediaOwnershipToken,
+                    mediaDisplayName = mediaDisplayName,
+                    mediaRelativePath = mediaRelativePath,
+                    mediaCollectionUri = mediaCollectionUri,
                 ),
             )
             // Streaming PNG encode
@@ -524,6 +588,15 @@ internal object SuperResolutionExportOrchestrator {
                     deletePendingRowBounded(rowStore, uri)?.also { cleanupFailures.add(it) }
                 }
                 runCatching { session?.close() }
+                    .exceptionOrNull()
+                    ?.let(cleanupFailures::add)
+                session?.lastTeardownResult
+                    ?.takeUnless(TeardownResult::allAttemptedSucceeded)
+                    ?.let { teardown ->
+                        cleanupFailures += IOException(
+                            "session close reported cleanup failure: $teardown",
+                        )
+                    }
                 if (session != null) {
                     // This is emitted only after the real session close call has returned.
                     runCatching { emitMilestone("after_session_close") }

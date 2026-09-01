@@ -3,6 +3,7 @@ package com.projectnuke.keplerstudio.editor
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.ExifInterface
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -33,6 +34,23 @@ internal fun resolveFullExportSourceGeometry(
             cropTransformedDimensions(sourceGeometry.width, sourceGeometry.height, state.cropState)
         }
     return FullExportSourceGeometry(width, height)
+}
+
+/**
+ * Transfers only app-managed source families into operation ownership. Gallery and arbitrary
+ * external paths intentionally receive no lease and remain owned by their original provider.
+ */
+internal fun acquireFullExportSourceOperationLease(sourcePath: String?): AutoCloseable? {
+    val source = sourcePath?.let { runCatching { File(it).canonicalFile }.getOrNull() } ?: return null
+    val parent = source.parentFile ?: return null
+    return when {
+        parent.name == "editor_sources" && RestoredWorkingSourceOwnership.isOwnedName(source.name) ->
+            RestoredWorkingSourceOwnership.acquireOperation(source)
+        parent.name == "current" && parent.parentFile?.name == "drafts" &&
+            LegacyDraftSourceOwnership.isOwnedSourceName(source.name) ->
+            LegacyDraftSourceOwnership.acquireOperation(source.absolutePath)
+        else -> null
+    }
 }
 
 private fun readFullExportSourceGeometry(sourcePath: String): FullExportSourceGeometry? {
@@ -84,6 +102,7 @@ internal class FullExportSourceRequest private constructor(
     val quickEffects: List<ActiveQuickEffect>,
     private var ownedBaseBitmap: Bitmap?,
     private var ownedSelectionLayers: List<SelectionLayer>,
+    private var sourceLease: AutoCloseable?,
 ) : AutoCloseable {
     private val baseOwnership = AtomicBoolean(true)
     private val layerOwnership = AtomicBoolean(true)
@@ -97,6 +116,8 @@ internal class FullExportSourceRequest private constructor(
         else ownedSelectionLayers.also { ownedSelectionLayers = emptyList() }
     }
 
+    internal fun ownedBaseBitmapForTest(): Bitmap? = synchronized(this) { ownedBaseBitmap }
+
     override fun close() {
         val base = synchronized(this) {
             if (!baseOwnership.compareAndSet(true, false)) null
@@ -108,11 +129,15 @@ internal class FullExportSourceRequest private constructor(
         }
         base?.takeUnless(Bitmap::isRecycled)?.recycle()
         layers.forEach { it.bitmap.takeUnless(Bitmap::isRecycled)?.recycle() }
+        synchronized(this) { sourceLease.also { sourceLease = null } }?.close()
     }
 
     companion object {
         internal fun capture(state: EditorUiState, documentGeneration: String): FullExportSourceRequest {
-            val baseSource = state.originalPreviewBitmap ?: state.previewBitmap
+            val baseSource =
+                if (state.baseBitmapDirty) state.originalPreviewBitmap ?: state.previewBitmap
+                else if (state.sourcePath == null) state.previewBitmap
+                else null
             if (state.baseBitmapDirty && baseSource != null) {
                 val required =
                     BitmapMemoryBudget.saturatingAdd(
@@ -141,10 +166,20 @@ internal class FullExportSourceRequest private constructor(
                 } else {
                     null
                 }
+            val sourceLease =
+                runCatching {
+                    if (!state.baseBitmapDirty) acquireFullExportSourceOperationLease(state.sourcePath)
+                    else null
+                }
+                    .getOrElse { failure ->
+                        base?.takeUnless(Bitmap::isRecycled)?.recycle()
+                        throw failure
+                    }
             val layers = try {
                 state.selectionLayers.copyBitmapsOwned()
             } catch (failure: Throwable) {
                 base?.takeUnless(Bitmap::isRecycled)?.recycle()
+                sourceLease?.close()
                 throw failure
             }
             return FullExportSourceRequest(
@@ -164,6 +199,7 @@ internal class FullExportSourceRequest private constructor(
                 quickEffects = state.activeQuickEffects.toList(),
                 ownedBaseBitmap = base,
                 ownedSelectionLayers = layers,
+                sourceLease = sourceLease,
             )
         }
     }
@@ -261,19 +297,10 @@ internal suspend fun prepareFullExportSourceBitmapFromRequest(
                 }
             } else {
                 val base = checkNotNull(request.takeBaseBitmap()) { "document has no source bitmap" }
-                renderEditedExportFromBitmap(
-                    ownedBaseBitmap = base,
-                    resolution = ExportResolution.Full,
-                    selectionLayers = layers,
-                    diagnostics = diagnostics,
-                ) { source, preparedLayers ->
-                    request.renderRequest(
-                        RenderOperation.ExportDirty,
-                        source,
-                        preparedLayers,
-                        diagnostics,
-                    )
-                }
+                // Frozen parent semantics: a clean document with no source path already owns
+                // the settled preview. Full export copied it and only then applied crop; it did
+                // not route the pixels through a new ExportDirty render decision.
+                base
             }
         if (request.cropState != CropState()) {
             val cropped = renderCropTransform(checkNotNull(output), request.cropState)

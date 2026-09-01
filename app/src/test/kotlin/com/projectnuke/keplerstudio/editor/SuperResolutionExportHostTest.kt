@@ -95,11 +95,11 @@ class SuperResolutionExportHostTest {
         ModelAvailabilityRegistry.applyForTest(ModelFeature.ExynosUpscale, ModelCapabilityObservation(ModelCapabilityPublisher.Probe,g,ModelCapabilityPhase.Loadable,true,true,true,true,true))
     }
 
-    private fun makeSession(available:Boolean=true, failLoad:Boolean=false): ExynosUpscaleSession {
+    private fun makeSession(available:Boolean=true, failLoad:Boolean=false, failDeinitialize:Boolean=false): ExynosUpscaleSession {
         val enn = object : ExynosEnnNativeInterface {
             override fun probeRuntime()=true
             override fun initialize()=EnnStatus.SUCCESS
-            override fun deinitialize()=EnnStatus.SUCCESS
+            override fun deinitialize()=if (failDeinitialize) EnnStatus.FAILED else EnnStatus.SUCCESS
             override fun openModel(path:String)=EnnOpenModelResult(EnnStatus.SUCCESS, 1L)
             override fun closeModel(modelId: Long)=EnnStatus.SUCCESS
             override fun allocateAllBuffers(modelId: Long)=EnnAllocateResult(EnnStatus.SUCCESS, 0x100L,1,1)
@@ -111,6 +111,41 @@ class SuperResolutionExportHostTest {
             override fun getMetaInfo(metaId: Int, modelId: Long) = "v2.4.11.l"
         }
         return ExynosUpscaleSession(context, enn, kotlinx.coroutines.Dispatchers.Default, { if (failLoad) ModelLoadResult.LoadFailed("fail") else ModelLoadResult.Ready(File(context.filesDir,"fake.nnc")) })
+    }
+
+    @Test
+    fun sessionCloseFailureIsPublishedAsCleanupDebtWithoutDeletingPublishedRow() = runBlocking {
+        makeAvailable()
+        val input = bitmap(32, 32)
+        val rowStore = FakeRowStore()
+        val history = SavedExportHistoryStore(context, persistence = object : SavedExportHistoryPersistence {
+            var state = SavedExportPersistedState(null, false, ExportHistoryRetention.Never)
+            override suspend fun readState() = state
+            override suspend fun updateState(transform: suspend (SavedExportPersistedState) -> SavedExportPersistedState): SavedExportPersistedState {
+                state = transform(state)
+                return state
+            }
+        })
+        val session = makeSession(failDeinitialize = true)
+        try {
+            val result = SuperResolutionExportOrchestrator.exportBitmap(
+                context = context,
+                inputBitmap = input,
+                fileName = "close-failure.png",
+                operationContext = ModelOperationContext(700L, "close-failure"),
+                rowStore = rowStore,
+                historyStore = history,
+                sessionProvider = { session },
+            )
+            assertTrue(result is SuperResolutionExportResult.PublishedWithMetadataFailure)
+            val published = result as SuperResolutionExportResult.PublishedWithMetadataFailure
+            assertNotNull(published.uri)
+            assertTrue(published.cleanupDebt)
+            assertEquals(0, rowStore.deleteCalls)
+        } finally {
+            input.recycle()
+            runCatching { session.close() }
+        }
     }
 
     private suspend fun awaitLatchWithMainDrain(

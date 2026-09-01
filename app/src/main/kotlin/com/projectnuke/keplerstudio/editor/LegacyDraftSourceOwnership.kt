@@ -95,6 +95,20 @@ internal object LegacyDraftSourceOwnership {
         }
     }
 
+    /** Claims one exact legacy Draft source for a long-running export operation. */
+    fun acquireOperation(path: String): AutoCloseable {
+        val owner = OwnerKey.create()
+        acquire(owner, RootKind.OPERATION, path)
+        var released = false
+        return AutoCloseable {
+            synchronized(lock) {
+                if (released) return@AutoCloseable
+                released = true
+            }
+            releaseOwner(owner)
+        }
+    }
+
     /**
      * Removes exactly the [owner]/[kind] reference for [path]. Other owners'
      * references to the same canonical path are untouched. No-op for null
