@@ -331,19 +331,6 @@ class ExynosN6ProductE2ETest {
             a.draftGenerationThumbnailPath == b.draftGenerationThumbnailPath
     }
 
-    private fun cancellationDocumentUnchanged(before: DocumentSnapshot, after: DocumentSnapshot): Boolean {
-        val a = before.state
-        val b = after.state
-        return a.sourcePath == b.sourcePath &&
-            a.baseContentToken == b.baseContentToken &&
-            a.revision == b.revision &&
-            a.params == b.params &&
-            a.cropState == b.cropState &&
-            a.selectionLayers == b.selectionLayers &&
-            a.previewBitmap === b.previewBitmap &&
-            a.originalPreviewBitmap === b.originalPreviewBitmap
-    }
-
     private fun writeCancellationEvidence(
         fileName: String,
         triggerPhase: SuperResolutionExportPhase,
@@ -359,7 +346,8 @@ class ExynosN6ProductE2ETest {
         elapsedMs: Long,
     ) {
         val registryActive = ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive == true
-        val documentUnchanged = cancellationDocumentUnchanged(before, after)
+        val documentUnchanged = documentUnchanged(before, after)
+        check(documentUnchanged) { "cancellation document identity changed; refusing PASS evidence" }
         File(cancellationReportDir(), fileName).writeText(JSONObject().apply {
             put("status", "PASS")
             put("trigger_phase", triggerPhase.name)
@@ -663,7 +651,13 @@ class ExynosN6ProductE2ETest {
         var seamHandle: AutoCloseable? = null
         try {
             val generation = ModelAvailabilityRegistry.beginProbe(); ModelAvailabilityRegistry.probePackagedCapabilities(context, generation)
-            vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 90) { !vm.uiState.value.isBusy && vm.uiState.value.sourcePath != null }
+            vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 90) {
+                val state = vm.uiState.value
+                !state.isBusy && !state.maintenanceBusy && !state.historyBusy &&
+                    !vm.historyActivityBusyForTest() && !vm.hasActiveDraftSaveJobForTest() &&
+                    state.draftGenerationId != null && state.draftGenerationId == vm.draftPointerBaseline &&
+                    state.sourcePath != null
+            }
             val before = captureDocument(vm); val pendingBefore = pendingRows(); handler.post(ticker)
             val startTime = System.nanoTime()
             val encodingStarted = CountDownLatch(1); val triggerProgress = AtomicReference<SuperResolutionExportProgress?>()
@@ -708,7 +702,7 @@ class ExynosN6ProductE2ETest {
             assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
             assertFalse(wake.isHeld)
             assertTrue("registry inactive after cancellation", ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive != true)
-            assertTrue("document identity must remain unchanged", cancellationDocumentUnchanged(before, after))
+            assertTrue("full document identity must remain unchanged", documentUnchanged(before, after))
             writeCancellationEvidence("n6_cancel_png_e2e.json", SuperResolutionExportPhase.Encoding, trigger, terminal, before, after, pendingBefore, pendingAfter, rgb8ExistsAfter, session, wake, elapsedMs)
         } finally {
             try { seamHandle?.close() } catch (_: Throwable) {}
@@ -731,7 +725,13 @@ class ExynosN6ProductE2ETest {
         var seamHandle: AutoCloseable? = null
         try {
             val generation = ModelAvailabilityRegistry.beginProbe(); ModelAvailabilityRegistry.probePackagedCapabilities(context, generation)
-            vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 90) { !vm.uiState.value.isBusy && vm.uiState.value.sourcePath != null }
+            vm.openImage(sourceUri); awaitWithDiagnostics(vm, sessionRef, lastMilestone, heartbeat, rgb8Ref, 90) {
+                val state = vm.uiState.value
+                !state.isBusy && !state.maintenanceBusy && !state.historyBusy &&
+                    !vm.historyActivityBusyForTest() && !vm.hasActiveDraftSaveJobForTest() &&
+                    state.draftGenerationId != null && state.draftGenerationId == vm.draftPointerBaseline &&
+                    state.sourcePath != null
+            }
             val before = captureDocument(vm); val pendingBefore = pendingRows(); handler.post(ticker)
             val startTime = System.nanoTime()
             val tilesStarted = CountDownLatch(1); val triggerProgress = AtomicReference<SuperResolutionExportProgress?>()
@@ -776,7 +776,7 @@ class ExynosN6ProductE2ETest {
             assertEquals(ModelRunnerLifecycle.Unloaded, session.lifecycle)
             assertFalse(wake.isHeld)
             assertTrue("registry inactive after NPU cancellation", ModelAvailabilityRegistry.state.value[ModelFeature.ExynosUpscale]?.sessionActive != true)
-            assertTrue("document identity must remain unchanged", cancellationDocumentUnchanged(before, after))
+            assertTrue("full document identity must remain unchanged", documentUnchanged(before, after))
             writeCancellationEvidence("n6_cancel_npu_e2e.json", SuperResolutionExportPhase.Upscaling, trigger, terminal, before, after, pendingBefore, pendingAfter, rgb8ExistsAfter, session, wake, elapsedMs)
         } finally {
             try { seamHandle?.close() } catch (_: Throwable) {}
