@@ -508,12 +508,14 @@ private suspend fun EditorViewModel.applyCropTransformBackground(
                         expectedOriginal ?: error("missing transformed original")
                     val adoptedPreview =
                         expectedPreview ?: error("missing transformed preview")
+                    val newViewport = it.viewport.clampedForImage(adoptedPreview.width, adoptedPreview.height)
                     it.copy(
                         originalPreviewBitmap = adoptedOriginal,
                         previewBitmap = adoptedPreview,
                         baseBitmapDirty = true,
                         baseContentToken = newBaseContentToken(),
                         cropState = CropState(),
+                        viewport = newViewport,
                         selectionLayers = checkNotNull(expectedTransformedLayers),
                         isBusy = false,
                         message = "변경사항을 적용했습니다.",

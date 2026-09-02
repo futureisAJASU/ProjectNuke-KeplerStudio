@@ -44,9 +44,17 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.projectnuke.keplerstudio.editor.DehazeEngine
@@ -440,12 +448,13 @@ private fun ZoomablePreview(
     activeSelectionLayerId: String? = null,
     showSelectionOverlay: Boolean = false,
 ) {
-    var scale by remember(bitmap) { mutableFloatStateOf(1f) }
-    var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
+    // Viewport must NOT be keyed to bitmap identity; replacement bitmap with same geometry preserves viewport.
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
     var size by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
-    var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }
-    var isMultiTouch by remember(bitmap) { mutableStateOf(false) }
-    var isTransforming by remember(bitmap) { mutableStateOf(false) }
+    var showOriginal by remember { mutableStateOf(false) }
+    var isMultiTouch by remember { mutableStateOf(false) }
+    var isTransforming by remember { mutableStateOf(false) }
     val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
     val activeMaskLayer = selectionLayers.firstOrNull { it.id == activeSelectionLayerId }
 
@@ -463,10 +472,15 @@ private fun ZoomablePreview(
     }
 
     LaunchedEffect(size, displayedBitmap.width, displayedBitmap.height) {
+        // Preserve viewport if geometry unchanged; clamp only if out-of-bounds. Do NOT reset to defaults on bitmap replacement.
         val settled = settledViewport(scale, offset, size)
+        // Only push if actually clamped; identical geometry with same scale/offset must remain unchanged.
         if (scale != settled.scale || offset != settled.offset) {
             scale = settled.scale
             offset = settled.offset
+            onViewportChanged(settled)
+        } else if (settled.viewportWidth != size.width || settled.viewportHeight != size.height) {
+            // Ensure viewport dimensions stay in sync with container size without resetting scale/pan.
             onViewportChanged(settled)
         }
     }
@@ -480,12 +494,15 @@ private fun ZoomablePreview(
                 .fillMaxSize()
                 .onSizeChanged {
                     size = it
+                    // Clamp, don't reset: same-size bitmap replacement preserves viewport exactly.
                     val settled = settledViewport(scale, offset, it)
-                    scale = settled.scale
-                    offset = settled.offset
-                    onViewportChanged(settled)
+                    if (scale != settled.scale || offset != settled.offset || settled.viewportWidth != it.width || settled.viewportHeight != it.height) {
+                        scale = settled.scale
+                        offset = settled.offset
+                        onViewportChanged(settled)
+                    }
                 }
-                .pointerInput(bitmap) {
+                .pointerInput(Unit) {
                     awaitPointerEventScope {
                         while (true) {
                             val event = awaitPointerEvent()
@@ -496,7 +513,7 @@ private fun ZoomablePreview(
                         }
                     }
                 }
-                .pointerInput(bitmap) {
+                .pointerInput(Unit) {
                     detectTransformGestures { _, pan, zoom, _ ->
                         isTransforming = true
                         showOriginal = false
@@ -506,7 +523,7 @@ private fun ZoomablePreview(
                         onViewportChanged(settled)
                     }
                 }
-                .pointerInput(bitmap, originalBitmap) {
+                .pointerInput(Unit) {
                     detectTapGestures(
                         onLongPress = {
                             if (originalBitmap != null && !isMultiTouch && !isTransforming) showOriginal = true
@@ -612,10 +629,10 @@ private fun AdjustmentPanel(
                     params = params,
                     activeLook = activeLook
                 )
-                EditorTool.Light -> LightPanel(params, onChange)
-                EditorTool.Color -> ColorPanel(params, onChange)
-                EditorTool.Effects -> EffectsPanel(params, onChange)
-                EditorTool.Detail -> DetailPanel(params, onChange)
+                EditorTool.Light -> LightPanel(params, onChange, viewModel)
+                EditorTool.Color -> ColorPanel(params, onChange, viewModel)
+                EditorTool.Effects -> EffectsPanel(params, onChange, viewModel)
+                EditorTool.Detail -> DetailPanel(params, onChange, viewModel)
                 EditorTool.Crop -> UnavailablePanel("자르기 도구는 EditorScreenV2에서 지원됩니다")
                 EditorTool.Masking -> UnavailablePanel("마스킹 모델은 아직 지원되지 않습니다")
                 EditorTool.Remove -> UnavailablePanel("기본 정리 도구는 EditorScreenV2에서 지원됩니다")
@@ -727,43 +744,43 @@ private fun AutoPanel(onAutoEnhance: () -> Unit) {
 }
 
 @Composable
-private fun LightPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    AdjustmentSlider("노출", params.exposure, -1f, 1f) { v -> onChange { it.copy(exposure = v) } }
-    AdjustmentSlider("대비", params.contrast, -1f, 1f) { v -> onChange { it.copy(contrast = v) } }
-    AdjustmentSlider("하이라이트", params.highlights, -1f, 1f) { v -> onChange { it.copy(highlights = v) } }
-    AdjustmentSlider("섀도우", params.shadows, -1f, 1f) { v -> onChange { it.copy(shadows = v) } }
-    AdjustmentSlider("화이트", params.whites, -1f, 1f) { v -> onChange { it.copy(whites = v) } }
-    AdjustmentSlider("블랙", params.blacks, -1f, 1f) { v -> onChange { it.copy(blacks = v) } }
+private fun LightPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit, viewModel: EditorViewModel? = null) {
+    AdjustmentSlider("노출", params.exposure, -1f, 1f, onValue = { v -> onChange { it.copy(exposure = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("대비", params.contrast, -1f, 1f, onValue = { v -> onChange { it.copy(contrast = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("하이라이트", params.highlights, -1f, 1f, onValue = { v -> onChange { it.copy(highlights = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("섀도우", params.shadows, -1f, 1f, onValue = { v -> onChange { it.copy(shadows = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("화이트", params.whites, -1f, 1f, onValue = { v -> onChange { it.copy(whites = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("블랙", params.blacks, -1f, 1f, onValue = { v -> onChange { it.copy(blacks = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
 }
 
 @Composable
-private fun ColorPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    AdjustmentSlider("색온도", params.temperature, -1f, 1f) { v -> onChange { it.copy(temperature = v) } }
-    AdjustmentSlider("색조", params.tint, -1f, 1f) { v -> onChange { it.copy(tint = v) } }
-    AdjustmentSlider("생동감", params.vibrance, -1f, 1f) { v -> onChange { it.copy(vibrance = v) } }
-    AdjustmentSlider("채도", params.saturation, -1f, 1f) { v -> onChange { it.copy(saturation = v) } }
+private fun ColorPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit, viewModel: EditorViewModel? = null) {
+    AdjustmentSlider("색온도", params.temperature, -1f, 1f, onValue = { v -> onChange { it.copy(temperature = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("색조", params.tint, -1f, 1f, onValue = { v -> onChange { it.copy(tint = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("생동감", params.vibrance, -1f, 1f, onValue = { v -> onChange { it.copy(vibrance = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("채도", params.saturation, -1f, 1f, onValue = { v -> onChange { it.copy(saturation = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
     UnavailablePanel("HSL과 색상 혼합은 아직 지원되지 않습니다")
 }
 
 @Composable
-private fun EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    AdjustmentSlider("명료도", params.clarity, -1f, 1f) { v -> onChange { it.copy(clarity = v) } }
-    AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f) { v -> onChange { it.copy(dehaze = v) } }
+private fun EffectsPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit, viewModel: EditorViewModel? = null) {
+    AdjustmentSlider("명료도", params.clarity, -1f, 1f, onValue = { v -> onChange { it.copy(clarity = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f, onValue = { v -> onChange { it.copy(dehaze = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
     UnavailablePanel("텍스처, 비네팅, 그레인은 아직 지원되지 않습니다")
 }
 
 @Composable
-private fun DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit) {
-    AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f) { v -> onChange { it.copy(sharpness = v) } }
-    AdjustmentSlider("노이즈 감소", params.luminanceNoiseReduction, 0f, 1f) { v ->
+private fun DetailPanel(params: EditParams, onChange: ((EditParams) -> EditParams) -> Unit, viewModel: EditorViewModel? = null) {
+    AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f, onValue = { v -> onChange { it.copy(sharpness = v) } }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("노이즈 감소", params.luminanceNoiseReduction, 0f, 1f, onValue = { v ->
         onChange { it.copy(noiseReduction = v, luminanceNoiseReduction = v) }
-    }
-    AdjustmentSlider("색상 노이즈 감소", params.colorNoiseReduction, 0f, 1f) { v ->
+    }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("색상 노이즈 감소", params.colorNoiseReduction, 0f, 1f, onValue = { v ->
         onChange { it.copy(colorNoiseReduction = v) }
-    }
-    AdjustmentSlider("디테일 보호", params.noiseDetailProtection, 0f, 1f) { v ->
+    }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    AdjustmentSlider("디테일 보호", params.noiseDetailProtection, 0f, 1f, onValue = { v ->
         onChange { it.copy(noiseDetailProtection = v) }
-    }
+    }, onFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
 }
 
 @Composable
@@ -782,15 +799,85 @@ private fun AdjustmentSlider(
     value: Float,
     min: Float,
     max: Float,
-    onValue: (Float) -> Unit
+    onValue: (Float) -> Unit,
+    onFinished: (() -> Unit)? = null,
 ) {
+    var sliderWidthPx by androidx.compose.runtime.remember { mutableStateOf(0) }
+    val fraction = ((value - min) / (max - min)).coerceIn(0f, 1f)
+    val currentOnValue = androidx.compose.runtime.rememberUpdatedState(onValue)
+    val currentOnFinished = androidx.compose.runtime.rememberUpdatedState(onFinished)
+    val currentMin = androidx.compose.runtime.rememberUpdatedState(min)
+    val currentMax = androidx.compose.runtime.rememberUpdatedState(max)
+    val widthState = androidx.compose.runtime.rememberUpdatedState(sliderWidthPx)
     Row(
         modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(label, modifier = Modifier.width(86.dp), style = MaterialTheme.typography.bodyMedium, color = TextPrimary)
-        Slider(value = value, onValueChange = onValue, valueRange = min..max, modifier = Modifier.weight(1f))
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(min = 48.dp)
+                .onSizeChanged { sliderWidthPx = it.width }
+                .semantics(mergeDescendants = false) {
+                    progressBarRangeInfo = ProgressBarRangeInfo(value, min..max)
+                    contentDescription = label
+                    setProgress { requested ->
+                        val clamped = requested.coerceIn(min, max)
+                        onValue(clamped)
+                        true
+                    }
+                }
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val w = widthState.value
+                            if (w <= 0) continue
+                            fun updateFromPosition(x: Float) {
+                                val f = (x / w.toFloat()).coerceIn(0f, 1f)
+                                val v = (currentMin.value + f * (currentMax.value - currentMin.value)).coerceIn(currentMin.value, currentMax.value)
+                                currentOnValue.value(v)
+                            }
+                            updateFromPosition(down.position.x)
+                            down.consume()
+                            var dragging = true
+                            while (dragging) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull { it.pressed }
+                                if (change == null || !change.pressed) {
+                                    dragging = false
+                                    currentOnFinished.value?.invoke()
+                                    break
+                                }
+                                updateFromPosition(change.position.x)
+                                change.consume()
+                                if (event.changes.all { !it.pressed }) {
+                                    dragging = false
+                                    currentOnFinished.value?.invoke()
+                                    break
+                                }
+                            }
+                        }
+                    }
+                },
+            contentAlignment = Alignment.CenterStart
+        ) {
+            androidx.compose.foundation.layout.Box(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 4.dp).background(TextMuted.copy(alpha = 0.3f))
+            )
+            androidx.compose.foundation.layout.Box(
+                modifier = Modifier.fillMaxWidth(fraction).heightIn(min = 4.dp).background(TextPrimary)
+            )
+            androidx.compose.foundation.layout.Box(
+                modifier = Modifier
+                    .offset { IntOffset(((widthState.value * fraction).toInt() - 10), 0) }
+                    .width(20.dp)
+                    .heightIn(min = 20.dp)
+                    .background(TextPrimary, androidx.compose.foundation.shape.CircleShape)
+            )
+        }
         Text(String.format(Locale.US, "%.2f", value), modifier = Modifier.width(52.dp), style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
     }
 }

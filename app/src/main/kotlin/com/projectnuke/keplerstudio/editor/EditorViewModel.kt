@@ -8175,6 +8175,7 @@ fun exportPreview() {
                             val nextOriginal = rotatedOriginal
                             val nextMasks = rotatedMasks.toList()
                             updateUiStateAndRecycleReplaced { live ->
+                                val newViewport = live.viewport.clampedForImage(nextPreview.width, nextPreview.height)
                                 live.copy(
                                     previewBitmap = nextPreview,
                                     originalPreviewBitmap = nextOriginal,
@@ -8183,6 +8184,7 @@ fun exportPreview() {
                                             layer.copy(bitmap = nextMasks[index])
                                         },
                                     cropState = nextCrop,
+                                    viewport = newViewport,
                                     baseBitmapDirty = true,
                                     baseContentToken = newBaseContentToken(),
                                     isBusy = false,
@@ -9776,6 +9778,37 @@ fun exportPreview() {
         paramUndoWindowJob = null
         transaction.close()
         transaction.lifecycleInstallation?.hooks?.onTransactionClosed?.invoke(transaction.id)
+    }
+
+    /**
+     * Continuous slider gesture handling: called on pointer-up to commit the
+     * coalesced transaction as ONE logical edit with authoritative final render.
+     * Intermediate drag samples remain coalesced; history gains only one entry.
+     */
+    internal fun finishContinuousParameterEdit() {
+        val tx = parameterGesture ?: return
+        tx.windowExpired = true
+        paramUndoWindowJob?.cancel()
+        paramUndoWindowJob = null
+        // If no render in flight and already adopted, commit immediately.
+        // Otherwise maybeClose will commit after the final render adopts.
+        if (tx.renderJob?.isActive != true && tx.historyJob?.isActive != true) {
+            if (tx.adoptedParams != null) {
+                commitPendingParameterTransaction(tx)
+            } else {
+                maybeCloseParameterGesture(tx)
+            }
+        }
+    }
+
+    internal fun cancelContinuousParameterEdit() {
+        val tx = parameterGesture ?: return
+        tx.windowExpired = true
+        paramUndoWindowJob?.cancel()
+        paramUndoWindowJob = null
+        renderJob?.cancel()
+        activeParamRenderRevision = null
+        maybeCloseParameterGesture(tx)
     }
 
     internal fun discardPendingParamUndoSnapshot() {

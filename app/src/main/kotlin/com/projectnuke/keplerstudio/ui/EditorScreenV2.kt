@@ -90,7 +90,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -871,34 +872,53 @@ private fun V2ZoomablePreview(
     onStrokeEnd: () -> Unit = {},
     onStrokeCancel: () -> Unit = {},
 ) {
-    var scale by remember(bitmap) { mutableFloatStateOf(1f) }
-    var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
-    var showOriginal by remember(bitmap, originalBitmap) { mutableStateOf(false) }
-    var containerSize by remember(bitmap) { mutableStateOf(IntSize.Zero) }
+    // Viewport ownership: independent of bitmap identity — previewBitmap replacement must NOT reset zoom/pan.
+    val uiState by viewModel.uiState.collectAsState()
+    val viewport = uiState.viewport
+    // Local transient gesture state is hoisted to ViewModel viewport; container size is the only local layout state.
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    // Show-original is transient UI state independent of viewport, but must not be keyed to bitmap identity.
+    var showOriginal by remember { mutableStateOf(false) }
     var cursorPosition by remember { mutableStateOf<Offset?>(null) }
     val displayedBitmap = if (showOriginal && originalBitmap != null) originalBitmap else bitmap
     val activeMaskLayer = selectionLayers.firstOrNull { it.id == activeSelectionLayerId }
-    val currentScale = rememberUpdatedState(scale)
-    val currentOffset = rememberUpdatedState(offset)
     val currentMaskLayer = rememberUpdatedState(activeMaskLayer)
+    val currentViewport = rememberUpdatedState(viewport)
     val density = LocalDensity.current
     val paddingPx = with(density) { 8.dp.toPx() }
+    val scale = viewport.scale
+    val offset = viewport.offset
 
-    LaunchedEffect(containerSize, displayedBitmap.width, displayedBitmap.height, paddingPx) {
+    LaunchedEffect(containerSize, displayedBitmap.width, displayedBitmap.height, paddingPx, viewport.viewportWidth, viewport.viewportHeight) {
         if (containerSize.width > 0 && containerSize.height > 0) {
-            val safeScale = scale.takeIf { it.isFinite() }?.coerceIn(1f, 8f) ?: 1f
-            val settled =
-                PreviewGeometry(
-                    container = containerSize,
-                    imageWidth = displayedBitmap.width,
-                    imageHeight = displayedBitmap.height,
-                    padding = paddingPx,
-                    zoom = safeScale,
-                    pan = offset,
-                ).clampedPan()
-            if (scale != safeScale || offset != settled) {
-                scale = safeScale
-                offset = settled
+            // Clamp existing viewport to current geometry; do NOT reset to 1f/Zero unless invalid.
+            val geometry = PreviewGeometry(
+                container = containerSize,
+                imageWidth = displayedBitmap.width,
+                imageHeight = displayedBitmap.height,
+                padding = paddingPx,
+                zoom = viewport.scale,
+                pan = viewport.offset,
+            )
+            val clamped = geometry.clampedPan()
+            val safeScale = viewport.scale.takeIf { it.isFinite() }?.coerceIn(1f, 8f) ?: 1f
+            // Only push correction if actually out of bounds or scale invalid, and geometry is valid.
+            // Identical-geometry bitmap replacement must preserve viewport exactly.
+            if (scale != safeScale || offset != clamped) {
+                // If geometry is invalid (e.g., no image), viewport update will sanitize.
+                viewModel.updateViewport(
+                    com.projectnuke.keplerstudio.editor.ViewportState(
+                        scale = safeScale,
+                        offset = clamped,
+                        viewportWidth = containerSize.width,
+                        viewportHeight = containerSize.height,
+                    )
+                )
+            } else if (viewport.viewportWidth != containerSize.width || viewport.viewportHeight != containerSize.height) {
+                // Viewport dimensions track container size; update if container changed size for same bitmap.
+                viewModel.updateViewport(
+                    viewport.copy(viewportWidth = containerSize.width, viewportHeight = containerSize.height)
+                )
             }
         }
     }
@@ -917,39 +937,41 @@ private fun V2ZoomablePreview(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(8.dp)
-                .pointerInput(bitmap, paintMode) {
+                .pointerInput(paintMode) {
                     if (paintMode && currentMaskLayer.value != null) {
                         detectDragGestures(
                             onDragStart = { off ->
                                 onStrokeStart()
                                 val mask = currentMaskLayer.value?.bitmap ?: return@detectDragGestures
+                                val vp = currentViewport.value
                                 val mapped = PreviewGeometry(
                                     container = containerSize,
                                     imageWidth = mask.width,
                                     imageHeight = mask.height,
                                     padding = paddingPx,
-                                    zoom = currentScale.value,
-                                    pan = currentOffset.value,
+                                    zoom = vp.scale,
+                                    pan = vp.offset,
                                 ).viewToImage(off + Offset(paddingPx, paddingPx))
                                 if (mapped != null) onPaintAt(mapped.first, mapped.second)
                             },
                             onDrag = { change, _ ->
                                 change.consume()
+                                val vp = currentViewport.value
                                 val innerCenter = Offset(
                                     (containerSize.width - paddingPx * 2f) / 2f,
                                     (containerSize.height - paddingPx * 2f) / 2f,
                                 )
                                 cursorPosition = innerCenter +
-                                    (change.position - innerCenter - currentOffset.value) /
-                                        currentScale.value.coerceAtLeast(0.001f)
+                                    (change.position - innerCenter - vp.offset) /
+                                        vp.scale.coerceAtLeast(0.001f)
                                 val mask = currentMaskLayer.value?.bitmap ?: return@detectDragGestures
                                 val mapped = PreviewGeometry(
                                     container = containerSize,
                                     imageWidth = mask.width,
                                     imageHeight = mask.height,
                                     padding = paddingPx,
-                                    zoom = currentScale.value,
-                                    pan = currentOffset.value,
+                                    zoom = vp.scale,
+                                    pan = vp.offset,
                                 ).viewToImage(change.position + Offset(paddingPx, paddingPx))
                                 if (mapped != null) onPaintAt(mapped.first, mapped.second)
                             },
@@ -958,39 +980,42 @@ private fun V2ZoomablePreview(
                         )
                     } else {
                         detectTransformGestures { centroid, pan, zoom, _ ->
-                            val oldScale = scale
+                            val vp = currentViewport.value
+                            val oldScale = vp.scale
                             val nextScale = (oldScale * zoom).coerceIn(1f, 8f)
-                            scale = nextScale
-                            offset = if (nextScale <= 1.01f) {
+                            val newOffset = if (nextScale <= 1.01f) {
                                 Offset.Zero
                             } else {
                                 val center = Offset(
                                     (containerSize.width - paddingPx * 2f) / 2f,
                                     (containerSize.height - paddingPx * 2f) / 2f,
                                 )
-                                val newOffset = ((offset + centroid - center) * (nextScale / oldScale)) - (centroid - center) + pan
-                                clampZoomOffset(newOffset, nextScale, bitmap.width, bitmap.height, containerSize, paddingPx)
+                                val newOff = ((vp.offset + centroid - center) * (nextScale / oldScale)) - (centroid - center) + pan
+                                clampZoomOffset(newOff, nextScale, bitmap.width, bitmap.height, containerSize, paddingPx)
                             }
+                            viewModel.updateViewport(
+                                vp.copy(scale = nextScale, offset = newOffset, viewportWidth = containerSize.width, viewportHeight = containerSize.height)
+                            )
                             showOriginal = false
                         }
                         showOriginal = false
                     }
                 }
-                .pointerInput(bitmap, originalBitmap, containerSize, paintMode) {
+                .pointerInput(paintMode) {
                     if (!paintMode) {
                         detectTapGestures(
                             onTap = { onToggleChrome() },
                             onDoubleTap = { tap ->
-                                if (scale > 1.01f) {
-                                    scale = 1f
-                                    offset = Offset.Zero
+                                val vp = currentViewport.value
+                                if (vp.scale > 1.01f) {
+                                    viewModel.updateViewport(vp.copy(scale = 1f, offset = Offset.Zero, viewportWidth = containerSize.width, viewportHeight = containerSize.height))
                                 } else {
                                     val targetScale = 2.5f
                                     val innerCenter = Offset(
                                         (containerSize.width - paddingPx * 2f) / 2f,
                                         (containerSize.height - paddingPx * 2f) / 2f,
                                     )
-                                    offset = clampZoomOffset(
+                                    val newOffset = clampZoomOffset(
                                         (innerCenter - tap) * (targetScale - 1f),
                                         targetScale,
                                         bitmap.width,
@@ -998,7 +1023,7 @@ private fun V2ZoomablePreview(
                                         containerSize,
                                         paddingPx,
                                     )
-                                    scale = targetScale
+                                    viewModel.updateViewport(vp.copy(scale = targetScale, offset = newOffset, viewportWidth = containerSize.width, viewportHeight = containerSize.height))
                                 }
                                 showOriginal = false
                             },
@@ -1011,10 +1036,10 @@ private fun V2ZoomablePreview(
                     }
                 }
                 .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                    translationX = offset.x
-                    translationY = offset.y
+                    scaleX = currentViewport.value.scale
+                    scaleY = currentViewport.value.scale
+                    translationX = currentViewport.value.offset.x
+                    translationY = currentViewport.value.offset.y
                 }
         )
         if (showGrid) {
@@ -1026,10 +1051,10 @@ private fun V2ZoomablePreview(
                         .fillMaxSize()
                         .padding(8.dp)
                         .graphicsLayer {
-                            scaleX = scale
-                            scaleY = scale
-                            translationX = offset.x
-                            translationY = offset.y
+                            scaleX = currentViewport.value.scale
+                            scaleY = currentViewport.value.scale
+                            translationX = currentViewport.value.offset.x
+                            translationY = currentViewport.value.offset.y
                         },
             )
         }
@@ -1038,8 +1063,8 @@ private fun V2ZoomablePreview(
                 layer = activeMaskLayer,
                 visible = showSelectionOverlay,
                 viewModel = viewModel,
-                scale = scale,
-                offset = offset,
+                scale = currentViewport.value.scale,
+                offset = currentViewport.value.offset,
                 paddingPx = paddingPx,
                 modifier = Modifier.fillMaxSize(),
             )
@@ -1062,10 +1087,10 @@ private fun V2ZoomablePreview(
                     .fillMaxSize()
                     .padding(8.dp)
                     .graphicsLayer {
-                        scaleX = scale
-                        scaleY = scale
-                        translationX = offset.x
-                        translationY = offset.y
+                        scaleX = currentViewport.value.scale
+                        scaleY = currentViewport.value.scale
+                        translationX = currentViewport.value.offset.x
+                        translationY = currentViewport.value.offset.y
                     },
             )
         }
@@ -1116,10 +1141,10 @@ private fun V2AdjustmentPanel(
                     V2EditorTool.Crop -> CropToolPanel(editorViewModel)
                     V2EditorTool.Masking -> MaskingToolPanel(editorViewModel)
                     V2EditorTool.Remove -> NativeRemoveToolPanel(editorViewModel)
-                    V2EditorTool.Light -> V2LightPanel(params, controlsEnabled, onChange)
-                    V2EditorTool.Color -> V2ColorPanel(params, controlsEnabled, onChange)
-                    V2EditorTool.Effects -> V2EffectsPanel(params, controlsEnabled, onChange)
-                    V2EditorTool.Detail -> V2DetailPanel(params, controlsEnabled, onChange)
+                    V2EditorTool.Light -> V2LightPanel(params, controlsEnabled, onChange, editorViewModel)
+                    V2EditorTool.Color -> V2ColorPanel(params, controlsEnabled, onChange, editorViewModel)
+                    V2EditorTool.Effects -> V2EffectsPanel(params, controlsEnabled, onChange, editorViewModel)
+                    V2EditorTool.Detail -> V2DetailPanel(params, controlsEnabled, onChange, editorViewModel)
                     V2EditorTool.Optics -> NativeOpticsToolPanel(editorViewModel)
                     V2EditorTool.Geometry -> NativeGeometryToolPanel(editorViewModel)
                     V2EditorTool.Blur -> NativeBlurToolPanel(editorViewModel)
@@ -1157,43 +1182,43 @@ private fun V2PlaceholderPanel(message: String) {
 }
 
 @Composable
-private fun V2LightPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit) {
-    V2AdjustmentSlider("노출", params.exposure, -1f, 1f, enabled) { v -> onChange { it.copy(exposure = v) } }
-    V2AdjustmentSlider("대비", params.contrast, -1f, 1f, enabled) { v -> onChange { it.copy(contrast = v) } }
-    V2AdjustmentSlider("하이라이트", params.highlights, -1f, 1f, enabled) { v -> onChange { it.copy(highlights = v) } }
-    V2AdjustmentSlider("그림자", params.shadows, -1f, 1f, enabled) { v -> onChange { it.copy(shadows = v) } }
-    V2AdjustmentSlider("화이트", params.whites, -1f, 1f, enabled) { v -> onChange { it.copy(whites = v) } }
-    V2AdjustmentSlider("블랙", params.blacks, -1f, 1f, enabled) { v -> onChange { it.copy(blacks = v) } }
+private fun V2LightPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit, viewModel: EditorViewModel? = null) {
+    V2AdjustmentSlider("노출", params.exposure, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(exposure = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("대비", params.contrast, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(contrast = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("하이라이트", params.highlights, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(highlights = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("그림자", params.shadows, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(shadows = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("화이트", params.whites, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(whites = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("블랙", params.blacks, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(blacks = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
 }
 
 @Composable
-private fun V2ColorPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit) {
-    V2AdjustmentSlider("색온도", params.temperature, -1f, 1f, enabled) { v -> onChange { it.copy(temperature = v) } }
-    V2AdjustmentSlider("색조", params.tint, -1f, 1f, enabled) { v -> onChange { it.copy(tint = v) } }
-    V2AdjustmentSlider("생동감", params.vibrance, -1f, 1f, enabled) { v -> onChange { it.copy(vibrance = v) } }
-    V2AdjustmentSlider("채도", params.saturation, -1f, 1f, enabled) { v -> onChange { it.copy(saturation = v) } }
+private fun V2ColorPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit, viewModel: EditorViewModel? = null) {
+    V2AdjustmentSlider("색온도", params.temperature, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(temperature = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("색조", params.tint, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(tint = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("생동감", params.vibrance, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(vibrance = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("채도", params.saturation, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(saturation = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
     V2PlaceholderPanel("HSL과 색상 혼합은 아직 연결하지 않았습니다")
 }
 
 @Composable
-private fun V2EffectsPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit) {
-    V2AdjustmentSlider("선명 대비", params.clarity, -1f, 1f, enabled) { v -> onChange { it.copy(clarity = v) } }
-    V2AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f, enabled) { v -> onChange { it.copy(dehaze = v) } }
+private fun V2EffectsPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit, viewModel: EditorViewModel? = null) {
+    V2AdjustmentSlider("선명 대비", params.clarity, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(clarity = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("디헤이즈", params.dehaze, -1f, 1f, enabled, onValue = { v -> onChange { it.copy(dehaze = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
     V2PlaceholderPanel("텍스처, 그레인, 고급 효과는 아직 연결하지 않았습니다")
 }
 
 @Composable
-private fun V2DetailPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit) {
-    V2AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f, enabled) { v -> onChange { it.copy(sharpness = v) } }
-    V2AdjustmentSlider("노이즈 감소", params.luminanceNoiseReduction, 0f, 1f, enabled) { v ->
+private fun V2DetailPanel(params: EditParams, enabled: Boolean, onChange: ((EditParams) -> EditParams) -> Unit, viewModel: EditorViewModel? = null) {
+    V2AdjustmentSlider("샤프닝", params.sharpness, 0f, 1f, enabled, onValue = { v -> onChange { it.copy(sharpness = v) } }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("노이즈 감소", params.luminanceNoiseReduction, 0f, 1f, enabled, onValue = { v ->
         onChange { it.copy(noiseReduction = v, luminanceNoiseReduction = v) }
-    }
-    V2AdjustmentSlider("색상 노이즈 감소", params.colorNoiseReduction, 0f, 1f, enabled) { v ->
+    }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("색상 노이즈 감소", params.colorNoiseReduction, 0f, 1f, enabled, onValue = { v ->
         onChange { it.copy(colorNoiseReduction = v) }
-    }
-    V2AdjustmentSlider("디테일 보호", params.noiseDetailProtection, 0f, 1f, enabled) { v ->
+    }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
+    V2AdjustmentSlider("디테일 보호", params.noiseDetailProtection, 0f, 1f, enabled, onValue = { v ->
         onChange { it.copy(noiseDetailProtection = v) }
-    }
+    }, onValueChangeFinished = viewModel?.let { { it.finishContinuousParameterEdit() } })
 }
 
 @Composable
@@ -1203,15 +1228,100 @@ private fun V2AdjustmentSlider(
     min: Float,
     max: Float,
     enabled: Boolean,
-    onValue: (Float) -> Unit
+    onValue: (Float) -> Unit,
+    onValueChangeFinished: (() -> Unit)? = null,
 ) {
+    var sliderWidthPx by remember { mutableStateOf(0) }
+    val fraction = ((value - min) / (max - min)).coerceIn(0f, 1f)
+    val currentOnValue = rememberUpdatedState(onValue)
+    val currentOnFinished = rememberUpdatedState(onValueChangeFinished)
+    val currentMin = rememberUpdatedState(min)
+    val currentMax = rememberUpdatedState(max)
+    val currentEnabled = rememberUpdatedState(enabled)
+    val widthState = rememberUpdatedState(sliderWidthPx)
     Row(
         modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(label, modifier = Modifier.width(86.dp), style = MaterialTheme.typography.bodyMedium, color = V2TextPrimary)
-        Slider(value = value, onValueChange = onValue, valueRange = min..max, enabled = enabled, modifier = Modifier.weight(1f))
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(48.dp)
+                .onSizeChanged { sliderWidthPx = it.width }
+                .semantics(mergeDescendants = false) {
+                    progressBarRangeInfo = ProgressBarRangeInfo(value, min..max)
+                    contentDescription = label
+                    if (enabled) {
+                        setProgress { requested ->
+                            val clamped = requested.coerceIn(min, max)
+                            onValue(clamped)
+                            true
+                        }
+                    }
+                }
+                .pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            if (!currentEnabled.value) continue
+                            val w = widthState.value
+                            if (w <= 0) continue
+                            fun updateFromPosition(x: Float) {
+                                val f = (x / w.toFloat()).coerceIn(0f, 1f)
+                                val v = (currentMin.value + f * (currentMax.value - currentMin.value)).coerceIn(currentMin.value, currentMax.value)
+                                currentOnValue.value(v)
+                            }
+                            updateFromPosition(down.position.x)
+                            down.consume()
+                            var dragging = true
+                            while (dragging) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull { it.pressed }
+                                if (change == null || !change.pressed) {
+                                    dragging = false
+                                    currentOnFinished.value?.invoke()
+                                    break
+                                }
+                                updateFromPosition(change.position.x)
+                                change.consume()
+                                if (event.changes.all { !it.pressed }) {
+                                    dragging = false
+                                    currentOnFinished.value?.invoke()
+                                    break
+                                }
+                            }
+                        }
+                    }
+                },
+            contentAlignment = Alignment.CenterStart
+        ) {
+            // track background
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .background(V2TextMuted.copy(alpha = 0.3f))
+            )
+            // active track
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(fraction)
+                    .height(4.dp)
+                    .background(if (enabled) V2Accent else V2TextMuted)
+            )
+            // thumb
+            val density = LocalDensity.current
+            val thumbOffsetPx = with(density) { 10.dp.toPx() }
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset(((widthState.value * fraction) - thumbOffsetPx).toInt(), 0) }
+                    .width(20.dp)
+                    .height(20.dp)
+                    .background(if (enabled) V2Accent else V2TextMuted, androidx.compose.foundation.shape.CircleShape)
+            )
+        }
         Text(String.format(Locale.US, "%.2f", value), modifier = Modifier.width(52.dp), style = MaterialTheme.typography.bodyMedium, color = V2TextSecondary)
     }
 }
