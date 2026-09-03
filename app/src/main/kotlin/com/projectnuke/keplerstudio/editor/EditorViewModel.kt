@@ -641,6 +641,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         @Volatile var inactivityGeneration: Long = 0L
         internal val stateLock = Any()
         private var closed = false
+        @Volatile private var executingRevision: Int? = null
 
         internal fun currentTerminalState(): ParamTransactionTerminalState = terminalState
 
@@ -664,28 +665,41 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     ParamRenderRevisionPhase.Canceled,
                     ParamRenderRevisionPhase.Failed,
                     ParamRenderRevisionPhase.Closed,
+                    ParamRenderRevisionPhase.Adopted,
                 )
             ) null else rev
         }
         internal fun latestRenderableParams(): EditParams? = synchronized(stateLock) {
-            val rev = latestRevision
+            val rev = latestRenderableRevision() ?: return@synchronized null
             val owner = renderRevisions[rev]
-            if (owner == null || owner.phase in setOf(
-                    ParamRenderRevisionPhase.Canceled,
-                    ParamRenderRevisionPhase.Failed,
-                    ParamRenderRevisionPhase.Closed,
-                )
-            ) null else owner.params
+            owner?.params
         }
 
         internal fun renderRevisionPhases(): Map<Int, ParamRenderRevisionPhase> =
             synchronized(stateLock) { renderRevisions.mapValues { it.value.phase } }
 
+        internal fun markExecuting(revision: Int) {
+            synchronized(stateLock) {
+                executingRevision = revision
+            }
+        }
+
+        internal fun clearExecuting(revision: Int) {
+            synchronized(stateLock) {
+                if (executingRevision == revision) {
+                    executingRevision = null
+                }
+            }
+        }
+
+        internal fun isExecuting(revision: Int): Boolean =
+            synchronized(stateLock) { executingRevision == revision }
+
         internal fun requestRender(revision: Int, params: EditParams) = synchronized(stateLock) {
             check(!closed && terminalState == ParamTransactionTerminalState.Active)
-            renderRevisions.values
-                .filter { it.revision != adoptedRevision && it.phase !in setOf(ParamRenderRevisionPhase.Canceled, ParamRenderRevisionPhase.Failed, ParamRenderRevisionPhase.Closed) }
-                .forEach { it.phase = ParamRenderRevisionPhase.Canceled; it.terminalReason = "superseded"; it.job?.cancel() }
+            // Just add the new revision. Conflation happens naturally because the pipeline
+            // always picks the latest renderable revision. Older revisions will be superseded
+            // when the newer ones are adopted.
             renderRevisions[revision] = RenderRevisionOwner(revision, params, start.identity)
         }
 
@@ -695,6 +709,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             owner.operationToken = operationToken
             owner.job = job
             owner.phase = ParamRenderRevisionPhase.Preparing
+            executingRevision = revision
             true
         }
 
@@ -704,6 +719,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 val owner = renderRevisions[revision] ?: return false
                 if (closed || terminalState != ParamTransactionTerminalState.Active || owner.phase == ParamRenderRevisionPhase.Canceled) return false
                 owner.phase = ParamRenderRevisionPhase.Rendering
+                executingRevision = revision
                 return true
             }
         }
@@ -716,17 +732,43 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             true
         }
 
-        /** The current render adopted; its output is retained as the gesture state. */
+        /**
+         * Adopt a completed render as the visible preview.
+         * 
+         * C2: Allow intermediate preview adoption even when newer pending requests exist.
+         * This provides visual progress during sustained drags.
+         * 
+         * The adopted revision updates the transient visible preview but does NOT:
+         * - Roll uiState.params backward
+         * - Roll revision backward
+         * - Commit history
+         * - Mutate Draft ownership
+         * - Become the final authoritative render unless it's also the latest
+         */
         internal fun adopt(revision: Int): Boolean {
             synchronized(stateLock) {
                 val owner = renderRevisions[revision] ?: return false
-                if (closed || terminalState != ParamTransactionTerminalState.Active || revision != latestRevision || owner.phase != ParamRenderRevisionPhase.Produced) return false
-                adoptedRevision?.takeIf { it != revision }?.let { previous ->
-                    renderRevisions[previous]?.apply { phase = ParamRenderRevisionPhase.Closed; terminalReason = "replaced by adoption $revision" }
+                if (closed || terminalState != ParamTransactionTerminalState.Active || owner.phase != ParamRenderRevisionPhase.Produced) return false
+                if (owner.revision == adoptedRevision) return false
+                val previousAdopted = adoptedRevision
+                if (previousAdopted != null && previousAdopted != revision) {
+                    renderRevisions[previousAdopted]?.apply { 
+                        phase = ParamRenderRevisionPhase.Closed
+                        terminalReason = "replaced by adoption $revision"
+                    }
                 }
                 owner.phase = ParamRenderRevisionPhase.Adopted
                 owner.outputOwned = false
                 owner.adoptionIdentity = "$id:$revision"
+                adoptedRevision = revision
+                // Only set adoptedParams if this is the latest revision (final adoption)
+                if (revision == latestRevision) {
+                    adoptedParams = owner.params
+                    // Cancel all older non-adopted revisions to achieve conflation
+                    renderRevisions.values
+                        .filter { it.revision < revision && it.phase !in setOf(ParamRenderRevisionPhase.Canceled, ParamRenderRevisionPhase.Failed, ParamRenderRevisionPhase.Closed, ParamRenderRevisionPhase.Adopted) }
+                        .forEach { it.phase = ParamRenderRevisionPhase.Canceled; it.terminalReason = "superseded by adoption $revision"; it.job?.cancel() }
+                }
                 return true
             }
         }
@@ -5746,7 +5788,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         if (parameterPipelineJob?.isActive == true) return
         parameterPipelineJob = viewModelScope.launch {
             try {
-                var lastRenderedRevision: Int? = null
                 while (tx.isPipelineActive()) {
                     val activeJob = synchronized(tx.stateLock) { tx.renderJob }
                     if (activeJob != null && activeJob.isActive) {
@@ -5754,12 +5795,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         continue
                     }
                     val revToRender = tx.latestRenderableRevision()
-                    if (revToRender != null && revToRender != lastRenderedRevision) {
+                    if (revToRender != null) {
                         val params = tx.latestRenderableParams()
                         if (params == null) break
                         val job = launchParameterRenderForTransaction(tx, revToRender, params)
                         job.join()
-                        lastRenderedRevision = revToRender
+                        // After render completes, check if this was the latest
+                        // If newer requests came in while rendering, continue to render them
                     } else {
                         if (tx.windowExpired) {
                             maybeCloseParameterGesture(tx)
@@ -5860,15 +5902,15 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     val result = owner.result
                     output = checkNotNull(owner.takeOutput())
                     tracker?.track(output, "updateParams:output")
+                    transaction.clearExecuting(nextRevision)
                     if (isManagedEditCurrent(operationToken, nextRevision)) {
                         if (transaction.adopt(nextRevision)) {
-                            transaction.adoptedRevision = nextRevision
-                            transaction.adoptedParams = next
+                            val isFinalAdoption = nextRevision == transaction.latestRevision
                             updateUiStateAndRecycleReplaced {
                                 it.copy(
-                                    params = next,
+                                    params = if (isFinalAdoption) next else it.params,
                                     previewBitmap = output,
-                                    isBusy = false,
+                                    isBusy = if (isFinalAdoption) false else it.isBusy,
                                     correctionEngineState = it.correctionEngineState.withSuccessfulRender(
                                         transaction.start.state.correctionEngineState.documentEngine,
                                         result.copy(output = checkNotNull(output)),
@@ -5878,7 +5920,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             activeParamRenderRevision = null
                             output = null
                             transaction.lifecycleInstallation?.hooks?.onRenderOutputAdopted?.invoke(nextRevision)
-                            maybeCloseParameterGesture(transaction)
+                            if (isFinalAdoption) {
+                                maybeCloseParameterGesture(transaction)
+                            }
                         } else {
                             transaction.cancelRender(nextRevision, "adoption rejected")
                             if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
@@ -5888,10 +5932,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     }
                 } catch (ce: CancellationException) {
+                    transaction.clearExecuting(nextRevision)
                     transaction.cancelRender(nextRevision, "canceled")
                     if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     throw ce
                 } catch (failure: Throwable) {
+                    transaction.clearExecuting(nextRevision)
                     transaction.failRender(nextRevision, failure.message ?: failure::class.java.simpleName)
                     if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     if (isManagedEditCurrent(operationToken, nextRevision)) {
@@ -5906,6 +5952,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                         }
                     }
                 } finally {
+                    transaction.clearExecuting(nextRevision)
                     output?.takeUnless(Bitmap::isRecycled)?.recycle()
                     base?.takeUnless(Bitmap::isRecycled)?.recycle()
                     baseSlot.close()

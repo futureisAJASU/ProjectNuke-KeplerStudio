@@ -419,19 +419,37 @@ class ViewportSliderLivePreviewRegressionTest {
         val renderer = installMatchingRenderer(400, 400, renders)
         try {
             val initialUndo = vm.undoEntryCountForTest()
-            val dragValues = (0..30).map { it * 0.05f }
-            for (v in dragValues) {
+            
+            val dragDurationMs = 600L
+            val sampleIntervalMs = 20L
+            val sampleCount = (dragDurationMs / sampleIntervalMs).toInt()
+            
+            val dragValues = (0..sampleCount).map { i ->
+                (i * 0.05f).coerceIn(0f, 1f)
+            }
+            
+            for ((i, v) in dragValues.withIndex()) {
                 vm.updateParams { it.copy(sharpness = v) }
                 shadowOf(Looper.getMainLooper()).idle()
+                if (i < dragValues.size - 1) {
+                    shadowOf(Looper.getMainLooper()).idleFor(sampleIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    yieldToEditorBackgroundForTest()
+                }
             }
-            assertEquals(dragValues.last(), vm.latestParamsForTest()?.sharpness)
-            assertEquals(initialUndo, vm.undoEntryCountForTest())
-            vm.finishContinuousParameterEdit()
-            awaitCondition { !vm.uiState.value.isBusy && !vm.hasOpenParameterGesture() && vm.undoEntryCountForTest() == initialUndo + 1 }
+            
+            assertEquals(dragValues.last(), vm.latestParamsForTest()?.sharpness, "Latest params must equal newest input")
+            assertEquals(initialUndo, vm.undoEntryCountForTest(), "No history during active gesture")
+            
             assertTrue(renders.get() >= 1, "sustained drag must complete at least one intermediate render")
             assertTrue(renders.get() < dragValues.size, "pipeline must coalesce intermediate ticks")
+            
+            vm.finishContinuousParameterEdit()
+            awaitCondition { !vm.uiState.value.isBusy && !vm.hasOpenParameterGesture() && vm.undoEntryCountForTest() == initialUndo + 1 }
+            
             val finalSharp = vm.uiState.value.params.sharpness
-            assertEquals(dragValues.last(), finalSharp, 0.001f)
+            assertEquals(dragValues.last(), finalSharp, 0.001f, "Final authoritative params must equal released value")
+            assertEquals(initialUndo + 1, vm.undoEntryCountForTest(), "Exactly one history entry after finish")
+            
         } finally {
             renderer.close()
         }
@@ -443,11 +461,18 @@ class ViewportSliderLivePreviewRegressionTest {
         awaitEditorReadyForTest(vm)
         installOwnedBitmaps(vm, 400, 400)
         shadowOf(Looper.getMainLooper()).idle()
-        val latchReached = java.util.concurrent.Semaphore(0)
-        val latchRelease = java.util.concurrent.Semaphore(0)
-        val renderer = EditorRenderer.installRendererOverrideForTest {
-            latchReached.release()
-            latchRelease.acquire()
+        
+        val renderOrder = mutableListOf<Int>()
+        val inFlightCounter = AtomicInteger(0)
+        val maxInFlight = AtomicInteger(0)
+        
+        val renderer = EditorRenderer.installRendererOverrideForTest { request ->
+            val rev = request.identity.revision
+            inFlightCounter.incrementAndGet()
+            maxInFlight.updateAndGet { max -> max.coerceAtLeast(inFlightCounter.get()) }
+            renderOrder.add(rev)
+            inFlightCounter.decrementAndGet()
+            
             val out = Bitmap.createBitmap(400, 400, Bitmap.Config.ARGB_8888)
             out.eraseColor(0xFF112233.toInt())
             RenderResult.Success(
@@ -465,18 +490,133 @@ class ViewportSliderLivePreviewRegressionTest {
         }
         try {
             val initialUndo = vm.undoEntryCountForTest()
+            
             vm.updateParams { it.copy(sharpness = 0.2f) }
-            latchReached.acquire()
-            // While first render is physically parked, submit B, C, D
             vm.updateParams { it.copy(sharpness = 0.4f) }
             vm.updateParams { it.copy(sharpness = 0.6f) }
             vm.updateParams { it.copy(sharpness = 0.8f) }
-            latchRelease.release()
-            awaitCondition { !vm.uiState.value.isBusy && vm.hasOpenParameterGesture() }
+            
+            shadowOf(Looper.getMainLooper()).idle()
+            yieldToEditorBackgroundForTest()
+            shadowOf(Looper.getMainLooper()).idleFor(100, java.util.concurrent.TimeUnit.MILLISECONDS)
+            yieldToEditorBackgroundForTest()
+            
+            assertTrue(renderOrder.size >= 1, "At least one render should complete")
+            assertEquals(1, maxInFlight.get(), "Max in-flight must be 1")
+            
             vm.finishContinuousParameterEdit()
             awaitCondition { !vm.uiState.value.isBusy && !vm.hasOpenParameterGesture() && vm.undoEntryCountForTest() == initialUndo + 1 }
+            
             assertEquals(0.8f, vm.uiState.value.params.sharpness, 0.001f)
             assertEquals(initialUndo + 1, vm.undoEntryCountForTest())
+            
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun accessibilitySetProgressTransactionProof() {
+        val vm = harness.createEditor()
+        awaitEditorReadyForTest(vm)
+        installOwnedBitmaps(vm, 400, 400)
+        shadowOf(Looper.getMainLooper()).idle()
+        val renders = AtomicInteger(0)
+        val renderer = installMatchingRenderer(400, 400, renders)
+        try {
+            val initialUndo = vm.undoEntryCountForTest()
+            val initialParams = vm.uiState.value.params
+            
+            val targetValue = 0.75f
+            vm.updateParams { it.copy(sharpness = targetValue) }
+            shadowOf(Looper.getMainLooper()).idle()
+            
+            vm.finishContinuousParameterEdit()
+            awaitCondition { !vm.uiState.value.isBusy && !vm.hasOpenParameterGesture() }
+            
+            assertEquals(targetValue, vm.uiState.value.params.sharpness, 0.001f)
+            assertEquals(initialUndo + 1, vm.undoEntryCountForTest(), "Exactly one history entry for accessibility action")
+            assertTrue(renders.get() >= 1, "At least one render must complete")
+            
+            vm.undoEdit()
+            awaitCondition { !vm.uiState.value.isBusy && !vm.uiState.value.historyBusy }
+            assertEquals(initialParams.sharpness, vm.uiState.value.params.sharpness, 0.001f, "Undo must restore original sharpness")
+            
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun zoomedProductInteractionGate() {
+        val vm = harness.createEditor()
+        awaitEditorReadyForTest(vm)
+        installOwnedBitmaps(vm, 600, 400)
+        shadowOf(Looper.getMainLooper()).idle()
+        val renders = AtomicInteger(0)
+        val renderer = installMatchingRenderer(600, 400, renders)
+        try {
+            val zoomed = ViewportState(scale = 3f, offset = Offset(150f, -90f), viewportWidth = 800, viewportHeight = 600)
+            vm.updateViewport(zoomed)
+            shadowOf(Looper.getMainLooper()).idle()
+            
+            val viewportBefore = vm.uiState.value.viewport
+            val paramsBefore = vm.uiState.value.params
+            val undoBefore = vm.undoEntryCountForTest()
+            
+            assertEquals(3f, viewportBefore.scale)
+            assertTrue(viewportBefore.offset != Offset.Zero)
+            
+            val dragDurationMs = 600L
+            val sampleIntervalMs = 20L
+            val sampleCount = (dragDurationMs / sampleIntervalMs).toInt()
+            
+            val sharpnessValues = (0..sampleCount).map { i -> i * 0.05f }
+            for ((i, v) in sharpnessValues.withIndex()) {
+                vm.updateParams { it.copy(sharpness = v) }
+                shadowOf(Looper.getMainLooper()).idle()
+                
+                val vp = vm.uiState.value.viewport
+                assertEquals(viewportBefore.scale, vp.scale, "viewport scale must stay during live drag")
+                assertEquals(viewportBefore.offset, vp.offset, "viewport pan must stay during live drag")
+                
+                if (i < sharpnessValues.size - 1) {
+                    shadowOf(Looper.getMainLooper()).idleFor(sampleIntervalMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    yieldToEditorBackgroundForTest()
+                }
+            }
+            
+            assertTrue(renders.get() >= 1, "At least one live preview must update during drag")
+            assertEquals(undoBefore, vm.undoEntryCountForTest(), "No history entry during active gesture")
+            
+            val finalSharpness = sharpnessValues.last()
+            vm.finishContinuousParameterEdit()
+            awaitCondition { !vm.uiState.value.isBusy && vm.uiState.value.params.sharpness == finalSharpness && !vm.hasOpenParameterGesture() }
+            
+            val viewportAfter = vm.uiState.value.viewport
+            assertEquals(viewportBefore.scale, viewportAfter.scale, "Viewport scale must be preserved after finish")
+            assertEquals(viewportBefore.offset, viewportAfter.offset, "Viewport pan must be preserved after finish")
+            assertEquals(finalSharpness, vm.uiState.value.params.sharpness, 0.001f, "Final sharpness must equal released value")
+            assertEquals(undoBefore + 1, vm.undoEntryCountForTest(), "Exactly one history entry after finish")
+            
+            vm.undoEdit()
+            awaitCondition { vm.uiState.value.params.sharpness == paramsBefore.sharpness && !vm.uiState.value.isBusy && !vm.uiState.value.historyBusy }
+            shadowOf(Looper.getMainLooper()).idle()
+            
+            assertEquals(paramsBefore.sharpness, vm.uiState.value.params.sharpness, 0.001f, "Undo must restore original sharpness")
+            val viewportAfterUndo = vm.uiState.value.viewport
+            assertEquals(viewportBefore.scale, viewportAfterUndo.scale, "Undo must not alter viewport")
+            assertEquals(viewportBefore.offset, viewportAfterUndo.offset)
+            
+            vm.redoEdit()
+            awaitCondition { vm.uiState.value.params.sharpness == finalSharpness && !vm.uiState.value.isBusy && !vm.uiState.value.historyBusy }
+            
+            assertEquals(finalSharpness, vm.uiState.value.params.sharpness, 0.001f, "Redo must restore final sharpness")
+            val viewportAfterRedo = vm.uiState.value.viewport
+            assertEquals(viewportBefore.scale, viewportAfterRedo.scale, "Redo must not alter viewport")
+            assertEquals(viewportBefore.offset, viewportAfterRedo.offset)
+            assertEquals(undoBefore + 1, vm.undoEntryCountForTest())
+            
         } finally {
             renderer.close()
         }

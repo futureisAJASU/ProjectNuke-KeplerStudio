@@ -1264,6 +1264,8 @@ private fun V2AdjustmentSlider(
                 }
                 .pointerInput(Unit) {
                     awaitPointerEventScope {
+                        var gestureActive = false
+                        var finished = false
                         try {
                             while (true) {
                                 val down = awaitFirstDown(requireUnconsumed = false)
@@ -1276,7 +1278,10 @@ private fun V2AdjustmentSlider(
                                     down.consume()
                                     continue
                                 }
+                                gestureActive = true
+                                finished = false
                                 fun updateFromPosition(x: Float) {
+                                    if (!currentEnabled.value) return
                                     val f = (x / w.toFloat()).coerceIn(0f, 1f)
                                     val v = (currentMin.value + f * (currentMax.value - currentMin.value)).coerceIn(currentMin.value, currentMax.value)
                                     currentOnValue.value(v)
@@ -1286,9 +1291,18 @@ private fun V2AdjustmentSlider(
                                 var dragging = true
                                 while (dragging) {
                                     val event = awaitPointerEvent()
+                                    if (!currentEnabled.value) {
+                                        dragging = false
+                                        gestureActive = false
+                                        finished = true
+                                        currentOnFinished.value?.invoke()
+                                        break
+                                    }
                                     val change = event.changes.firstOrNull { it.id == down.id }
                                     if (change == null || !change.pressed) {
                                         dragging = false
+                                        gestureActive = false
+                                        finished = true
                                         currentOnFinished.value?.invoke()
                                         break
                                     }
@@ -1296,13 +1310,17 @@ private fun V2AdjustmentSlider(
                                     change.consume()
                                     if (event.changes.all { !it.pressed }) {
                                         dragging = false
+                                        gestureActive = false
+                                        finished = true
                                         currentOnFinished.value?.invoke()
                                         break
                                     }
                                 }
                             }
                         } finally {
-                            currentOnFinished.value?.invoke()
+                            if (gestureActive && !finished) {
+                                currentOnFinished.value?.invoke()
+                            }
                         }
                     }
                 },
