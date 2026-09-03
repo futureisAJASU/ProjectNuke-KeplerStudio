@@ -1257,41 +1257,52 @@ private fun V2AdjustmentSlider(
                         setProgress { requested ->
                             val clamped = requested.coerceIn(min, max)
                             onValue(clamped)
+                            onValueChangeFinished?.invoke()
                             true
                         }
                     }
                 }
                 .pointerInput(Unit) {
                     awaitPointerEventScope {
-                        while (true) {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            if (!currentEnabled.value) continue
-                            val w = widthState.value
-                            if (w <= 0) continue
-                            fun updateFromPosition(x: Float) {
-                                val f = (x / w.toFloat()).coerceIn(0f, 1f)
-                                val v = (currentMin.value + f * (currentMax.value - currentMin.value)).coerceIn(currentMin.value, currentMax.value)
-                                currentOnValue.value(v)
-                            }
-                            updateFromPosition(down.position.x)
-                            down.consume()
-                            var dragging = true
-                            while (dragging) {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull { it.pressed }
-                                if (change == null || !change.pressed) {
-                                    dragging = false
-                                    currentOnFinished.value?.invoke()
-                                    break
+                        try {
+                            while (true) {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                if (!currentEnabled.value) {
+                                    down.consume()
+                                    continue
                                 }
-                                updateFromPosition(change.position.x)
-                                change.consume()
-                                if (event.changes.all { !it.pressed }) {
-                                    dragging = false
-                                    currentOnFinished.value?.invoke()
-                                    break
+                                val w = widthState.value
+                                if (w <= 0) {
+                                    down.consume()
+                                    continue
+                                }
+                                fun updateFromPosition(x: Float) {
+                                    val f = (x / w.toFloat()).coerceIn(0f, 1f)
+                                    val v = (currentMin.value + f * (currentMax.value - currentMin.value)).coerceIn(currentMin.value, currentMax.value)
+                                    currentOnValue.value(v)
+                                }
+                                updateFromPosition(down.position.x)
+                                down.consume()
+                                var dragging = true
+                                while (dragging) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id }
+                                    if (change == null || !change.pressed) {
+                                        dragging = false
+                                        currentOnFinished.value?.invoke()
+                                        break
+                                    }
+                                    updateFromPosition(change.position.x)
+                                    change.consume()
+                                    if (event.changes.all { !it.pressed }) {
+                                        dragging = false
+                                        currentOnFinished.value?.invoke()
+                                        break
+                                    }
                                 }
                             }
+                        } finally {
+                            currentOnFinished.value?.invoke()
                         }
                     }
                 },

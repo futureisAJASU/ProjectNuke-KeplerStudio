@@ -15,6 +15,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
@@ -403,6 +404,79 @@ class ViewportSliderLivePreviewRegressionTest {
             vm.finishContinuousParameterEdit()
             awaitCondition { !vm.uiState.value.isBusy && vm.uiState.value.params.clarity == 0.5f }
             assertEquals(undoBefore3 + 1, vm.undoEntryCountForTest())
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun sustainedDragLivePreviewRequiresIntermediateRender() {
+        val vm = harness.createEditor()
+        awaitEditorReadyForTest(vm)
+        installOwnedBitmaps(vm, 400, 400)
+        shadowOf(Looper.getMainLooper()).idle()
+        val renders = AtomicInteger(0)
+        val renderer = installMatchingRenderer(400, 400, renders)
+        try {
+            val initialUndo = vm.undoEntryCountForTest()
+            val dragValues = (0..30).map { it * 0.05f }
+            for (v in dragValues) {
+                vm.updateParams { it.copy(sharpness = v) }
+                shadowOf(Looper.getMainLooper()).idle()
+            }
+            assertEquals(dragValues.last(), vm.latestParamsForTest()?.sharpness)
+            assertEquals(initialUndo, vm.undoEntryCountForTest())
+            vm.finishContinuousParameterEdit()
+            awaitCondition { !vm.uiState.value.isBusy && !vm.hasOpenParameterGesture() && vm.undoEntryCountForTest() == initialUndo + 1 }
+            assertTrue(renders.get() >= 1, "sustained drag must complete at least one intermediate render")
+            assertTrue(renders.get() < dragValues.size, "pipeline must coalesce intermediate ticks")
+            val finalSharp = vm.uiState.value.params.sharpness
+            assertEquals(dragValues.last(), finalSharp, 0.001f)
+        } finally {
+            renderer.close()
+        }
+    }
+
+    @Test
+    fun parameterPipelinePhysicalSerialization() {
+        val vm = harness.createEditor()
+        awaitEditorReadyForTest(vm)
+        installOwnedBitmaps(vm, 400, 400)
+        shadowOf(Looper.getMainLooper()).idle()
+        val latchReached = java.util.concurrent.Semaphore(0)
+        val latchRelease = java.util.concurrent.Semaphore(0)
+        val renderer = EditorRenderer.installRendererOverrideForTest {
+            latchReached.release()
+            latchRelease.acquire()
+            val out = Bitmap.createBitmap(400, 400, Bitmap.Config.ARGB_8888)
+            out.eraseColor(0xFF112233.toInt())
+            RenderResult.Success(
+                operation = RenderOperation.NativePreview,
+                requestedRoute = NativeRenderRoute.V1,
+                output = out,
+                actualRoute = NativeRenderRoute.V1,
+                decision = RenderRouteDecision.FollowDocument,
+                usedDebugOverride = false,
+                algorithmVersion = AlgorithmContracts.NATIVE_V1,
+                participation = RenderParticipation(),
+                durationMillis = 0L,
+                knownTransientBytes = 0L,
+            )
+        }
+        try {
+            val initialUndo = vm.undoEntryCountForTest()
+            vm.updateParams { it.copy(sharpness = 0.2f) }
+            latchReached.acquire()
+            // While first render is physically parked, submit B, C, D
+            vm.updateParams { it.copy(sharpness = 0.4f) }
+            vm.updateParams { it.copy(sharpness = 0.6f) }
+            vm.updateParams { it.copy(sharpness = 0.8f) }
+            latchRelease.release()
+            awaitCondition { !vm.uiState.value.isBusy && vm.hasOpenParameterGesture() }
+            vm.finishContinuousParameterEdit()
+            awaitCondition { !vm.uiState.value.isBusy && !vm.hasOpenParameterGesture() && vm.undoEntryCountForTest() == initialUndo + 1 }
+            assertEquals(0.8f, vm.uiState.value.params.sharpness, 0.001f)
+            assertEquals(initialUndo + 1, vm.undoEntryCountForTest())
         } finally {
             renderer.close()
         }

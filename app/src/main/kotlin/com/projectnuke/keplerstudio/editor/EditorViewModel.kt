@@ -656,6 +656,28 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
+        internal fun isPipelineActive(): Boolean = !closed && terminalState == ParamTransactionTerminalState.Active
+        internal fun latestRenderableRevision(): Int? = synchronized(stateLock) {
+            val rev = latestRevision
+            val owner = renderRevisions[rev]
+            if (owner == null || owner.phase in setOf(
+                    ParamRenderRevisionPhase.Canceled,
+                    ParamRenderRevisionPhase.Failed,
+                    ParamRenderRevisionPhase.Closed,
+                )
+            ) null else rev
+        }
+        internal fun latestRenderableParams(): EditParams? = synchronized(stateLock) {
+            val rev = latestRevision
+            val owner = renderRevisions[rev]
+            if (owner == null || owner.phase in setOf(
+                    ParamRenderRevisionPhase.Canceled,
+                    ParamRenderRevisionPhase.Failed,
+                    ParamRenderRevisionPhase.Closed,
+                )
+            ) null else owner.params
+        }
+
         internal fun renderRevisionPhases(): Map<Int, ParamRenderRevisionPhase> =
             synchronized(stateLock) { renderRevisions.mapValues { it.value.phase } }
 
@@ -5717,60 +5739,53 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             OpenImageFailureStage.Adoption -> "이미지를 열지 못했습니다."
         }
 
-    fun updateParams(transform: (EditParams) -> EditParams) {
-        if (shuttingDown) return
-        if (editorLeaveLocksActions()) return
-        prepareForGlobalParamEdit()
-        val parameterAdmission = editorActionAdmission(allowMaskSupersession = true)
-        if (
-            parameterAdmission != EditorActionAdmission.Ready &&
-                !(parameterAdmission == EditorActionAdmission.HistoryBusy && parameterGesture != null)
-        ) {
-            if (parameterAdmission == EditorActionAdmission.HistoryBusy) reportHistoryBusyAdmission()
-            return
-        }
-        val next = transform(_uiState.value.params)
-        if (next == _uiState.value.params) return
-        val transaction =
-            parameterGesture ?: run {
-                val source = acquireEditorSnapshot("updateParams") ?: return
-                ParameterGestureTransaction(
-                    id = ++parameterGestureCounter,
-                    start = source,
-                    lifecycleInstallation = ParameterLifecycleTestHook.capture(),
-                    historyPublishSeam = HistoryPublishTestSeam.capture(),
-                ).also {
-                    parameterGesture = it
-                    lastSuccessfullyRenderedParams = source.state.params
-                    ParameterLifecycleTestHook.notifyTransactionCreated(it.lifecycleInstallation, it.id)
+    private var parameterPipelineJob: Job? = null
+
+    private fun scheduleParameterPipeline() {
+        val tx = parameterGesture ?: return
+        if (parameterPipelineJob?.isActive == true) return
+        parameterPipelineJob = viewModelScope.launch {
+            try {
+                var lastRenderedRevision: Int? = null
+                while (tx.isPipelineActive()) {
+                    val activeJob = synchronized(tx.stateLock) { tx.renderJob }
+                    if (activeJob != null && activeJob.isActive) {
+                        delay(10L)
+                        continue
+                    }
+                    val revToRender = tx.latestRenderableRevision()
+                    if (revToRender != null && revToRender != lastRenderedRevision) {
+                        val params = tx.latestRenderableParams()
+                        if (params == null) break
+                        val job = launchParameterRenderForTransaction(tx, revToRender, params)
+                        job.join()
+                        lastRenderedRevision = revToRender
+                    } else {
+                        if (tx.windowExpired) {
+                            maybeCloseParameterGesture(tx)
+                        }
+                        break
+                    }
                 }
-            }
-        val nextRevision = _uiState.value.revision + 1
-        transaction.latestParams = next
-        transaction.latestRevision = nextRevision
-        transaction.requestRender(nextRevision, next)
-        transaction.windowExpired = false
-        transaction.inactivityGeneration++
-        paramUndoWindowJob?.cancel()
-        val tickGeneration = transaction.inactivityGeneration
-        paramUndoWindowJob = viewModelScope.launch {
-            delay(900L)
-            if (transaction.inactivityGeneration == tickGeneration) {
-                transaction.windowExpired = true
-                transaction.lifecycleInstallation?.hooks?.onInactivityTimerFired?.invoke(transaction.id)
-                maybeCloseParameterGesture(transaction)
+            } finally {
+                parameterPipelineJob = null
             }
         }
-        updateUiState { it.copy(params = next, revision = nextRevision, isBusy = true) }
-        updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
-        renderJob?.cancel()
-        activeParamRenderRevision = nextRevision
+    }
+
+    private fun launchParameterRenderForTransaction(
+        transaction: ParameterGestureTransaction,
+        revision: Int,
+        params: EditParams,
+    ): Job {
         val tracker = beginMemoryTracking(
             "updateParams",
             snapshotState = "rendering",
             transientReserveBytes = BitmapMemoryBudget.operationReserveBytes(),
         )
-        launchManagedRenderWithPreparedResources(
+        val nextRevision = revision
+        val next = params
+        val job = launchManagedRenderWithPreparedResources(
             { operationToken ->
                 val thisJob = coroutineContext[Job]
                 if (!transaction.prepareRender(nextRevision, operationToken, thisJob)) return@launchManagedRenderWithPreparedResources
@@ -5779,10 +5794,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 var base: Bitmap? = null
                 var output: Bitmap? = null
                 try {
-                    delay(120L)
-                    if (transaction.historyHandle == null &&
-                        transaction.historyFailure == null
-                    ) {
+                    if (transaction.historyHandle == null && transaction.historyFailure == null) {
                         transaction.historyHandle =
                             prepareHistorySnapshot("updateParams:${transaction.id}", transaction.start)
                         transaction.historyJob = viewModelScope.launch(Dispatchers.Default) {
@@ -5790,9 +5802,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                 val snap = transaction.historyHandle?.await()
                                 if (snap != null) {
                                     var owned: OwnedHistorySnapshot? = OwnedHistorySnapshot(snap)
-                                    // The scoped owner gate is cancellable: terminal ViewModel
-                                    // settlement must be able to stop publication before the
-                                    // history coordinator closes.
                                     try {
                                         transaction.historyPublishSeam?.awaitRelease()
                                         val handoffOwned = checkNotNull(owned)
@@ -5888,8 +5897,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (isManagedEditCurrent(operationToken, nextRevision)) {
                         val retainedParams = transaction.adoptedParams
                         if (retainedParams != null) {
-                            // A newer render failed: keep the previously adopted
-                            // output; only the latest adopted revision decides.
                             updateUiState { it.copy(params = retainedParams, isBusy = false) }
                         } else {
                             takePendingParameterSnapshotForRollback(transaction)?.let {
@@ -5914,7 +5921,63 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     if (_uiState.value.revision == nextRevision) updateUiState { it.copy(isBusy = false) }
                 }
             }),
-        ).also { transaction.renderJob = it }
+        )
+        synchronized(transaction.stateLock) {
+            if (transaction.isPipelineActive()) {
+                transaction.renderJob = job
+            }
+        }
+        return job
+    }
+
+    fun updateParams(transform: (EditParams) -> EditParams) {
+        if (shuttingDown) return
+        if (editorLeaveLocksActions()) return
+        prepareForGlobalParamEdit()
+        val parameterAdmission = editorActionAdmission(allowMaskSupersession = true)
+        if (
+            parameterAdmission != EditorActionAdmission.Ready &&
+                !(parameterAdmission == EditorActionAdmission.HistoryBusy && parameterGesture != null)
+        ) {
+            if (parameterAdmission == EditorActionAdmission.HistoryBusy) reportHistoryBusyAdmission()
+            return
+        }
+        val next = transform(_uiState.value.params)
+        if (next == _uiState.value.params) return
+        val transaction =
+            parameterGesture ?: run {
+                val source = acquireEditorSnapshot("updateParams") ?: return
+                ParameterGestureTransaction(
+                    id = ++parameterGestureCounter,
+                    start = source,
+                    lifecycleInstallation = ParameterLifecycleTestHook.capture(),
+                    historyPublishSeam = HistoryPublishTestSeam.capture(),
+                ).also {
+                    parameterGesture = it
+                    lastSuccessfullyRenderedParams = source.state.params
+                    ParameterLifecycleTestHook.notifyTransactionCreated(it.lifecycleInstallation, it.id)
+                }
+            }
+        val nextRevision = _uiState.value.revision + 1
+        transaction.latestParams = next
+        transaction.latestRevision = nextRevision
+        transaction.requestRender(nextRevision, next)
+        transaction.windowExpired = false
+        transaction.inactivityGeneration++
+        paramUndoWindowJob?.cancel()
+        val tickGeneration = transaction.inactivityGeneration
+        paramUndoWindowJob = viewModelScope.launch {
+            delay(900L)
+            if (transaction.inactivityGeneration == tickGeneration) {
+                transaction.windowExpired = true
+                transaction.lifecycleInstallation?.hooks?.onInactivityTimerFired?.invoke(transaction.id)
+                maybeCloseParameterGesture(transaction)
+            }
+        }
+        updateUiState { it.copy(params = next, revision = nextRevision, isBusy = true) }
+        updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
+        activeParamRenderRevision = nextRevision
+        scheduleParameterPipeline()
     }
 
     fun applyAutoEnhance() {
@@ -9808,6 +9871,7 @@ fun exportPreview() {
         paramUndoWindowJob = null
         renderJob?.cancel()
         activeParamRenderRevision = null
+        parameterPipelineJob?.cancel()
         maybeCloseParameterGesture(tx)
     }
 
@@ -9851,6 +9915,7 @@ fun exportPreview() {
         if (!unresolved) return SettlementResult.NoTransaction
 
         renderJob?.cancel()
+        parameterPipelineJob?.cancel()
         activeParamRenderRevision = null
         val transaction = parameterGesture
 
