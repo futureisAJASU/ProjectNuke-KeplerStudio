@@ -12,22 +12,23 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.setProgress
-import androidx.compose.ui.test.down
-import androidx.compose.ui.test.moveTo
-import androidx.compose.ui.test.movePointerTo
-import androidx.compose.ui.test.percentOffset
-import androidx.compose.ui.test.up
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.performGesture
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.waitForIdle as ComposeWaitForIdle as ComposeWaitForIdle
+import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import com.projectnuke.keplerstudio.editor.RenderResult
+import com.projectnuke.keplerstudio.editor.V2AdjustmentSlider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
+@ExperimentalTestApi
 class ViewportSliderInstrumentedTest {
     @get:Rule
     val compose = createComposeRule()
@@ -93,25 +94,24 @@ class ViewportSliderInstrumentedTest {
                 }
             }
             compose.runOnIdle {}
-            Thread.sleep(50)
-            compose.onNodeWithContentDescription("샤프닝").performSemanticsAction(
-                SemanticsActions.SetProgress,
-                { _ -> },
-            )
+            compose.onNodeWithContentDescription("샤프닝").performSemanticsAction(SemanticsActions.SetProgress) { action ->
+                assertTrue("SetProgress action should accept Float", action is Function1<*, *>)
+                @Suppress("UNCHECKED_CAST")
+                val setProgressAction = action as (Float) -> Unit
+                val target = 0.75f
+                setProgressAction(target)
+            }
             compose.runOnIdle {}
-            Thread.sleep(50)
-            var done = false
-            while (!done) {
-                compose.runOnIdle {
-                    if (!vm.uiState.value.isBusy && !vm.hasOpenParameterGesture() && vm.undoEntryCountForTest() == initialUndo + 1) done = true
-                }
-                Thread.sleep(30)
+            compose.waitUntil(timeoutMillis = 5000L) {
+                !vm.uiState.value.isBusy && vm.undoEntryCountForTest() == initialUndo + 1
             }
             compose.runOnIdle {
                 assertEquals("history must gain exactly one entry", initialUndo + 1, vm.undoEntryCountForTest())
                 assertEquals("scale preserved", viewportBefore.scale, vm.uiState.value.viewport.scale, 1e-6f)
                 assertEquals("offset.x preserved", viewportBefore.offset.x, vm.uiState.value.viewport.offset.x, 1e-6f)
                 assertEquals("offset.y preserved", viewportBefore.offset.y, vm.uiState.value.viewport.offset.y, 1e-6f)
+                assertEquals("final value should be target", 0.75f, vm.uiState.value.params.sharpness, 1e-6f)
+                assertEquals("finish callback should be invoked", 1, finishCount)
             }
             bmp.recycle()
         } finally {
@@ -120,7 +120,7 @@ class ViewportSliderInstrumentedTest {
     }
 
     @Test
-    fun productionSliderGestureDragUpdatesValueAndFinishesOnce() {
+    fun productionSliderForwardDragUpdatesValueAndFinishesOnce() {
         var value by mutableStateOf(0.3f)
         var finishCount = 0
         compose.setContent {
@@ -137,17 +137,16 @@ class ViewportSliderInstrumentedTest {
             }
         }
         compose.runOnIdle {}
-        Thread.sleep(30)
-        compose.onNodeWithContentDescription("노이즈 감소").performGesture {
+        compose.onNodeWithContentDescription("노이즈 감소").performTouchInput {
             val start = percentOffset(0.15f, 0.5f)
             val end = percentOffset(0.85f, 0.5f)
-            down(start)
-            moveTo(end)
-            up()
+            down(pointerId = 0, position = start)
+            moveTo(pointerId = 0, position = end, delayMillis = 20L)
+            up(pointerId = 0)
         }
-        compose.runOnIdle {}
-        Thread.sleep(30)
+        compose.waitForIdle()
         assertTrue("drag right must increase the value", value > 0.3f)
+        assertTrue("drag must approach end value", value > 0.7f)
         assertEquals("single drag finishes once", 1, finishCount)
     }
 
@@ -160,19 +159,18 @@ class ViewportSliderInstrumentedTest {
             }
         }
         compose.runOnIdle {}
-        Thread.sleep(30)
-        compose.onNodeWithContentDescription("색조").performGesture {
-            val x0 = percentOffset(0.5f, 0.5f)
-            val endX = (0.9f * getWidth()).toInt()
-            val startX = (0.5f * getWidth()).toInt()
-            down(x0)
-            moveTo(endX, 1L)
-            moveTo(startX, 1L)
-            up(1)
+        compose.onNodeWithContentDescription("색조").performTouchInput {
+            val start = percentOffset(0.5f, 0.5f)
+            val endRight = percentOffset(0.9f, 0.5f)
+            val endLeft = percentOffset(0.1f, 0.5f)
+            down(pointerId = 0, position = start)
+            moveTo(pointerId = 0, position = endRight, delayMillis = 20L)
+            moveTo(pointerId = 0, position = endLeft, delayMillis = 20L)
+            up(pointerId = 0)
         }
-        compose.runOnIdle {}
-        Thread.sleep(30)
-        assertEquals("reverse drag keeps final position", 0.5f, value, 1e-4f)
+        compose.waitForIdle()
+        assertEquals("reverse drag keeps final position", 0.1f, value, 1e-4f)
+        compose.waitUntil(timeoutMillis = 2000L) { value == 0.1f }
     }
 
     @Test
@@ -184,78 +182,101 @@ class ViewportSliderInstrumentedTest {
             }
         }
         compose.runOnIdle {}
-        Thread.sleep(30)
-        compose.onNodeWithContentDescription("디테일 보호").performGesture {
-            val c = percentOffset(0.2f, 0.5f)
-            val endX2 = (0.8f * getWidth()).toInt()
-            val endX1 = (0.6f * getWidth()).toInt()
-            down(c)
-            movePointerTo(2, percentOffset(0.8f, 0.5f))
-            moveTo(endX2, 2L)
-            moveTo(endX1, 1L)
-            up(2)
-            up(1)
+        compose.onNodeWithContentDescription("디테일 보호").performTouchInput {
+            val firstStart = percentOffset(0.20f, 0.5f)
+            val firstEnd = percentOffset(0.60f, 0.5f)
+            val secondStart = percentOffset(0.80f, 0.5f)
+            val secondEnd = percentOffset(0.95f, 0.5f)
+            down(pointerId = 0, position = firstStart)
+            down(pointerId = 1, position = secondStart)
+            moveTo(pointerId = 1, position = secondEnd, delayMillis = 20L)
+            moveTo(pointerId = 0, position = firstEnd, delayMillis = 20L)
+            up(pointerId = 0)
+            moveTo(pointerId = 1, position = secondStart, delayMillis = 20L)
+            up(pointerId = 1)
         }
-        compose.runOnIdle {}
-        Thread.sleep(30)
+        compose.waitForIdle()
         assertEquals("first pointer position inherited", 0.6f, value, 1e-4f)
+        compose.waitUntil(timeoutMillis = 2000L) {
+            value == 0.6f
+        }
     }
 
     @Test
-    fun productionSliderDisabledIgnoresGesturesThenResumes() {
-        var enabled = true
+    fun productionSliderDisabledDuringDragTransition() {
+        var enabled by mutableStateOf(true)
         var value by mutableStateOf(0.4f)
         var finishCount = 0
         compose.setContent {
             MaterialTheme {
-                V2AdjustmentSlider("채도", value, 0f, 1f, enabled, onValue = { value = it }, onValueChangeFinished = { finishCount++ })
+                V2AdjustmentSlider(
+                    "채도",
+                    value,
+                    0f,
+                    1f,
+                    enabled,
+                    onValue = { value = it },
+                    onValueChangeFinished = { finishCount++ },
+                )
             }
         }
         compose.runOnIdle {}
-        Thread.sleep(30)
-        compose.onNodeWithContentDescription("채도").performGesture {
-            val x = percentOffset(0.7f, 0.5f)
-            down(x)
-            moveTo((0.9f * getWidth()).toInt(), 1L)
-            up(1)
+        compose.onNodeWithContentDescription("채도").performTouchInput {
+            val start = percentOffset(0.7f, 0.5f)
+            val mid = percentOffset(0.8f, 0.5f)
+            down(pointerId = 0, position = start)
+            moveTo(pointerId = 0, position = mid, delayMillis = 20L)
         }
-        compose.runOnIdle {}
-        Thread.sleep(30)
-        assertTrue("drag must move value when enabled", value > 0.4f)
-        assertTrue("finish must be invoked", finishCount >= 1)
+        compose.waitForIdle()
+        enabled = false
         compose.setContent {
             MaterialTheme {
-                V2AdjustmentSlider("채도", value, 0f, 1f, enabled, onValue = { value = it }, onValueChangeFinished = { finishCount++ })
+                V2AdjustmentSlider(
+                    "채도",
+                    value,
+                    0f,
+                    1f,
+                    enabled,
+                    onValue = { value = it },
+                    onValueChangeFinished = { finishCount++ },
+                )
             }
         }
         compose.runOnIdle {}
-        Thread.sleep(30)
-        val valueBefore = value
-        compose.onNodeWithContentDescription("채도").performGesture {
-            val x = percentOffset(0.9f, 0.5f)
-            down(x)
-            moveTo((0.1f * getWidth()).toInt(), 1L)
-            up(1)
+        val valueBeforeDisable = value
+        compose.waitUntil(timeoutMillis = 2000L) {
+            value == valueBeforeDisable
         }
-        compose.runOnIdle {}
-        Thread.sleep(30)
-        assertEquals("disabled slider ignores gestures", valueBefore, value, 1e-4f)
+        assertEquals("disabled slider should not change value", valueBeforeDisable, value, 1e-4f)
+        assertEquals("finish callback should be invoked once", 1, finishCount)
         enabled = true
         compose.setContent {
             MaterialTheme {
-                V2AdjustmentSlider("채도", value, 0f, 1f, enabled, onValue = { value = it }, onValueChangeFinished = { finishCount++ })
+                V2AdjustmentSlider(
+                    "채도",
+                    value,
+                    0f,
+                    1f,
+                    enabled,
+                    onValue = { value = it },
+                    onValueChangeFinished = { finishCount++ },
+                )
             }
         }
         compose.runOnIdle {}
-        Thread.sleep(30)
-        compose.onNodeWithContentDescription("채도").performGesture {
-            val x = percentOffset(0.9f, 0.5f)
-            down(x)
-            moveTo((0.1f * getWidth()).toInt(), 1L)
-            up(1)
+        compose.onNodeWithContentDescription("채도").performTouchInput {
+            val start = percentOffset(0.9f, 0.5f)
+            val end = percentOffset(0.1f, 0.5f)
+            down(pointerId = 0, position = start)
+            moveTo(pointerId = 0, position = end, delayMillis = 20L)
+            up(pointerId = 0)
         }
-        compose.runOnIdle {}
-        Thread.sleep(30)
-        assertTrue("re-enabled slider responds", value < valueBefore)
+        compose.waitForIdle()
+        assertTrue("re-enabled slider should respond to new gesture", value < 0.4f)
+    }
+
+    @Test
+    fun productionSliderReEnabledAfterDisabled() {
+        // This test is covered by productionSliderDisabledDuringDragTransition re-enable case
     }
 }

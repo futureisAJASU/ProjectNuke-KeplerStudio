@@ -1222,7 +1222,7 @@ private fun V2DetailPanel(params: EditParams, enabled: Boolean, onChange: ((Edit
 }
 
 @Composable
-internal fun V2AdjustmentSlider(
+public fun V2AdjustmentSlider(
     label: String,
     value: Float,
     min: Float,
