@@ -2,13 +2,14 @@ package com.projectnuke.keplerstudio.ui
 
 import android.app.Application
 import android.graphics.Bitmap
-import androidx.compose.foundation.VerticalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.scroll.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -261,22 +262,21 @@ class ViewportSliderInstrumentedTest {
         var finishCount = 0
         compose.setContent {
             MaterialTheme {
-                VerticalScroll(
-                    modifier = Modifier.height(200.dp).verticalScroll(scrollState),
-                    content = {
-                        Spacer(Modifier.height(100.dp))
-                        V2AdjustmentSlider(
-                            "샤프닝",
-                            value,
-                            0f,
-                            1f,
-                            true,
-                            onValue = { value = it },
-                            onValueChangeFinished = { finishCount++ },
-                        )
-                        Spacer(Modifier.height(100.dp))
-                    }
-                )
+                Column(
+                    modifier = Modifier.height(200.dp).verticalScroll(scrollState)
+                ) {
+                    Spacer(Modifier.height(100.dp))
+                    V2AdjustmentSlider(
+                        "샤프닝",
+                        value,
+                        0f,
+                        1f,
+                        true,
+                        onValue = { value = it },
+                        onValueChangeFinished = { finishCount++ },
+                    )
+                    Spacer(Modifier.height(100.dp))
+                }
             }
         }
         compose.runOnIdle {}
@@ -289,17 +289,11 @@ class ViewportSliderInstrumentedTest {
         assertTrue("slider drag should update value", value > 0.3f)
         assertEquals("slider drag should finish once", 1, finishCount)
         assertTrue("parent scroll should not move significantly", scrollState.value == 0)
-        // Separate vertical scroll gesture
-        compose.onNodeWithContentDescription("샤프닝").performTouchInput {
-            down(pointerId = 0, position = percentOffset(0.5f, 0.5f))
-        }
-        compose.waitForIdle()
-        // Vertical scroll parent
         compose.performTouchInput {
             moveTo(pointerId = 0, position = Offset(0f, 100f), delayMillis = 20L)
             up(pointerId = 0)
         }
         compose.waitForIdle()
-        assertTrue("vertical scroll should move parent", scrollCount.value > 0)
+        assertTrue("vertical scroll should move parent", scrollState.value > 0)
     }
 }
