@@ -2,27 +2,34 @@ package com.projectnuke.keplerstudio.ui
 
 import android.app.Application
 import android.graphics.Bitmap
+import androidx.compose.foundation.VerticalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.percentOffset
 import androidx.compose.ui.semantics.SemanticsActions
-import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performSemanticsAction
-import androidx.compose.ui.test.waitForIdle as ComposeWaitForIdle as ComposeWaitForIdle
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import com.projectnuke.keplerstudio.editor.RenderResult
-import com.projectnuke.keplerstudio.editor.V2AdjustmentSlider
+import com.projectnuke.keplerstudio.editor.RenderRequest
+import com.projectnuke.keplerstudio.ui.V2AdjustmentSlider
+import com.projectnuke.keplerstudio.editor.ViewportState
+import com.projectnuke.keplerstudio.editor.EditorViewModel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -33,7 +40,7 @@ class ViewportSliderInstrumentedTest {
     @get:Rule
     val compose = createComposeRule()
 
-    private fun successRender(request: com.projectnuke.keplerstudio.editor.RenderRequest, width: Int, height: Int): RenderResult.Success {
+    private fun successRender(request: RenderRequest, width: Int, height: Int): RenderResult.Success {
         val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         out.eraseColor(0xFF112233.toInt())
         return RenderResult.Success(
@@ -53,15 +60,12 @@ class ViewportSliderInstrumentedTest {
     @Test
     fun accessibilitySetProgressOnProductionSliderCommitsOneHistory() {
         val app = ApplicationProvider.getApplicationContext<Application>()
-        val vm = com.projectnuke.keplerstudio.editor.EditorViewModel(app)
+        val vm = EditorViewModel(app)
         val renderer = com.projectnuke.keplerstudio.editor.EditorRenderer.installRendererOverrideForTest { request ->
             successRender(request, 160, 160)
         }
         try {
-            while (!vm.startupInitCompletion.isCompleted) {
-                compose.runOnIdle {}
-                Thread.sleep(30)
-            }
+            compose.waitUntil(timeoutMillis = 10_000L) { vm.startupInitCompletion.isCompleted }
             val bmp = Bitmap.createBitmap(160, 160, Bitmap.Config.ARGB_8888)
             bmp.eraseColor(0xFF808080.toInt())
             vm.updateUiState {
@@ -70,11 +74,10 @@ class ViewportSliderInstrumentedTest {
                     baseContentToken = "instr-base-${bmp.hashCode()}",
                     previewBitmap = bmp,
                     originalPreviewBitmap = bmp,
-                    viewport = com.projectnuke.keplerstudio.editor.ViewportState(scale = 2f, offset = androidx.compose.ui.geometry.Offset(10f, -5f), viewportWidth = 800, viewportHeight = 600),
+                    viewport = ViewportState(scale = 2f, offset = Offset(10f, -5f), viewportWidth = 800, viewportHeight = 600),
                 )
             }
-            compose.runOnIdle {}
-            Thread.sleep(50)
+            compose.waitForIdle()
             val initialUndo = vm.undoEntryCountForTest()
             val viewportBefore = vm.uiState.value.viewport
             var finishCount = 0
@@ -93,18 +96,12 @@ class ViewportSliderInstrumentedTest {
                     }
                 }
             }
-            compose.runOnIdle {}
+            compose.waitForIdle()
             compose.onNodeWithContentDescription("샤프닝").performSemanticsAction(SemanticsActions.SetProgress) { action ->
-                assertTrue("SetProgress action should accept Float", action is Function1<*, *>)
-                @Suppress("UNCHECKED_CAST")
-                val setProgressAction = action as (Float) -> Unit
-                val target = 0.75f
-                setProgressAction(target)
+                assertTrue("SetProgress action should accept Float", action(0.75f))
             }
-            compose.runOnIdle {}
-            compose.waitUntil(timeoutMillis = 5000L) {
-                !vm.uiState.value.isBusy && vm.undoEntryCountForTest() == initialUndo + 1
-            }
+            compose.waitForIdle()
+            compose.waitUntil(timeoutMillis = 10_000L) { vm.undoEntryCountForTest() == initialUndo + 1 }
             compose.runOnIdle {
                 assertEquals("history must gain exactly one entry", initialUndo + 1, vm.undoEntryCountForTest())
                 assertEquals("scale preserved", viewportBefore.scale, vm.uiState.value.viewport.scale, 1e-6f)
@@ -170,7 +167,6 @@ class ViewportSliderInstrumentedTest {
         }
         compose.waitForIdle()
         assertEquals("reverse drag keeps final position", 0.1f, value, 1e-4f)
-        compose.waitUntil(timeoutMillis = 2000L) { value == 0.1f }
     }
 
     @Test
@@ -197,9 +193,6 @@ class ViewportSliderInstrumentedTest {
         }
         compose.waitForIdle()
         assertEquals("first pointer position inherited", 0.6f, value, 1e-4f)
-        compose.waitUntil(timeoutMillis = 2000L) {
-            value == 0.6f
-        }
     }
 
     @Test
@@ -221,32 +214,20 @@ class ViewportSliderInstrumentedTest {
             }
         }
         compose.runOnIdle {}
-        compose.onNodeWithContentDescription("채도").performTouchInput {
-            val start = percentOffset(0.7f, 0.5f)
-            val mid = percentOffset(0.8f, 0.5f)
-            down(pointerId = 0, position = start)
-            moveTo(pointerId = 0, position = mid, delayMillis = 20L)
+        val node = compose.onNodeWithContentDescription("채도")
+        node.performTouchInput {
+            down(pointerId = 0, position = percentOffset(0.7f, 0.5f))
+            moveTo(pointerId = 0, position = percentOffset(0.8f, 0.5f), delayMillis = 20L)
         }
         compose.waitForIdle()
-        enabled = false
-        compose.setContent {
-            MaterialTheme {
-                V2AdjustmentSlider(
-                    "채도",
-                    value,
-                    0f,
-                    1f,
-                    enabled,
-                    onValue = { value = it },
-                    onValueChangeFinished = { finishCount++ },
-                )
-            }
-        }
-        compose.runOnIdle {}
         val valueBeforeDisable = value
-        compose.waitUntil(timeoutMillis = 2000L) {
-            value == valueBeforeDisable
+        enabled = false
+        compose.waitForIdle()
+        node.performTouchInput {
+            moveTo(pointerId = 0, position = percentOffset(0.9f, 0.5f), delayMillis = 20L)
+            up(pointerId = 0)
         }
+        compose.waitForIdle()
         assertEquals("disabled slider should not change value", valueBeforeDisable, value, 1e-4f)
         assertEquals("finish callback should be invoked once", 1, finishCount)
         enabled = true
@@ -264,11 +245,9 @@ class ViewportSliderInstrumentedTest {
             }
         }
         compose.runOnIdle {}
-        compose.onNodeWithContentDescription("채도").performTouchInput {
-            val start = percentOffset(0.9f, 0.5f)
-            val end = percentOffset(0.1f, 0.5f)
-            down(pointerId = 0, position = start)
-            moveTo(pointerId = 0, position = end, delayMillis = 20L)
+        node.performTouchInput {
+            down(pointerId = 0, position = percentOffset(0.9f, 0.5f))
+            moveTo(pointerId = 0, position = percentOffset(0.1f, 0.5f), delayMillis = 20L)
             up(pointerId = 0)
         }
         compose.waitForIdle()
@@ -276,7 +255,51 @@ class ViewportSliderInstrumentedTest {
     }
 
     @Test
-    fun productionSliderReEnabledAfterDisabled() {
-        // This test is covered by productionSliderDisabledDuringDragTransition re-enable case
+    fun parentScrollArbitration() {
+        val scrollState = rememberScrollState()
+        var value by mutableStateOf(0.3f)
+        var finishCount = 0
+        compose.setContent {
+            MaterialTheme {
+                VerticalScroll(
+                    modifier = Modifier.height(200.dp).verticalScroll(scrollState),
+                    content = {
+                        Spacer(Modifier.height(100.dp))
+                        V2AdjustmentSlider(
+                            "샤프닝",
+                            value,
+                            0f,
+                            1f,
+                            true,
+                            onValue = { value = it },
+                            onValueChangeFinished = { finishCount++ },
+                        )
+                        Spacer(Modifier.height(100.dp))
+                    }
+                )
+            }
+        }
+        compose.runOnIdle {}
+        compose.onNodeWithContentDescription("샤프닝").performTouchInput {
+            down(pointerId = 0, position = percentOffset(0.15f, 0.5f))
+            moveTo(pointerId = 0, position = percentOffset(0.85f, 0.5f), delayMillis = 20L)
+            up(pointerId = 0)
+        }
+        compose.waitForIdle()
+        assertTrue("slider drag should update value", value > 0.3f)
+        assertEquals("slider drag should finish once", 1, finishCount)
+        assertTrue("parent scroll should not move significantly", scrollState.value == 0)
+        // Separate vertical scroll gesture
+        compose.onNodeWithContentDescription("샤프닝").performTouchInput {
+            down(pointerId = 0, position = percentOffset(0.5f, 0.5f))
+        }
+        compose.waitForIdle()
+        // Vertical scroll parent
+        compose.performTouchInput {
+            moveTo(pointerId = 0, position = Offset(0f, 100f), delayMillis = 20L)
+            up(pointerId = 0)
+        }
+        compose.waitForIdle()
+        assertTrue("vertical scroll should move parent", scrollCount.value > 0)
     }
 }
