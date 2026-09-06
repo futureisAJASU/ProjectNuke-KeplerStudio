@@ -501,15 +501,41 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     }
     private var paramUndoWindowJob: Job? = null
     private var lastSuccessfullyRenderedParams: EditParams = EditParams()
-    private var activeParamRenderRevision: Int? = null
     private var parameterGesture: ParameterGestureTransaction? = null
     private var parameterGestureCounter: Long = 0L
+    private var paramIntermediateAdoptionCount = 0
+    private var paramFinalAdoptionCount = 0
 
     /** Pure read-only inspection for tests: a parameter transaction is open. */
     internal fun hasOpenParameterGesture(): Boolean = parameterGesture != null
 
-    /** Pure read-only inspection for tests: the currently pending render revision. */
-    internal fun pendingParamRenderRevision(): Int? = activeParamRenderRevision
+    /** Pure read-only inspection for tests: the single pending (latest, not-yet-executing) render revision. */
+    internal fun pendingParamRenderRevision(): Int? = parameterGesture?.pendingRevisionForTest()
+
+    /** Pure read-only inspection for tests: the physically executing render revision. */
+    internal fun executingParamRenderRevisionForTest(): Int? = parameterGesture?.executingRevisionForTest()
+
+    /** Pure read-only inspection for tests: bounded owned render-revision owner count. */
+    internal fun ownedParamRenderRevisionCountForTest(): Int =
+        parameterGesture?.ownedRenderRevisionCountForTest() ?: 0
+
+    /** Pure read-only inspection for tests: pending requests superseded by newer samples. */
+    internal fun supersededParamRenderRequestCountForTest(): Int =
+        parameterGesture?.supersededRenderRequestCountForTest() ?: 0
+
+    /** Pure read-only inspection for tests: total render requests admitted to the open gesture. */
+    internal fun totalParamRenderRequestCountForTest(): Int =
+        parameterGesture?.totalRenderRequestCountForTest() ?: 0
+
+    /** Pure read-only inspection for tests: last pending revision superseded by a newer sample. */
+    internal fun lastSupersededParamRenderRevisionForTest(): Int? =
+        parameterGesture?.lastSupersededRevisionForTest()
+
+    /** Direct adoption counter: intermediate visible-preview adoptions (survives transaction close). */
+    internal fun intermediateAdoptionCountForTest(): Int = paramIntermediateAdoptionCount
+
+    /** Direct adoption counter: final authoritative adoptions (survives transaction close). */
+    internal fun finalAdoptionCountForTest(): Int = paramFinalAdoptionCount
 
     /** Read-only test boundary for the active parameter render completion. */
     internal fun parameterRenderJobForTest(): Job? = parameterGesture?.renderJob
@@ -642,6 +668,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         internal val stateLock = Any()
         private var closed = false
         @Volatile private var executingRevision: Int? = null
+        private var pendingRevision: Int? = null
+        @Volatile var totalRenderRequests: Int = 0
+        @Volatile var supersededRenderRequests: Int = 0
+        @Volatile var intermediateAdoptionCount: Int = 0
+        @Volatile var finalAdoptionCount: Int = 0
+        @Volatile var lastSupersededRevision: Int? = null
+        @Volatile var lastTerminalRevision: Int? = null
 
         internal fun currentTerminalState(): ParamTransactionTerminalState = terminalState
 
@@ -695,12 +728,80 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         internal fun isExecuting(revision: Int): Boolean =
             synchronized(stateLock) { executingRevision == revision }
 
+        /** The single physically executing render revision, if any. */
+        internal fun executingRevisionForTest(): Int? = synchronized(stateLock) { executingRevision }
+
+        /** The single pending (latest, not-yet-executing) request revision, if any. */
+        internal fun pendingRevisionForTest(): Int? = synchronized(stateLock) { pendingRevision }
+
+        /** Bounded owned RenderRevisionOwner count; must stay a small constant regardless of gesture length. */
+        internal fun ownedRenderRevisionCountForTest(): Int = synchronized(stateLock) { renderRevisions.size }
+
+        internal fun supersededRenderRequestCountForTest(): Int = supersededRenderRequests
+        internal fun totalRenderRequestCountForTest(): Int = totalRenderRequests
+        internal fun intermediateAdoptionCountForTest(): Int = intermediateAdoptionCount
+        internal fun finalAdoptionCountForTest(): Int = finalAdoptionCount
+        internal fun lastSupersededRevisionForTest(): Int? = lastSupersededRevision
+        internal fun lastTerminalRevisionForTest(): Int? = lastTerminalRevision
+
+        /** True while the transaction owns an executing or pending render. */
+        internal fun hasActiveRender(): Boolean = synchronized(stateLock) {
+            executingRevision != null || pendingRevision != null
+        }
+
+        /** The revision still owns a produced (not yet adopted) output. */
+        internal fun isProducedOwner(revision: Int): Boolean = synchronized(stateLock) {
+            renderRevisions[revision]?.phase == ParamRenderRevisionPhase.Produced
+        }
+
+        /**
+         * Conflation contract: at most ONE pending request may exist. A new request
+         * supersedes and releases the previous non-executing pending revision, preserving
+         * the executing revision and the adopted revision. The owned owner map therefore
+         * stays bounded (executing + pending + adopted + one terminal diagnostic slot)
+         * regardless of pointer-sample count.
+         */
         internal fun requestRender(revision: Int, params: EditParams) = synchronized(stateLock) {
             check(!closed && terminalState == ParamTransactionTerminalState.Active)
-            // Just add the new revision. Conflation happens naturally because the pipeline
-            // always picks the latest renderable revision. Older revisions will be superseded
-            // when the newer ones are adopted.
+            totalRenderRequests++
+            val previous = pendingRevision
+            if (previous != null && previous != revision) {
+                supersedePendingLocked(previous, "superseded by request $revision")
+            }
+            pendingRevision = revision
             renderRevisions[revision] = RenderRevisionOwner(revision, params, start.identity)
+            pruneLocked()
+        }
+
+        /** Releases the previous non-executing pending owner; the executing revision is never touched. */
+        private fun supersedePendingLocked(revision: Int, reason: String) {
+            val owner = renderRevisions[revision] ?: return
+            if (owner.phase != ParamRenderRevisionPhase.Requested) return
+            renderRevisions.remove(revision)
+            owner.phase = ParamRenderRevisionPhase.Canceled
+            owner.terminalReason = reason
+            owner.job?.cancel()
+            owner.outputOwned = false
+            supersededRenderRequests++
+            lastSupersededRevision = revision
+        }
+
+        private fun pruneLocked() {
+            renderRevisions.entries.removeIf { entry ->
+                val owner = entry.value
+                if (owner.phase !in setOf(
+                        ParamRenderRevisionPhase.Canceled,
+                        ParamRenderRevisionPhase.Failed,
+                        ParamRenderRevisionPhase.Closed,
+                    )
+                ) {
+                    return@removeIf false
+                }
+                entry.key != executingRevision &&
+                    entry.key != pendingRevision &&
+                    entry.key != adoptedRevision &&
+                    entry.key != lastTerminalRevision
+            }
         }
 
         internal fun prepareRender(revision: Int, operationToken: Long, job: Job?) = synchronized(stateLock) {
@@ -710,6 +811,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             owner.job = job
             owner.phase = ParamRenderRevisionPhase.Preparing
             executingRevision = revision
+            if (pendingRevision == revision) pendingRevision = null
             true
         }
 
@@ -752,23 +854,31 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 if (owner.revision == adoptedRevision) return false
                 val previousAdopted = adoptedRevision
                 if (previousAdopted != null && previousAdopted != revision) {
-                    renderRevisions[previousAdopted]?.apply { 
-                        phase = ParamRenderRevisionPhase.Closed
-                        terminalReason = "replaced by adoption $revision"
+                    val replaced = renderRevisions.remove(previousAdopted)
+                    if (replaced != null) {
+                        replaced.phase = ParamRenderRevisionPhase.Closed
+                        replaced.terminalReason = "replaced by adoption $revision"
+                        replaced.outputOwned = false
                     }
                 }
                 owner.phase = ParamRenderRevisionPhase.Adopted
                 owner.outputOwned = false
                 owner.adoptionIdentity = "$id:$revision"
                 adoptedRevision = revision
-                // Only set adoptedParams if this is the latest revision (final adoption)
+                // Only the latest revision becomes the final authoritative adoption.
+                // Intermediate adoption updates the transient visible preview only.
                 if (revision == latestRevision) {
                     adoptedParams = owner.params
-                    // Cancel all older non-adopted revisions to achieve conflation
-                    renderRevisions.values
-                        .filter { it.revision < revision && it.phase !in setOf(ParamRenderRevisionPhase.Canceled, ParamRenderRevisionPhase.Failed, ParamRenderRevisionPhase.Closed, ParamRenderRevisionPhase.Adopted) }
-                        .forEach { it.phase = ParamRenderRevisionPhase.Canceled; it.terminalReason = "superseded by adoption $revision"; it.job?.cancel() }
+                    finalAdoptionCount++
+                    val pending = pendingRevision
+                    if (pending != null && pending != revision) {
+                        pendingRevision = null
+                        supersedePendingLocked(pending, "superseded by final adoption $revision")
+                    }
+                } else {
+                    intermediateAdoptionCount++
                 }
+                pruneLocked()
                 return true
             }
         }
@@ -781,6 +891,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 owner.phase = ParamRenderRevisionPhase.Failed
                 owner.terminalReason = reason
                 owner.outputOwned = false
+                lastTerminalRevision = revision
+                if (pendingRevision == revision) pendingRevision = null
+                pruneLocked()
                 return true
             }
         }
@@ -793,6 +906,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 owner.phase = ParamRenderRevisionPhase.Canceled
                 owner.terminalReason = reason
                 owner.outputOwned = false
+                lastTerminalRevision = revision
+                if (pendingRevision == revision) pendingRevision = null
+                pruneLocked()
                 return true
             }
         }
@@ -2129,6 +2245,45 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun isManagedEditCurrent(token: Long, revision: Int): Boolean =
         !shuttingDown && managedEdits.isCurrent(token) && _uiState.value.revision == revision
 
+    /**
+     * Parameter-render-specific ownership gate.
+     *
+     * Unlike [isManagedEditCurrent], this does NOT require
+     * `_uiState.value.revision == renderedRevision`: an intermediate preview may complete
+     * while newer slider samples have already advanced the UI revision. It DOES require that
+     * the same [ParameterGestureTransaction] still owns the gesture, the managed operation
+     * token still belongs to this render, the document identity/generation is unchanged, and
+     * the transaction is still Active.
+     */
+    private fun isParameterRenderOwning(
+        transaction: ParameterGestureTransaction,
+        operationToken: Long,
+    ): Boolean {
+        if (shuttingDown) return false
+        if (parameterGesture !== transaction) return false
+        if (!managedEdits.isCurrent(operationToken)) return false
+        if (!transaction.isPipelineActive()) return false
+        val state = _uiState.value
+        val id = transaction.start.identity
+        if (state.sourcePath != id.sourcePath) return false
+        if (state.baseContentToken != id.baseContentToken) return false
+        if (historyCoordinator.currentGeneration() != id.generation) return false
+        return true
+    }
+
+    /**
+     * Narrow parameter-render adoption gate: the produced revision may be presented as the
+     * visible preview (intermediate or final). Final authority still requires
+     * `renderedRevision == transaction.latestRevision`, enforced at the adoption site.
+     */
+    private fun isParameterRenderAdoptable(
+        transaction: ParameterGestureTransaction,
+        operationToken: Long,
+        revision: Int,
+    ): Boolean =
+        isParameterRenderOwning(transaction, operationToken) &&
+            transaction.isProducedOwner(revision)
+
     /** Changes the persisted default only; the current document is unchanged until explicitly applied. */
     internal fun canApplyCorrectionEngineForUi(): Boolean {
         val state = _uiState.value
@@ -2164,7 +2319,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         invalidateManagedEdits()
         renderJob?.cancel()
         renderJob = null
-        activeParamRenderRevision = null
         invalidateExport()
 
         val before = _uiState.value
@@ -3694,9 +3848,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     internal fun isBusyOwnedByMaskSupersedable(): Boolean {
         val state = _uiState.value
+        val parameterTx = parameterGesture
         if (
-            activeParamRenderRevision != null &&
-                activeParamRenderRevision == state.revision &&
+            parameterTx != null &&
+                parameterTx.hasActiveRender() &&
                 renderJob?.isActive == true
         )
             return true
@@ -3730,7 +3885,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         val state = _uiState.value
         val layerId = state.activeSelectionLayerId ?: return false
         val layer = state.selectionLayers.firstOrNull { it.id == layerId } ?: return false
-        if (state.params != lastSuccessfullyRenderedParams || activeParamRenderRevision != null) {
+        if (state.params != lastSuccessfullyRenderedParams || parameterGesture?.hasActiveRender() == true) {
             return false
         }
         val prerequisite = settlement.historyPrerequisite
@@ -5903,9 +6058,14 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     output = checkNotNull(owner.takeOutput())
                     tracker?.track(output, "updateParams:output")
                     transaction.clearExecuting(nextRevision)
-                    if (isManagedEditCurrent(operationToken, nextRevision)) {
+                    if (isParameterRenderAdoptable(transaction, operationToken, nextRevision)) {
                         if (transaction.adopt(nextRevision)) {
                             val isFinalAdoption = nextRevision == transaction.latestRevision
+                            if (isFinalAdoption) paramFinalAdoptionCount++ else paramIntermediateAdoptionCount++
+                            // Intermediate adoption updates ONLY the transient visible-render
+                            // state (previewBitmap + visible engine preview). It must not roll
+                            // back uiState.params, uiState.revision, history, Draft identity,
+                            // document identity, or the latest parameter intent.
                             updateUiStateAndRecycleReplaced {
                                 it.copy(
                                     params = if (isFinalAdoption) next else it.params,
@@ -5917,7 +6077,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                                     ),
                                 )
                             }
-                            activeParamRenderRevision = null
                             output = null
                             transaction.lifecycleInstallation?.hooks?.onRenderOutputAdopted?.invoke(nextRevision)
                             if (isFinalAdoption) {
@@ -5925,22 +6084,24 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             }
                         } else {
                             transaction.cancelRender(nextRevision, "adoption rejected")
-                            if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                         }
                     } else {
                         transaction.cancelRender(nextRevision, "stale managed edit")
-                        if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     }
                 } catch (ce: CancellationException) {
                     transaction.clearExecuting(nextRevision)
                     transaction.cancelRender(nextRevision, "canceled")
-                    if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
                     throw ce
                 } catch (failure: Throwable) {
                     transaction.clearExecuting(nextRevision)
                     transaction.failRender(nextRevision, failure.message ?: failure::class.java.simpleName)
-                    if (activeParamRenderRevision == nextRevision) activeParamRenderRevision = null
-                    if (isManagedEditCurrent(operationToken, nextRevision)) {
+                    // Only the final/latest authoritative render failure may apply the
+                    // final failure/rollback policy. An intermediate failure while a newer
+                    // pending request owns the latest parameter intent must leave that
+                    // intent, its pending ownership, and isBusy untouched.
+                    if (isParameterRenderOwning(transaction, operationToken) &&
+                        nextRevision == transaction.latestRevision
+                    ) {
                         val retainedParams = transaction.adoptedParams
                         if (retainedParams != null) {
                             updateUiState { it.copy(params = retainedParams, isBusy = false) }
@@ -5963,9 +6124,10 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 }
             },
             PreparedResourceHandoff.create("parameterRender", { tracker?.end() }, {
-                if (activeParamRenderRevision == nextRevision) {
-                    activeParamRenderRevision = null
-                    if (_uiState.value.revision == nextRevision) updateUiState { it.copy(isBusy = false) }
+                if (!shuttingDown && parameterGesture === transaction &&
+                    _uiState.value.revision == nextRevision
+                ) {
+                    updateUiState { it.copy(isBusy = false) }
                 }
             }),
         )
@@ -6023,7 +6185,6 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
         updateUiState { it.copy(params = next, revision = nextRevision, isBusy = true) }
         updateUiState { it.copy(message = "미리보기를 렌더링하는 중입니다.") }
-        activeParamRenderRevision = nextRevision
         scheduleParameterPipeline()
     }
 
@@ -9857,6 +10018,10 @@ fun exportPreview() {
     private fun maybeCloseParameterGesture(transaction: ParameterGestureTransaction) {
         if (parameterGesture !== transaction || !transaction.windowExpired) return
         if (transaction.renderJob?.isActive == true || transaction.historyJob?.isActive == true) return
+        // A pending (latest, not-yet-executing) render request is still owned by this
+        // transaction and the pipeline is alive to execute it: rolling back or closing now
+        // would discard the latest parameter intent before its authoritative render ran.
+        if (transaction.hasActiveRender() && parameterPipelineJob?.isActive == true) return
         if (transaction.adoptedParams == null) {
             transaction.rollback()
             val startState = transaction.start.state
@@ -9917,7 +10082,6 @@ fun exportPreview() {
         paramUndoWindowJob?.cancel()
         paramUndoWindowJob = null
         renderJob?.cancel()
-        activeParamRenderRevision = null
         parameterPipelineJob?.cancel()
         maybeCloseParameterGesture(tx)
     }
@@ -9957,13 +10121,11 @@ fun exportPreview() {
     internal fun settleParameterTransaction(reason: SettlementReason): SettlementResult {
         val unresolved =
             parameterGesture != null ||
-                activeParamRenderRevision != null ||
                 _uiState.value.params != lastSuccessfullyRenderedParams
         if (!unresolved) return SettlementResult.NoTransaction
 
         renderJob?.cancel()
         parameterPipelineJob?.cancel()
-        activeParamRenderRevision = null
         val transaction = parameterGesture
 
         paramUndoWindowJob?.cancel()
