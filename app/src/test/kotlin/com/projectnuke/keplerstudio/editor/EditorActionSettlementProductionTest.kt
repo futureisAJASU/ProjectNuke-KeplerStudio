@@ -95,7 +95,7 @@ class EditorActionSettlementProductionTest {
         awaitEvent(vm) { vm.hasOpenParameterGesture() && vm.adoptedParamsForTest()?.exposure == 0.3f }
         // request 0.5; the renderer suspends — no adoption, transaction still open
         vm.updateParams { it.copy(exposure = 0.5f) }
-        awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+        awaitEvent(vm) { renderCalls.get() >= 2 && vm.executingParamRenderRevisionForTest() != null }
         assertTrue("0.5 render must be suspended", renderCalls.get() >= 2)
         assertTrue("busy while a render is pending", vm.uiState.value.isBusy)
         assertTrue("transaction remains open", vm.hasOpenParameterGesture())
@@ -139,7 +139,7 @@ class EditorActionSettlementProductionTest {
             assertEquals(0, setup.closed.size)
             assertEquals(0, vm.undoEntryCountForTest())
             assertTrue("transaction untouched by pure(false)", vm.hasOpenParameterGesture())
-            assertTrue("pending render untouched", vm.pendingParamRenderRevision() != null)
+            assertTrue("executing render untouched", vm.executingParamRenderRevisionForTest() != null)
 
             assertTrue("pure must admit mask-supersedable busy", vm.canEnterEditorActionPure(true))
             assertEquals(0, setup.commitBegan.size)

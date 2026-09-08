@@ -341,7 +341,7 @@ class ParameterNoAdoptionRollbackProductionTest {
             vm.updateParams { it.copy(exposure = 0.7f) }
             assertTrue(
                 awaitEvent(vm) {
-                    vm.pendingParamRenderRevision() != null && vm.hasOpenParameterGesture()
+                    vm.executingParamRenderRevisionForTest() != null && vm.hasOpenParameterGesture()
                 },
             )
             assertEquals(0, adopted.get())

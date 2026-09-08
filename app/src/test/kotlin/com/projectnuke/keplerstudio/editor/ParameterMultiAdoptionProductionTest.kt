@@ -284,19 +284,25 @@ class ParameterMultiAdoptionProductionTest {
             awaitEvent(vm) { adopted.size == 1 && uiPixelColor(vm) == red }
 
             vm.updateParams { it.copy(exposure = 0.4f) }
-            awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { renderCalls.get() >= 2 && vm.executingParamRenderRevisionForTest() != null }
             assertEquals("latest requested is 0.4", 0.4f, vm.latestParamsForTest()?.exposure)
             assertEquals("latest adopted is still 0.2", 0.2f, vm.adoptedParamsForTest()?.exposure)
 
             vm.updateParams { it.copy(exposure = 0.6f) }
-            awaitEvent(vm) { adopted.size == 2 && uiPixelColor(vm) == blue }
+            // 0.6 becomes the sole pending request; the suspended 0.4 render must finish
+            // first (physical execution is serialized) before the newest can be adopted.
+            awaitEvent(vm) {
+                vm.pendingParamRenderRevision() != null &&
+                    vm.adoptedParamsForTest()?.exposure == 0.2f
+            }
 
-            // release the superseded render; its output must never adopt
+            // release the suspended render; the newest (0.6) becomes the final authority
             pendingGate.complete(Unit)
             awaitEvent(vm) {
-                renderCalls.get() == 3 && adopted.size == 2 && !vm.uiState.value.isBusy
+                renderCalls.get() == 3 &&
+                    vm.adoptedParamsForTest()?.exposure == 0.6f &&
+                    !vm.uiState.value.isBusy
             }
-            assertEquals("superseded render never adopts", 2, adopted.size)
             assertEquals("0.6 won", 0.6f, vm.uiState.value.params.exposure)
             assertEquals(blue, uiPixelColor(vm))
             assertEquals("latest adopted is 0.6", 0.6f, vm.adoptedParamsForTest()?.exposure)

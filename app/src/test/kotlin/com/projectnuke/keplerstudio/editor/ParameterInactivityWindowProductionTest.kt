@@ -266,7 +266,7 @@ class ParameterInactivityWindowProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.2f) }
-            awaitEvent(vm) { vm.pendingParamRenderRevision() != null && renderCalls.get() >= 1 }
+            awaitEvent(vm) { vm.executingParamRenderRevisionForTest() != null && renderCalls.get() >= 1 }
 
             advanceInactivityWindow(vm)
 

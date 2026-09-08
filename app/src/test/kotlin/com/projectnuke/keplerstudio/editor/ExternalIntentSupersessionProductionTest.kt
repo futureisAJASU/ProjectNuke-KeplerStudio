@@ -112,14 +112,13 @@ class ExternalIntentSupersessionProductionTest {
             assertEquals(0.3f, vm.adoptedParamsForTest()?.exposure)
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.executingParamRenderRevisionForTest() != null }
             assertTrue("0.5 render must be suspended", renderCalls.get() >= 2)
             assertTrue("busy while B is pending", vm.uiState.value.isBusy)
 
             vm.updateCropRect(0.25f, 0.25f, 0.75f, 0.75f)
             vm.applyCropTransform()
             awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && transformCalls.get() >= 2 }
-
             assertEquals("only A adopted", 1, adopted.size)
             assertEquals("B rendered once and never re-rendered", 2, renderCalls.get())
             assertFalse("transaction settled closed on first tap", vm.hasOpenParameterGesture())
@@ -194,7 +193,7 @@ class ExternalIntentSupersessionProductionTest {
             val startPixels = uiPixelColor(vm.uiState.value.previewBitmap)
 
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { renderCalls.get() >= 1 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { renderCalls.get() >= 1 && vm.executingParamRenderRevisionForTest() != null }
             assertEquals("nothing adopted before the crop", 0, adopted)
             assertTrue("busy while the only render is pending", vm.uiState.value.isBusy)
 
@@ -269,7 +268,7 @@ class ExternalIntentSupersessionProductionTest {
             awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.executingParamRenderRevisionForTest() != null }
 
             vm.applyFlareOriginalMvp()
             awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && flareCalls.get() >= 1 }
@@ -344,7 +343,7 @@ class ExternalIntentSupersessionProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { vm.executingParamRenderRevisionForTest() != null }
 
             vm.applySunFlareOriginalMvp()
             awaitEvent(vm) { !vm.uiState.value.isBusy && flareCalls.get() >= 1 }
@@ -407,7 +406,7 @@ class ExternalIntentSupersessionProductionTest {
             awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.executingParamRenderRevisionForTest() != null }
 
             vm.applyMaskAwareRemaster()
             awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && renderCalls.get() >= 3 }
@@ -478,7 +477,7 @@ class ExternalIntentSupersessionProductionTest {
             awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.executingParamRenderRevisionForTest() != null }
 
             vm.applyActiveSelectionLocalEditNativeBaked()
             awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && renderCalls.get() >= 3 }
@@ -545,7 +544,7 @@ class ExternalIntentSupersessionProductionTest {
             awaitEvent(vm, advanceVirtualTime = false) { adopted.isNotEmpty() && vm.hasOpenParameterGesture() }
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm, advanceVirtualTime = false) { renderCalls.get() >= 2 && vm.executingParamRenderRevisionForTest() != null }
 
             vm.applyActiveSelectionLocalEdit()
             awaitEvent(vm, advanceVirtualTime = false) { !vm.uiState.value.isBusy && renderCalls.get() >= 3 }

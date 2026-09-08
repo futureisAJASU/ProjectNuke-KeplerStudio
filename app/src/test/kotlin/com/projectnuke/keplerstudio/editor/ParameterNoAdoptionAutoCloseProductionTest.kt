@@ -104,7 +104,7 @@ class ParameterNoAdoptionAutoCloseProductionTest {
             val startRevision = vm.uiState.value.revision
 
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { renderCalls.get() >= 1 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { renderCalls.get() >= 1 && vm.executingParamRenderRevisionForTest() != null }
             assertTrue("gesture open before invalidation", vm.hasOpenParameterGesture())
 
             vm.invalidateManagedEditsForTest()

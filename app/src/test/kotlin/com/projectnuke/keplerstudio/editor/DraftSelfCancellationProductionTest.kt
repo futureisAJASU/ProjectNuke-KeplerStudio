@@ -183,7 +183,7 @@ class DraftSelfCancellationProductionTest {
 
             // request 0.4; the renderer suspends after starting (no adoption)
             vm.updateParams { it.copy(exposure = 0.4f) }
-            awaitEvent(vm) { requests.size >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { requests.size >= 2 && vm.executingParamRenderRevisionForTest() != null }
             assertTrue("0.4 render must be suspended", requests.size >= 2)
             assertEquals("adopted params stay 0.2", 0.2f, vm.adoptedParamsForTest()?.exposure)
             assertEquals("latest optimistic params are 0.4", 0.4f, vm.latestParamsForTest()?.exposure)
@@ -250,7 +250,7 @@ class DraftSelfCancellationProductionTest {
             assertEquals(0f, vm.uiState.value.params.exposure)
 
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { vm.executingParamRenderRevisionForTest() != null }
             assertEquals(0, adopted)
 
             // save before any adoption: settlement rolls back to start

@@ -108,7 +108,7 @@ class ParameterRenderPhaseProductionTest {
             assertEquals(0.3f, vm.uiState.value.params.exposure)
 
             vm.updateParams { it.copy(exposure = 0.5f) }
-            awaitEvent(vm) { renderCalls.get() >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { renderCalls.get() >= 2 && vm.executingParamRenderRevisionForTest() != null }
             assertEquals("later render in flight must be Rendering", EditorViewModel.ParamRenderPhase.Rendering, vm.paramRenderPhaseForTest())
 
             gateB.complete(Unit)
@@ -117,17 +117,20 @@ class ParameterRenderPhaseProductionTest {
             assertEquals(0.5f, vm.uiState.value.params.exposure)
 
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { renderCalls.get() >= 3 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { renderCalls.get() >= 3 && vm.executingParamRenderRevisionForTest() != null }
             assertEquals("third render in flight must be Rendering", EditorViewModel.ParamRenderPhase.Rendering, vm.paramRenderPhaseForTest())
 
             gateC.complete(Unit)
             awaitEvent(vm) { adopted.size == 3 }
             assertEquals("third adoption leaves phase Adopted", EditorViewModel.ParamRenderPhase.Adopted, vm.paramRenderPhaseForTest())
             assertEquals(0.7f, vm.uiState.value.params.exposure)
+            // The ownership map is bounded (O(1)): earlier superseded renders are pruned
+            // rather than retained as Closed; only the latest adopted owner stays in the
+            // map as the authoritative phase.
             val ownedRevisions = vm.paramRenderRevisionPhasesForTest()
-            assertEquals(EditorViewModel.ParamRenderRevisionPhase.Closed, ownedRevisions[adopted[0]])
-            assertEquals(EditorViewModel.ParamRenderRevisionPhase.Closed, ownedRevisions[adopted[1]])
+            assertNull(ownedRevisions[adopted[0]])
             assertEquals(EditorViewModel.ParamRenderRevisionPhase.Adopted, ownedRevisions[adopted[2]])
+            assertTrue("ownership map stays bounded (O(1))", ownedRevisions.size <= 4)
 
             val result = vm.settleParameterTransactionBeforeExternalEdit()
             assertEquals(EditorViewModel.SettlementResult.Committed::class, result::class)
@@ -178,7 +181,7 @@ class ParameterRenderPhaseProductionTest {
         try {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { renderCalls.get() >= 1 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { renderCalls.get() >= 1 && vm.executingParamRenderRevisionForTest() != null }
             assertEquals("in-flight render is Rendering", EditorViewModel.ParamRenderPhase.Rendering, vm.paramRenderPhaseForTest())
 
             val result = vm.settleParameterTransactionBeforeExternalEdit()

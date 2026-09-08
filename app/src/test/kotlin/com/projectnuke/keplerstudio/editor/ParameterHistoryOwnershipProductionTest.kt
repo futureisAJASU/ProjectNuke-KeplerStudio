@@ -100,7 +100,7 @@ class ParameterHistoryOwnershipProductionTest {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
             awaitEvent(vm, advanceVirtualTime = false) { publishSeam.reached.isCompleted }
-            assertTrue("render remains pending while history publication is gated", vm.pendingParamRenderRevision() != null)
+            assertTrue("render remains executing while history publication is gated", vm.executingParamRenderRevisionForTest() != null)
             assertTrue(
                 "history capture reserved the selection mask",
                 vm.selectionMaskOwnership.reservedBytes() > 0L,
@@ -164,7 +164,7 @@ class ParameterHistoryOwnershipProductionTest {
             awaitReady(vm)
             vm.updateParams { it.copy(exposure = 0.7f) }
             awaitEvent(vm, advanceVirtualTime = false) { publishSeam.reached.isCompleted }
-            assertTrue("render remains pending while history publication is gated", vm.pendingParamRenderRevision() != null)
+            assertTrue("render remains executing while history publication is gated", vm.executingParamRenderRevisionForTest() != null)
             assertTrue(
                 "history capture reserved the selection mask",
                 vm.selectionMaskOwnership.reservedBytes() > 0L,

@@ -181,7 +181,7 @@ class ShutdownDraftIntegrityProductionTest {
             assertEquals(0.2f, vm.adoptedParamsForTest()?.exposure)
 
             vm.updateParams { it.copy(exposure = 0.4f) }
-            awaitEvent(vm) { requests.size >= 2 && vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { requests.size >= 2 && vm.executingParamRenderRevisionForTest() != null }
             assertEquals("0.4 render must be suspended", requests.size >= 2, true)
             val revisionBeforeShutdown = vm.uiState.value.revision
             val epochBefore = vm.draftEpochForTest()
@@ -255,7 +255,7 @@ class ShutdownDraftIntegrityProductionTest {
             val epochBefore = vm.draftEpochForTest()
 
             vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { vm.pendingParamRenderRevision() != null }
+            awaitEvent(vm) { vm.executingParamRenderRevisionForTest() != null }
             val revisionBeforeShutdown = vm.uiState.value.revision
             assertEquals("no adoption before shutdown", 0, adopted)
             val startPixels = uiPixelColor(vm)
