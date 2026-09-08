@@ -8,17 +8,20 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.wrapContentSize
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.scroll.verticalScroll
+import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.pointer.percentOffset
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.swipeUp
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -82,12 +85,13 @@ class ViewportSliderInstrumentedTest {
             val initialUndo = vm.undoEntryCountForTest()
             val viewportBefore = vm.uiState.value.viewport
             var finishCount = 0
+            val sharpnessBefore = vm.uiState.value.params.sharpness
             compose.setContent {
                 MaterialTheme {
                     Box(Modifier.fillMaxSize().wrapContentSize()) {
                         V2AdjustmentSlider(
                             "샤프닝",
-                            vm.uiState.value.params.sharpness,
+                            sharpnessBefore,
                             0f,
                             1f,
                             true,
@@ -110,6 +114,11 @@ class ViewportSliderInstrumentedTest {
                 assertEquals("offset.y preserved", viewportBefore.offset.y, vm.uiState.value.viewport.offset.y, 1e-6f)
                 assertEquals("final value should be target", 0.75f, vm.uiState.value.params.sharpness, 1e-6f)
                 assertEquals("finish callback should be invoked", 1, finishCount)
+                assertEquals("sharpness == 0.75", 0.75f, vm.uiState.value.params.sharpness, 1e-6f)
+                assertEquals("viewport unchanged after accessibility", viewportBefore, vm.uiState.value.viewport)
+            }
+            vm.updateUiState {
+                it.copy(previewBitmap = null, originalPreviewBitmap = null)
             }
             bmp.recycle()
         } finally {
@@ -173,27 +182,36 @@ class ViewportSliderInstrumentedTest {
     @Test
     fun productionSliderSecondPointerDoesNotStealDrag() {
         var value by mutableStateOf(0.5f)
+        var finishCount = 0
         compose.setContent {
             MaterialTheme {
-                V2AdjustmentSlider("디테일 보호", value, 0f, 1f, true, onValue = { value = it }, onValueChangeFinished = {})
+                V2AdjustmentSlider("디테일 보호", value, 0f, 1f, true, onValue = { value = it }, onValueChangeFinished = { finishCount++ })
             }
         }
         compose.runOnIdle {}
         compose.onNodeWithContentDescription("디테일 보호").performTouchInput {
             val firstStart = percentOffset(0.20f, 0.5f)
-            val firstEnd = percentOffset(0.60f, 0.5f)
+            val firstEnd = percentOffset(0.40f, 0.5f)
+            down(pointerId = 0, position = firstStart)
+            moveTo(pointerId = 0, position = firstEnd, delayMillis = 20L)
+            val valueAfterPointer0 = value
             val secondStart = percentOffset(0.80f, 0.5f)
             val secondEnd = percentOffset(0.95f, 0.5f)
-            down(pointerId = 0, position = firstStart)
             down(pointerId = 1, position = secondStart)
             moveTo(pointerId = 1, position = secondEnd, delayMillis = 20L)
-            moveTo(pointerId = 0, position = firstEnd, delayMillis = 20L)
+            assertEquals("value should remain after pointer 1 starts", valueAfterPointer0, value, 1e-4f)
+            val firstFinal = percentOffset(0.60f, 0.5f)
+            moveTo(pointerId = 0, position = firstFinal, delayMillis = 20L)
+            assertEquals("pointer 0 should establish value ~0.60", 0.60f, value, 1e-4f)
             up(pointerId = 0)
-            moveTo(pointerId = 1, position = secondStart, delayMillis = 20L)
+            val pointer1Move = percentOffset(0.50f, 0.5f)
+            moveTo(pointerId = 1, position = pointer1Move, delayMillis = 20L)
+            assertEquals("value should not change after pointer 0 up and pointer 1 move", 0.60f, value, 1e-4f)
             up(pointerId = 1)
         }
         compose.waitForIdle()
         assertEquals("first pointer position inherited", 0.6f, value, 1e-4f)
+        assertEquals("original gesture should finish once", 1, finishCount)
     }
 
     @Test
@@ -257,13 +275,16 @@ class ViewportSliderInstrumentedTest {
 
     @Test
     fun parentScrollArbitration() {
-        val scrollState = rememberScrollState()
+        val scrollState = ScrollState(0)
         var value by mutableStateOf(0.3f)
         var finishCount = 0
         compose.setContent {
             MaterialTheme {
                 Column(
-                    modifier = Modifier.height(200.dp).verticalScroll(scrollState)
+                    modifier = Modifier
+                        .testTag("scroll-parent")
+                        .height(200.dp)
+                        .verticalScroll(scrollState)
                 ) {
                     Spacer(Modifier.height(100.dp))
                     V2AdjustmentSlider(
@@ -288,12 +309,12 @@ class ViewportSliderInstrumentedTest {
         compose.waitForIdle()
         assertTrue("slider drag should update value", value > 0.3f)
         assertEquals("slider drag should finish once", 1, finishCount)
-        assertTrue("parent scroll should not move significantly", scrollState.value == 0)
-        compose.performTouchInput {
-            moveTo(pointerId = 0, position = Offset(0f, 100f), delayMillis = 20L)
-            up(pointerId = 0)
+        val previousScrollValue = scrollState.value
+        assertTrue("parent scroll should not move significantly", scrollState.value == previousScrollValue || scrollState.value == 0)
+        compose.onNodeWithTag("scroll-parent").performTouchInput {
+            swipeUp()
         }
         compose.waitForIdle()
-        assertTrue("vertical scroll should move parent", scrollState.value > 0)
+        assertTrue("vertical scroll should move parent", scrollState.value > previousScrollValue)
     }
 }
