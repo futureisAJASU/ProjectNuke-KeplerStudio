@@ -474,17 +474,7 @@ class CrossFeatureDocumentTruthProductionTest {
 
     private fun deleteOwnedTestPath(path: File) {
         if (!path.exists()) return
-        val deleted = if (path.isDirectory) {
-            try {
-                path.walkTopDown().filter { it.isFile }.forEach { it.delete() }
-                path.walkTopDown().filter { it.isDirectory }.sortedDescending().forEach { it.delete() }
-                true
-            } catch (e: Exception) {
-                throw AssertionError("test cleanup could not delete directory ${path.absolutePath}: ${e.message}")
-            }
-        } else {
-            path.delete()
-        }
+        val deleted = if (path.isDirectory) path.deleteRecursively() else path.delete()
         assertTrue("test cleanup could not delete ${path.absolutePath}", deleted || !path.exists())
     }
 }

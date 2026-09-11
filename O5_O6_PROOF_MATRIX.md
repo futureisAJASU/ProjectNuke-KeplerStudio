@@ -18,9 +18,10 @@ O5-A TEARDOWN MATRIX (direct production operation proof):
 
 O5-D DISK OWNERSHIP (no additional vacuous test needed):
 - Draft source ownership -> LegacyDraftSourceOwnershipProductionTest.singleOwnerClaimProtectsAndReleases (REAL: registry claim/release/protection) -> PASS
-- History pressure/reclamation -> LegacyDraftSourceOwnershipProductionTest.twoOwnersShareOneCanonicalFileUntilBothRelease (REAL: multi-owner claim/release) -> PASS
+- History pressure/reclamation (direct) -> HistoryPressureCoordinatorProductionTest.historyPressureNeverTouchesCurrentDraftOrDocumentSources (REAL: history pressure reclamation runs, asserts current Draft and document sources untouched) -> PASS
 - Operation lease -> LegacyDraftSourceOwnershipProductionTest.staleCleanupCannotDeleteAcquiredPath (REAL: acquire/release boundary) -> PASS
-- FullExport source lease -> ExportPipelineTest / ExportPreviewProductionTest (REAL: export source copy/lease before publication) -> PASS
+- FullExport source lease ownership (direct) -> SuperResolutionProductTest.appOwnedCleanSourceLeaseSurvivesDocumentOwnerTeardown (REAL: source lease survives document owner teardown) -> PASS
+- FullExport source lease (additional distinct contract) -> ExportPipelineTest (REAL: export source copy/lease before publication) -> PASS
 - SR journal/staging exact ownership -> SuperResolutionOperationJournalTest (REAL: journal path tracking, session ownership) -> PASS
 
 O6 REQUIREMENT -> EXISTING GENUINE TEST -> REAL OPERATION? -> STATUS
