@@ -314,7 +314,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     internal fun activeViewModelJobDiagnosticsForTest(): String =
         viewModelScope.coroutineContext[Job]?.children
             ?.filter { !it.isCompleted }
-            ?.joinToString(prefix = "[", postfix = "]") { it.toString() }
+            ?.joinToString(prefix = "[", postfix = "]") { "${it::class.simpleName}:${it.toString()}" }
             ?: "[]"
 
     internal fun startupCoordinatorActiveForTest(): Boolean = startupCoordinatorJob?.isActive == true
@@ -6059,18 +6059,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                     tracker?.track(output, "updateParams:output")
                     transaction.clearExecuting(nextRevision)
                     if (isParameterRenderAdoptable(transaction, operationToken, nextRevision)) {
+                        // Stale late adoption guard: only the latest requested
+                        // revision may commit the params / revision / history /
+                        // Draft truth.  An older render completing after a
+                        // newer request (undo / redo / replacement / next
+                        // gesture) must not roll back any authoritative
+                        // document truth or convert the stale result into a
+                        // success.
+                        val isFinalAdoption = nextRevision == transaction.latestRevision
                         if (transaction.adopt(nextRevision)) {
-                            val isFinalAdoption = nextRevision == transaction.latestRevision
                             if (isFinalAdoption) paramFinalAdoptionCount++ else paramIntermediateAdoptionCount++
-                            // Intermediate adoption updates ONLY the transient visible-render
-                            // state (previewBitmap + visible engine preview). It must not roll
-                            // back uiState.params, uiState.revision, history, Draft identity,
-                            // document identity, or the latest parameter intent.
+                            val isStaleLate = !isFinalAdoption &&
+                                nextRevision != transaction.latestRevision
                             updateUiStateAndRecycleReplaced {
                                 it.copy(
                                     params = if (isFinalAdoption) next else it.params,
                                     previewBitmap = output,
-                                    isBusy = if (isFinalAdoption) false else it.isBusy,
+                                    isBusy = if (isStaleLate) false else it.isBusy,
                                     correctionEngineState = it.correctionEngineState.withSuccessfulRender(
                                         transaction.start.state.correctionEngineState.documentEngine,
                                         result.copy(output = checkNotNull(output)),
@@ -6079,7 +6084,9 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                             }
                             output = null
                             transaction.lifecycleInstallation?.hooks?.onRenderOutputAdopted?.invoke(nextRevision)
-                            if (isFinalAdoption) {
+                            if (isStaleLate) {
+                                transaction.cancelRender(nextRevision, "stale late adoption completed")
+                            } else {
                                 maybeCloseParameterGesture(transaction)
                             }
                         } else {
@@ -6149,6 +6156,7 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
                 !(parameterAdmission == EditorActionAdmission.HistoryBusy && parameterGesture != null)
         ) {
             if (parameterAdmission == EditorActionAdmission.HistoryBusy) reportHistoryBusyAdmission()
+            else updateUiState { it.copy(message = "PARAM_ADMISSION_REJECT ${parameterAdmission.name}") }
             return
         }
         val next = transform(_uiState.value.params)
