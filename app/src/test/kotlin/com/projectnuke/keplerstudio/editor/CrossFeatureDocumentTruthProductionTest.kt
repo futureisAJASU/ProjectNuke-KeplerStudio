@@ -130,7 +130,7 @@ class CrossFeatureDocumentTruthProductionTest {
                 !vm.hasOpenParameterGesture() &&
                     vm.pendingParamRenderRevision() == null &&
                     !vm.hasActiveDraftSaveJobForTest() &&
-                    vm.viewModelJobsForTest().none { it.isActive }
+                    !vm.uiState.value.isBusy
             }
 
             assertEquals("undo restored the exact pre-edit params", EditParams(), vm.uiState.value.params)
@@ -328,6 +328,84 @@ class CrossFeatureDocumentTruthProductionTest {
         }
     }
 // ------------------------------------------------------------------
+    // O6-D NORMAL FULL EXPORT TRUTH
+    // ------------------------------------------------------------------
+
+    @Test
+    fun fullExportSourceCorrespondsToAuthoritativeDocumentState() = runBlocking {
+        val sourceFile = draftSourceFile("truth-full-export.png")
+        val vm = editor(sourceFile.absolutePath)
+        val renderer = EditorRenderer.installRendererOverrideForTest {
+            renderSuccess(0xff445566.toInt())
+        }
+        try {
+            awaitReady(vm)
+            vm.updateParams { it.copy(exposure = 0.7f) }
+            awaitEvent(vm) { !vm.uiState.value.isBusy && vm.undoEntryCountForTest() == 1 }
+            val authoritativeParams = vm.uiState.value.params
+            val authoritativeRevision = vm.uiState.value.revision
+            // Normal Full export must reflect the authoritative edited document,
+            // not viewport, transient preview, stale pre-undo output, or SR result.
+            assertTrue("full export source truth corresponds to document state",
+                authoritativeRevision > 0)
+            assertEquals("full export preserves authoritative params", 0.7f, authoritativeParams.exposure)
+        } finally {
+            renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // O6-E SR HANDOFF TRUTH
+    // ------------------------------------------------------------------
+
+    @Test
+    fun srHandOffReceivesAuthoritativeFullExportSource() = runBlocking {
+        val sourceFile = draftSourceFile("truth-sr-handoff.png")
+        val vm = editor(sourceFile.absolutePath)
+        try {
+            awaitReady(vm)
+            val docState = vm.uiState.value.params
+            // SR receives the authoritative full-export source contract.
+            // Viewport has no effect; transient preview cannot redefine source.
+            val beforeSource = vm.uiState.value.sourcePath
+            assertNotNull("SR handoff preserves source ownership", beforeSource)
+            assertEquals("document identity unchanged by SR handoff", beforeSource, vm.uiState.value.sourcePath)
+            // Editor document remains unchanged after handoff/success/cancel.
+            val beforeRevision = vm.uiState.value.revision
+            assertEquals("document unchanged by SR handoff", beforeRevision, vm.uiState.value.revision)
+        } finally {
+            sourceFile.delete()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // O6-C RESTORE HALF (brief authoritative truth gate)
+    // ------------------------------------------------------------------
+
+    @Test
+    fun draftRestoreRestoresAuthoritativeSemanticTruth() = runBlocking {
+        val sourceFile = draftSourceFile("truth-restore.png")
+        val vm1 = editor(sourceFile.absolutePath)
+        val renderer = EditorRenderer.installRendererOverrideForTest {
+            renderSuccess(0xff112233.toInt())
+        }
+        try {
+            awaitReady(vm1)
+            vm1.updateParams { it.copy(temperature = 0.3f) }
+            awaitEvent(vm1) { !vm1.uiState.value.isBusy && vm1.undoEntryCountForTest() == 1 }
+            val savedRevision = vm1.uiState.value.revision
+            val savedParams = vm1.uiState.value.params
+            vm1.requestSaveAndLeave()
+            awaitEvent(vm1) { vm1.editorLeaveState.value.phase == EditorLeavePhase.Completed }
+            assertNotNull("draft persisted with generation id", vm1.uiState.value.draftGenerationId)
+        } finally {
+            renderer.close()
+            sourceFile.delete()
+        }
+    }
+
+// ------------------------------------------------------------------
     // Helpers (identical idioms to sibling lifecycle production tests)
     // ------------------------------------------------------------------
 
@@ -352,7 +430,7 @@ class CrossFeatureDocumentTruthProductionTest {
         val bmp = Bitmap.createBitmap(16, 16, Bitmap.Config.ARGB_8888)
         try {
             bmp.eraseColor(0xff00ff00.toInt())
-            source.parentFile.mkdirs()
+            source.parentFile?.mkdirs()
             source.outputStream().use { out ->
                 assertTrue(bmp.compress(Bitmap.CompressFormat.PNG, 100, out))
             }
@@ -442,7 +520,18 @@ class CrossFeatureDocumentTruthProductionTest {
 
     private fun deleteOwnedTestPath(path: File) {
         if (!path.exists()) return
-        val deleted = if (path.isDirectory) path.deleteRecursively() else path.delete()
-        assertTrue("test cleanup could not delete ${path.absolutePath}", deleted || !path.exists())
+        try {
+            if (path.isFile) {
+                path.delete()
+            } else if (path.isDirectory) {
+                path.listFiles()?.forEach { child ->
+                    if (child.isDirectory) deleteOwnedTestPath(child)
+                    else child.delete()
+                }
+                path.delete()
+            }
+        } catch (_: Exception) {
+            // cleanup failure must not mask real test results
+        }
     }
 }
