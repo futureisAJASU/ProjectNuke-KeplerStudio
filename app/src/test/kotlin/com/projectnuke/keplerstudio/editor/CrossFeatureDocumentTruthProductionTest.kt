@@ -328,82 +328,36 @@ class CrossFeatureDocumentTruthProductionTest {
         }
     }
 // ------------------------------------------------------------------
-    // O6-D NORMAL FULL EXPORT TRUTH
+    // O6-D FULL EXPORT TRUTH — covered by existing genuine tests
     // ------------------------------------------------------------------
-
-    @Test
-    fun fullExportSourceCorrespondsToAuthoritativeDocumentState() = runBlocking {
-        val sourceFile = draftSourceFile("truth-full-export.png")
-        val vm = editor(sourceFile.absolutePath)
-        val renderer = EditorRenderer.installRendererOverrideForTest {
-            renderSuccess(0xff445566.toInt())
-        }
-        try {
-            awaitReady(vm)
-            vm.updateParams { it.copy(exposure = 0.7f) }
-            awaitEvent(vm) { !vm.uiState.value.isBusy && vm.undoEntryCountForTest() == 1 }
-            val authoritativeParams = vm.uiState.value.params
-            val authoritativeRevision = vm.uiState.value.revision
-            // Normal Full export must reflect the authoritative edited document,
-            // not viewport, transient preview, stale pre-undo output, or SR result.
-            assertTrue("full export source truth corresponds to document state",
-                authoritativeRevision > 0)
-            assertEquals("full export preserves authoritative params", 0.7f, authoritativeParams.exposure)
-        } finally {
-            renderer.close()
-            sourceFile.delete()
-        }
-    }
+    // SuperResolutionProductTest.preflightUsesAuthoritativeFullSourceBoundsNotPreviewBounds
+    // SuperResolutionProductTest.dirtyBakedPreflightUsesTheSameBaseGeometryAsFullExportPreparation
+    // SuperResolutionProductTest.sourcePathNullCleanRenderedFullExportCopiesPreviewBeforeCrop
+    // SuperResolutionProductTest.sourcePathNullCleanRenderedFullExportAppliesOnlyTheExistingCropTransform
+    // SuperResolutionExportHostTest.sourcePreparationSharesFullExportSemantics
+    // SuperResolutionExportHostTest.normalFullAndN6SourcesHaveByteForByteParityForEditedDocument
+    // ExportPreviewProductionTest also covers real normal export path.
+    // See O5_O6_PROOF_MATRIX.md for mapping.
 
     // ------------------------------------------------------------------
-    // O6-E SR HANDOFF TRUTH
+    // O6-E SR HANDOFF TRUTH — covered by existing genuine tests
     // ------------------------------------------------------------------
-
-    @Test
-    fun srHandOffReceivesAuthoritativeFullExportSource() = runBlocking {
-        val sourceFile = draftSourceFile("truth-sr-handoff.png")
-        val vm = editor(sourceFile.absolutePath)
-        try {
-            awaitReady(vm)
-            val docState = vm.uiState.value.params
-            // SR receives the authoritative full-export source contract.
-            // Viewport has no effect; transient preview cannot redefine source.
-            val beforeSource = vm.uiState.value.sourcePath
-            assertNotNull("SR handoff preserves source ownership", beforeSource)
-            assertEquals("document identity unchanged by SR handoff", beforeSource, vm.uiState.value.sourcePath)
-            // Editor document remains unchanged after handoff/success/cancel.
-            val beforeRevision = vm.uiState.value.revision
-            assertEquals("document unchanged by SR handoff", beforeRevision, vm.uiState.value.revision)
-        } finally {
-            sourceFile.delete()
-        }
-    }
+    // SuperResolutionExportHostTest.sourcePreparationSharesFullExportSemantics
+    // SuperResolutionExportHostTest.normalFullAndN6SourcesHaveByteForByteParityForEditedDocument
+    // SuperResolutionExportHostTest.viewModelProductActionSuccessPreservesDocumentAndHistoryState
+    // SuperResolutionExportHostTest.srUserCancellationPreservesDocumentIdentity
+    // SuperResolutionExportHostTest.srStaleOperationPreservesDocumentIdentity
+    // See O5_O6_PROOF_MATRIX.md for mapping.
 
     // ------------------------------------------------------------------
-    // O6-C RESTORE HALF (brief authoritative truth gate)
+    // O6-C RESTORE HALF — covered by existing genuine tests
     // ------------------------------------------------------------------
-
-    @Test
-    fun draftRestoreRestoresAuthoritativeSemanticTruth() = runBlocking {
-        val sourceFile = draftSourceFile("truth-restore.png")
-        val vm1 = editor(sourceFile.absolutePath)
-        val renderer = EditorRenderer.installRendererOverrideForTest {
-            renderSuccess(0xff112233.toInt())
-        }
-        try {
-            awaitReady(vm1)
-            vm1.updateParams { it.copy(temperature = 0.3f) }
-            awaitEvent(vm1) { !vm1.uiState.value.isBusy && vm1.undoEntryCountForTest() == 1 }
-            val savedRevision = vm1.uiState.value.revision
-            val savedParams = vm1.uiState.value.params
-            vm1.requestSaveAndLeave()
-            awaitEvent(vm1) { vm1.editorLeaveState.value.phase == EditorLeavePhase.Completed }
-            assertNotNull("draft persisted with generation id", vm1.uiState.value.draftGenerationId)
-        } finally {
-            renderer.close()
-            sourceFile.delete()
-        }
-    }
+    // DraftRestoreProductionTest.restoredDraftReappliesAdoptedParamsPixelsAndSource
+    // DraftRestoreProductionTest.teardownDuringNativeRestoreCancelsWithoutLateAdoption
+    // DraftRestoreProductionTest.restoreIsSupersededByRealOpenImageAndCannotAdoptLate
+    // DraftRestoreProductionTest.pointerReplacementDuringRestoreMakesOldContinuationInert
+    // DraftRestoreProductionTest.adoptedRestoreSessionReleasesOnlyWhenDocumentOwnerEnds
+    // See O5_O6_PROOF_MATRIX.md for mapping.
 
 // ------------------------------------------------------------------
     // Helpers (identical idioms to sibling lifecycle production tests)
@@ -520,18 +474,17 @@ class CrossFeatureDocumentTruthProductionTest {
 
     private fun deleteOwnedTestPath(path: File) {
         if (!path.exists()) return
-        try {
-            if (path.isFile) {
-                path.delete()
-            } else if (path.isDirectory) {
-                path.listFiles()?.forEach { child ->
-                    if (child.isDirectory) deleteOwnedTestPath(child)
-                    else child.delete()
-                }
-                path.delete()
+        val deleted = if (path.isDirectory) {
+            try {
+                path.walkTopDown().filter { it.isFile }.forEach { it.delete() }
+                path.walkTopDown().filter { it.isDirectory }.sortedDescending().forEach { it.delete() }
+                true
+            } catch (e: Exception) {
+                throw AssertionError("test cleanup could not delete directory ${path.absolutePath}: ${e.message}")
             }
-        } catch (_: Exception) {
-            // cleanup failure must not mask real test results
+        } else {
+            path.delete()
         }
+        assertTrue("test cleanup could not delete ${path.absolutePath}", deleted || !path.exists())
     }
 }

@@ -463,55 +463,29 @@ class EditorLifecycleTeardownMatrixProductionTest {
         }
     }
 // ------------------------------------------------------------------
-    // O5-A MISSING DIRECT TEARDOWN COVERAGE (minimal proofs)
+    // O5-A PROOF MATRIX (existing genuine tests cover requirements)
     // ------------------------------------------------------------------
 
-    // Draft restore owner must not adopt after teardown when a restore
-    // job is interrupted by cleanup.
-    @Test
-    fun teardownWhileDraftRestoreInFlightDoesNotMutateRestoredTruth() = runBlocking {
-        val sourceFile = draftSourceFile("matrix-restore.png")
-        val vm = editor(sourceFile.absolutePath)
-        try {
-            awaitReady(vm)
-            val before = vm.uiState.value.revision
-            harness.clearViewModels()
-            awaitSettled(vm) { !vm.uiState.value.isBusy && vm.pendingParamRenderRevision() == null }
-            assertTrue("restore interrupted but truth preserved", vm.uiState.value.revision >= before)
-        } finally {
-            sourceFile.delete()
-        }
-    }
-
-    // Selection-owned async render: selection mask reservation must release.
-    @Test
-    fun teardownWhileSelectionOwnedAsyncRenderReleasesReservation() = runBlocking {
-        val sourceFile = draftSourceFile("matrix-selection.png")
-        val vm = editor(sourceFile.absolutePath)
-        try {
-            awaitReady(vm)
-            assertEquals(0L, vm.selectionMaskOwnership.reservedBytes())
-            harness.clearViewModels()
-            awaitSettled(vm) { vm.selectionMaskOwnership.reservedBytes() == 0L }
-        } finally {
-            sourceFile.delete()
-        }
-    }
-
-    // Normal export preparation owns an independent resource before
-    // publication; teardown must release exactly once.
-    @Test
-    fun teardownWhileExportPreparationOwnsIndependentResourceReleasesOnce() = runBlocking {
-        val sourceFile = draftSourceFile("matrix-export.png")
-        val vm = editor(sourceFile.absolutePath)
-        try {
-            awaitReady(vm)
-            harness.clearViewModels()
-            awaitSettled(vm) { !vm.uiState.value.isBusy }
-        } finally {
-            sourceFile.delete()
-        }
-    }
+    // The teardown matrix above (parameter render produced/not-adopted,
+    // async queued/admitted, rotation executing, image-decode in-flight,
+    // draft-save in-flight, document replacement) provides direct proof.
+    // Additional missing owners are covered by existing production tests:
+    // Draft restore: DraftRestoreProductionTest covers teardown during
+    // native restore (teardownDuringNativeRestoreCancelsWithoutLateAdoption,
+    // restoreIsSupersededByRealOpenImageAndCannotAdoptLate,
+    // pointerReplacementDuringRestoreMakesOldContinuationInert,
+    // adoptedRestoreSessionReleasesOnlyWhenDocumentOwnerEnds).
+    // Selection async render: SelectionPreviewProductionTest covers
+    // selection-owned async ownership and teardown.
+    // Normal export preparation: ExportPreviewProductionTest /
+    // ExportPipelineTest cover real export publication, cancellation,
+    // stale completion, and independent resource ownership.
+    // Disk ownership interaction: LegacyDraftSourceOwnershipProductionTest
+    // covers stale cleanup (staleCleanupCannotDeleteAcquiredPath,
+    // inFlightSaveKeepsPreviousLegacySourceAliveUntilSettlement,
+    // cancelledSaveReleasesItsOperationRoots,
+    // legacyRestoreKeepsSourceAliveWhileDecodingThenTransfersOnAdoption).
+    // See O5_PROOF_MATRIX.md for full mapping.
 
 // ------------------------------------------------------------------
     // Helpers (identical idioms to sibling lifecycle production tests)
@@ -670,38 +644,19 @@ class EditorLifecycleTeardownMatrixProductionTest {
         assertTrue(predicate())
     }
 
-    // Minimal disk-ownership interaction: no broad deletion while active
-    // owned paths exist; only exact inactive paths may be removed.
-    @Test
-    fun diskOwnershipDoesNotDeleteActiveOwnedPaths() = runBlocking {
-        val sourceFile = draftSourceFile("disk-ownership.png")
-        val vm = editor(sourceFile.absolutePath)
-        try {
-            awaitReady(vm)
-            val activePath = checkNotNull(vm.uiState.value.sourcePath)
-            assertTrue("active owned path must exist", File(activePath).exists())
-            harness.clearViewModels()
-            awaitSettled(vm) { !vm.uiState.value.isBusy }
-            assertTrue("active source preserved after cleanup boundary", File(activePath).exists())
-        } finally {
-            sourceFile.delete()
-        }
-    }
-
     private fun deleteOwnedTestPath(path: File) {
         if (!path.exists()) return
-        try {
-            if (path.isFile) {
-                path.delete()
-            } else if (path.isDirectory) {
-                path.listFiles()?.forEach { child ->
-                    if (child.isDirectory) deleteOwnedTestPath(child)
-                    else child.delete()
-                }
-                path.delete()
+        val deleted = if (path.isDirectory) {
+            try {
+                path.walkTopDown().filter { it.isFile }.forEach { it.delete() }
+                path.walkTopDown().filter { it.isDirectory }.sortedDescending().forEach { it.delete() }
+                true
+            } catch (e: Exception) {
+                throw AssertionError("test cleanup could not delete directory ${path.absolutePath}: ${e.message}")
             }
-        } catch (_: Exception) {
-            // cleanup failure must not mask real test results
+        } else {
+            path.delete()
         }
+        assertTrue("test cleanup could not delete ${path.absolutePath}", deleted || !path.exists())
     }
 }
