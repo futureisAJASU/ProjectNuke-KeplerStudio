@@ -2,8 +2,13 @@ FINAL REPORT - KEPLERSTUDIO FINAL AUTOMATED CLOSURE
 =====================================================
 START HEAD: d2c54bd46aa51db8a6db4a3d924b8e3a0aeeac09
 PREVIOUS HEAD (before final correction): df1a08ddadab12bddcab49a453759de94591e4b1
-FINAL HEAD: e7794fd21b965df1abef11da74811ab606cefce3
-ORIGIN HEAD: e7794fd21b965df1abef11da74811ab606cefce3
+REPORT BASE HEAD (before final documentation commit):
+e7794fd21b965df1abef11da74811ab606cefce3
+
+CLOSURE CONTENT COMMITTED AFTER REPORT BASE:
+e7794fd21b965df1abef11da74811ab606cefce3 (same as base; documentation-only pass)
+
+NOTE: This file's own SHA is not self-referential; the base SHA is recorded before the final commit.
 
 COMMIT HISTORY:
 - d2c54bd (interrupted checkpoint)

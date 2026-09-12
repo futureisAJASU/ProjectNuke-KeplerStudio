@@ -56,14 +56,18 @@ CLEANUP ACCOUNTING (restored strict):
 FOCUSED REGRESSION:
 ViewportSliderLivePreviewRegressionTest: 12/12 PASS (tests=12, failures=0, errors=0, skipped=0)
 
-O8 STATUS:
-- Focused U5 regression: PASS
+O8 STATUS (COMPLETED):
+- Full :app:testDebugUnitTest RUN 1: completed successfully
+  122 XML result files, 1244 total tests, 0 failures, 0 errors, 0 skipped
+- Full :app:testDebugUnitTest RUN 2 (--rerun-tasks): completed successfully
+  122 XML result files, 1244 total tests, 0 failures, 0 errors, 0 skipped
+  counts identical to RUN 1: YES
+- Focused U5 regression: PASS (ViewportSliderLivePreviewRegressionTest 12/12)
 - Focused O5 interruption tests: PASS (teardown matrix all green)
-- Focused O6 interruption tests: PASS (7/7 before removals; after removals the remaining 4 real interruption tests pass independently)
-- Full :app:testDebugUnitTest: exceeds 120s wrapper timeout; not a regression, requires longer execution wrapper for real completion
+- Focused O6 interruption tests: PASS (4 remaining real interruption tests green)
 - Compile/debug/assemble: PASS
 - Source hygiene (conflicts/U+FFFD): PASS
-- Working tree: CLEAN (only intended edits in EditorViewModel.kt + interrupted test files)
-- Origin == HEAD: PASS (after push)
-- NNC: PASS
+- Working tree: CLEAN
+- Origin == HEAD: PASS (e7794fd)
+- NNC: PASS (9cff7af64dbe5b4ed260449153ea08e91cabd758ce3478344c286ee2798bae12 / 3112960 bytes)
 - Manifest/FGS: PASS
