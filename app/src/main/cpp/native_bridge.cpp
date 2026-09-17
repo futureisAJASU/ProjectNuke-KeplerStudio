@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
@@ -25,6 +26,26 @@ namespace {
 
 struct Session {
     std::string sourcePath;
+};
+
+class ScopedUtfChars {
+public:
+    ScopedUtfChars(JNIEnv* env, jstring value, const char* chars)
+        : env_(env), value_(value), chars_(chars) {}
+
+    ScopedUtfChars(const ScopedUtfChars&) = delete;
+    ScopedUtfChars& operator=(const ScopedUtfChars&) = delete;
+
+    ~ScopedUtfChars() {
+        if (chars_ != nullptr) {
+            env_->ReleaseStringUTFChars(value_, chars_);
+        }
+    }
+
+private:
+    JNIEnv* env_;
+    jstring value_;
+    const char* chars_;
 };
 
 using kepler_native::LockedBitmap;
@@ -864,14 +885,21 @@ Java_com_projectnuke_keplerstudio_bridge_NativePhotoCore_nativeCreateSession(
     jobject /*thiz*/,
     jstring sourcePath
 ) {
+    if (sourcePath == nullptr) return 0L;
+
     const char* chars = env->GetStringUTFChars(sourcePath, nullptr);
     if (!chars) return 0L;
+    ScopedUtfChars chars_guard(env, sourcePath, chars);
 
-    auto* session = new Session();
-    session->sourcePath = chars;
-
-    env->ReleaseStringUTFChars(sourcePath, chars);
-    return reinterpret_cast<jlong>(session);
+    try {
+        auto session = std::make_unique<Session>();
+        session->sourcePath = chars;
+        return reinterpret_cast<jlong>(session.release());
+    } catch (...) {
+        // Never let a C++ allocation/string exception cross the JNI boundary.
+        // In particular, do not clear or replace any pending Java exception.
+        return 0L;
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL

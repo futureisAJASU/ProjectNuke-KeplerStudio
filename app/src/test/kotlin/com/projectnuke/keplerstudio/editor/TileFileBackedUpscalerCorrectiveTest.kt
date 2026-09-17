@@ -74,11 +74,11 @@ class TileFileBackedUpscalerCorrectiveTest {
         override fun allocateAllBuffers(modelId: Long) = EnnAllocateResult(allocationStatus, if (allocationStatus == EnnStatus.SUCCESS) 0x515AL else 0L, 1, 1)
         override fun releaseBuffers(bufferSet: Long, bufferCount: Int) = releaseBuffersStatus
         override fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int): IntArray? = if (direction == 0) inputInfo else outputInfo
-        override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray): Int {
+        override fun memcpyHostToDevice(bufferSet: Long, bufferCount: Int, index: Int, data: ByteArray): Int {
             val call = memcpyInCalls.getAndIncrement()
             return memcpyInStatuses[minOf(call, memcpyInStatuses.size - 1)]
         }
-        override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int {
+        override fun memcpyDeviceToHost(bufferSet: Long, bufferCount: Int, index: Int, out: ByteArray): Int {
             val call = memcpyOutCalls.getAndIncrement()
             outputBufferIdentity += System.identityHashCode(out)
             outputFiller?.invoke(call, out)

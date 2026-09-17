@@ -104,12 +104,12 @@ class TileInferenceOrchestratorTest {
         override fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int): IntArray? =
             if (direction == 0) inputInfo else outputInfo
 
-        override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray): Int {
+        override fun memcpyHostToDevice(bufferSet: Long, bufferCount: Int, index: Int, data: ByteArray): Int {
             val call = memcpyInCalls.getAndIncrement()
             return memcpyInStatuses[minOf(call, memcpyInStatuses.size - 1)]
         }
 
-        override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int {
+        override fun memcpyDeviceToHost(bufferSet: Long, bufferCount: Int, index: Int, out: ByteArray): Int {
             val call = memcpyOutCalls.getAndIncrement()
             outputFiller?.invoke(call, out)
             return memcpyOutStatuses[minOf(call, memcpyOutStatuses.size - 1)]

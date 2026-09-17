@@ -9,7 +9,9 @@
  */
 #include <jni.h>
 #include <android/log.h>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include "enn/include/enn_api-public_ndk_v1.hpp"
 
 #define KEPLER_ENN_LOG_TAG "KeplerEnn"
@@ -21,6 +23,27 @@ constexpr jint LOCAL_INVAL = static_cast<jint>(ENN_RET_INVAL);
 constexpr jint LOCAL_SIZE = static_cast<jint>(ENN_RET_SIZE);
 constexpr jint LOCAL_FAILED = static_cast<jint>(ENN_RET_FAILED);
 constexpr jint LOCAL_SUCCESS = static_cast<jint>(ENN_RET_SUCCESS);
+
+class ScopedEnnBufferSet {
+public:
+    ScopedEnnBufferSet(EnnBufferPtr* buffers, jint buffer_count)
+        : buffers_(buffers), buffer_count_(buffer_count) {}
+
+    ScopedEnnBufferSet(const ScopedEnnBufferSet&) = delete;
+    ScopedEnnBufferSet& operator=(const ScopedEnnBufferSet&) = delete;
+
+    ~ScopedEnnBufferSet() {
+        if (buffers_ != nullptr && buffer_count_ > 0) {
+            enn::api::EnnReleaseBuffers(buffers_, buffer_count_);
+        }
+    }
+
+    void dismiss() { buffers_ = nullptr; }
+
+private:
+    EnnBufferPtr* buffers_;
+    jint buffer_count_;
+};
 
 }  // namespace
 
@@ -47,7 +70,11 @@ Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeOpenModel(
     EnnModelId model_id = 0;
     if (path != nullptr) {
         const char* utf = env->GetStringUTFChars(path, nullptr);
-        if (utf != nullptr) {
+        if (utf == nullptr) {
+            // GetStringUTFChars may have raised (for example, OOM). Return
+            // immediately so no JNI call is made while that exception is pending.
+            if (env->ExceptionCheck()) return nullptr;
+        } else {
             result = enn::api::EnnOpenModel(utf, &model_id);
             env->ReleaseStringUTFChars(path, utf);
         }
@@ -61,6 +88,7 @@ Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeOpenModel(
     jlongArray out = env->NewLongArray(2);
     if (out == nullptr) return nullptr;
     env->SetLongArrayRegion(out, 0, 2, values);
+    if (env->ExceptionCheck()) return nullptr;
     return out;
 }
 
@@ -83,14 +111,27 @@ Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeAllocateAllBuffer
     EnnReturn result =
         enn::api::EnnAllocateAllBuffers(static_cast<EnnModelId>(model_id), &buffer_set, &info);
     jlong values[4] = {static_cast<jlong>(result), 0L, 0L, 0L};
-    if (result == ENN_RET_SUCCESS && buffer_set != nullptr &&
-            info.n_in_buf > 0 && info.n_out_buf > 0) {
+    const uint64_t total_count = static_cast<uint64_t>(info.n_in_buf) +
+            static_cast<uint64_t>(info.n_out_buf);
+    const bool has_release_count = total_count > 0 &&
+            total_count <= static_cast<uint64_t>(std::numeric_limits<jint>::max());
+    ScopedEnnBufferSet owned_buffers(
+            result == ENN_RET_SUCCESS && buffer_set != nullptr && has_release_count
+                    ? buffer_set
+                    : nullptr,
+            has_release_count ? static_cast<jint>(total_count) : 0);
+    if (result == ENN_RET_SUCCESS && buffer_set != nullptr && has_release_count) {
         values[1] = reinterpret_cast<jlong>(buffer_set);
         values[2] = static_cast<jlong>(info.n_in_buf);
         values[3] = static_cast<jlong>(info.n_out_buf);
     } else if (result == ENN_RET_SUCCESS) {
+        // The vendored API defines the allocation outputs as a buffer pointer
+        // paired with NumberOfBuffersInfo, and EnnReleaseBuffers requires the
+        // total array size. With no positive, representable count there is no
+        // contract-supported release argument to invent; such a success is a
+        // malformed vendor result, not a valid ownership transfer.
         __android_log_print(ANDROID_LOG_ERROR, KEPLER_ENN_LOG_TAG,
-                            "EnnAllocateAllBuffers returned SUCCESS with an unusable buffer set");
+                            "EnnAllocateAllBuffers returned SUCCESS without a releasable buffer set");
     } else {
         __android_log_print(ANDROID_LOG_ERROR, KEPLER_ENN_LOG_TAG,
                             "EnnAllocateAllBuffers failed: %d", static_cast<int>(result));
@@ -98,6 +139,8 @@ Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeAllocateAllBuffer
     jlongArray out = env->NewLongArray(4);
     if (out == nullptr) return nullptr;
     env->SetLongArrayRegion(out, 0, 4, values);
+    if (env->ExceptionCheck()) return nullptr;
+    owned_buffers.dismiss();
     return out;
 }
 
@@ -115,6 +158,10 @@ Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeReleaseBuffers(
 JNIEXPORT jintArray JNICALL
 Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeGetBufferInfoByIndex(
         JNIEnv* env, jobject, jlong model_id, jint direction, jint index) {
+    if (index < 0 || (direction != static_cast<jint>(ENN_DIR_IN) &&
+            direction != static_cast<jint>(ENN_DIR_OUT))) {
+        return nullptr;
+    }
     EnnBufferInfo info = {};
     EnnReturn result = enn::api::EnnGetBufferInfoByIndex(
             &info, static_cast<EnnModelId>(model_id),
@@ -130,18 +177,25 @@ Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeGetBufferInfoByIn
     jintArray out = env->NewIntArray(5);
     if (out == nullptr) return nullptr;
     env->SetIntArrayRegion(out, 0, 5, values);
+    if (env->ExceptionCheck()) return nullptr;
     return out;
 }
 
 JNIEXPORT jint JNICALL
 Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeMemcpyHostToDevice(
-        JNIEnv* env, jobject, jlong buffer_set, jint index, jbyteArray data) {
+        JNIEnv* env, jobject, jlong buffer_set, jint buffer_count, jint index, jbyteArray data) {
     auto* buffers = reinterpret_cast<EnnBufferPtr*>(buffer_set);
-    if (buffers == nullptr || data == nullptr || index < 0) return LOCAL_INVAL;
+    if (buffers == nullptr || data == nullptr || buffer_count <= 0 || index < 0 ||
+            index >= buffer_count) {
+        return LOCAL_INVAL;
+    }
+    EnnBufferPtr buffer = buffers[index];
+    if (buffer == nullptr || buffer->va == nullptr) return LOCAL_INVAL;
     const jsize length = env->GetArrayLength(data);
-    if (length < 0 || static_cast<uint32_t>(length) > buffers[index]->size) {
+    if (env->ExceptionCheck()) return LOCAL_FAILED;
+    if (length < 0 || static_cast<uint32_t>(length) > buffer->size) {
         __android_log_print(ANDROID_LOG_ERROR, KEPLER_ENN_LOG_TAG,
-                            "memcpy in size %d exceeds buffer %u", length, buffers[index]->size);
+                            "memcpy in size %d exceeds buffer %u", length, buffer->size);
         return LOCAL_SIZE;
     }
     jbyte* bytes = env->GetByteArrayElements(data, nullptr);
@@ -157,14 +211,20 @@ Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeMemcpyHostToDevic
  */
 JNIEXPORT jint JNICALL
 Java_com_projectnuke_keplerstudio_editor_ExynosEnnNative_nativeMemcpyDeviceToHost(
-        JNIEnv* env, jobject, jlong buffer_set, jint index, jbyteArray out) {
+        JNIEnv* env, jobject, jlong buffer_set, jint buffer_count, jint index, jbyteArray out) {
     auto* buffers = reinterpret_cast<EnnBufferPtr*>(buffer_set);
-    if (buffers == nullptr || out == nullptr || index < 0) return LOCAL_INVAL;
+    if (buffers == nullptr || out == nullptr || buffer_count <= 0 || index < 0 ||
+            index >= buffer_count) {
+        return LOCAL_INVAL;
+    }
+    EnnBufferPtr buffer = buffers[index];
+    if (buffer == nullptr || buffer->va == nullptr) return LOCAL_INVAL;
     const jsize length = env->GetArrayLength(out);
-    if (length < 0 || static_cast<uint32_t>(length) > buffers[index]->size) {
+    if (env->ExceptionCheck()) return LOCAL_FAILED;
+    if (length < 0 || static_cast<uint32_t>(length) > buffer->size) {
         __android_log_print(ANDROID_LOG_ERROR, KEPLER_ENN_LOG_TAG,
                             "memcpy out request %d exceeds buffer %u",
-                            length, buffers[index]->size);
+                            length, buffer->size);
         return LOCAL_SIZE;
     }
     jbyte* bytes = env->GetByteArrayElements(out, nullptr);

@@ -104,6 +104,8 @@ class ExynosUpscaleSessionTest {
         val allocateCalls = AtomicInteger()
         val releaseBufferCalls = AtomicInteger()
         val executeCalls = AtomicInteger()
+        val memcpyInBufferCounts = mutableListOf<Int>()
+        val memcpyOutBufferCounts = mutableListOf<Int>()
         /** Ordered log of physical lifecycle steps for close-vs-inference ordering proof. */
         val stepLog = mutableListOf<String>()
 
@@ -166,13 +168,15 @@ class ExynosUpscaleSessionTest {
                 else -> outputInfo
             }
 
-        override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray): Int {
+        override fun memcpyHostToDevice(bufferSet: Long, bufferCount: Int, index: Int, data: ByteArray): Int {
+            memcpyInBufferCounts += bufferCount
             memcpyInThrows?.let { throw it }
             require(data.size == ExynosUpscaleSession.INPUT_BYTES)
             return memcpyInStatus
         }
 
-        override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int {
+        override fun memcpyDeviceToHost(bufferSet: Long, bufferCount: Int, index: Int, out: ByteArray): Int {
+            memcpyOutBufferCounts += bufferCount
             memcpyOutThrows?.let { throw it }
             outputFiller?.invoke(out)
             return memcpyOutStatus
@@ -254,6 +258,22 @@ class ExynosUpscaleSessionTest {
             val capability = ModelAvailabilityRegistry.state.value.getValue(ModelFeature.ExynosUpscale)
             assertEquals(ModelCapabilityPhase.Ready, capability.phase)
             assertTrue(capability.sessionActive)
+        } finally {
+            session.close()
+        }
+    }
+
+    @Test
+    fun inferencePassesTotalValidatedBufferCountToBothMemcpyBoundaries() = runBlocking {
+        val enn = FakeEnn()
+        val session = session(enn)
+        try {
+            assertTrue(session.load(fakeToken()) is ModelLoadResult.Ready)
+            val result = session.run(testPixels(), ModelOperationContext(1L, "g1"))
+            assertTrue("inference must succeed: $result", result is ModelRunResult.Success)
+            (result as ModelRunResult.Success).value.recycle()
+            assertEquals(listOf(2), enn.memcpyInBufferCounts)
+            assertEquals(listOf(2), enn.memcpyOutBufferCounts)
         } finally {
             session.close()
         }

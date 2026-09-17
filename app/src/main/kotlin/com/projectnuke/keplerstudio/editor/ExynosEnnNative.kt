@@ -118,9 +118,9 @@ internal interface ExynosEnnNativeInterface {
     /** Returns [n, width, height, channel, size] or null. */
     fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int): IntArray?
 
-    fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray): Int
+    fun memcpyHostToDevice(bufferSet: Long, bufferCount: Int, index: Int, data: ByteArray): Int
 
-    fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int
+    fun memcpyDeviceToHost(bufferSet: Long, bufferCount: Int, index: Int, out: ByteArray): Int
 
     fun execute(modelId: Long): Int
 
@@ -202,14 +202,14 @@ internal object ExynosEnnNative : ExynosEnnNativeInterface {
         return nativeGetBufferInfoByIndex(modelId, direction, index)
     }
 
-    override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray): Int {
+    override fun memcpyHostToDevice(bufferSet: Long, bufferCount: Int, index: Int, data: ByteArray): Int {
         checkBridgeLoaded()
-        return nativeMemcpyHostToDevice(bufferSet, index, data)
+        return nativeMemcpyHostToDevice(bufferSet, bufferCount, index, data)
     }
 
-    override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int {
+    override fun memcpyDeviceToHost(bufferSet: Long, bufferCount: Int, index: Int, out: ByteArray): Int {
         checkBridgeLoaded()
-        return nativeMemcpyDeviceToHost(bufferSet, index, out)
+        return nativeMemcpyDeviceToHost(bufferSet, bufferCount, index, out)
     }
 
     override fun execute(modelId: Long): Int {
@@ -254,8 +254,18 @@ internal object ExynosEnnNative : ExynosEnnNativeInterface {
         index: Int,
     ): IntArray?
 
-    private external fun nativeMemcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray): Int
-    private external fun nativeMemcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int
+    private external fun nativeMemcpyHostToDevice(
+        bufferSet: Long,
+        bufferCount: Int,
+        index: Int,
+        data: ByteArray,
+    ): Int
+    private external fun nativeMemcpyDeviceToHost(
+        bufferSet: Long,
+        bufferCount: Int,
+        index: Int,
+        out: ByteArray,
+    ): Int
     private external fun nativeExecute(modelId: Long): Int
     private external fun nativeGetMetaInfo(metaId: Int, modelId: Long): String?
 }

@@ -330,3 +330,45 @@ tasks.register<Exec>("hostNativeCancellationRegistryTest") {
     inputs.file(hostCancellationExecutable)
     commandLine(hostCancellationExecutable.get().asFile.absolutePath)
 }
+
+val hostEnnBoundaryExecutable =
+    layout.buildDirectory.file(
+        "host-native/native_enn_boundary_test" +
+            if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) ".exe" else "",
+    )
+
+tasks.register<Exec>("compileHostEnnBoundaryTest") {
+    group = "verification"
+    description = "Compile the host harness for the Exynos ENN JNI boundary contract."
+    val nativeSources =
+        listOf(
+            "src/test/native/native_enn_boundary_test.cpp",
+            "src/main/cpp/enn_kepler_jni.cpp",
+        )
+    inputs.files(nativeSources.map(::file))
+    inputs.dir("src/test/native/enn_stubs")
+    inputs.dir("src/test/native/stubs")
+    outputs.file(hostEnnBoundaryExecutable)
+    doFirst {
+        hostEnnBoundaryExecutable.get().asFile.parentFile.mkdirs()
+    }
+    commandLine(
+        "g++",
+        "-std=c++20",
+        "-O2",
+        "-Isrc/test/native/enn_stubs",
+        "-Isrc/test/native/stubs",
+        "-Isrc/main/cpp",
+        *nativeSources.toTypedArray(),
+        "-o",
+        hostEnnBoundaryExecutable.get().asFile.absolutePath,
+    )
+}
+
+tasks.register<Exec>("hostEnnBoundaryTest") {
+    group = "verification"
+    description = "Run host checks for the Exynos ENN JNI boundary contract."
+    dependsOn("compileHostEnnBoundaryTest")
+    inputs.file(hostEnnBoundaryExecutable)
+    commandLine(hostEnnBoundaryExecutable.get().asFile.absolutePath)
+}

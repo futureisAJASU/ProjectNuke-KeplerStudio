@@ -770,7 +770,9 @@ internal class ExynosUpscaleSession(
             preH2dCheck?.invoke()
             coroutineContext.ensureActive()
             val h2dStatus =
-                nativeRunStage(diagnostics, "h2d") { native.memcpyHostToDevice(bufferSet, 0, inputBytes) }
+                nativeRunStage(diagnostics, "h2d") {
+                    native.memcpyHostToDevice(bufferSet, bufferCount, 0, inputBytes)
+                }
             diagnostics.h2dStatus = h2dStatus
             if (h2dStatus != EnnStatus.SUCCESS) return NativeRunOutcome.H2dFailed(h2dStatus)
 
@@ -791,7 +793,7 @@ internal class ExynosUpscaleSession(
             coroutineContext.ensureActive()
             val d2hStatus =
                 nativeRunStage(diagnostics, "d2h") {
-                    native.memcpyDeviceToHost(bufferSet, ENN_OUTPUT_INDEX, outputBytes)
+                    native.memcpyDeviceToHost(bufferSet, bufferCount, ENN_OUTPUT_INDEX, outputBytes)
                 }
             diagnostics.d2hStatus = d2hStatus
             if (d2hStatus != EnnStatus.SUCCESS) {

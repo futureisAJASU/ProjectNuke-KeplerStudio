@@ -105,8 +105,8 @@ class SuperResolutionExportHostTest {
             override fun allocateAllBuffers(modelId: Long)=EnnAllocateResult(EnnStatus.SUCCESS, 0x100L,1,1)
             override fun releaseBuffers(bufferSet: Long, bufferCount: Int)=EnnStatus.SUCCESS
             override fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int)= if (direction==0) intArrayOf(1,128,128,3,ExynosUpscaleSession.INPUT_BYTES) else intArrayOf(1,512,512,3,ExynosUpscaleSession.OUTPUT_BYTES)
-            override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray)=EnnStatus.SUCCESS
-            override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int { java.util.Arrays.fill(out, 0x3F.toByte()); return EnnStatus.SUCCESS }
+            override fun memcpyHostToDevice(bufferSet: Long, bufferCount: Int, index: Int, data: ByteArray)=EnnStatus.SUCCESS
+            override fun memcpyDeviceToHost(bufferSet: Long, bufferCount: Int, index: Int, out: ByteArray): Int { java.util.Arrays.fill(out, 0x3F.toByte()); return EnnStatus.SUCCESS }
             override fun execute(modelId: Long)=EnnStatus.SUCCESS
             override fun getMetaInfo(metaId: Int, modelId: Long) = "v2.4.11.l"
         }
@@ -923,8 +923,8 @@ class SuperResolutionExportHostTest {
             override fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int) =
                 if (direction == 0) intArrayOf(1, 128, 128, 3, ExynosUpscaleSession.INPUT_BYTES)
                 else intArrayOf(1, 512, 512, 3, ExynosUpscaleSession.OUTPUT_BYTES)
-            override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray) = EnnStatus.SUCCESS
-            override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int {
+            override fun memcpyHostToDevice(bufferSet: Long, bufferCount: Int, index: Int, data: ByteArray) = EnnStatus.SUCCESS
+            override fun memcpyDeviceToHost(bufferSet: Long, bufferCount: Int, index: Int, out: ByteArray): Int {
                 java.util.Arrays.fill(out, 0x3F.toByte())
                 return EnnStatus.SUCCESS
             }
@@ -1083,8 +1083,8 @@ class SuperResolutionExportHostTest {
                             override fun allocateAllBuffers(modelId: Long)=EnnAllocateResult(EnnStatus.SUCCESS, 0x100L,1,1)
                             override fun releaseBuffers(bufferSet: Long, bufferCount: Int)=EnnStatus.SUCCESS
                             override fun getBufferInfoByIndex(modelId: Long, direction: Int, index: Int)= if (direction==0) intArrayOf(1,128,128,3,ExynosUpscaleSession.INPUT_BYTES) else intArrayOf(1,512,512,3,ExynosUpscaleSession.OUTPUT_BYTES)
-                            override fun memcpyHostToDevice(bufferSet: Long, index: Int, data: ByteArray)=EnnStatus.SUCCESS
-                            override fun memcpyDeviceToHost(bufferSet: Long, index: Int, out: ByteArray): Int { java.util.Arrays.fill(out, 0x3F.toByte()); return EnnStatus.SUCCESS }
+            override fun memcpyHostToDevice(bufferSet: Long, bufferCount: Int, index: Int, data: ByteArray)=EnnStatus.SUCCESS
+            override fun memcpyDeviceToHost(bufferSet: Long, bufferCount: Int, index: Int, out: ByteArray): Int { java.util.Arrays.fill(out, 0x3F.toByte()); return EnnStatus.SUCCESS }
                             override fun execute(modelId: Long): Int {
                                 aExecuteEntered.countDown()
                                 while (true) {
